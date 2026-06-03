@@ -171,10 +171,10 @@ function Do-Add {
 
 New-Item -ItemType Directory -Force -Path $CfgDir | Out-Null
 New-Item -ItemType Directory -Force -Path $SshDir  | Out-Null
+
+# Fix .ssh dir permissions early (silently, before header clears screen)
 $_dirOut = (icacls $SshDir 2>$null) -join ' '
-if ($_dirOut -match '\(I\)|Everyone|BUILTIN\\Users') {
-    Write-Host "    [!] .ssh directory has wrong permissions - fixing..." -ForegroundColor Yellow
-}
+$_dirFixed = $_dirOut -match '\(I\)|Everyone|BUILTIN\\Users'
 icacls $SshDir /reset 2>$null | Out-Null
 icacls $SshDir /inheritance:r /grant "$env:USERNAME`:(OI)(CI)F" 2>$null | Out-Null
 
@@ -184,6 +184,7 @@ Write-Host ""
 Write-Host "    Claude Code" -ForegroundColor White
 Write-Host "    $Alias  |  $ServerIP" -ForegroundColor DarkGray
 Write-Host ""
+if ($_dirFixed) { Write-Host "      -> fixed: .ssh directory permissions" -ForegroundColor DarkGray; Write-Host "" }
 
 # config
 if ($Setup -or -not (Test-Path $Cfg)) {
@@ -219,7 +220,9 @@ Host $Alias
     IdentityFile ~/.ssh/id_ed25519
     StrictHostKeyChecking accept-new
 "@ | Add-Content -Path $sshCfg -Encoding ASCII
-Repair-SshPerm $sshCfg "SSH config"
+# Fix SSH config permissions silently — shown later under the step that calls StepOk
+icacls $sshCfg /reset 2>$null | Out-Null
+icacls $sshCfg /inheritance:r /grant "$env:USERNAME`:F" 2>$null | Out-Null
 
 # connect — retry until reachable, 5s between attempts
 $connected = $false
