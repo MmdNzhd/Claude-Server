@@ -93,6 +93,17 @@ else
     warn "claude-mount.sh not found - install manually: install -m 644 claude-mount.sh /usr/local/lib/claude-mount"
 fi
 
+for hook in claude-hook-logout-block.sh claude-hook-pre.sh claude-hook-stop.sh; do
+    src="$SCRIPT_DIR/hooks/$hook"
+    dst="/usr/local/bin/${hook%.sh}"
+    if [ -f "$src" ]; then
+        install -m 755 "$src" "$dst"
+        ok "${hook%.sh} installed in /usr/local/bin/"
+    else
+        warn "$hook not found in hooks/ - install manually"
+    fi
+done
+
 if grep -qiE "^[[:space:]]*AllowTcpForwarding[[:space:]]+no" /etc/ssh/sshd_config; then
     sed -i -E 's/^[[:space:]]*AllowTcpForwarding[[:space:]]+no/AllowTcpForwarding yes/I' /etc/ssh/sshd_config
     systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
