@@ -25,7 +25,7 @@ sshx() { ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=10
 
 # Short timeout version for tunnel check
 tunnel_up() {
-    sshx "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/\$PORT' 2>/dev/null && echo UP" 2>/dev/null | grep -q UP
+    sshx "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$PORT' 2>/dev/null && echo UP" 2>/dev/null | grep -q UP
 }
 
 # Mac-compatible port check (nc is available on macOS, timeout is not)

@@ -43,7 +43,7 @@ function Repair-SshPerm([string]$path, [string]$label) {
     $out = (icacls $path 2>$null) -join ' '
     icacls $path /reset 2>$null | Out-Null
     icacls $path /inheritance:r /grant "$env:USERNAME`:F" 2>$null | Out-Null
-    if ($out -match '\(I\)|Everyone|BUILTIN\\\\Users') { $script:pendingFixes += "$label permissions" }
+    if ($out -match '\(I\)|Everyone|BUILTIN\\Users') { $script:pendingFixes += "$label permissions" }
 }
 
 function Install-ServerKey([string]$pub) {
@@ -57,7 +57,7 @@ function Install-ServerKey([string]$pub) {
         $_adminOut = (icacls $adminFile 2>$null) -join ' '
         icacls $adminFile /reset 2>$null | Out-Null
         icacls $adminFile /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" 2>$null | Out-Null
-        if ($_adminOut -match '\(I\)|Everyone|BUILTIN\\\\Users') { $script:pendingFixes += "administrators_authorized_keys permissions" }
+        if ($_adminOut -match '\(I\)|Everyone|BUILTIN\\Users') { $script:pendingFixes += "administrators_authorized_keys permissions" }
     }
 
     # Now write the key to both files and fix their permissions
@@ -70,9 +70,12 @@ function Install-ServerKey([string]$pub) {
         if ($akFile -eq $userFile) { Repair-SshPerm $akFile "authorized_keys" }
     }
 
-    # Restart sshd so it picks up the new key
-    Restart-Service sshd -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 1
+    # Restart sshd only if it was stopped — key changes take effect immediately without restart
+    $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
+    if (-not $sshdSvc -or $sshdSvc.Status -ne 'Running') {
+        Start-Service sshd -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
 }
 
 function SshX([string]$Cmd) {
