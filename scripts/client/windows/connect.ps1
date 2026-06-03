@@ -147,8 +147,8 @@ $LaptopUser = $conf["LAPTOP_USER"]
 # SSH key
 Step "Laptop SSH key"
 $keyA = Join-Path $SshDir "id_ed25519"
-if (-not (Test-Path $keyA)) { ssh-keygen -t ed25519 -N '' -f $keyA -q }
-if (Test-Path $keyA) { StepOk } else { StepFail "could not create key"; exit 1 }
+if (-not (Test-Path $keyA)) { ssh-keygen -t ed25519 -N '""' -f $keyA -q }
+if (Test-Path $keyA) { StepOk } else { StepFail "could not create key"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 
 # SSH config
 $sshCfg = Join-Path $SshDir "config"
@@ -227,13 +227,13 @@ if ($needsKey) {
 Step "Getting tunnel port"
 $uidStr = (SshX "id -u") -join ""
 $Port   = 20000 + [int]($uidStr -replace '\D','')
-if ($Port -le 20000) { StepFail "could not get UID from server"; exit 1 }
+if ($Port -le 20000) { StepFail "could not get UID from server"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 StepOk "port $Port"
 
 Step "Setting up server key"
 SshX "test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q" 2>$null | Out-Null
 $PubB = (SshX "cat ~/.ssh/claude_laptop.pub").Trim()
-if (-not $PubB) { StepFail "could not read server key"; exit 1 }
+if (-not $PubB) { StepFail "could not read server key"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 $adminFile = Join-Path $env:ProgramData "ssh\administrators_authorized_keys"
 $userFile  = Join-Path $SshDir "authorized_keys"
 foreach ($akFile in @($adminFile, $userFile)) {
@@ -346,7 +346,7 @@ while (-not $go) {
 if ($go) {
     if (-not (Get-Command code -ErrorAction SilentlyContinue)) {
         Warn "VSCode not found. Install it + the Remote-SSH extension, then re-run."
-        Write-Host ""; exit 1
+        Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
     }
 
     Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
@@ -367,12 +367,12 @@ if ($go) {
                 Write-Host "    sshd started ok." -ForegroundColor Green
             } else {
                 Write-Host "    Could not start sshd. Run as admin: Start-Service sshd" -ForegroundColor Red
-                Write-Host ""; exit 1
+                Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
             }
         } catch {
             Write-Host "    Error starting sshd: $($_.Exception.Message)" -ForegroundColor Red
             Write-Host "    Run as admin: Start-Service sshd" -ForegroundColor DarkGray
-            Write-Host ""; exit 1
+            Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
         }
     } else {
         StepOk
@@ -421,13 +421,34 @@ if ($go) {
     Write-Host ""
     $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
 
+    # Auto-fix: key mismatch -> reinstall key and retry once
+    if (-not $mountOk -and $mountOut -match 'key auth failed|connection reset|reset by peer|publickey|Permission denied') {
+        Write-Host "    Key rejected - reinstalling server key automatically..." -ForegroundColor Yellow
+        $newPub = (SshX "cat ~/.ssh/claude_laptop.pub").Trim()
+        if ($newPub) {
+            foreach ($akFile in @((Join-Path $env:ProgramData "ssh\administrators_authorized_keys"), (Join-Path $SshDir "authorized_keys"))) {
+                if (-not (Test-Path (Split-Path $akFile))) { continue }
+                if (-not (Test-Path $akFile)) { New-Item -ItemType File -Path $akFile -Force -ErrorAction SilentlyContinue | Out-Null }
+                $lines = Get-Content $akFile -ErrorAction SilentlyContinue
+                if ($lines -notcontains $newPub) { Add-Content -Path $akFile -Value $newPub -Encoding ASCII }
+            }
+            icacls (Join-Path $env:ProgramData "ssh\administrators_authorized_keys") /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" 2>$null | Out-Null
+            Write-Host "    Key reinstalled - retrying mount..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 2
+            Write-Host -NoNewline "    please wait..." -ForegroundColor DarkGray
+            $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String
+            Write-Host ""
+            $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
+        }
+    }
+
     if (-not $mountOk) {
         StepFail $mountOut.Trim()
         Write-Host ""
         if ($mountOut -match 'No such file|not found|cannot find') {
             Warn "Path not found on laptop. Use 'e edit' to correct the project path."
         }
-        Write-Host ""; exit 1
+        Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
     }
 
     StepOk
