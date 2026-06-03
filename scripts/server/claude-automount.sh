@@ -33,3 +33,9 @@ if [ -f "$CONNECT_CONF" ]; then
 fi
 
 "$MOUNT_BIN" up 2>/dev/null
+
+# start watchdog in background to recover from hangs/disconnects
+WATCHDOG="/usr/local/bin/claude-watchdog"
+if [ -x "$WATCHDOG" ]; then
+    nohup "$WATCHDOG" >/dev/null 2>&1 &
+fi

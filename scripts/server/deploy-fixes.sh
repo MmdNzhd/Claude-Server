@@ -5,9 +5,10 @@
 
 REPO="/home/smart/mounts/claude-code-server/scripts/server"
 
-echo "=== Deploying claude-automount to /usr/local/bin/ ==="
+echo "=== Deploying claude-automount and claude-watchdog to /usr/local/bin/ ==="
 sudo install -m 755 "$REPO/claude-automount.sh" /usr/local/bin/claude-automount
-echo "  OK: /usr/local/bin/claude-automount updated"
+sudo install -m 755 "$REPO/claude-watchdog.sh" /usr/local/bin/claude-watchdog
+echo "  OK: claude-automount and claude-watchdog updated"
 
 echo ""
 echo "=== Deploying claude-mount to /usr/local/lib/ ==="
