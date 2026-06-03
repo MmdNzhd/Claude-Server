@@ -74,7 +74,7 @@ _do_mount() {
 
     mkdir -p "$lpath"
 
-    local sshfs_opts="ServerAliveInterval=10,ServerAliveCountMax=3,idmap=user,allow_other,StrictHostKeyChecking=no,UserKnownHostsFile=/dev/null,ConnectTimeout=10,dir_cache=yes,dcache_timeout=60,max_conns=4"
+    local sshfs_opts="ServerAliveInterval=10,ServerAliveCountMax=3,idmap=user,allow_other,StrictHostKeyChecking=no,UserKnownHostsFile=/dev/null,ConnectTimeout=10,dir_cache=yes,dcache_timeout=60,attr_timeout=30,entry_timeout=30,max_conns=4"
 
     local id_opt=""
     if [ -f "$KEY" ]; then
