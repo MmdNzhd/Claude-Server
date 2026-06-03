@@ -328,11 +328,23 @@ if ($go) {
 
     if (-not $mountOk) {
         StepFail $mountOut.Trim()
-        Write-Host "    -> Is OpenSSH Server running?  Get-Service sshd" -ForegroundColor DarkGray
-        Write-Host "    -> Is the project path correct? Use 'e edit' to fix it." -ForegroundColor DarkGray
         Write-Host ""
-        Write-Host "    Debug: on server run:" -ForegroundColor DarkGray
-        Write-Host "      ssh -v -p $Port -i ~/.ssh/claude_laptop ${LaptopUser}@localhost 'echo ok'" -ForegroundColor DarkGray
+
+        $svc = Get-Service sshd -ErrorAction SilentlyContinue
+        if (-not $svc -or $svc.Status -ne 'Running') {
+            Warn "OpenSSH Server is NOT running on this laptop."
+            try { Start-Service sshd -ErrorAction Stop; Write-Host "  [ok] Started sshd." -ForegroundColor Green }
+            catch { Write-Host "       Could not start sshd automatically." -ForegroundColor DarkGray }
+        } else {
+            Write-Host "    OpenSSH Server is running." -ForegroundColor DarkGray
+            if ($mountOut -match 'reset by peer|Permission denied|publickey') {
+                Warn "Key auth failed. Re-run connect.bat to re-install the key."
+            }
+        }
+
+        if ($mountOut -match 'No such file|not found|cannot find') {
+            Warn "Path not found on laptop. Use 'e edit' to correct the project path."
+        }
         Write-Host ""; exit 1
     }
 

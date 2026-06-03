@@ -6,6 +6,13 @@ REM First run : asks for server username + project path, sets up SSH keys (serve
 REM Every run : opens reverse tunnel, mounts the project on the server, opens VSCode.
 
 setlocal
+
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+    powershell -Command "Start-Process -FilePath '%~f0' -Verb RunAs -Wait"
+    exit /b
+)
+
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0connect.ps1" %*
 if %ERRORLEVEL% neq 0 (
     echo.
