@@ -11,7 +11,7 @@ CFG_DIR="$HOME/.config/claude-connect"
 CFG="$CFG_DIR/connect.conf"
 CM='$HOME/.local/bin/claude-mount'
 
-die()       { echo ""; echo "  [X] $*"; exit 1; }
+die()       { echo ""; echo "  [X] $*"; echo ""; exit 1; }
 warn()      { printf '  [!] %s\n' "$*"; }
 step() {
     local s="    $*"
@@ -22,7 +22,14 @@ step_ok()   { if [ -n "${1:-}" ]; then printf ' %s\n' "$*"; else printf ' ok\n';
 step_fail() { printf ' failed\n'; [ -n "${1:-}" ] && printf '      -> %s\n' "$*"; }
 
 sshx() { ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 "$ALIAS" "$@"; }
-tunnel_up() { sshx "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/\$PORT' 2>/dev/null && echo UP" 2>/dev/null | grep -q UP; }
+
+# Short timeout version for tunnel check
+tunnel_up() {
+    sshx "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/\$PORT' 2>/dev/null && echo UP" 2>/dev/null | grep -q UP
+}
+
+# Mac-compatible port check (nc is available on macOS, timeout is not)
+port_open() { nc -zw3 "$1" "$2" 2>/dev/null; }
 
 mkdir -p "$CFG_DIR" "$HOME/.ssh"
 
@@ -34,9 +41,7 @@ printf '    \033[0;90m%s  |  %s\033[0m\n' "$ALIAS" "$SERVER_IP"
 echo ""
 
 # config
-SETUP=""
 if [ "${1:-}" = "--setup" ] || [ ! -f "$CFG" ]; then
-    SETUP=1
     printf '  \033[0;36mFirst-time setup\033[0m\n\n'
     read -rp "    Server username: " REMOTE_USER
     printf 'REMOTE_USER=%s\nLAPTOP_USER=%s\n' "$REMOTE_USER" "$(whoami)" > "$CFG"
@@ -75,15 +80,37 @@ Host $ALIAS
 EOF
 step_ok "$REMOTE_USER"
 
-step "Connecting"
-if ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=6 "$ALIAS" true 2>/dev/null; then
-    step_ok "$REMOTE_USER@$SERVER_IP"
-else
-    if ! timeout 3 bash -c "exec 3<>/dev/tcp/$SERVER_IP/22" 2>/dev/null; then
-        step_fail "cannot reach $SERVER_IP - VPN connected? Server running?"
-        exit 1
+# connect — retry until reachable, 5s between attempts
+connected=""
+needs_key=""
+for attempt in $(seq 1 10); do
+    printf '    \033[0;36mConnecting %d/10\033[0m' "$attempt"
+    for ((i=18; i<46-12; i++)); do printf '.'; done
+    sw_start=$SECONDS
+    if ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=5 "$ALIAS" true 2>/dev/null; then
+        printf ' \033[0;32m%s@%s\033[0m\n' "$REMOTE_USER" "$SERVER_IP"
+        connected=1; break
     fi
-    step_fail "auth failed - installing key"
+    elapsed=$(( SECONDS - sw_start ))
+    if port_open "$SERVER_IP" 22; then
+        printf ' \033[0;33mauth failed (%ds) - no key, installing now\033[0m\n' "$elapsed"
+        needs_key=1; break
+    fi
+    printf ' \033[0;90mno response (%ds)\033[0m\n' "$elapsed"
+    if [ "$attempt" -lt 10 ]; then
+        printf '    \033[0;90mWaiting 5s (VPN on? Server up?)...\033[0m\n'
+        sleep 5
+    fi
+done
+
+if [ -z "$connected" ] && [ -z "$needs_key" ]; then
+    echo ""
+    warn "Cannot reach $SERVER_IP after 10 attempts"
+    warn "VPN connected? Server running?"
+    echo ""; exit 1
+fi
+
+if [ -n "$needs_key" ]; then
     echo ""
     printf '    \033[0;33mEnter server password (one time only):\033[0m\n'
     if command -v ssh-copy-id >/dev/null 2>&1; then
@@ -96,7 +123,7 @@ else
     step "Verifying connection"
     if ! ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=6 "$ALIAS" true 2>/dev/null; then
         step_fail "still cannot connect"
-        warn "Cannot connect to $ALIAS ($REMOTE_USER@$SERVER_IP)."
+        warn "Cannot connect - user=$REMOTE_USER  host=$SERVER_IP"
         echo ""
         printf '    \033[0;90mCurrent username: %s\033[0m\n' "$REMOTE_USER"
         read -rp "    Username changed? Enter new username (or Enter to exit): " fix
@@ -160,9 +187,9 @@ echo ""
 printf '    \033[0;32mReady\033[0m\n'
 echo ""
 
-# helpers
+# helpers — use 'list' not 'status' (status is slow/hangs on stale mounts)
 load_mounts() {
-    sshx "$CM status 2>/dev/null" 2>/dev/null || true
+    sshx "$CM list 2>/dev/null" 2>/dev/null || true
 }
 
 show_mounts() {
@@ -176,13 +203,9 @@ show_mounts() {
         return
     fi
     local i=1
-    while IFS='|' read -r mid mlabel mpath mstatus; do
+    while IFS='|' read -r mid mlabel mrpath mlpath; do
         [ -z "$mid" ] && continue
-        if [ "$mstatus" = "MOUNTED" ]; then
-            printf '    \033[1;37m%d  %s\033[0m  \033[0;32m(on)\033[0m\n' "$i" "$mlabel"
-        else
-            printf '    \033[0;90m%d  %s\033[0m\n' "$i" "$mlabel"
-        fi
+        printf '    \033[0;90m%d  %s\033[0m\n' "$i" "$mlabel"
         i=$(( i + 1 ))
     done <<< "$raw"
     echo ""
@@ -218,7 +241,11 @@ do_add() {
     _added_id="$new_id"
 }
 
+step "Loading projects"
 mounts_raw="$(load_mounts)"
+mount_count="$(printf '%s\n' "$mounts_raw" | grep -c '|' 2>/dev/null || echo 0)"
+step_ok "$mount_count project(s)"
+
 go_path=""
 go_id=""
 
@@ -238,8 +265,8 @@ while [ -z "$go_path" ]; do
     if [[ "$choice" =~ ^[0-9]+$ ]]; then
         row="$(printf '%s\n' "$mounts_raw" | sed -n "${choice}p")"
         if [ -z "$row" ]; then warn "Not found."; continue; fi
-        IFS='|' read -r mid mlabel mpath mstatus <<< "$row"
-        go_path="$mpath"; go_id="$mid"
+        IFS='|' read -r mid mlabel mrpath mlpath <<< "$row"
+        go_path="$mlpath"; go_id="$mid"
     else
         case "$choice" in
             a)
@@ -254,12 +281,11 @@ while [ -z "$go_path" ]; do
                 read -rp "    Edit number: " en
                 row="$(printf '%s\n' "$mounts_raw" | sed -n "${en}p")"
                 if [ -z "$row" ]; then warn "Not found."; continue; fi
-                IFS='|' read -r cur_id cur_label cur_path _ <<< "$row"
-                cur_rpath="$(sshx "grep REMOTE_PATH ~/.claude-mounts.d/$cur_id.conf 2>/dev/null" 2>/dev/null | sed 's/REMOTE_PATH=//;s/"//g')"
+                IFS='|' read -r cur_id cur_label cur_rpath cur_lpath <<< "$row"
                 echo ""
                 read -rp "    Name  [$cur_label]: " inp; new_label="${inp:-$cur_label}"
                 read -rp "    Path  [$cur_rpath]: " inp; new_rpath="${inp:-$cur_rpath}"
-                read -rp "    Local [$cur_path]: " inp; new_lpath="${inp:-$cur_path}"
+                read -rp "    Local [$cur_lpath]: " inp; new_lpath="${inp:-$cur_lpath}"
                 edit_out="$(sshx "$CM edit '$cur_id' '$new_label' '$new_rpath' '$new_lpath'" 2>&1)" || warn "$edit_out"
                 mounts_raw="$(load_mounts)"
                 ;;
@@ -308,34 +334,89 @@ if [ -n "$go_path" ]; then
 
     pkill -f "ssh.*-R ${PORT}:localhost:22" 2>/dev/null || true
 
-    step "Mounting files"
+    step "Checking SSH service"
+    if pgrep -x sshd >/dev/null 2>&1; then
+        step_ok
+    else
+        step_fail "sshd not running"
+        printf '    Enabling Remote Login...\n'
+        sudo systemsetup -setremotelogin on 2>/dev/null || true
+        sleep 1
+        if pgrep -x sshd >/dev/null 2>&1; then
+            printf '    sshd started ok.\n'
+        else
+            printf '    Could not start sshd. Go to: System Settings -> Sharing -> Remote Login\n'
+            exit 1
+        fi
+    fi
+
+    step "Starting SSH tunnel"
     ssh -fN -o ExitOnForwardFailure=no -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
         -R "$PORT:localhost:22" "$ALIAS" 2>/dev/null &
-    bg_tunnel_pid=$!
+    bg_pid=$!
+    step_ok "pid $bg_pid"
 
     up=""
-    for _ in $(seq 1 6); do sleep 2; if tunnel_up; then up=1; break; fi; done
+    for i in $(seq 1 8); do
+        sleep 2
+        printf '    Tunnel check %d/8...' "$i"
+        if ! kill -0 "$bg_pid" 2>/dev/null; then
+            printf ' SSH process died\n'
+            break
+        fi
+        if tunnel_up; then
+            printf ' port %d is open\n' "$PORT"
+            up=1; break
+        fi
+        printf ' port %d not open yet\n' "$PORT"
+    done
+
     if [ -z "$up" ]; then
-        step_fail "could not reach laptop on port 22"
-        printf '      -> Is SSH Server running? (System Settings -> Sharing -> Remote Login)\n'
+        echo ""
+        warn "Tunnel did not come up on port $PORT"
+        if ! port_open "$SERVER_IP" 22; then
+            warn "Server unreachable - VPN disconnected?"
+        else
+            warn "Check Mac firewall - SSH must allow inbound connections"
+        fi
         echo ""; exit 1
     fi
 
+    step "Mounting files"
+    printf '    please wait...'
     mount_out="$(sshx "$CM up '$go_id' 2>&1")"
     mount_exit=$?
-    if [ $mount_exit -ne 0 ] || echo "$mount_out" | grep -q 'FAILED\|No tunnel\|not configured'; then
-        step_fail
-        printf '      -> %s\n' "$mount_out"
-        if echo "$mount_out" | grep -qi "key auth failed\|publickey\|permission denied"; then
-            printf '      -> Re-run connect.sh to reinstall the key\n'
-        elif echo "$mount_out" | grep -qi "path not found\|no such file"; then
-            printf '      -> Fix the project path: press e then edit the project\n'
+    printf '\n'
+    mount_ok=0
+    if [ $mount_exit -eq 0 ] && ! echo "$mount_out" | grep -q 'error:\|FAILED\|No tunnel\|not configured'; then
+        mount_ok=1
+    fi
+
+    # Auto-fix: key rejected -> reinstall and retry once
+    if [ $mount_ok -eq 0 ] && echo "$mount_out" | grep -qi 'key auth failed\|connection reset\|reset by peer\|publickey\|Permission denied'; then
+        printf '    Key rejected - reinstalling server key automatically...\n'
+        new_pub="$(sshx "cat ~/.ssh/claude_laptop.pub" 2>/dev/null)"
+        if [ -n "$new_pub" ]; then
+            touch "$HOME/.ssh/authorized_keys"; chmod 600 "$HOME/.ssh/authorized_keys"
+            grep -qxF "$new_pub" "$HOME/.ssh/authorized_keys" || echo "$new_pub" >> "$HOME/.ssh/authorized_keys"
+            printf '    Key reinstalled - retrying mount...\n'
+            sleep 2
+            printf '    please wait...'
+            mount_out="$(sshx "$CM up '$go_id' 2>&1")"
+            mount_exit=$?
+            printf '\n'
+            if [ $mount_exit -eq 0 ] && ! echo "$mount_out" | grep -q 'error:\|FAILED\|No tunnel\|not configured'; then
+                mount_ok=1
+            fi
+        fi
+    fi
+
+    if [ $mount_ok -eq 0 ]; then
+        step_fail "$mount_out"
+        if echo "$mount_out" | grep -qi "path not found\|no such file"; then
+            warn "Fix the project path: press e then edit the project"
         elif echo "$mount_out" | grep -qi "not running\|refused"; then
-            printf '      -> Enable SSH: System Settings -> Sharing -> Remote Login\n'
-        elif echo "$mount_out" | grep -qi "timeout\|not responding"; then
-            printf '      -> SSH server slow — try again\n'
-        else
-            printf '      -> Debug: ssh -v -p %s -i ~/.ssh/claude_laptop %s@localhost "echo ok"\n' "$PORT" "$LAPTOP_USER"
+            warn "Enable SSH: System Settings -> Sharing -> Remote Login"
         fi
         echo ""; exit 1
     fi

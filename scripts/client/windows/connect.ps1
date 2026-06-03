@@ -27,6 +27,28 @@ function Step($m)  { Write-Host ("    " + $m).PadRight(46, '.') -NoNewline -Fore
 function StepOk  { param([string]$d=''); if ($d) { Write-Host " $d" -ForegroundColor Green } else { Write-Host " ok" -ForegroundColor Green } }
 function StepFail{ param([string]$d=''); Write-Host " failed" -ForegroundColor Red; if ($d) { Write-Host "      -> $d" -ForegroundColor DarkGray } }
 
+function Install-ServerKey([string]$pub) {
+    $adminFile = Join-Path $env:ProgramData "ssh\administrators_authorized_keys"
+    $userFile  = Join-Path $SshDir "authorized_keys"
+    foreach ($akFile in @($adminFile, $userFile)) {
+        $akDir = Split-Path $akFile
+        if (-not (Test-Path $akDir)) { continue }
+        if (-not (Test-Path $akFile)) { New-Item -ItemType File -Path $akFile -Force -ErrorAction SilentlyContinue | Out-Null }
+        if (-not (Test-Path $akFile)) { continue }
+        # Keep existing keys intact, only add this one if missing
+        $lines = @(Get-Content $akFile -ErrorAction SilentlyContinue | Where-Object { $_.Trim() -ne '' })
+        if ($lines -notcontains $pub) { Add-Content -Path $akFile -Value $pub -Encoding ASCII }
+    }
+    # Full permission reset: remove ALL existing ACEs then set correct ones
+    if (Test-Path $adminFile) {
+        icacls $adminFile /reset 2>$null | Out-Null
+        icacls $adminFile /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" 2>$null | Out-Null
+    }
+    # Restart sshd so permission changes take effect
+    Restart-Service sshd -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+}
+
 function SshX([string]$Cmd) {
     ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 $Alias $Cmd
 }
@@ -234,17 +256,7 @@ Step "Setting up server key"
 SshX "test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q" 2>$null | Out-Null
 $PubB = (SshX "cat ~/.ssh/claude_laptop.pub").Trim()
 if (-not $PubB) { StepFail "could not read server key"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
-$adminFile = Join-Path $env:ProgramData "ssh\administrators_authorized_keys"
-$userFile  = Join-Path $SshDir "authorized_keys"
-foreach ($akFile in @($adminFile, $userFile)) {
-    $akDir = Split-Path $akFile
-    if (-not (Test-Path $akDir)) { continue }
-    if (-not (Test-Path $akFile)) { New-Item -ItemType File -Path $akFile -Force -ErrorAction SilentlyContinue | Out-Null }
-    if (-not (Test-Path $akFile)) { continue }
-    $existing = Get-Content $akFile -ErrorAction SilentlyContinue
-    if ($existing -notcontains $PubB) { Add-Content -Path $akFile -Value $PubB -Encoding ASCII }
-}
-icacls $adminFile /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" 2>$null | Out-Null
+Install-ServerKey $PubB
 StepOk
 
 Step "Configuring server"
@@ -421,20 +433,13 @@ if ($go) {
     Write-Host ""
     $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
 
-    # Auto-fix: key mismatch -> reinstall key and retry once
+    # Auto-fix: key rejected -> overwrite authorized_keys, reset permissions, restart sshd, retry
     if (-not $mountOk -and $mountOut -match 'key auth failed|connection reset|reset by peer|publickey|Permission denied') {
-        Write-Host "    Key rejected - reinstalling server key automatically..." -ForegroundColor Yellow
+        Write-Host "    Key rejected - reinstalling and restarting sshd..." -ForegroundColor Yellow
         $newPub = (SshX "cat ~/.ssh/claude_laptop.pub").Trim()
         if ($newPub) {
-            foreach ($akFile in @((Join-Path $env:ProgramData "ssh\administrators_authorized_keys"), (Join-Path $SshDir "authorized_keys"))) {
-                if (-not (Test-Path (Split-Path $akFile))) { continue }
-                if (-not (Test-Path $akFile)) { New-Item -ItemType File -Path $akFile -Force -ErrorAction SilentlyContinue | Out-Null }
-                $lines = Get-Content $akFile -ErrorAction SilentlyContinue
-                if ($lines -notcontains $newPub) { Add-Content -Path $akFile -Value $newPub -Encoding ASCII }
-            }
-            icacls (Join-Path $env:ProgramData "ssh\administrators_authorized_keys") /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" 2>$null | Out-Null
-            Write-Host "    Key reinstalled - retrying mount..." -ForegroundColor Yellow
-            Start-Sleep -Seconds 2
+            Install-ServerKey $newPub
+            Write-Host "    Retrying mount..." -ForegroundColor Yellow
             Write-Host -NoNewline "    please wait..." -ForegroundColor DarkGray
             $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String
             Write-Host ""
