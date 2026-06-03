@@ -61,7 +61,12 @@ fi
 
 step "Laptop SSH key"
 [ -f "$HOME/.ssh/id_ed25519" ] || ssh-keygen -t ed25519 -N '' -f "$HOME/.ssh/id_ed25519" -q
-if [ -f "$HOME/.ssh/id_ed25519" ]; then step_ok; else step_fail "could not create key"; exit 1; fi
+if [ -f "$HOME/.ssh/id_ed25519" ]; then
+    chmod 600 "$HOME/.ssh/id_ed25519" 2>/dev/null || true
+    step_ok
+else
+    step_fail "could not create key"; exit 1
+fi
 
 step "Server config"
 touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
@@ -383,10 +388,10 @@ if [ -n "$go_path" ]; then
     fi
 
     step "Mounting files"
-    printf '    please wait...'
+    mount_start=$SECONDS
     mount_out="$(sshx "$CM up '$go_id' 2>&1")"
     mount_exit=$?
-    printf '\n'
+    mount_t=$(( SECONDS - mount_start ))
     mount_ok=0
     if [ $mount_exit -eq 0 ] && ! echo "$mount_out" | grep -q 'error:\|FAILED\|No tunnel\|not configured'; then
         mount_ok=1
@@ -394,17 +399,17 @@ if [ -n "$go_path" ]; then
 
     # Auto-fix: key rejected -> reinstall and retry once
     if [ $mount_ok -eq 0 ] && echo "$mount_out" | grep -qi 'key auth failed\|connection reset\|reset by peer\|publickey\|Permission denied'; then
-        printf '    Key rejected - reinstalling server key automatically...\n'
+        printf ' retrying...\n'
+        warn "Key rejected - reinstalling server key"
         new_pub="$(sshx "cat ~/.ssh/claude_laptop.pub" 2>/dev/null)"
         if [ -n "$new_pub" ]; then
             touch "$HOME/.ssh/authorized_keys"; chmod 600 "$HOME/.ssh/authorized_keys"
             grep -qxF "$new_pub" "$HOME/.ssh/authorized_keys" || echo "$new_pub" >> "$HOME/.ssh/authorized_keys"
-            printf '    Key reinstalled - retrying mount...\n'
-            sleep 2
-            printf '    please wait...'
+            step "Mounting files"
+            mount_start=$SECONDS
             mount_out="$(sshx "$CM up '$go_id' 2>&1")"
             mount_exit=$?
-            printf '\n'
+            mount_t=$(( SECONDS - mount_start ))
             if [ $mount_exit -eq 0 ] && ! echo "$mount_out" | grep -q 'error:\|FAILED\|No tunnel\|not configured'; then
                 mount_ok=1
             fi
@@ -421,8 +426,9 @@ if [ -n "$go_path" ]; then
         echo ""; exit 1
     fi
 
-    step_ok
-    [ -n "$mount_out" ] && printf '    \033[0;90m%s\033[0m\n' "$mount_out"
+    step_ok "${mount_t}s"
+    clean_out="$(printf '%s' "$mount_out" | sed 's/^already mounted: //')"
+    [ -n "$clean_out" ] && printf '      -> \033[0;90m%s\033[0m\n' "$clean_out"
 
     step "Opening VSCode"
     code --folder-uri "vscode-remote://ssh-remote+$ALIAS$go_path"

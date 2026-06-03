@@ -21,30 +21,56 @@ $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
 $CM       = '$HOME/.local/bin/claude-mount'
 
-function Die($m)   { Write-Host ""; Write-Host "  [X] $m" -ForegroundColor Red; Write-Host ""; exit 1 }
+function Die($m)   { Write-Host ""; Write-Host "  [X] $m" -ForegroundColor Red; Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 function Warn($m)  { Write-Host "  [!] $m" -ForegroundColor DarkYellow }
 function Step($m)  { Write-Host ("    " + $m).PadRight(46, '.') -NoNewline -ForegroundColor DarkCyan }
-function StepOk  { param([string]$d=''); if ($d) { Write-Host " $d" -ForegroundColor Green } else { Write-Host " ok" -ForegroundColor Green } }
-function StepFail{ param([string]$d=''); Write-Host " failed" -ForegroundColor Red; if ($d) { Write-Host "      -> $d" -ForegroundColor DarkGray } }
+function StepOk  {
+    param([string]$d='')
+    if ($d) { Write-Host " $d" -ForegroundColor Green } else { Write-Host " ok" -ForegroundColor Green }
+    foreach ($fx in $script:pendingFixes) { Write-Host "      -> fixed: $fx" -ForegroundColor DarkGray }
+    $script:pendingFixes = @()
+}
+function StepFail {
+    param([string]$d='')
+    Write-Host " failed" -ForegroundColor Red
+    if ($d) { Write-Host "      -> $d" -ForegroundColor DarkGray }
+    $script:pendingFixes = @()
+}
+$script:pendingFixes = @()
+
+function Repair-SshPerm([string]$path, [string]$label) {
+    if (-not (Test-Path $path)) { return }
+    $out = (icacls $path 2>$null) -join ' '
+    icacls $path /reset 2>$null | Out-Null
+    icacls $path /inheritance:r /grant "$env:USERNAME`:F" 2>$null | Out-Null
+    if ($out -match '\(I\)|Everyone|BUILTIN\\\\Users') { $script:pendingFixes += "$label permissions" }
+}
 
 function Install-ServerKey([string]$pub) {
     $adminFile = Join-Path $env:ProgramData "ssh\administrators_authorized_keys"
     $userFile  = Join-Path $SshDir "authorized_keys"
-    foreach ($akFile in @($adminFile, $userFile)) {
-        $akDir = Split-Path $akFile
-        if (-not (Test-Path $akDir)) { continue }
-        if (-not (Test-Path $akFile)) { New-Item -ItemType File -Path $akFile -Force -ErrorAction SilentlyContinue | Out-Null }
-        if (-not (Test-Path $akFile)) { continue }
-        # Keep existing keys intact, only add this one if missing
-        $lines = @(Get-Content $akFile -ErrorAction SilentlyContinue | Where-Object { $_.Trim() -ne '' })
-        if ($lines -notcontains $pub) { Add-Content -Path $akFile -Value $pub -Encoding ASCII }
-    }
-    # Full permission reset: remove ALL existing ACEs then set correct ones
-    if (Test-Path $adminFile) {
+
+    # Fix permissions on adminFile FIRST so we can write to it
+    $adminDir = Split-Path $adminFile
+    if (Test-Path $adminDir) {
+        if (-not (Test-Path $adminFile)) { New-Item -ItemType File -Path $adminFile -Force | Out-Null }
+        $_adminOut = (icacls $adminFile 2>$null) -join ' '
         icacls $adminFile /reset 2>$null | Out-Null
         icacls $adminFile /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" 2>$null | Out-Null
+        if ($_adminOut -match '\(I\)|Everyone|BUILTIN\\\\Users') { $script:pendingFixes += "administrators_authorized_keys permissions" }
     }
-    # Restart sshd so permission changes take effect
+
+    # Now write the key to both files and fix their permissions
+    foreach ($akFile in @($adminFile, $userFile)) {
+        if (-not (Test-Path (Split-Path $akFile))) { continue }
+        if (-not (Test-Path $akFile)) { New-Item -ItemType File -Path $akFile -Force -ErrorAction SilentlyContinue | Out-Null }
+        if (-not (Test-Path $akFile)) { continue }
+        $lines = @(Get-Content $akFile -ErrorAction SilentlyContinue | Where-Object { $_.Trim() -ne '' })
+        if ($lines -notcontains $pub) { Add-Content -Path $akFile -Value $pub -Encoding ASCII }
+        if ($akFile -eq $userFile) { Repair-SshPerm $akFile "authorized_keys" }
+    }
+
+    # Restart sshd so it picks up the new key
     Restart-Service sshd -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 }
@@ -145,6 +171,12 @@ function Do-Add {
 
 New-Item -ItemType Directory -Force -Path $CfgDir | Out-Null
 New-Item -ItemType Directory -Force -Path $SshDir  | Out-Null
+$_dirOut = (icacls $SshDir 2>$null) -join ' '
+if ($_dirOut -match '\(I\)|Everyone|BUILTIN\\Users') {
+    Write-Host "    [!] .ssh directory has wrong permissions - fixing..." -ForegroundColor Yellow
+}
+icacls $SshDir /reset 2>$null | Out-Null
+icacls $SshDir /inheritance:r /grant "$env:USERNAME`:(OI)(CI)F" 2>$null | Out-Null
 
 # header
 Clear-Host
@@ -170,7 +202,10 @@ $LaptopUser = $conf["LAPTOP_USER"]
 Step "Laptop SSH key"
 $keyA = Join-Path $SshDir "id_ed25519"
 if (-not (Test-Path $keyA)) { ssh-keygen -t ed25519 -N '""' -f $keyA -q }
-if (Test-Path $keyA) { StepOk } else { StepFail "could not create key"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
+if (Test-Path $keyA) {
+    Repair-SshPerm $keyA "SSH private key"
+    StepOk
+} else { StepFail "could not create key"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 
 # SSH config
 $sshCfg = Join-Path $SshDir "config"
@@ -184,6 +219,7 @@ Host $Alias
     IdentityFile ~/.ssh/id_ed25519
     StrictHostKeyChecking accept-new
 "@ | Add-Content -Path $sshCfg -Encoding ASCII
+Repair-SshPerm $sshCfg "SSH config"
 
 # connect — retry until reachable, 5s between attempts
 $connected = $false
@@ -271,6 +307,7 @@ Host $Alias
     RemoteForward $Port localhost:22
     ExitOnForwardFailure no
 "@ | Add-Content -Path $sshCfg -Encoding ASCII
+Repair-SshPerm $sshCfg "SSH config"
 SshX "printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\n' '$LaptopUser' '$Port' > ~/.claude-connect.conf" 2>$null | Out-Null
 StepOk "laptop=$LaptopUser port=$Port"
 
@@ -389,6 +426,14 @@ if ($go) {
     } else {
         StepOk
     }
+    # Ensure Windows Firewall allows inbound SSH (port 22)
+    $fwRule = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
+    if (-not $fwRule) {
+        Write-Host "    [!] Firewall rule for SSH missing - adding..." -ForegroundColor Yellow
+        New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -DisplayName "OpenSSH SSH Server (sshd)" `
+            -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 `
+            -ErrorAction SilentlyContinue | Out-Null
+    }
 
     Step "Starting SSH tunnel"
     $bgTunnel = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList @(
@@ -428,36 +473,37 @@ if ($go) {
     }
 
     Step "Mounting files"
-    Write-Host -NoNewline "    please wait..." -ForegroundColor DarkGray
+    $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
     $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String
-    Write-Host ""
+    $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
     $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
 
-    # Auto-fix: key rejected -> overwrite authorized_keys, reset permissions, restart sshd, retry
+    # Auto-fix: key rejected -> reinstall key, restart sshd, retry
     if (-not $mountOk -and $mountOut -match 'key auth failed|connection reset|reset by peer|publickey|Permission denied') {
-        Write-Host "    Key rejected - reinstalling and restarting sshd..." -ForegroundColor Yellow
+        Write-Host " retrying..." -ForegroundColor DarkGray
+        Warn "Key rejected - reinstalling server key and restarting sshd"
         $newPub = (SshX "cat ~/.ssh/claude_laptop.pub").Trim()
         if ($newPub) {
             Install-ServerKey $newPub
-            Write-Host "    Retrying mount..." -ForegroundColor Yellow
-            Write-Host -NoNewline "    please wait..." -ForegroundColor DarkGray
+            Step "Mounting files"
+            $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
             $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String
-            Write-Host ""
+            $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
             $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
         }
     }
 
     if (-not $mountOk) {
         StepFail $mountOut.Trim()
-        Write-Host ""
         if ($mountOut -match 'No such file|not found|cannot find') {
             Warn "Path not found on laptop. Use 'e edit' to correct the project path."
         }
         Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
     }
 
-    StepOk
-    if ($mountOut.Trim()) { Write-Host "    $($mountOut.Trim())" -ForegroundColor DarkGray }
+    StepOk "${mountT}s"
+    $cleanOut = ($mountOut.Trim() -replace '^already mounted:\s*', '')
+    if ($cleanOut) { Write-Host "      -> $cleanOut" -ForegroundColor DarkGray }
 
     Step "Opening VSCode"
     & code --folder-uri "vscode-remote://ssh-remote+$Alias$($go.Path)"
