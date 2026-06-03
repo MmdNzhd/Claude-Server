@@ -87,17 +87,19 @@ _do_mount() {
     if ! sshfs_out=$(timeout 30 bash -c "$sshfs_cmd" 2>&1); then
         local reason="$sshfs_out"
         if echo "$reason" | grep -qi "permission denied\|publickey"; then
-            reason="key auth failed — re-run connect to reinstall the key"
+            reason="key auth failed - re-run connect.bat to reinstall the key"
+        elif echo "$reason" | grep -qi "connection reset\|reset by peer"; then
+            reason="connection reset - laptop SSH rejected the key (re-run connect.bat to reinstall)"
         elif echo "$reason" | grep -qi "no such file\|cannot find\|not found"; then
             reason="path not found on laptop: $rpath"
         elif echo "$reason" | grep -qi "connection refused"; then
-            reason="laptop SSH server not running (connection refused)"
+            reason="laptop SSH not running (connection refused)"
         elif echo "$reason" | grep -qi "timed out\|timeout"; then
-            reason="laptop SSH server not responding (timeout)"
+            reason="laptop SSH not responding (timeout)"
         elif [ -z "$reason" ]; then
-            reason="unknown error (exit code $?)"
+            reason="unknown error"
         fi
-        echo "error: mount failed — $reason" >&2
+        echo "error: mount failed - $reason" >&2
         return 1
     fi
 
