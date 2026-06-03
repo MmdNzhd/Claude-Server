@@ -13,7 +13,8 @@ $ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 $Version     = Get-Date -Format 'yyyyMMdd'
 $PackageName = "claude-code-client-$Version"
-$OutDir      = Join-Path $ProjectRoot "dist\$PackageName"
+$OutBase     = Join-Path $env:USERPROFILE "Desktop\claude-publish"
+$OutDir      = Join-Path $OutBase $PackageName
 
 $FilesToCopy = @(
     @{ Src = "scripts\client\windows\connect.bat"; Dst = "windows\connect.bat" }
@@ -30,7 +31,10 @@ Write-Host "Publishing $PackageName" -ForegroundColor White
 Write-Host ""
 
 Write-Step "Creating output folder..."
-if (Test-Path $OutDir) { Remove-Item $OutDir -Recurse -Force }
+if (Test-Path $OutDir) {
+    try { Remove-Item $OutDir -Recurse -Force -ErrorAction Stop }
+    catch { Write-Err "Cannot delete old package folder - close Windows Explorer in dist\ and retry." }
+}
 $null = New-Item $OutDir -ItemType Directory -Force
 Write-Ok $OutDir
 
@@ -55,7 +59,7 @@ Write-Ok "README.txt"
 
 if (-not $NoZip) {
     Write-Step "Creating ZIP..."
-    $ZipPath = Join-Path $ProjectRoot "dist\$PackageName.zip"
+    $ZipPath = Join-Path $OutBase "$PackageName.zip"
     if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::CreateFromDirectory($OutDir, $ZipPath)
@@ -63,8 +67,8 @@ if (-not $NoZip) {
 }
 
 Write-Host ""
-Write-Host "Done.  Package is at: dist\$PackageName" -ForegroundColor Green
+Write-Host "Done.  Package is at: Desktop\claude-publish\$PackageName" -ForegroundColor Green
 if (-not $NoZip) {
-    Write-Host "       ZIP ready at:  dist\$PackageName.zip" -ForegroundColor Green
+    Write-Host "       ZIP ready at:  Desktop\claude-publish\$PackageName.zip" -ForegroundColor Green
 }
 Write-Host ""
