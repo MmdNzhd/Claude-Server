@@ -83,8 +83,21 @@ _do_mount() {
 
     local sshfs_cmd="sshfs -o ${sshfs_opts}${id_opt} ${LAPTOP_USER}@127.0.0.1:${rpath} ${lpath} -p ${TUNNEL_PORT}"
 
-    if ! timeout 30 bash -c "$sshfs_cmd" 2>&1; then
-        echo "error: sshfs mount failed for $id ($lpath)" >&2
+    local sshfs_out
+    if ! sshfs_out=$(timeout 30 bash -c "$sshfs_cmd" 2>&1); then
+        local reason="$sshfs_out"
+        if echo "$reason" | grep -qi "permission denied\|publickey"; then
+            reason="key auth failed — re-run connect to reinstall the key"
+        elif echo "$reason" | grep -qi "no such file\|cannot find\|not found"; then
+            reason="path not found on laptop: $rpath"
+        elif echo "$reason" | grep -qi "connection refused"; then
+            reason="laptop SSH server not running (connection refused)"
+        elif echo "$reason" | grep -qi "timed out\|timeout"; then
+            reason="laptop SSH server not responding (timeout)"
+        elif [ -z "$reason" ]; then
+            reason="unknown error (exit code $?)"
+        fi
+        echo "error: mount failed — $reason" >&2
         return 1
     fi
 

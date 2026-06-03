@@ -4,6 +4,14 @@
 
 param([switch]$Setup)
 
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    if ($Setup) { $argList += " -Setup" }
+    Start-Process powershell $argList -Verb RunAs
+    exit
+}
+
 $ErrorActionPreference = "Continue"
 $ServerIP = "192.168.210.240"
 $Alias    = "claude-server"
@@ -195,13 +203,17 @@ Step "Setting up server key"
 SshX "test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q" 2>$null | Out-Null
 $PubB = (SshX "cat ~/.ssh/claude_laptop.pub").Trim()
 if (-not $PubB) { StepFail "could not read server key"; exit 1 }
-$adminSid    = [System.Security.Principal.SecurityIdentifier]'S-1-5-32-544'
-$curGroups   = [System.Security.Principal.WindowsIdentity]::GetCurrent().Groups
-$isAdminUser = $curGroups -and ($curGroups | Where-Object { $_.Value -eq $adminSid.Value })
-$authKeys    = if ($isAdminUser) { Join-Path $env:ProgramData "ssh\administrators_authorized_keys" } else { Join-Path $SshDir "authorized_keys" }
-if (-not (Test-Path $authKeys)) { New-Item -ItemType File -Path $authKeys -Force | Out-Null }
-if ((Get-Content $authKeys -ErrorAction SilentlyContinue) -notcontains $PubB) { Add-Content -Path $authKeys -Value $PubB -Encoding ASCII }
-if ($isAdminUser) { icacls $authKeys /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" 2>$null | Out-Null }
+$adminFile = Join-Path $env:ProgramData "ssh\administrators_authorized_keys"
+$userFile  = Join-Path $SshDir "authorized_keys"
+foreach ($akFile in @($adminFile, $userFile)) {
+    $akDir = Split-Path $akFile
+    if (-not (Test-Path $akDir)) { continue }
+    if (-not (Test-Path $akFile)) { New-Item -ItemType File -Path $akFile -Force -ErrorAction SilentlyContinue | Out-Null }
+    if (-not (Test-Path $akFile)) { continue }
+    $existing = Get-Content $akFile -ErrorAction SilentlyContinue
+    if ($existing -notcontains $PubB) { Add-Content -Path $akFile -Value $PubB -Encoding ASCII }
+}
+icacls $adminFile /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" 2>$null | Out-Null
 StepOk
 
 Step "Configuring server"
@@ -310,7 +322,7 @@ if ($go) {
 
     Step "Mounting files"
     $bgTunnel = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList @(
-        "-N", "-o", "ExitOnForwardFailure=yes",
+        "-N", "-o", "ExitOnForwardFailure=no",
         "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
         "-R", "$Port`:localhost:22", $Alias)
 
@@ -318,8 +330,14 @@ if ($go) {
     foreach ($i in 1..6) { Start-Sleep -Seconds 2; if (Tunnel-Up) { $up = $true; break } }
 
     if (-not $up) {
-        StepFail "could not reach laptop on port 22"
-        Write-Host "    -> Is OpenSSH Server running?  Get-Service sshd" -ForegroundColor DarkGray
+        $svc = Get-Service sshd -ErrorAction SilentlyContinue
+        if (-not $svc -or $svc.Status -ne 'Running') {
+            StepFail "OpenSSH Server is not running on this laptop"
+            try { Start-Service sshd -ErrorAction Stop; Write-Host "    Started sshd. Re-run connect.bat." -ForegroundColor Green }
+            catch { Write-Host "    Could not start sshd. Run: Start-Service sshd" -ForegroundColor DarkGray }
+        } else {
+            StepFail "tunnel did not come up on port $Port"
+        }
         Write-Host ""; exit 1
     }
 
@@ -329,28 +347,12 @@ if ($go) {
     if (-not $mountOk) {
         StepFail $mountOut.Trim()
         Write-Host ""
-
-        $svc = Get-Service sshd -ErrorAction SilentlyContinue
-        if (-not $svc -or $svc.Status -ne 'Running') {
-            Warn "OpenSSH Server is NOT running on this laptop."
-            try { Start-Service sshd -ErrorAction Stop; Write-Host "  [ok] Started sshd." -ForegroundColor Green }
-            catch { Write-Host "       Could not start sshd automatically." -ForegroundColor DarkGray }
-        } else {
-            Write-Host "    OpenSSH Server is running." -ForegroundColor DarkGray
-            if ($mountOut -match 'reset by peer|Permission denied|publickey') {
-                Warn "Key auth failed. Re-run connect.bat to re-install the key."
-            }
-        }
-
         if ($mountOut -match 'No such file|not found|cannot find') {
             Warn "Path not found on laptop. Use 'e edit' to correct the project path."
         }
         Write-Host ""; exit 1
     }
 
-    if ($bgTunnel -and -not $bgTunnel.HasExited) {
-        Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
-    }
     StepOk
     if ($mountOut.Trim()) { Write-Host "    $($mountOut.Trim())" -ForegroundColor DarkGray }
 

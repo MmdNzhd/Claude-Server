@@ -309,7 +309,7 @@ if [ -n "$go_path" ]; then
     pkill -f "ssh.*-R ${PORT}:localhost:22" 2>/dev/null || true
 
     step "Mounting files"
-    ssh -fN -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+    ssh -fN -o ExitOnForwardFailure=no -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
         -R "$PORT:localhost:22" "$ALIAS" 2>/dev/null &
     bg_tunnel_pid=$!
 
@@ -324,16 +324,22 @@ if [ -n "$go_path" ]; then
     mount_out="$(sshx "$CM up '$go_id' 2>&1")"
     mount_exit=$?
     if [ $mount_exit -ne 0 ] || echo "$mount_out" | grep -q 'FAILED\|No tunnel\|not configured'; then
-        step_fail "$mount_out"
-        printf '      -> Is SSH Server running on your laptop?\n'
-        printf '      -> Is the project path correct? Use "e edit" to fix it.\n'
-        echo ""
-        printf '    Debug: on server run:\n'
-        printf '      ssh -v -p %s -i ~/.ssh/claude_laptop %s@localhost "echo ok"\n' "$PORT" "$LAPTOP_USER"
+        step_fail
+        printf '      -> %s\n' "$mount_out"
+        if echo "$mount_out" | grep -qi "key auth failed\|publickey\|permission denied"; then
+            printf '      -> Re-run connect.sh to reinstall the key\n'
+        elif echo "$mount_out" | grep -qi "path not found\|no such file"; then
+            printf '      -> Fix the project path: press e then edit the project\n'
+        elif echo "$mount_out" | grep -qi "not running\|refused"; then
+            printf '      -> Enable SSH: System Settings -> Sharing -> Remote Login\n'
+        elif echo "$mount_out" | grep -qi "timeout\|not responding"; then
+            printf '      -> SSH server slow — try again\n'
+        else
+            printf '      -> Debug: ssh -v -p %s -i ~/.ssh/claude_laptop %s@localhost "echo ok"\n' "$PORT" "$LAPTOP_USER"
+        fi
         echo ""; exit 1
     fi
 
-    kill "$bg_tunnel_pid" 2>/dev/null || true
     step_ok
     [ -n "$mount_out" ] && printf '    \033[0;90m%s\033[0m\n' "$mount_out"
 

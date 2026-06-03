@@ -23,12 +23,18 @@ echo ""
 echo "=== Deploying hooks to /usr/local/bin/ ==="
 for hook in claude-hook-logout-block.sh claude-hook-pre.sh claude-hook-stop.sh; do
     src="$REPO/hooks/$hook"
-    dst="/usr/local/bin/${hook%.sh}"
     if [ -f "$src" ]; then
-        sudo install -m 755 "$src" "$dst"
-        echo "  OK: $dst"
+        # deploy both with and without .sh extension — settings.json files use .sh
+        sudo install -m 755 "$src" "/usr/local/bin/${hook%.sh}"
+        sudo install -m 755 "$src" "/usr/local/bin/$hook"
+        echo "  OK: /usr/local/bin/${hook%.sh} and /usr/local/bin/$hook"
     fi
 done
+
+echo ""
+echo "=== Clearing stale active session files ==="
+sudo find /var/run/claude-active -name "*.active" -delete
+echo "  OK: stale files cleared"
 
 echo ""
 echo "Done."
