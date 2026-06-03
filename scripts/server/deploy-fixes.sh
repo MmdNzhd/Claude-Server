@@ -5,6 +5,11 @@
 
 REPO="/home/smart/mounts/claude-code-server/scripts/server"
 
+echo "=== Deploying claude-automount to /usr/local/bin/ ==="
+sudo install -m 755 "$REPO/claude-automount.sh" /usr/local/bin/claude-automount
+echo "  OK: /usr/local/bin/claude-automount updated"
+
+echo ""
 echo "=== Deploying claude-mount to /usr/local/lib/ ==="
 sudo install -m 644 "$REPO/claude-mount.sh" /usr/local/lib/claude-mount
 echo "  OK: /usr/local/lib/claude-mount updated"
@@ -35,6 +40,22 @@ echo ""
 echo "=== Clearing stale active session files ==="
 sudo find /var/run/claude-active -name "*.active" -delete
 echo "  OK: stale files cleared"
+
+echo ""
+echo "=== Ensuring effortLevel=low for all users ==="
+for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
+    f="/home/$u/.claude/settings.json"
+    [ -f "$f" ] || continue
+    tmp=$(mktemp)
+    if jq '. + {"effortLevel": "low"}' "$f" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$f"
+        chown "$u:$u" "$f"
+        echo "  updated: $u"
+    else
+        rm -f "$tmp"
+        echo "  WARN: invalid JSON in $u settings, skipped"
+    fi
+done
 
 echo ""
 echo "Done."

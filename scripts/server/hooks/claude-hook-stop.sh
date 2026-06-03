@@ -17,5 +17,5 @@ done
 SESSION_PID="${CLAUDE_WRAPPER_PID:-$PPID}"
 rm -f "${ACTIVE_DIR}/${USER}.${SESSION_PID}.active" 2>/dev/null || true
 
-printf '{"timestamp":"%s","event":"IDLE","user":"%s"}\n' \
-    "$(date -Iseconds)" "$USER" >> "$LOG_FILE" 2>/dev/null || true
+printf '{"timestamp":"%s","event":"IDLE","user":"%s","session":"%s"}\n' \
+    "$(date -Iseconds)" "$USER" "$SESSION_PID" >> "$LOG_FILE" 2>/dev/null || true

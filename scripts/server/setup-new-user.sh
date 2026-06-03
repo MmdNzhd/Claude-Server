@@ -48,6 +48,7 @@ cat > "/home/$USERNAME/.claude/settings.json" << 'SETTINGS'
 {
   "theme": "dark",
   "model": "claude-sonnet-4-6",
+  "effortLevel": "low",
   "hooks": {
     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/usr/local/bin/claude-hook-logout-block.sh"}]}],
     "PreToolUse": [{"hooks": [{"type": "command", "command": "/usr/local/bin/claude-hook-pre.sh"}]}],
