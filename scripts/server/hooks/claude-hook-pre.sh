@@ -1,0 +1,39 @@
+#!/bin/bash
+# PreToolUse hook: enforce per-user active session limit.
+# exit 0 = allow tool, exit 2 = block tool (Claude Code cancels it)
+#
+# Fast path: if this session is already marked active, just touch and allow.
+# This hook runs on EVERY tool call so it must be fast.
+
+ACTIVE_DIR="/var/run/claude-active"
+LIMITS_FILE="/etc/claude-limits.conf"
+ACTIVE_FILE="${ACTIVE_DIR}/${USER}.${CLAUDE_WRAPPER_PID:-$$}.active"
+
+mkdir -p "$ACTIVE_DIR"
+
+# Fast path: already active for this session
+if [ -f "$ACTIVE_FILE" ]; then
+    touch "$ACTIVE_FILE"
+    exit 0
+fi
+
+# Get active_limit for this user from config
+get_limit() {
+    local u="$1" lim
+    lim=$(awk -v u="$u" '$1==u{print $3; exit}' "$LIMITS_FILE" 2>/dev/null)
+    [ -z "$lim" ] && lim=$(awk '$1=="default"{print $3; exit}' "$LIMITS_FILE" 2>/dev/null)
+    echo "${lim:-2}"
+}
+
+ACTIVE_LIMIT=$(get_limit "$USER")
+[ "$ACTIVE_LIMIT" = "unlimited" ] && { touch "$ACTIVE_FILE"; exit 0; }
+
+ACTIVE_COUNT=$(find "$ACTIVE_DIR" -name "${USER}.*.active" 2>/dev/null | wc -l)
+
+if [ "$ACTIVE_COUNT" -ge "$ACTIVE_LIMIT" ]; then
+    echo "Active session limit reached ($ACTIVE_COUNT/$ACTIVE_LIMIT). Wait for another session to finish processing." >&2
+    exit 2
+fi
+
+touch "$ACTIVE_FILE"
+exit 0
