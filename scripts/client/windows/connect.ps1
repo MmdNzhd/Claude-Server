@@ -6,9 +6,10 @@ param([switch]$Setup)
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-    if ($Setup) { $argList += " -Setup" }
-    Start-Process powershell $argList -Verb RunAs
+    $scriptPath = $PSCommandPath -replace "'", "''"
+    $setupFlag  = if ($Setup) { ' -Setup' } else { '' }
+    $cmd = "& '$scriptPath'$setupFlag; if (`$LASTEXITCODE -ne 0) { Write-Host ''; Read-Host '    Press Enter to close' }"
+    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $cmd
     exit
 }
 
@@ -31,7 +32,11 @@ function SshX([string]$Cmd) {
 }
 
 function Tunnel-Up {
-    return ((SshX "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port' 2>/dev/null && echo UP" 2>$null) -match 'UP')
+    # Short timeout so VPN loss is detected quickly (3s connect + 2s port check)
+    $r = ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=3 `
+             -o ServerAliveInterval=2 -o ServerAliveCountMax=2 `
+             $Alias "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port' 2>/dev/null && echo UP" 2>$null
+    return ($r -match 'UP')
 }
 
 function PortOpen($ip, $port) {
@@ -55,14 +60,15 @@ function Remove-SshHostBlock($cfgPath, $alias) {
 }
 
 function Load-Mounts {
+    # Use 'list' (reads configs only, fast) instead of 'status' (checks mounts, slow/hangs on stale mounts)
     $out = @()
-    foreach ($line in ((SshX "$CM status 2>/dev/null") -split "`n")) {
-        if ($line.Trim() -match '^([^\|]+)\|([^\|]*)\|([^\|]+)\|(MOUNTED|OFF)$') {
+    foreach ($line in ((SshX "$CM list 2>/dev/null") -split "`n")) {
+        if ($line.Trim() -match '^([^\|]+)\|([^\|]*)\|([^\|]*)\|([^\|]+)$') {
             $out += [PSCustomObject]@{
                 Id    = $matches[1].Trim()
                 Label = $matches[2].Trim()
-                Path  = $matches[3].Trim()
-                On    = ($matches[4].Trim() -eq "MOUNTED")
+                Path  = $matches[4].Trim()
+                On    = $false
             }
         }
     }
@@ -157,28 +163,53 @@ Host $Alias
     StrictHostKeyChecking accept-new
 "@ | Add-Content -Path $sshCfg -Encoding ASCII
 
-# connect
-Step "Connecting"
-ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=6 $Alias "true" 2>$null
-if ($LASTEXITCODE -eq 0) { StepOk "$RemoteUser@$ServerIP" }
-if ($LASTEXITCODE -ne 0) {
-    if (-not (PortOpen $ServerIP 22)) {
-        StepFail "cannot reach $ServerIP - VPN connected? Server running?"
-        Write-Host ""; exit 1
+# connect — retry until reachable, 5s between attempts
+$connected = $false
+$needsKey  = $false
+for ($attempt = 1; $attempt -le 10; $attempt++) {
+    Write-Host -NoNewline ("    Connecting $attempt/10").PadRight(46, '.') -ForegroundColor DarkCyan
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=5 $Alias "true" 2>$null
+    $sw.Stop()
+    $connT = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host " $RemoteUser@$ServerIP" -ForegroundColor Green
+        $connected = $true; break
     }
-    StepFail "auth failed - installing key"
+    if (PortOpen $ServerIP 22) {
+        Write-Host " auth failed (${connT}s) - no key, installing now" -ForegroundColor DarkYellow
+        $needsKey = $true; break
+    }
+    Write-Host " no response (${connT}s)" -ForegroundColor DarkGray
+    if ($attempt -lt 10) {
+        Write-Host "    Waiting 5s (VPN on? Server up?)..." -ForegroundColor DarkGray
+        Start-Sleep -Seconds 5
+    }
+}
+
+if (-not $connected -and -not $needsKey) {
+    Write-Host ""
+    Warn "Cannot reach $ServerIP after 10 attempts"
+    Warn "VPN connected? Server running?"
+    Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
+}
+
+if ($needsKey) {
     Write-Host ""
     Write-Host "    Enter server password (one time only):" -ForegroundColor Yellow
     Get-Content "$keyA.pub" | ssh -o StrictHostKeyChecking=accept-new "$RemoteUser@$ServerIP" `
         "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     $keyCopyOk = ($LASTEXITCODE -eq 0)
     Step "Verifying connection"
+    $verifySW = [System.Diagnostics.Stopwatch]::StartNew()
     ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=6 $Alias "true" 2>$null
+    $verifySW.Stop()
+    $verifyT = [math]::Round($verifySW.Elapsed.TotalSeconds, 1)
     if ($LASTEXITCODE -ne 0) {
-        if (-not $keyCopyOk) { StepFail "key copy failed - wrong password?" }
-        else { StepFail "still cannot connect" }
+        if (-not $keyCopyOk) { StepFail "key copy failed after ${verifyT}s - wrong password?" }
+        else { StepFail "still cannot connect after ${verifyT}s" }
         Write-Host ""
-        Warn "Cannot connect to $Alias ($RemoteUser@$ServerIP)."
+        Warn "Cannot connect - user=$RemoteUser  host=$ServerIP"
         Write-Host ""
         Write-Host "    Current username: $RemoteUser" -ForegroundColor DarkGray
         $fix = (Read-Host "    Username changed? Enter new username (or Enter to exit)").Trim()
@@ -187,7 +218,7 @@ if ($LASTEXITCODE -ne 0) {
             Remove-SshHostBlock $sshCfg $Alias
             Write-Host ""; Write-Host "    Saved. Re-run connect.bat." -ForegroundColor Green
         }
-        Write-Host ""; exit 1
+        Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
     }
     StepOk "$RemoteUser@$ServerIP"
 }
@@ -244,7 +275,9 @@ Write-Host "    Ready" -ForegroundColor Green
 Write-Host ""
 
 # mount helpers
+Step "Loading projects"
 $mounts = @(Load-Mounts)
+StepOk "$($mounts.Count) project(s)"
 $go = $null
 
 while (-not $go) {
@@ -320,29 +353,73 @@ if ($go) {
         Where-Object { $_.CommandLine -match "-R\s+${Port}:localhost:22" } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
-    Step "Mounting files"
+    Step "Checking SSH service"
+    $svc = Get-Service sshd -ErrorAction SilentlyContinue
+    if (-not $svc -or $svc.Status -ne 'Running') {
+        StepFail "OpenSSH Server not running"
+        Write-Host ""
+        Write-Host "    Trying to start sshd..." -ForegroundColor Yellow
+        try {
+            Start-Service sshd -ErrorAction Stop
+            Start-Sleep -Seconds 1
+            $svc = Get-Service sshd -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq 'Running') {
+                Write-Host "    sshd started ok." -ForegroundColor Green
+            } else {
+                Write-Host "    Could not start sshd. Run as admin: Start-Service sshd" -ForegroundColor Red
+                Write-Host ""; exit 1
+            }
+        } catch {
+            Write-Host "    Error starting sshd: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "    Run as admin: Start-Service sshd" -ForegroundColor DarkGray
+            Write-Host ""; exit 1
+        }
+    } else {
+        StepOk
+    }
+
+    Step "Starting SSH tunnel"
     $bgTunnel = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList @(
         "-N", "-o", "ExitOnForwardFailure=no",
         "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
         "-R", "$Port`:localhost:22", $Alias)
+    StepOk "pid $($bgTunnel.Id)"
 
     $up = $false
-    foreach ($i in 1..6) { Start-Sleep -Seconds 2; if (Tunnel-Up) { $up = $true; break } }
-
-    if (-not $up) {
-        $svc = Get-Service sshd -ErrorAction SilentlyContinue
-        if (-not $svc -or $svc.Status -ne 'Running') {
-            StepFail "OpenSSH Server is not running on this laptop"
-            try { Start-Service sshd -ErrorAction Stop; Write-Host "    Started sshd. Re-run connect.bat." -ForegroundColor Green }
-            catch { Write-Host "    Could not start sshd. Run: Start-Service sshd" -ForegroundColor DarkGray }
-        } else {
-            StepFail "tunnel did not come up on port $Port"
+    $tunnelMsg = ""
+    for ($i = 1; $i -le 8; $i++) {
+        Start-Sleep -Seconds 2
+        Write-Host -NoNewline "    Tunnel check $i/8..." -ForegroundColor DarkGray
+        if ($bgTunnel.HasExited) {
+            $tunnelMsg = "SSH process exited with code $($bgTunnel.ExitCode)"
+            Write-Host " SSH process died" -ForegroundColor Red
+            break
         }
-        Write-Host ""; exit 1
+        if (Tunnel-Up) {
+            Write-Host " port $Port is open" -ForegroundColor Green
+            $up = $true; break
+        }
+        Write-Host " port $Port not open yet" -ForegroundColor DarkGray
     }
 
+    if (-not $up) {
+        Write-Host ""
+        Warn "Tunnel did not come up on port $Port"
+        if ($tunnelMsg) {
+            Warn $tunnelMsg
+        } elseif (-not (PortOpen $ServerIP 22)) {
+            Warn "Server unreachable - VPN disconnected?"
+        } else {
+            Warn "Check Windows Firewall - port 22 must allow inbound connections"
+        }
+        Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
+    }
+
+    Step "Mounting files"
+    Write-Host -NoNewline "    please wait..." -ForegroundColor DarkGray
     $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String
-    $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'FAILED|No tunnel|not configured'
+    Write-Host ""
+    $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
 
     if (-not $mountOk) {
         StepFail $mountOut.Trim()
