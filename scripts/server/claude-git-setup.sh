@@ -181,22 +181,23 @@ cmd_init() {
     fi
 
     # -----------------------------------------------------------------------
-    # Recovery: pointer exists but server git was lost (e.g. server reinstall)
-    # Restore .git-local backup on Windows so we can re-create server git.
+    # State normalization: if .git is a file (any content) and server git
+    # is gone, try to restore .git-local backup so bundling can proceed.
+    # This covers: valid pointer + no server git, AND broken file + no server git.
     # -----------------------------------------------------------------------
-    if _win_git_is_pointer && ! _server_git_ok; then
-        _log "pointer exists but server git lost -- attempting recovery"
+    if [ -f "${LOCAL_PATH}/.git" ] && ! _server_git_ok; then
+        _log ".git is a file but server git is missing -- checking for .git-local backup"
         local backup_local="${LOCAL_PATH}/.git-local"
 
         if [ -d "$backup_local" ]; then
             _log "restoring .git-local backup via Windows SSH..."
-            local win_git="${REMOTE_PATH}/.git"
-            local win_backup="${REMOTE_PATH}/.git-local"
+            local win_git_r="${REMOTE_PATH}/.git"
+            local win_backup_r="${REMOTE_PATH}/.git-local"
 
             local recovery_script
             recovery_script=$(cat <<PSEOF
-\$g = '${win_git}'
-\$b = '${win_backup}'
+\$g = '${win_git_r}'
+\$b = '${win_backup_r}'
 if (Test-Path \$b) {
     if (Test-Path \$g) { Remove-Item \$g -Force }
     Move-Item \$b \$g
@@ -215,7 +216,8 @@ PSEOF
                 exit 0
             fi
         else
-            _log "no .git-local backup found -- cannot recover without Windows .git"
+            _log "cannot proceed: .git is a file with no .git-local backup"
+            _log "fix on Windows: del '${REMOTE_PATH}\\.git' then reconnect"
             exit 0
         fi
     fi
@@ -224,9 +226,14 @@ PSEOF
     # Step 1: Create server-local git dir from Windows bundle
     # -----------------------------------------------------------------------
     if ! _server_git_ok; then
+        # .git must be a directory to create a valid bundle
+        if ! _win_git_is_dir; then
+            _log "cannot bundle: .git on Windows is not a directory (state: $( [ -f "${LOCAL_PATH}/.git" ] && echo file || echo missing ))"
+            exit 0
+        fi
+
         _log "creating server git from bundle..."
 
-        # Use user's home dir on Windows -- always exists, no need to create
         local win_bundle="C:/Users/${LAPTOP_USER}/claude-git-${PROJECT_ID}.bundle"
         local local_bundle="/tmp/claude-git-${PROJECT_ID}-$$.bundle"
 
@@ -235,7 +242,7 @@ PSEOF
             && bundle_ok=1
 
         if [ "$bundle_ok" -eq 0 ]; then
-            _log "bundle failed -- git may not be in Windows PATH or repo path wrong"
+            _log "bundle failed -- git not in Windows PATH, or .git is not a valid repo"
             exit 0
         fi
 
@@ -246,11 +253,18 @@ PSEOF
             exit 0
         fi
 
-        if ! git bundle verify "$local_bundle" >/dev/null 2>&1; then
-            _log "bundle verification failed -- partial transfer?"
-            rm -f "$local_bundle"
-            _ssh_win "powershell -NoProfile -Command \"Remove-Item -Force -ErrorAction SilentlyContinue '${win_bundle}'\"" || true
-            exit 0
+        local verify_err verify_rc
+        verify_err=$(git bundle verify "$local_bundle" 2>&1); verify_rc=$?
+        if [ $verify_rc -ne 0 ]; then
+            if echo "$verify_err" | grep -q "need a repository"; then
+                # Shallow repo -- bundle has prerequisites. Clone still works fine.
+                _log "bundle has prerequisites (shallow repo) -- proceeding with clone"
+            else
+                _log "bundle verification failed: ${verify_err}"
+                rm -f "$local_bundle"
+                _ssh_win "powershell -NoProfile -Command \"Remove-Item -Force -ErrorAction SilentlyContinue '${win_bundle}'\"" || true
+                exit 0
+            fi
         fi
 
         rm -rf "$SERVER_GIT"
@@ -261,14 +275,11 @@ PSEOF
             exit 0
         fi
 
-        # Configure for use with a working tree (not bare).
-        # Use --git-dir to avoid confusion after core.bare is set to false.
         git --git-dir="$SERVER_GIT" config core.bare false           2>/dev/null || true
         git --git-dir="$SERVER_GIT" config core.untrackedCache true  2>/dev/null || true
         git --git-dir="$SERVER_GIT" pack-refs --all                  2>/dev/null || true
         git --git-dir="$SERVER_GIT" gc --auto                        2>/dev/null || true
 
-        # Pre-populate index so first git status is fast
         GIT_DIR="$SERVER_GIT" GIT_WORK_TREE="$LOCAL_PATH" \
             git read-tree HEAD 2>/dev/null || true
 
@@ -277,29 +288,31 @@ PSEOF
         _log "server git created"
     fi
 
-    # Ensure server git is configured for working-tree use regardless of how it was created
+    # Ensure server git is always configured for working-tree use
     git --git-dir="$SERVER_GIT" config core.bare false          2>/dev/null || true
     git --git-dir="$SERVER_GIT" config core.untrackedCache true 2>/dev/null || true
 
     # -----------------------------------------------------------------------
-    # Step 2: Create gitdir pointer on Windows (replaces .git directory)
+    # Step 2: Create gitdir pointer on Windows
+    # Handles all .git states: directory, broken file, or missing file.
+    # If .git is a directory: moves it to .git-local backup, writes pointer.
+    # If .git is already a file (any content): overwrites with correct pointer.
+    # If .git doesn't exist: creates pointer file.
     # -----------------------------------------------------------------------
     if ! _win_git_is_pointer; then
         _log "creating gitdir pointer on Windows..."
 
-        if _win_git_is_dir; then
-            local win_git="${REMOTE_PATH}/.git"
-            local win_backup="${REMOTE_PATH}/.git-local"
-            local pointer="gitdir: ${SERVER_GIT}"
+        local win_git="${REMOTE_PATH}/.git"
+        local win_backup="${REMOTE_PATH}/.git-local"
+        local pointer="gitdir: ${SERVER_GIT}"
 
-            # Write setup script to Windows via SSHFS, then execute via SSH.
-            # This sidesteps Windows SSHFS permission issues for directory operations.
-            local ps_script
-            ps_script=$(cat <<PSEOF
+        local ps_script
+        ps_script=$(cat <<PSEOF
 \$g = '${win_git}'
 \$b = '${win_backup}'
 \$c = '${pointer}'
-if ((Get-Item \$g -ErrorAction SilentlyContinue) -is [System.IO.DirectoryInfo]) {
+\$item = Get-Item \$g -ErrorAction SilentlyContinue
+if (\$item -is [System.IO.DirectoryInfo]) {
     if (-not (Test-Path \$b)) {
         Move-Item \$g \$b
     } else {
@@ -307,23 +320,29 @@ if ((Get-Item \$g -ErrorAction SilentlyContinue) -is [System.IO.DirectoryInfo]) 
     }
     Set-Content -NoNewline -Encoding ASCII \$g \$c
     Write-Host 'pointer created'
-} elseif (Test-Path \$g) {
-    Write-Host 'already a file'
 } else {
-    Write-Host 'not found'
+    Set-Content -NoNewline -Encoding ASCII \$g \$c
+    Write-Host 'pointer written'
 }
 PSEOF
 )
-            local result
-            result=$(_run_ps_via_sshfs "$ps_script")
-            _log "pointer setup result: ${result:-no output}"
-        fi
+        local result
+        result=$(_run_ps_via_sshfs "$ps_script")
+        _log "pointer setup result: ${result:-no output}"
 
-        if _win_git_is_pointer; then
-            _log "pointer verified"
-        else
-            _log "warning: pointer not created -- git will use SSHFS (slow but functional)"
-        fi
+        case "${result:-}" in
+            'pointer created'|'pointer written')
+                _log "pointer ready"
+                ;;
+            *)
+                # PS returned unexpected result -- check via SSHFS (may be stale up to 60s)
+                if _win_git_is_pointer; then
+                    _log "pointer verified"
+                else
+                    _log "warning: pointer not confirmed -- will retry on next login"
+                fi
+                ;;
+        esac
     fi
 
     _log "init complete"
