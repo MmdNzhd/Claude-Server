@@ -46,28 +46,38 @@ while true; do
 
     for conf in "$CONF_DIR"/*.conf; do
         [ -f "$conf" ] || continue
-        id=""
-        lpath=""
+        local_id=""
+        local_lpath=""
         while IFS='=' read -r k v; do
             v="${v#\"}" v="${v%\"}"
             case "$k" in
-                id)    id="$v" ;;
-                lpath) lpath="$v" ;;
+                id)              local_id="$v" ;;
+                lpath|LOCAL_PATH) local_lpath="$v" ;;
             esac
         done < "$conf"
-        [ -n "$id" ] && [ -n "$lpath" ] || continue
+        [ -n "$local_id" ] && [ -n "$local_lpath" ] || continue
 
-        # only care about currently mounted paths
-        mountpoint -q "$lpath" 2>/dev/null || continue
+        # Normalize path separators
+        local_lpath="${local_lpath//\\//}"
 
-        if mount_hung "$lpath"; then
-            # force unmount the hung mount
-            fusermount -uz "$lpath" 2>/dev/null || true
+        # Only care about currently mounted paths
+        mountpoint -q "$local_lpath" 2>/dev/null || continue
+
+        if mount_hung "$local_lpath"; then
+            # Force unmount the hung mount
+            fusermount -uz "$local_lpath" 2>/dev/null || \
+            fusermount3 -uz "$local_lpath" 2>/dev/null || \
+            umount -l "$local_lpath" 2>/dev/null || true
             sleep 2
 
-            # remount only if tunnel is back up
+            # Restore any .git dirs hidden by the session that just died.
+            # cmd_recover skips projects that are still mounted, so safe to call broadly.
+            # If tunnel is down, restore silently fails; connect.bat will recover on next connect.
+            "$MOUNT_BIN" recover 2>/dev/null || true
+
+            # Remount only if tunnel is back up
             if tunnel_up; then
-                "$MOUNT_BIN" up "$id" 2>/dev/null || true
+                "$MOUNT_BIN" up "$local_id" 2>/dev/null || true
             fi
         fi
     done

@@ -32,6 +32,9 @@ if [ -f "$CONNECT_CONF" ]; then
     fi
 fi
 
+# Restore any .git dirs hidden by a previous crashed session before mounting
+"$MOUNT_BIN" recover 2>/dev/null || true
+
 "$MOUNT_BIN" up 2>/dev/null
 
 # start watchdog in background to recover from hangs/disconnects
@@ -40,13 +43,3 @@ if [ -x "$WATCHDOG" ]; then
     nohup "$WATCHDOG" >/dev/null 2>&1 &
 fi
 
-# setup local git mirrors for SSHFS projects (background, non-blocking)
-GIT_SETUP="$HOME/.local/bin/claude-git-setup"
-[ -x "$GIT_SETUP" ] || GIT_SETUP="/usr/local/bin/claude-git-setup"
-if [ -x "$GIT_SETUP" ]; then
-    for _conf in "$CONF_DIR"/*.conf; do
-        [ -f "$_conf" ] || continue
-        _id=$(basename "$_conf" .conf)
-        nohup "$GIT_SETUP" init "$_id" >/dev/null 2>&1 &
-    done
-fi

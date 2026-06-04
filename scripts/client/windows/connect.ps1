@@ -495,6 +495,10 @@ if ($go) {
         Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
     }
 
+    # Restore any .git dirs hidden by a previous crashed session
+    SshX "$CM recover" 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { Warn "Recovery incomplete — if .git is missing on Windows, re-run connect.bat" }
+
     Step "Mounting files"
     $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
     $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String
