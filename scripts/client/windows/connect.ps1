@@ -46,7 +46,7 @@ function Repair-SshPerm([string]$path, [string]$label) {
     if ($out -match '\(I\)|Everyone|BUILTIN\\Users') { $script:pendingFixes += "$label permissions" }
 }
 
-function Install-ServerKey([string]$pub) {
+function Install-ServerKey([string]$pub, [bool]$ForceRestart = $false) {
     $adminFile = Join-Path $env:ProgramData "ssh\administrators_authorized_keys"
     $userFile  = Join-Path $SshDir "authorized_keys"
 
@@ -70,9 +70,18 @@ function Install-ServerKey([string]$pub) {
         if ($akFile -eq $userFile) { Repair-SshPerm $akFile "authorized_keys" }
     }
 
-    # Restart sshd only if it was stopped — key changes take effect immediately without restart
+    # Always restart sshd when forced (e.g. after key rejection).
+    # administrators_authorized_keys requires a restart on some Windows configurations.
+    # On normal first-time setup, only start if stopped (no unnecessary restart).
     $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
-    if (-not $sshdSvc -or $sshdSvc.Status -ne 'Running') {
+    if ($ForceRestart -and $sshdSvc -and $sshdSvc.Status -eq 'Running') {
+        Restart-Service sshd -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+        $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
+        if (-not $sshdSvc -or $sshdSvc.Status -ne 'Running') {
+            $script:pendingFixes += "sshd restart failed - run connect.bat as administrator"
+        }
+    } elseif (-not $sshdSvc -or $sshdSvc.Status -ne 'Running') {
         Start-Service sshd -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
     }
@@ -82,7 +91,7 @@ function SshX([string]$Cmd) {
     ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 $Alias $Cmd
 }
 
-function Tunnel-Up {
+function Test-Tunnel {
     # Short timeout so VPN loss is detected quickly (3s connect + 2s port check)
     $r = ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=3 `
              -o ServerAliveInterval=2 -o ServerAliveCountMax=2 `
@@ -110,7 +119,7 @@ function Remove-SshHostBlock($cfgPath, $alias) {
     Set-Content -Path $cfgPath -Value $out -Encoding ASCII
 }
 
-function Load-Mounts {
+function Get-Mounts {
     # Use 'list' (reads configs only, fast) instead of 'status' (checks mounts, slow/hangs on stale mounts)
     $out = @()
     foreach ($line in ((SshX "$CM list 2>/dev/null") -split "`n")) {
@@ -144,7 +153,7 @@ function Show-Mounts($mounts) {
     Write-Host ""
 }
 
-function Pick-Mount($mounts, $n) {
+function Select-Mount($mounts, $n) {
     if ($n -match '^\d+$') {
         $i = [int]$n - 1
         if ($i -ge 0 -and $i -lt $mounts.Count) { return $mounts[$i] }
@@ -152,7 +161,7 @@ function Pick-Mount($mounts, $n) {
     return $null
 }
 
-function Do-Add {
+function Add-Project {
     Write-Host ""
     Write-Host "    Add project" -ForegroundColor White
     Write-Host ""
@@ -223,11 +232,11 @@ Host $Alias
     IdentityFile ~/.ssh/id_ed25519
     StrictHostKeyChecking accept-new
 "@ | Add-Content -Path $sshCfg -Encoding ASCII
-# Fix SSH config permissions silently — shown later under the step that calls StepOk
+# Fix SSH config permissions silently - shown later under the step that calls StepOk
 icacls $sshCfg /reset 2>$null | Out-Null
 icacls $sshCfg /inheritance:r /grant "$env:USERNAME`:F" 2>$null | Out-Null
 
-# connect — retry until reachable, 5s between attempts
+# connect - retry until reachable, 5s between attempts
 $connected = $false
 $needsKey  = $false
 for ($attempt = 1; $attempt -le 10; $attempt++) {
@@ -317,12 +326,20 @@ Repair-SshPerm $sshCfg "SSH config"
 SshX "printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\n' '$LaptopUser' '$Port' > ~/.claude-connect.conf" 2>$null | Out-Null
 StepOk "laptop=$LaptopUser port=$Port"
 
-# push claude-mount if available
-$src = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..\..\server\claude-mount.sh"))
+# push server scripts (claude-mount + claude-git-setup) if available
+$serverScriptDir = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..\..\server"))
+SshX "mkdir -p ~/.local/bin" 2>$null | Out-Null
+
+$src = Join-Path $serverScriptDir "claude-mount.sh"
 if (Test-Path $src) {
-    SshX "mkdir -p ~/.local/bin" 2>$null | Out-Null
     scp -o BatchMode=yes -o ConnectTimeout=10 -q $src "${Alias}:~/.local/bin/claude-mount" 2>$null
     SshX "chmod +x ~/.local/bin/claude-mount; grep -q 'CLAUDE_LOCAL_BIN_PATH' ~/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=`$HOME/.local/bin:`$PATH\n' >> ~/.bashrc" 2>$null | Out-Null
+}
+
+$gitSrc = Join-Path $serverScriptDir "claude-git-setup.sh"
+if (Test-Path $gitSrc) {
+    scp -o BatchMode=yes -o ConnectTimeout=10 -q $gitSrc "${Alias}:~/.local/bin/claude-git-setup" 2>$null
+    SshX "chmod +x ~/.local/bin/claude-git-setup" 2>$null | Out-Null
 }
 
 Write-Host ""
@@ -331,13 +348,13 @@ Write-Host ""
 
 # mount helpers
 Step "Loading projects"
-$mounts = @(Load-Mounts)
+$mounts = @(Get-Mounts)
 StepOk "$($mounts.Count) project(s)"
 $go = $null
 
 while (-not $go) {
     if ($mounts.Count -eq 0) {
-        $go = Do-Add
+        $go = Add-Project
         if (-not $go) { Die "Could not add project." }
         break
     }
@@ -347,33 +364,33 @@ while (-not $go) {
     Write-Host ""
 
     if ($c -match '^\d+$') {
-        $m = Pick-Mount $mounts $c
+        $m = Select-Mount $mounts $c
         if (-not $m) { Warn "Not found."; continue }
         $go = [PSCustomObject]@{ Id = $m.Id; Path = $m.Path }
     } else { switch ($c) {
         "a" {
-            $r = Do-Add
-            if ($r) { $go = $r } else { $mounts = @(Load-Mounts) }
+            $r = Add-Project
+            if ($r) { $go = $r } else { $mounts = @(Get-Mounts) }
         }
         "e" {
-            $cur = Pick-Mount $mounts (Read-Host "    Edit number").Trim()
+            $cur = Select-Mount $mounts (Read-Host "    Edit number").Trim()
             if (-not $cur) { Warn "Not found."; continue }
-            $curR = (SshX "grep REMOTE_PATH ~/.claude-mounts.d/$($cur.Id).conf" 2>$null) -replace 'REMOTE_PATH=|"',''
+            $curR = ((SshX "grep '^rpath' ~/.claude-mounts.d/$($cur.Id).conf" 2>$null) -replace 'rpath=|"|\r','').Trim()
             Write-Host ""
             $nLbl = (Read-Host "    Name  [$($cur.Label)]").Trim(); if (-not $nLbl) { $nLbl = $cur.Label }
             $nR   = (Read-Host "    Path  [$curR]").Trim() -replace '\\','/'; if (-not $nR) { $nR = $curR }
             $nL   = (Read-Host "    Local [$($cur.Path)]").Trim(); if (-not $nL) { $nL = $cur.Path }
             $editOut = (SshX "$CM edit '$($cur.Id)' '$nLbl' '$nR' '$nL'" 2>&1) | Out-String
             if ($LASTEXITCODE -ne 0) { Warn $editOut.Trim() }
-            $mounts = @(Load-Mounts)
+            $mounts = @(Get-Mounts)
         }
         "d" {
-            $m = Pick-Mount $mounts (Read-Host "    Delete number").Trim()
+            $m = Select-Mount $mounts (Read-Host "    Delete number").Trim()
             if (-not $m) { Warn "Not found."; continue }
             if ((Read-Host "    Delete '$($m.Label)'? [y/N]").Trim().ToLower() -eq "y") {
                 $rmOut = (SshX "$CM rm '$($m.Id)'" 2>&1) | Out-String
                 if ($LASTEXITCODE -ne 0) { Warn $rmOut.Trim() }
-                $mounts = @(Load-Mounts)
+                $mounts = @(Get-Mounts)
             }
         }
         "c" {
@@ -458,7 +475,7 @@ if ($go) {
             Write-Host " SSH process died" -ForegroundColor Red
             break
         }
-        if (Tunnel-Up) {
+        if (Test-Tunnel) {
             Write-Host " port $Port is open" -ForegroundColor Green
             $up = $true; break
         }
@@ -484,13 +501,13 @@ if ($go) {
     $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
     $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
 
-    # Auto-fix: key rejected -> reinstall key, restart sshd, retry
+    # Auto-fix: key rejected -> reinstall key, force-restart sshd, retry
     if (-not $mountOk -and $mountOut -match 'key auth failed|connection reset|reset by peer|publickey|Permission denied') {
         Write-Host " retrying..." -ForegroundColor DarkGray
         Warn "Key rejected - reinstalling server key and restarting sshd"
         $newPub = (SshX "cat ~/.ssh/claude_laptop.pub").Trim()
         if ($newPub) {
-            Install-ServerKey $newPub
+            Install-ServerKey $newPub -ForceRestart $true
             Step "Mounting files"
             $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
             $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String

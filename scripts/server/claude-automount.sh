@@ -1,5 +1,5 @@
 #!/bin/bash
-# claude-automount — runs from ~/.bashrc on interactive login.
+# claude-automount -- runs from ~/.bashrc on interactive login.
 # Mounts all configured projects (from ~/.claude-mounts.d/) if the tunnel is up.
 # Idempotent: safe to run repeatedly.
 
@@ -38,4 +38,15 @@ fi
 WATCHDOG="/usr/local/bin/claude-watchdog"
 if [ -x "$WATCHDOG" ]; then
     nohup "$WATCHDOG" >/dev/null 2>&1 &
+fi
+
+# setup local git mirrors for SSHFS projects (background, non-blocking)
+GIT_SETUP="$HOME/.local/bin/claude-git-setup"
+[ -x "$GIT_SETUP" ] || GIT_SETUP="/usr/local/bin/claude-git-setup"
+if [ -x "$GIT_SETUP" ]; then
+    for _conf in "$CONF_DIR"/*.conf; do
+        [ -f "$_conf" ] || continue
+        _id=$(basename "$_conf" .conf)
+        nohup "$GIT_SETUP" init "$_id" >/dev/null 2>&1 &
+    done
 fi

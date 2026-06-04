@@ -1,5 +1,5 @@
 #!/bin/bash
-# claude-watchdog — monitors SSHFS mounts and recovers from hangs/disconnects.
+# claude-watchdog -- monitors SSHFS mounts and recovers from hangs/disconnects.
 # Run once per session: called from .bashrc after automount (runs in background).
 # Only one instance per user runs at a time (lock file guard).
 

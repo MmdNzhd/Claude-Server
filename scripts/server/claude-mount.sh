@@ -67,12 +67,22 @@ _do_mount() {
         return 0
     fi
 
-    # Clean stale mountpoint
-    if mountpoint -q "$lpath" 2>/dev/null; then
-        fusermount -u "$lpath" 2>/dev/null || fusermount3 -u "$lpath" 2>/dev/null || true
+    # Clean stale mountpoint (use lazy unmount -z in case the mount is frozen)
+    if timeout 2 mountpoint -q "$lpath" 2>/dev/null; then
+        fusermount -uz "$lpath" 2>/dev/null || fusermount3 -uz "$lpath" 2>/dev/null || \
+            sudo umount -l "$lpath" 2>/dev/null || true
+        sleep 1
     fi
 
-    mkdir -p "$lpath"
+    # mkdir -p can fail with I/O error if lpath is under a stale parent mount -- force-clean and retry
+    if ! mkdir -p "$lpath" 2>/dev/null; then
+        fusermount -uz "$lpath" 2>/dev/null || sudo umount -l "$lpath" 2>/dev/null || true
+        sleep 1
+        if ! timeout 5 mkdir -p "$lpath" 2>/dev/null; then
+            echo "error: cannot create mountpoint $lpath" >&2
+            return 1
+        fi
+    fi
 
     local sshfs_opts="ServerAliveInterval=10,ServerAliveCountMax=3,idmap=user,allow_other,StrictHostKeyChecking=no,UserKnownHostsFile=/dev/null,ConnectTimeout=10,dir_cache=yes,dcache_timeout=60,attr_timeout=30,entry_timeout=30,max_conns=4"
 
@@ -81,12 +91,17 @@ _do_mount() {
         id_opt=",IdentityFile=$KEY"
     fi
 
-    local sshfs_cmd="sshfs -o ${sshfs_opts}${id_opt} ${LAPTOP_USER}@127.0.0.1:${rpath} ${lpath} -p ${TUNNEL_PORT}"
+    # Execute sshfs directly (not via bash -c) so paths with spaces are handled correctly
+    local sshfs_out sshfs_exit=0
+    sshfs_out=$(timeout 30 sshfs -o "${sshfs_opts}${id_opt}" \
+        "${LAPTOP_USER}@127.0.0.1:${rpath}" "${lpath}" \
+        -p "${TUNNEL_PORT}" 2>&1) || sshfs_exit=$?
 
-    local sshfs_out
-    if ! sshfs_out=$(timeout 30 bash -c "$sshfs_cmd" 2>&1); then
+    if [ "$sshfs_exit" -ne 0 ]; then
         local reason="$sshfs_out"
-        if echo "$reason" | grep -qi "permission denied\|publickey"; then
+        if [ "$sshfs_exit" -eq 124 ] || [ -z "$reason" ]; then
+            reason="laptop SSH not responding (timeout)"
+        elif echo "$reason" | grep -qi "permission denied\|publickey"; then
             reason="key auth failed - re-run connect.bat to reinstall the key"
         elif echo "$reason" | grep -qi "connection reset\|reset by peer"; then
             reason="connection reset - laptop SSH rejected the key (re-run connect.bat to reinstall)"
@@ -94,10 +109,6 @@ _do_mount() {
             reason="path not found on laptop: $rpath"
         elif echo "$reason" | grep -qi "connection refused"; then
             reason="laptop SSH not running (connection refused)"
-        elif echo "$reason" | grep -qi "timed out\|timeout"; then
-            reason="laptop SSH not responding (timeout)"
-        elif [ -z "$reason" ]; then
-            reason="unknown error"
         fi
         echo "error: mount failed - $reason" >&2
         return 1
@@ -105,7 +116,9 @@ _do_mount() {
 
     if ! timeout 10 ls -A "$lpath" >/dev/null 2>&1; then
         echo "error: mount verification failed for $lpath" >&2
-        fusermount -u "$lpath" 2>/dev/null || fusermount3 -u "$lpath" 2>/dev/null || true
+        # Use lazy unmount (-z) to clean up even if the mount is frozen
+        fusermount -uz "$lpath" 2>/dev/null || fusermount3 -uz "$lpath" 2>/dev/null || \
+            sudo umount -l "$lpath" 2>/dev/null || true
         return 1
     fi
 
@@ -178,12 +191,15 @@ EOF
 
 cmd_edit() {
     local id="$1"
+    local new_label="${2:-}"
+    local new_rpath="${3:-}"
+    local new_lpath="${4:-}"
     local conf="$CONF_DIR/${id}.conf"
     [ -f "$conf" ] || { echo "error: not found: $id" >&2; return 1; }
 
     local cur_label="" cur_rpath="" cur_lpath=""
     while IFS='=' read -r k v; do
-        v="${v#\"}" v="${v%\"}" 
+        v="${v#\"}" v="${v%\"}"
         case "$k" in
             label) cur_label="$v" ;;
             rpath) cur_rpath="$v" ;;
@@ -191,9 +207,17 @@ cmd_edit() {
         esac
     done < "$conf"
 
-    printf "Label [%s]: " "$cur_label"; read -r v; [ -n "$v" ] && cur_label="$v"
-    printf "Remote path [%s]: " "$cur_rpath"; read -r v; [ -n "$v" ] && cur_rpath="$v"
-    printf "Local path [%s]: " "$cur_lpath"; read -r v; [ -n "$v" ] && cur_lpath="$v"
+    if [ -n "$new_label" ] || [ -n "$new_rpath" ] || [ -n "$new_lpath" ]; then
+        # Non-interactive: use provided args, keep current value if arg is empty
+        [ -n "$new_label" ] && cur_label="$new_label"
+        [ -n "$new_rpath" ] && cur_rpath="$new_rpath"
+        [ -n "$new_lpath" ] && cur_lpath="$new_lpath"
+    else
+        # Interactive (local terminal)
+        printf "Label [%s]: " "$cur_label"; read -r v; [ -n "$v" ] && cur_label="$v"
+        printf "Remote path [%s]: " "$cur_rpath"; read -r v; [ -n "$v" ] && cur_rpath="$v"
+        printf "Local path [%s]: " "$cur_lpath"; read -r v; [ -n "$v" ] && cur_lpath="$v"
+    fi
 
     cat > "$conf" <<EOF
 id=$id
