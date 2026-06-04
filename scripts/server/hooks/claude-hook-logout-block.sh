@@ -5,7 +5,7 @@ SESSION_PID="${CLAUDE_WRAPPER_PID:-$PPID}"
 
 INPUT=$(cat)
 
-# log that a prompt was received — used to measure response latency
+# log that a prompt was received -- used to measure response latency
 printf '{"timestamp":"%s","event":"PROMPT","user":"%s","session":"%s"}\n' \
     "$(date -Iseconds)" "$USER" "$SESSION_PID" >> "$LOG_FILE" 2>/dev/null || true
 

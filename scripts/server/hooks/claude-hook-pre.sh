@@ -10,7 +10,7 @@ LIMITS_FILE="/etc/claude-limits.conf"
 
 # CLAUDE_WRAPPER_PID is set by /usr/local/bin/claude wrapper.
 # If not set (e.g. VS Code launches claude directly), fall back to PPID
-# which is Claude Code's own PID — consistent across all tool calls in a session.
+# which is Claude Code's own PID -- consistent across all tool calls in a session.
 SESSION_PID="${CLAUDE_WRAPPER_PID:-$PPID}"
 ACTIVE_FILE="${ACTIVE_DIR}/${USER}.${SESSION_PID}.active"
 

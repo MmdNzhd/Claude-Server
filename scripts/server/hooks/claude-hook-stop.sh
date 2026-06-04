@@ -2,7 +2,7 @@
 LOG_FILE="/var/log/claude-activity.jsonl"
 ACTIVE_DIR="/var/run/claude-active"
 
-# Remove all active markers for this user — catches both CLAUDE_WRAPPER_PID
+# Remove all active markers for this user -- catches both CLAUDE_WRAPPER_PID
 # and PPID-based files, and any stale ones left from crashed sessions.
 for f in "$ACTIVE_DIR"/${USER}.*.active; do
     [ -f "$f" ] || continue
@@ -13,7 +13,7 @@ for f in "$ACTIVE_DIR"/${USER}.*.active; do
 done
 
 # Remove our specific session file explicitly (covers the case where the process
-# is still alive but we're stopping — e.g. the wrapper PID or PPID)
+# is still alive but we're stopping -- e.g. the wrapper PID or PPID)
 SESSION_PID="${CLAUDE_WRAPPER_PID:-$PPID}"
 rm -f "${ACTIVE_DIR}/${USER}.${SESSION_PID}.active" 2>/dev/null || true
 
