@@ -13,6 +13,168 @@
 
 ---
 
+## Diagrams
+
+### 1. Architecture — How Everything Connects
+
+```mermaid
+graph TD
+    subgraph WIN["🪟 Windows Laptop"]
+        FILES["D:/Smart/SqlSimulator/\n├── .git.server-session  ← hidden\n├── .claude/rules/        ← stub\n├── .claude/commands/     ← stub\n├── .mcp.json             ← stub\n└── source files"]
+        SSHD["OpenSSH Server\nport 22"]
+    end
+
+    subgraph NET["🌐 VPN + SSH Tunnel"]
+        TUNNEL["connect.bat creates:\nserver port 21002 → Windows:22"]
+    end
+
+    subgraph SRV["🐧 Ubuntu 24 Server"]
+        MOUNT["~/mounts/sqlsimulator/\n(SSHFS — no .git visible)"]
+        GIT["git status\nfatal: not a git repository\n⏱ 0.004s"]
+        CLAUDE["claude\n⏱ 4s startup"]
+        SCRIPTS["claude-mount\nclaude-automount\nclaude-watchdog"]
+    end
+
+    WIN -->|SSHFS over SSH| MOUNT
+    SSHD <-->|reverse tunnel| TUNNEL
+    MOUNT --> GIT
+    MOUNT --> CLAUDE
+    SCRIPTS -->|controls| MOUNT
+```
+
+---
+
+### 2. Mount Flow — What Happens on connect.bat
+
+```mermaid
+flowchart TD
+    A([connect.bat starts]) --> B[SSH tunnel\nserver:21002 → Windows:22]
+    B --> C[claude-mount recover\nbest-effort: restore any stranded .git]
+    C --> D[claude-mount up project]
+
+    D --> E{already\nmounted?}
+    E -->|yes| F[create stubs + warm dcache\nbackground]
+    F --> Z
+
+    E -->|no| G["SSH to Windows — 1 call:\n① rename .git → .git.server-session\n② mkdir .claude/rules .claude/commands\n③ create .mcp.json if missing/empty"]
+
+    G --> H[sshfs mount]
+    H --> I{mount\nsucceeded?}
+
+    I -->|no| J[restore .git immediately\nshow specific error]
+    J --> ERR([❌ error shown to user])
+
+    I -->|yes| K{ls -A\nverification}
+    K -->|timeout/fail| L[restore .git\nlazy unmount]
+    L --> ERR
+
+    K -->|ok| M[background:\nls .claude/ → warm dcache\nls .claude/rules/\nls .claude/commands/]
+
+    M --> Z([✅ VSCode opens\ngit status → 0.004s\nclaude startup → 4s])
+```
+
+---
+
+### 3. Self-Healing — All Recovery Paths
+
+```mermaid
+flowchart LR
+    subgraph HAPPY["Normal Session"]
+        S1([user connects]) -->|mount up| H1[.git hidden\nSSSHFS active]
+        H1 -->|mount down| R1[.git restored ✅]
+    end
+
+    subgraph CRASH["Crash / Abnormal Disconnect"]
+        S2([crash or kill]) --> C1[".git.server-session\nstranded on Windows"]
+        C1 --> T1{next event}
+
+        T1 -->|connect.bat| P1["recover\n→ restore .git\nthen re-hide on up"]
+        T1 -->|.bashrc login| P2["automount recover\n→ restore .git\nthen re-hide on up"]
+        T1 -->|mount hangs 5s| P3["watchdog\n→ force unmount\n→ recover\n→ remount if tunnel up"]
+    end
+
+    subgraph CONFIG["Config Changes"]
+        S3([claude-mount rm]) --> Q1[read rpath\nunmount\nrestore .git\ndelete config]
+        S4([claude-mount edit\nnew rpath]) --> Q2[restore .git\nat OLD path\nthen save new config]
+    end
+```
+
+---
+
+### 4. Why Each Attempt Failed
+
+```mermaid
+flowchart LR
+    PROB["628 files\n× 670ms per stat\n= 7 minutes"]
+
+    PROB --> A1["Local .git\n--separate-git-dir"]
+    A1 -->|❌ still stats\nworking tree files| FAIL
+
+    PROB --> A2["core.checkStat\n= minimal"]
+    A2 -->|❌ fewer fields\nsame call count| FAIL
+
+    PROB --> A3["attr_timeout=30\nSSHFS cache"]
+    A3 -->|❌ cold cache\nevery 30 seconds| FAIL
+
+    PROB --> A4["rsync Windows\n→ local disk"]
+    A4 -->|❌ rsync reads\nfrom SSHFS too\n4m13s enumeration| FAIL
+
+    PROB --> A5["FSMonitor"]
+    A5 -->|❌ SSHFS has\nno inotify support| FAIL
+
+    PROB --> SOL["✅ Hide .git\nrename on mount\nrestore on unmount"]
+    SOL --> WIN["0.004s ⚡"]
+
+    FAIL["❌ still slow"]
+```
+
+---
+
+### 5. Claude Startup Bottleneck (strace diagnosis)
+
+```mermaid
+sequenceDiagram
+    participant C as claude process
+    participant S as SSHFS kernel module
+    participant W as Windows SFTP server
+
+    Note over C,W: Each lookup = 1 network round-trip (~3s over VPN)
+
+    C->>S: openat(".claude/settings.json")
+    S->>W: SFTP lstat request
+    W-->>S: ENOENT (3s later)
+    S-->>C: file not found
+
+    C->>S: openat(".claude/settings.local.json")
+    S->>W: SFTP lstat request
+    W-->>S: ENOENT (3s later)
+    S-->>C: file not found
+
+    C->>S: openat(".mcp.json")
+    S->>W: SFTP lstat request
+    W-->>S: ENOENT (3s later)
+    S-->>C: file not found
+
+    C->>S: openat(".claude/rules/")
+    S->>W: SFTP lstat request
+    W-->>S: ENOENT (3s later)
+    S-->>C: file not found
+
+    C->>S: statx(".claude/commands/")
+    S->>W: SFTP lstat request
+    W-->>S: ENOENT (3s later)
+    S-->>C: file not found
+
+    Note over C,W: Total: 5 × 3s = 15s overhead → 18s startup
+
+    Note over C,W: After fix: stubs exist on Windows + dcache warmed
+    C->>S: openat(".claude/settings.json")
+    S-->>C: ENOENT from dcache (0ms)
+    Note over C,W: → 4s startup (same as local disk)
+```
+
+---
+
 ## Problem 1: `git status` — 7 Minutes
 
 ### Discovery
