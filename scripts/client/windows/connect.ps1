@@ -552,6 +552,9 @@ if ($go) {
             Write-Host "    ============================================" -ForegroundColor DarkGray
             Write-Host ""
 
+            # Flush any keys pressed during reconnect delay so they don't immediately trigger an action
+            while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
+
             # Wait for keypress or tunnel drop
             $action = 'q'
             while (-not $bgTunnel.HasExited) {
