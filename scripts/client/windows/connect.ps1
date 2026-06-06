@@ -538,6 +538,34 @@ if ($go) {
 
     Write-Host ""
     Write-Host "    Run 'claude' in the VSCode terminal." -ForegroundColor DarkGray
-    SshX "($CM up >/dev/null 2>&1 &); true" 2>$null | Out-Null
+    Write-Host ""
+    Write-Host ("    " + ("─" * 44)) -ForegroundColor DarkGray
+    Write-Host "    Session active — keep this window open" -ForegroundColor Cyan
+    Write-Host "    Close window or press Enter to disconnect" -ForegroundColor DarkGray
+    Write-Host ("    " + ("─" * 44)) -ForegroundColor DarkGray
+    Write-Host ""
+
+    # Stay open until user closes window or presses Enter.
+    # finally block runs on both: window close (CTRL_CLOSE_EVENT) and Enter key.
+    try {
+        while (-not $bgTunnel.HasExited) {
+            if ([Console]::KeyAvailable) {
+                $null = [Console]::ReadKey($true)
+                break
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    } finally {
+        Write-Host ""
+        Write-Host "    Disconnecting..." -ForegroundColor DarkGray
+        # Restore .git on Windows for this project
+        SshX "$CM down '$($go.Id)'" 2>$null | Out-Null
+        # Kill tunnel process if still alive
+        if (-not $bgTunnel.HasExited) {
+            Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host "    Session ended — .git restored on Windows." -ForegroundColor Green
+        Write-Host ""
+    }
 }
 Write-Host ""
