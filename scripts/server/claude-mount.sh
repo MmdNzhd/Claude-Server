@@ -273,12 +273,7 @@ cmd_add() {
 
     mkdir -p "$CONF_DIR"
     local conf="$CONF_DIR/${id}.conf"
-    cat > "$conf" <<EOF
-id=$id
-label=$label
-rpath=$rpath
-lpath=$lpath
-EOF
+    printf 'id=%s\nlabel=%s\nrpath=%s\nlpath=%s\n' "$id" "$label" "$rpath" "$lpath" > "$conf"
     echo "added: $id ($label)"
 }
 
@@ -322,12 +317,7 @@ cmd_edit() {
         _restore_git "$old_rpath"
     fi
 
-    cat > "$conf" <<EOF
-id=$id
-label=$cur_label
-rpath=$cur_rpath
-lpath=$cur_lpath
-EOF
+    printf 'id=%s\nlabel=%s\nrpath=%s\nlpath=%s\n' "$id" "$cur_label" "$cur_rpath" "$cur_lpath" > "$conf"
     echo "updated: $id"
 }
 
