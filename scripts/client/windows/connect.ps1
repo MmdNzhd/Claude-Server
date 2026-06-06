@@ -573,15 +573,17 @@ if ($go) {
 
             # Wait for keypress or tunnel drop
             $action = 'q'
+            $gotKey = $false
             while (-not $bgTunnel.HasExited) {
                 if ([Console]::KeyAvailable) {
                     $ch = ([Console]::ReadKey($true)).KeyChar.ToString().ToLower()
                     if ($ch -eq 'r') { $action = 'r' }
+                    $gotKey = $true
                     break
                 }
                 Start-Sleep -Milliseconds 500
             }
-            if ($bgTunnel.HasExited) {
+            if (-not $gotKey -and $bgTunnel.HasExited) {
                 $action = 'r'
                 Write-Host "    Connection dropped - reconnecting..." -ForegroundColor Yellow
             }
@@ -610,11 +612,12 @@ if ($go) {
             Write-Host ""
             Write-Host "    Disconnecting..." -ForegroundColor DarkGray
             SshX "$CM down '$($go.Id)'" 2>$null | Out-Null
-            if ($bgTunnel -and -not $bgTunnel.HasExited) {
-                Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
-            }
             Write-Host "    .git restored on Windows." -ForegroundColor Green
             Write-Host ""
+        }
+        # Always kill tunnel - even if $alreadyDown (e.g. tunnel-fail or mount-fail Q path)
+        if ($bgTunnel -and -not $bgTunnel.HasExited) {
+            Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
         }
     }
 }
