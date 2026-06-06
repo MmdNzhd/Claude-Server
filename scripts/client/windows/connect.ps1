@@ -458,114 +458,145 @@ if ($go) {
             -ErrorAction SilentlyContinue | Out-Null
     }
 
-    Step "Starting SSH tunnel"
-    $bgTunnel = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList @(
-        "-N", "-o", "ExitOnForwardFailure=no",
-        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
-        "-R", "$Port`:localhost:22", $Alias)
-    StepOk "pid $($bgTunnel.Id)"
+    $alreadyDown = $false
+    $bgTunnel    = $null
 
-    $up = $false
-    $tunnelMsg = ""
-    for ($i = 1; $i -le 8; $i++) {
-        Start-Sleep -Seconds 2
-        Write-Host -NoNewline "    Tunnel check $i/8..." -ForegroundColor DarkGray
-        if ($bgTunnel.HasExited) {
-            $tunnelMsg = "SSH process exited with code $($bgTunnel.ExitCode)"
-            Write-Host " SSH process died" -ForegroundColor Red
-            break
-        }
-        if (Test-Tunnel) {
-            Write-Host " port $Port is open" -ForegroundColor Green
-            $up = $true; break
-        }
-        Write-Host " port $Port not open yet" -ForegroundColor DarkGray
-    }
+    try {
+        :sessionLoop while ($true) {
+            # Kill any stale tunnel before starting a new one
+            if ($bgTunnel -and -not $bgTunnel.HasExited) {
+                Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
+            }
 
-    if (-not $up) {
-        Write-Host ""
-        Warn "Tunnel did not come up on port $Port"
-        if ($tunnelMsg) {
-            Warn $tunnelMsg
-        } elseif (-not (PortOpen $ServerIP 22)) {
-            Warn "Server unreachable - VPN disconnected?"
-        } else {
-            Warn "Check Windows Firewall - port 22 must allow inbound connections"
-        }
-        Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
-    }
+            Step "Starting SSH tunnel"
+            $bgTunnel = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList @(
+                "-N", "-o", "ExitOnForwardFailure=no",
+                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+                "-R", "$Port`:localhost:22", $Alias)
+            StepOk "pid $($bgTunnel.Id)"
 
-    # Restore any .git dirs hidden by a previous crashed session
-    SshX "$CM recover" 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) { Warn "Recovery incomplete - if .git is missing on Windows, re-run connect.bat" }
+            $up = $false
+            $tunnelMsg = ""
+            for ($i = 1; $i -le 8; $i++) {
+                Start-Sleep -Seconds 2
+                Write-Host -NoNewline "    Tunnel check $i/8..." -ForegroundColor DarkGray
+                if ($bgTunnel.HasExited) {
+                    $tunnelMsg = "SSH process exited with code $($bgTunnel.ExitCode)"
+                    Write-Host " SSH process died" -ForegroundColor Red
+                    break
+                }
+                if (Test-Tunnel) {
+                    Write-Host " port $Port is open" -ForegroundColor Green
+                    $up = $true; break
+                }
+                Write-Host " port $Port not open yet" -ForegroundColor DarkGray
+            }
 
-    Step "Mounting files"
-    $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
-    $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String
-    $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
-    $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
+            if (-not $up) {
+                Write-Host ""
+                Warn "Tunnel did not come up on port $Port"
+                if ($tunnelMsg) {
+                    Warn $tunnelMsg
+                } elseif (-not (PortOpen $ServerIP 22)) {
+                    Warn "Server unreachable - VPN disconnected?"
+                } else {
+                    Warn "Check Windows Firewall - port 22 must allow inbound connections"
+                }
+                Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
+            }
 
-    # Auto-fix: key rejected -> reinstall key, force-restart sshd, retry
-    if (-not $mountOk -and $mountOut -match 'key auth failed|connection reset|reset by peer|publickey|Permission denied') {
-        Write-Host " retrying..." -ForegroundColor DarkGray
-        Warn "Key rejected - reinstalling server key and restarting sshd"
-        $newPub = (SshX "cat ~/.ssh/claude_laptop.pub").Trim()
-        if ($newPub) {
-            Install-ServerKey $newPub -ForceRestart $true
+            SshX "$CM recover" 2>$null | Out-Null
+
             Step "Mounting files"
             $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
             $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String
             $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
             $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
-        }
-    }
 
-    if (-not $mountOk) {
-        StepFail $mountOut.Trim()
-        if ($mountOut -match 'No such file|not found|cannot find') {
-            Warn "Path not found on laptop. Use 'e edit' to correct the project path."
-        }
-        Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
-    }
-
-    StepOk "${mountT}s"
-    $cleanOut = ($mountOut.Trim() -replace '^already mounted:\s*', '')
-    if ($cleanOut) { Write-Host "      -> $cleanOut" -ForegroundColor DarkGray }
-
-    Step "Opening VSCode"
-    & code --folder-uri "vscode-remote://ssh-remote+$Alias$($go.Path)"
-    StepOk $($go.Path)
-
-    Write-Host ""
-    Write-Host "    Run 'claude' in the VSCode terminal." -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "    ============================================" -ForegroundColor DarkGray
-    Write-Host "    Session active -- keep this window open" -ForegroundColor Cyan
-    Write-Host "    Close window or press Enter to disconnect" -ForegroundColor DarkGray
-    Write-Host "    ============================================" -ForegroundColor DarkGray
-    Write-Host ""
-
-    # Stay open until user closes window or presses Enter.
-    # finally block runs on both: window close (CTRL_CLOSE_EVENT) and Enter key.
-    try {
-        while (-not $bgTunnel.HasExited) {
-            if ([Console]::KeyAvailable) {
-                $null = [Console]::ReadKey($true)
-                break
+            if (-not $mountOk -and $mountOut -match 'key auth failed|connection reset|reset by peer|publickey|Permission denied') {
+                Write-Host " retrying..." -ForegroundColor DarkGray
+                Warn "Key rejected - reinstalling server key and restarting sshd"
+                $newPub = (SshX "cat ~/.ssh/claude_laptop.pub").Trim()
+                if ($newPub) {
+                    Install-ServerKey $newPub -ForceRestart $true
+                    Step "Mounting files"
+                    $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
+                    $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String
+                    $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
+                    $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
+                }
             }
-            Start-Sleep -Milliseconds 500
+
+            if (-not $mountOk) {
+                StepFail $mountOut.Trim()
+                if ($mountOut -match 'No such file|not found|cannot find') {
+                    Warn "Path not found on laptop. Use 'e edit' to correct the project path."
+                }
+                Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
+            }
+
+            StepOk "${mountT}s"
+            $cleanOut = ($mountOut.Trim() -replace '^already mounted:\s*', '')
+            if ($cleanOut) { Write-Host "      -> $cleanOut" -ForegroundColor DarkGray }
+
+            Step "Opening VSCode"
+            & code --folder-uri "vscode-remote://ssh-remote+$Alias$($go.Path)"
+            StepOk $($go.Path)
+
+            Write-Host ""
+            Write-Host "    Run 'claude' in the VSCode terminal." -ForegroundColor DarkGray
+            Write-Host ""
+            Write-Host "    ============================================" -ForegroundColor DarkGray
+            Write-Host "    Session active -- keep this window open" -ForegroundColor Cyan
+            Write-Host "    R = reconnect   Q or Enter = disconnect" -ForegroundColor DarkGray
+            Write-Host "    ============================================" -ForegroundColor DarkGray
+            Write-Host ""
+
+            # Wait for keypress or tunnel drop
+            $action = 'q'
+            while (-not $bgTunnel.HasExited) {
+                if ([Console]::KeyAvailable) {
+                    $ch = ([Console]::ReadKey($true)).KeyChar.ToString().ToLower()
+                    if ($ch -eq 'r') { $action = 'r' }
+                    break
+                }
+                Start-Sleep -Milliseconds 500
+            }
+            if ($bgTunnel.HasExited) {
+                $action = 'r'
+                Write-Host "    Connection dropped - reconnecting..." -ForegroundColor Yellow
+            }
+
+            # Disconnect
+            Write-Host ""
+            Write-Host "    Disconnecting..." -ForegroundColor DarkGray
+            SshX "$CM down '$($go.Id)'" 2>$null | Out-Null
+            if (-not $bgTunnel.HasExited) {
+                Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
+            }
+            $alreadyDown = $true
+            Write-Host "    .git restored on Windows." -ForegroundColor Green
+
+            if ($action -ne 'r') { break sessionLoop }
+
+            $alreadyDown = $false
+            Write-Host ""
+            Write-Host "    Reconnecting in 2s..." -ForegroundColor Cyan
+            Start-Sleep -Seconds 2
+            Write-Host ""
         }
     } finally {
-        Write-Host ""
-        Write-Host "    Disconnecting..." -ForegroundColor DarkGray
-        # Restore .git on Windows for this project
-        SshX "$CM down '$($go.Id)'" 2>$null | Out-Null
-        # Kill tunnel process if still alive
-        if (-not $bgTunnel.HasExited) {
-            Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
+        # Runs on window close (CTRL_CLOSE_EVENT) - ensure cleanup even if window is force-closed
+        if (-not $alreadyDown) {
+            Write-Host ""
+            Write-Host "    Disconnecting..." -ForegroundColor DarkGray
+            SshX "$CM down '$($go.Id)'" 2>$null | Out-Null
+            if ($bgTunnel -and -not $bgTunnel.HasExited) {
+                Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
+            }
+            Write-Host "    .git restored on Windows." -ForegroundColor Green
+            Write-Host ""
         }
-        Write-Host "    Session ended - .git restored on Windows." -ForegroundColor Green
-        Write-Host ""
     }
 }
 Write-Host ""
