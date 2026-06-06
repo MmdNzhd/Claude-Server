@@ -33,7 +33,7 @@ Write-Host ""
 Write-Step "Creating output folder..."
 if (Test-Path $OutDir) {
     try { Remove-Item $OutDir -Recurse -Force -ErrorAction Stop }
-    catch { Write-Err "Cannot delete old package folder - close Windows Explorer in dist\ and retry." }
+    catch { Write-Host " (locked, will overwrite)" -ForegroundColor DarkYellow }
 }
 $null = New-Item $OutDir -ItemType Directory -Force
 Write-Ok $OutDir

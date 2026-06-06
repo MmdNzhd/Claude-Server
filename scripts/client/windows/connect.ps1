@@ -43,6 +43,10 @@ function Repair-SshPerm([string]$path, [string]$label) {
     $out = (icacls $path 2>$null) -join ' '
     icacls $path /reset 2>$null | Out-Null
     icacls $path /inheritance:r /grant "$env:USERNAME`:F" 2>$null | Out-Null
+    # When elevated as a different admin account, also grant the actual laptop user access
+    if ($script:LaptopUser -and $script:LaptopUser -ne $env:USERNAME) {
+        icacls $path /grant "$($script:LaptopUser)`:F" 2>$null | Out-Null
+    }
     if ($out -match '\(I\)|Everyone|BUILTIN\\Users') { $script:pendingFixes += "$label permissions" }
 }
 
@@ -65,7 +69,7 @@ function Install-ServerKey([string]$pub, [bool]$ForceRestart = $false) {
         if (-not (Test-Path (Split-Path $akFile))) { continue }
         if (-not (Test-Path $akFile)) { New-Item -ItemType File -Path $akFile -Force -ErrorAction SilentlyContinue | Out-Null }
         if (-not (Test-Path $akFile)) { continue }
-        $lines = @(Get-Content $akFile -ErrorAction SilentlyContinue | Where-Object { $_.Trim() -ne '' })
+        $lines = @(Get-Content $akFile -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
         if ($lines -notcontains $pub) { Add-Content -Path $akFile -Value $pub -Encoding ASCII }
         if ($akFile -eq $userFile) { Repair-SshPerm $akFile "authorized_keys" }
     }
@@ -76,7 +80,7 @@ function Install-ServerKey([string]$pub, [bool]$ForceRestart = $false) {
     $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
     if ($ForceRestart -and $sshdSvc -and $sshdSvc.Status -eq 'Running') {
         Restart-Service sshd -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 3
+        Start-Sleep -Seconds 5
         $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
         if (-not $sshdSvc -or $sshdSvc.Status -ne 'Running') {
             $script:pendingFixes += "sshd restart failed - run connect.bat as administrator"
@@ -176,8 +180,9 @@ function Add-Project {
     if (-not $nId) { Warn "Could not derive a project name."; return $null }
     $nLpath = "/home/$RemoteUser/mounts/$nId"
     Write-Host ""
-    $out = SshX "$CM add '$nId' '$nLbl' '$nPath' '$nLpath'" 2>&1
-    if ($LASTEXITCODE -ne 0) { Warn $out; return $null }
+    $nLbl_sh  = $nLbl  -replace "'", "'\\''"; $nPath_sh = $nPath -replace "'", "'\\''";
+    $out = (SshX "$CM add '$nId' '$nLbl_sh' '$nPath_sh' '$nLpath'" 2>&1) | Out-String
+    if ($LASTEXITCODE -ne 0) { Warn $out.Trim(); return $null }
     return [PSCustomObject]@{ Id = $nId; Path = $nLpath }
 }
 
@@ -210,6 +215,13 @@ $conf = @{}
 Get-Content $Cfg | ForEach-Object { if ($_ -match '^(.+?)=(.*)$'){ $conf[$matches[1]] = $matches[2] } }
 $RemoteUser = $conf["REMOTE_USER"]
 $LaptopUser = $conf["LAPTOP_USER"]
+$script:LaptopUser = $LaptopUser
+# When elevated as a different admin account, $env:USERPROFILE may point to the wrong user profile.
+# Use LAPTOP_USER from config to find the correct .ssh directory.
+if ($LaptopUser -and (Test-Path "C:\Users\$LaptopUser")) {
+    $SshDir = Join-Path "C:\Users\$LaptopUser" ".ssh"
+}
+New-Item -ItemType Directory -Force -Path $SshDir | Out-Null
 
 # SSH key
 Step "Laptop SSH key"
@@ -305,7 +317,7 @@ StepOk "port $Port"
 
 Step "Setting up server key"
 SshX "test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q" 2>$null | Out-Null
-$PubB = (SshX "cat ~/.ssh/claude_laptop.pub").Trim()
+$PubB = ((SshX "cat ~/.ssh/claude_laptop.pub") -join '').Trim()
 if (-not $PubB) { StepFail "could not read server key"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 Install-ServerKey $PubB
 StepOk
@@ -375,12 +387,13 @@ while (-not $go) {
         "e" {
             $cur = Select-Mount $mounts (Read-Host "    Edit number").Trim()
             if (-not $cur) { Warn "Not found."; continue }
-            $curR = ((SshX "grep '^rpath' ~/.claude-mounts.d/$($cur.Id).conf" 2>$null) -replace 'rpath=|"|\r','').Trim()
+            $curR = (((SshX "grep '^rpath' ~/.claude-mounts.d/$($cur.Id).conf" 2>$null) -join '') -replace 'rpath=|"|\r','').Trim()
             Write-Host ""
             $nLbl = (Read-Host "    Name  [$($cur.Label)]").Trim(); if (-not $nLbl) { $nLbl = $cur.Label }
             $nR   = (Read-Host "    Path  [$curR]").Trim() -replace '\\','/'; if (-not $nR) { $nR = $curR }
             $nL   = (Read-Host "    Local [$($cur.Path)]").Trim(); if (-not $nL) { $nL = $cur.Path }
-            $editOut = (SshX "$CM edit '$($cur.Id)' '$nLbl' '$nR' '$nL'" 2>&1) | Out-String
+            $nLbl_sh = $nLbl -replace "'", "'\\''"; $nR_sh = $nR -replace "'", "'\\''"
+            $editOut = (SshX "$CM edit '$($cur.Id)' '$nLbl_sh' '$nR_sh' '$nL'" 2>&1) | Out-String
             if ($LASTEXITCODE -ne 0) { Warn $editOut.Trim() }
             $mounts = @(Get-Mounts)
         }
@@ -456,6 +469,9 @@ if ($go) {
         New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -DisplayName "OpenSSH SSH Server (sshd)" `
             -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 `
             -ErrorAction SilentlyContinue | Out-Null
+    } elseif ($fwRule.Enabled.ToString() -ne 'True') {
+        Write-Host "    [!] Firewall rule for SSH was disabled - enabling..." -ForegroundColor Yellow
+        Enable-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
     }
 
     $alreadyDown = $false
@@ -526,8 +542,19 @@ if ($go) {
 
             if (-not $mountOk -and $mountOut -match 'key auth failed|connection reset|reset by peer|publickey|Permission denied') {
                 Write-Host " retrying..." -ForegroundColor DarkGray
-                Warn "Key rejected - reinstalling server key and restarting sshd"
-                $newPub = (SshX "cat ~/.ssh/claude_laptop.pub").Trim()
+                # "connection reset" = TCP-level drop (firewall, sshd permissions, or sshd stopped)
+                # "key auth failed" / "publickey" = authentication failure
+                if ($mountOut -match 'connection reset|reset by peer') {
+                    Warn "Connection reset - checking firewall and restarting sshd"
+                    $fw = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
+                    if ($fw -and $fw.Enabled.ToString() -ne 'True') {
+                        Enable-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
+                        $script:pendingFixes += "SSH firewall rule re-enabled"
+                    }
+                } else {
+                    Warn "Key rejected - reinstalling server key and restarting sshd"
+                }
+                $newPub = ((SshX "cat ~/.ssh/claude_laptop.pub") -join '').Trim()
                 if ($newPub) {
                     Install-ServerKey $newPub -ForceRestart $true
                     Step "Mounting files"
