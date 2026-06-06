@@ -502,7 +502,15 @@ if ($go) {
                 } else {
                     Warn "Check Windows Firewall - port 22 must allow inbound connections"
                 }
-                Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
+                Write-Host ""
+                Write-Host "    R = retry   Q = quit" -ForegroundColor DarkGray
+                $rk = ''
+                while ($rk -ne 'r' -and $rk -ne 'q') {
+                    if ([Console]::KeyAvailable) { $rk = ([Console]::ReadKey($true)).KeyChar.ToString().ToLower() }
+                    else { Start-Sleep -Milliseconds 200 }
+                }
+                if ($rk -eq 'r') { Write-Host ""; continue }
+                $alreadyDown = $true; break sessionLoop
             }
 
             SshX "$CM recover" 2>$null | Out-Null
@@ -532,7 +540,15 @@ if ($go) {
                 if ($mountOut -match 'No such file|not found|cannot find') {
                     Warn "Path not found on laptop. Use 'e edit' to correct the project path."
                 }
-                Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
+                Write-Host ""
+                Write-Host "    R = retry   Q = quit" -ForegroundColor DarkGray
+                $rk = ''
+                while ($rk -ne 'r' -and $rk -ne 'q') {
+                    if ([Console]::KeyAvailable) { $rk = ([Console]::ReadKey($true)).KeyChar.ToString().ToLower() }
+                    else { Start-Sleep -Milliseconds 200 }
+                }
+                if ($rk -eq 'r') { Write-Host ""; continue }
+                $alreadyDown = $true; break sessionLoop
             }
 
             StepOk "${mountT}s"
