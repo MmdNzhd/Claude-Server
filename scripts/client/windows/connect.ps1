@@ -506,8 +506,11 @@ if ($go) {
                 Write-Host "    R = retry   Q = quit" -ForegroundColor DarkGray
                 $rk = ''
                 while ($rk -ne 'r' -and $rk -ne 'q') {
-                    if ([Console]::KeyAvailable) { $rk = ([Console]::ReadKey($true)).KeyChar.ToString().ToLower() }
-                    else { Start-Sleep -Milliseconds 200 }
+                    if ([Console]::KeyAvailable) {
+                        $ki2 = [Console]::ReadKey($true)
+                        if ($ki2.KeyChar.ToString().ToLower() -eq 'r' -or $ki2.Key -eq [ConsoleKey]::R) { $rk = 'r' }
+                        elseif ($ki2.KeyChar.ToString().ToLower() -eq 'q' -or $ki2.Key -eq [ConsoleKey]::Q) { $rk = 'q' }
+                    } else { Start-Sleep -Milliseconds 200 }
                 }
                 if ($rk -eq 'r') { Write-Host ""; continue }
                 $alreadyDown = $true; break sessionLoop
@@ -544,8 +547,11 @@ if ($go) {
                 Write-Host "    R = retry   Q = quit" -ForegroundColor DarkGray
                 $rk = ''
                 while ($rk -ne 'r' -and $rk -ne 'q') {
-                    if ([Console]::KeyAvailable) { $rk = ([Console]::ReadKey($true)).KeyChar.ToString().ToLower() }
-                    else { Start-Sleep -Milliseconds 200 }
+                    if ([Console]::KeyAvailable) {
+                        $ki2 = [Console]::ReadKey($true)
+                        if ($ki2.KeyChar.ToString().ToLower() -eq 'r' -or $ki2.Key -eq [ConsoleKey]::R) { $rk = 'r' }
+                        elseif ($ki2.KeyChar.ToString().ToLower() -eq 'q' -or $ki2.Key -eq [ConsoleKey]::Q) { $rk = 'q' }
+                    } else { Start-Sleep -Milliseconds 200 }
                 }
                 if ($rk -eq 'r') { Write-Host ""; continue }
                 $alreadyDown = $true; break sessionLoop
@@ -572,12 +578,14 @@ if ($go) {
             while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
 
             # Wait for keypress or tunnel drop
+            # Check both KeyChar (English) and Key (physical key, layout-independent)
+            # so R works even when Persian/Arabic keyboard layout is active.
             $action = 'q'
             $gotKey = $false
             while (-not $bgTunnel.HasExited) {
                 if ([Console]::KeyAvailable) {
-                    $ch = ([Console]::ReadKey($true)).KeyChar.ToString().ToLower()
-                    if ($ch -eq 'r') { $action = 'r' }
+                    $ki = [Console]::ReadKey($true)
+                    if ($ki.KeyChar.ToString().ToLower() -eq 'r' -or $ki.Key -eq [ConsoleKey]::R) { $action = 'r' }
                     $gotKey = $true
                     break
                 }
