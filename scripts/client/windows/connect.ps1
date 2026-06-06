@@ -497,7 +497,7 @@ if ($go) {
 
     # Restore any .git dirs hidden by a previous crashed session
     SshX "$CM recover" 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) { Warn "Recovery incomplete — if .git is missing on Windows, re-run connect.bat" }
+    if ($LASTEXITCODE -ne 0) { Warn "Recovery incomplete - if .git is missing on Windows, re-run connect.bat" }
 
     Step "Mounting files"
     $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
@@ -539,10 +539,10 @@ if ($go) {
     Write-Host ""
     Write-Host "    Run 'claude' in the VSCode terminal." -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host ("    " + ("─" * 44)) -ForegroundColor DarkGray
-    Write-Host "    Session active — keep this window open" -ForegroundColor Cyan
+    Write-Host "    ============================================" -ForegroundColor DarkGray
+    Write-Host "    Session active -- keep this window open" -ForegroundColor Cyan
     Write-Host "    Close window or press Enter to disconnect" -ForegroundColor DarkGray
-    Write-Host ("    " + ("─" * 44)) -ForegroundColor DarkGray
+    Write-Host "    ============================================" -ForegroundColor DarkGray
     Write-Host ""
 
     # Stay open until user closes window or presses Enter.
@@ -564,7 +564,7 @@ if ($go) {
         if (-not $bgTunnel.HasExited) {
             Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
         }
-        Write-Host "    Session ended — .git restored on Windows." -ForegroundColor Green
+        Write-Host "    Session ended - .git restored on Windows." -ForegroundColor Green
         Write-Host ""
     }
 }
