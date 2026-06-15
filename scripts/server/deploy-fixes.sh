@@ -16,7 +16,8 @@ sudo install -m 755 "$REPO/claude-automount.sh"  /usr/local/bin/claude-automount
 sudo install -m 755 "$REPO/claude-watchdog.sh"   /usr/local/bin/claude-watchdog
 sudo install -m 755 "$REPO/claude-git-setup.sh"  /usr/local/bin/claude-git-setup
 sudo install -m 755 "$REPO/claude-wrapper.sh"    /usr/local/bin/claude
-echo "  OK: claude-automount, claude-watchdog, claude-git-setup, claude wrapper updated"
+sudo install -m 755 "$REPO/designer-start.sh"    /usr/local/bin/designer-start
+echo "  OK: claude-automount, claude-watchdog, claude-git-setup, claude wrapper, designer-start updated"
 
 echo ""
 echo "=== Deploying claude-limits.conf to /etc/ ==="

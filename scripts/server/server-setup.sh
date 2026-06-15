@@ -2,6 +2,13 @@
 # server-setup.sh - full Claude Code Server install from scratch
 # Run as root on Ubuntu 24
 # Usage: bash server-setup.sh
+#
+# DEPRECATED: use 'sudo claude-server install' instead.
+echo ""
+echo "  DEPRECATED: use 'sudo claude-server install' instead."
+echo ""
+echo "  Press Ctrl+C to cancel, or Enter to continue anyway."
+read -r _
 
 set -e
 

@@ -80,9 +80,24 @@ function Install-ServerKey([string]$pub, [bool]$ForceRestart = $false) {
     $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
     if ($ForceRestart -and $sshdSvc -and $sshdSvc.Status -eq 'Running') {
         Restart-Service sshd -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 5
-        $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
-        if (-not $sshdSvc -or $sshdSvc.Status -ne 'Running') {
+        # Wait until sshd is actually accepting connections (up to 20s).
+        # A fixed 5s sleep races on slower machines and causes immediate retry failure.
+        $deadline = (Get-Date).AddSeconds(20)
+        $sshdReady = $false
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 1
+            $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
+            if ($sshdSvc -and $sshdSvc.Status -eq 'Running') {
+                try {
+                    $tcp = New-Object System.Net.Sockets.TcpClient
+                    if ($tcp.BeginConnect('127.0.0.1', 22, $null, $null).AsyncWaitHandle.WaitOne(1000)) {
+                        $tcp.Close(); $sshdReady = $true; break
+                    }
+                    $tcp.Close()
+                } catch {}
+            }
+        }
+        if (-not $sshdReady) {
             $script:pendingFixes += "sshd restart failed - run connect.bat as administrator"
         }
     } elseif (-not $sshdSvc -or $sshdSvc.Status -ne 'Running') {
@@ -281,9 +296,12 @@ if (-not $connected -and -not $needsKey) {
 
 if ($needsKey) {
     Write-Host ""
+    # Clear stale known_hosts entry so host key mismatch doesn't block auth
+    ssh-keygen -R $ServerIP 2>$null | Out-Null
     Write-Host "    Enter server password (one time only):" -ForegroundColor Yellow
-    Get-Content "$keyA.pub" | ssh -o StrictHostKeyChecking=accept-new "$RemoteUser@$ServerIP" `
-        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+    $pubKeyContent = (Get-Content "$keyA.pub").Trim() -replace "'", "'\''"
+    ssh -o StrictHostKeyChecking=accept-new "$RemoteUser@$ServerIP" `
+        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\n' '$pubKeyContent' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     $keyCopyOk = ($LASTEXITCODE -eq 0)
     Step "Verifying connection"
     $verifySW = [System.Diagnostics.Stopwatch]::StartNew()
@@ -557,6 +575,11 @@ if ($go) {
                 $newPub = ((SshX "cat ~/.ssh/claude_laptop.pub") -join '').Trim()
                 if ($newPub) {
                     Install-ServerKey $newPub -ForceRestart $true
+                    # sshd restart can kill the reverse tunnel — re-check before retrying mount.
+                    if (-not (Test-Tunnel)) {
+                        Write-Host ""; Warn "Tunnel dropped after sshd restart - reconnecting..."
+                        continue
+                    }
                     Step "Mounting files"
                     $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
                     $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String

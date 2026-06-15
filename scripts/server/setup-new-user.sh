@@ -1,6 +1,13 @@
 #!/bin/bash
 # Run as ROOT on server to add a new developer
 # Usage: sudo bash setup-new-user.sh <username>
+#
+# DEPRECATED: use 'sudo claude-server add-user <username>' instead.
+echo ""
+echo "  DEPRECATED: use 'sudo claude-server add-user <username>' instead."
+echo ""
+echo "  Press Ctrl+C to cancel, or Enter to continue anyway."
+read -r _
 
 set -e
 
