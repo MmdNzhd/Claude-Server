@@ -8,7 +8,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 # In repo mode: commands/ is inside scripts/server/
 # In installed mode: /usr/local/lib/claude-server/ — repo must be cloned nearby
-REPO_DIR="${CLAUDE_SERVER_REPO:-$(cd "$SCRIPT_DIR/../.." && pwd 2>/dev/null)}"
+REPO_DIR="${CLAUDE_SERVER_REPO:-$(cd "$SCRIPT_DIR/../../.." && pwd 2>/dev/null)}"
 SERVER_DIR="$REPO_DIR/scripts/server"
 
 GREEN='\033[0;32m'
