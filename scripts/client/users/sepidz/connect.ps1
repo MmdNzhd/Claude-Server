@@ -2,27 +2,27 @@
 # Usage:  double-click connect.bat
 #         connect.bat -Setup   (reconfigure username)
 
-param([switch]$Setup, [ValidateSet('vscode','rider','both')][string]$Ide = '')
+param([switch]$Setup)
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     $scriptPath = $PSCommandPath -replace "'", "''"
     $setupFlag  = if ($Setup) { ' -Setup' } else { '' }
-    $ideFlag    = if ($Ide)   { " -Ide $Ide" } else { '' }
-    $cmd = "& '$scriptPath'$setupFlag$ideFlag; if (`$LASTEXITCODE -ne 0) { Write-Host ''; Read-Host '    Press Enter to close' }"
+    $cmd = "& '$scriptPath'$setupFlag; if (`$LASTEXITCODE -ne 0) { Write-Host ''; Read-Host '    Press Enter to close' }"
     Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $cmd
     exit
 }
 
 $ErrorActionPreference = "Continue"
+
 if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
     Write-Host "  [X] OpenSSH client (ssh.exe) not found." -ForegroundColor Red
     Write-Host "      Install it via: Settings -> Apps -> Optional Features -> OpenSSH Client" -ForegroundColor DarkGray
     Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
 }
-$ServerIP = "192.168.210.240"
-$Alias    = "claude-server"
-$CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
+$ServerIP = "192.168.250.70"
+$Alias    = "claude-server-sepidz"
+$CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect-sepidz"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
 $CM       = '$HOME/.local/bin/claude-mount'
@@ -123,25 +123,6 @@ function Install-ServerKey([string]$pub, [bool]$ForceRestart = $false) {
 function SshX([string]$Cmd) {
     # ConnectTimeout=30: handles slow VPN/internet (was 10, too short)
     ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 $Alias $Cmd
-}
-
-function Find-Rider {
-    $r = Get-Command rider64.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
-    if (-not $r) { $r = Get-Command rider.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source }
-    if (-not $r) {
-        foreach ($p in @(
-            "${env:LOCALAPPDATA}\Programs\JetBrains\Rider*\bin\rider64.exe",
-            "${env:LOCALAPPDATA}\Programs\JetBrains\Rider*\bin\rider.exe",
-            "${env:ProgramFiles}\JetBrains\Rider*\bin\rider64.exe",
-            "${env:ProgramFiles}\JetBrains\Rider*\bin\rider.exe",
-            "${env:ProgramFiles(x86)}\JetBrains\Rider*\bin\rider64.exe",
-            "${env:ProgramFiles(x86)}\JetBrains\Rider*\bin\rider.exe"
-        )) {
-            $found = Get-Item $p -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($found) { $r = $found.FullName; break }
-        }
-    }
-    return $r
 }
 
 function Test-Tunnel {
@@ -285,6 +266,8 @@ if (Test-Path $keyA) {
 $sshCfg = Join-Path $SshDir "config"
 if (-not (Test-Path $sshCfg)) { New-Item -ItemType File -Path $sshCfg | Out-Null }
 Remove-SshHostBlock $sshCfg $Alias
+# Migration: remove stale "Host claude-server" block written by the old sepidz script
+Remove-SshHostBlock $sshCfg "claude-server"
 @"
 
 Host $Alias
@@ -366,9 +349,9 @@ $initOut = (SshX "id -u && (test -f ~/.ssh/claude_laptop || ssh-keygen -t ed2551
 # Strip \r (CRLF edge case from some SSH servers/Windows line endings)
 $lines   = ($initOut -replace "`r",'') -split "`n" | Where-Object { $_.Trim() -ne '' }
 $uidStr  = ($lines | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1) -replace '\D',''
-$Port    = 20000 + [int]$uidStr
+$Port    = 21000 + [int]$uidStr
 $PubB    = ($lines | Where-Object { $_ -match '^ssh-' } | Select-Object -First 1).Trim()
-if ($Port -le 20000) { StepFail "could not get UID from server"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
+if ($Port -le 21000) { StepFail "could not get UID from server"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 if (-not $PubB)      { StepFail "could not read server key";     Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 StepOk "port $Port"
 
@@ -491,45 +474,9 @@ while (-not $go) {
 
 # mount first, then open VSCode
 if ($go) {
-    # G: Editor detection — VSCode and/or Rider, with saved preference
-    $EditorPref = Join-Path $CfgDir "editor.conf"
-    $haveCode  = [bool](Get-Command code  -ErrorAction SilentlyContinue)
-    $haveRider = [bool](Find-Rider)
-
-    # -Ide flag overrides saved preference; empty = use saved or auto-detect
-    $resolvedIde = $Ide
-    if (-not $resolvedIde -and (Test-Path $EditorPref)) {
-        $saved = (Get-Content $EditorPref -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
-        if ($saved -match '^(vscode|rider|both)$') { $resolvedIde = $saved }
-        elseif ($saved) {
-            Warn "Saved editor preference '$saved' is invalid - resetting"
-            Remove-Item $EditorPref -ErrorAction SilentlyContinue
-        }
-    }
-
-    if (-not $haveCode -and -not $haveRider) {
-        Warn "No editor found. Install VS Code (+ Remote-SSH) or JetBrains Rider, then re-run."
+    if (-not (Get-Command code -ErrorAction SilentlyContinue)) {
+        Warn "VSCode not found. Install it + the Remote-SSH extension, then re-run."
         Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
-    } elseif ($haveCode -and -not $haveRider) {
-        $resolvedIde = 'vscode'
-    } elseif (-not $haveCode -and $haveRider) {
-        $resolvedIde = 'rider'
-    } elseif (-not $resolvedIde) {
-        # Both available and no saved/flag preference — prompt once and save
-        Write-Host ""
-        Write-Host "    Open with" -ForegroundColor White
-        Write-Host ""
-        Write-Host "    1  VS Code" -ForegroundColor DarkGray
-        Write-Host "    2  JetBrains Rider" -ForegroundColor DarkGray
-        Write-Host "    3  Both" -ForegroundColor DarkGray
-        Write-Host ""
-        $edChoice = (Read-Host "    >").Trim()
-        switch ($edChoice) {
-            "2" { $resolvedIde = 'rider' }
-            "3" { $resolvedIde = 'both'  }
-            default { $resolvedIde = 'vscode' }
-        }
-        Set-Content -Path $EditorPref -Value $resolvedIde -Encoding ASCII
     }
 
     Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
@@ -584,6 +531,10 @@ if ($go) {
             if ($bgTunnel -and -not $bgTunnel.HasExited) {
                 Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
             }
+            # Free any stale server-side port binding from a previous crashed session.
+            # fuser -k kills only the sshd child holding *:Port — not the sshd master.
+            # Guard with command -v: fuser is in psmisc and may not be installed everywhere.
+            SshX "command -v fuser >/dev/null 2>&1 && fuser -k ${Port}/tcp 2>/dev/null; true" 2>$null | Out-Null
 
             Step "Starting SSH tunnel"
             $bgTunnel = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList @(
@@ -713,36 +664,14 @@ if ($go) {
             if ($cleanOut) { Write-Host "      -> $cleanOut" -ForegroundColor DarkGray }
 
             if (-not $editorOpened) {
-                if ($resolvedIde -eq 'vscode' -or $resolvedIde -eq 'both') {
-                    Step "Opening VS Code"
-                    if (-not (Get-Command code -ErrorAction SilentlyContinue)) {
-                        StepFail "VS Code not found - install VS Code or add 'code' to PATH"
-                    } else {
-                        & code --folder-uri "vscode-remote://ssh-remote+$Alias$($go.Path)"
-                        if ($LASTEXITCODE -eq 0) { StepOk $($go.Path) }
-                        else { StepFail "VS Code exited with code $LASTEXITCODE" }
-                    }
-                }
-                if ($resolvedIde -eq 'rider' -or $resolvedIde -eq 'both') {
-                    Step "Opening JetBrains Rider"
-                    $riderExe = Find-Rider
-                    if ($riderExe) {
-                        # [Uri]::EscapeDataString works on PS5.1 and PS7+ (System.Web not needed)
-                        $encodedPath = [Uri]::EscapeDataString($go.Path)
-                        $gatewayUri  = "jetbrains-gateway://connect#host=${Alias}&user=${RemoteUser}&projectPath=${encodedPath}&type=ssh&deploy=false&newUi=true"
-                        Start-Process $gatewayUri
-                        StepOk $($go.Path)
-                    } else {
-                        StepFail "Rider not found - install JetBrains Rider or add rider64.exe to PATH"
-                        if (Test-Path $EditorPref) { Remove-Item $EditorPref -ErrorAction SilentlyContinue }
-                    }
-                }
+                Step "Opening VSCode"
+                & code --folder-uri "vscode-remote://ssh-remote+$Alias$($go.Path)"
+                if ($LASTEXITCODE -eq 0) { StepOk $($go.Path) }
+                else { StepFail "VS Code exited with code $LASTEXITCODE" }
                 $editorOpened = $true
-                $editorLabel = switch ($resolvedIde) { 'rider' { 'Rider' } 'both' { 'VS Code / Rider' } default { 'VS Code' } }
                 Write-Host ""
-                Write-Host "    Run 'claude' in the $editorLabel terminal." -ForegroundColor DarkGray
+                Write-Host "    Run 'claude' in the VSCode terminal." -ForegroundColor DarkGray
             }
-
             Write-Host ""
             Write-Host "    ============================================" -ForegroundColor DarkGray
             Write-Host "    Session active -- keep this window open" -ForegroundColor Cyan
