@@ -37,6 +37,29 @@ fi
 
 "$MOUNT_BIN" up 2>/dev/null
 
+# Auto-init CodeGraph and Headroom for any newly mounted project.
+# Runs in background after a short delay so SSHFS mounts settle first.
+(
+    sleep 5
+    MOUNTS_DIR="$HOME/mounts"
+    if [ -d "$MOUNTS_DIR" ] && command -v codegraph >/dev/null 2>&1; then
+        for project in "$MOUNTS_DIR"/*/; do
+            [ -d "$project" ] || continue
+            # Skip if already indexed or if mount is empty (not yet ready)
+            [ -d "$project/.codegraph" ] && continue
+            [ -z "$(ls -A "$project" 2>/dev/null)" ] && continue
+            timeout 120 codegraph init "$project" >/dev/null 2>&1 || true
+        done
+    fi
+    # Headroom: register MCP if not already in settings
+    if command -v headroom >/dev/null 2>&1; then
+        SETTINGS="$HOME/.claude/settings.json"
+        if [ -f "$SETTINGS" ] && ! grep -q '"headroom"' "$SETTINGS" 2>/dev/null; then
+            headroom mcp install >/dev/null 2>&1 || true
+        fi
+    fi
+) &
+
 # start watchdog in background to recover from hangs/disconnects
 WATCHDOG="/usr/local/bin/claude-watchdog"
 if [ -x "$WATCHDOG" ]; then

@@ -207,7 +207,7 @@ function Show-Mounts($mounts) {
 }
 
 function Select-Mount($mounts, $n) {
-    if ($n -match '^\d+$') {
+    if ($n -match '^[0-9]+$') {
         $i = [int]$n - 1
         if ($i -ge 0 -and $i -lt $mounts.Count) { return $mounts[$i] }
     }
@@ -365,7 +365,7 @@ Step "Getting tunnel port + server key"
 $initOut = (SshX "id -u && (test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q) && cat ~/.ssh/claude_laptop.pub") -join "`n"
 # Strip \r (CRLF edge case from some SSH servers/Windows line endings)
 $lines   = ($initOut -replace "`r",'') -split "`n" | Where-Object { $_.Trim() -ne '' }
-$uidStr  = ($lines | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1) -replace '\D',''
+$uidStr  = [string]($lines | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1) -replace '\D',''
 $Port    = 20000 + [int]$uidStr
 $PubB    = ($lines | Where-Object { $_ -match '^ssh-' } | Select-Object -First 1).Trim()
 if ($Port -le 20000) { StepFail "could not get UID from server"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
@@ -436,8 +436,9 @@ while (-not $go) {
     Show-Mounts $mounts
     $c = (Read-Host "    >").Trim().ToLower()
     Write-Host ""
+    if (-not $c) { continue }
 
-    if ($c -match '^\d+$') {
+    if ($c -match '^[0-9]+$') {
         $m = Select-Mount $mounts $c
         if (-not $m) { Warn "Not found."; continue }
         $go = [PSCustomObject]@{ Id = $m.Id; Path = $m.Path }
@@ -538,7 +539,59 @@ if ($go) {
 
     Step "Checking SSH service"
     $svc = Get-Service sshd -ErrorAction SilentlyContinue
-    if (-not $svc -or $svc.Status -ne 'Running') {
+    if (-not $svc) {
+        StepFail "OpenSSH Server not installed"
+        Write-Host ""
+        Write-Host "    OpenSSH Server not found - installing now..." -ForegroundColor Yellow
+        $installed = $false
+        # Method 1: Windows Capability (Win10/11 built-in) — requires Windows Update service
+        $wuSvc = Get-Service wuauserv -ErrorAction SilentlyContinue
+        if ($wuSvc -and $wuSvc.Status -ne 'Running') {
+            Write-Host "    Starting Windows Update service for install..." -ForegroundColor DarkGray
+            Start-Service wuauserv -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+        }
+        try {
+            Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop | Out-Null
+            Write-Host "    OpenSSH Server installed ok (via Windows Capability)." -ForegroundColor Green
+            $installed = $true
+        } catch {
+            Write-Host "    Windows Capability install failed: $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+        # Method 2: winget fallback
+        if (-not $installed) {
+            Write-Host "    Trying winget fallback..." -ForegroundColor DarkGray
+            try {
+                $wg = Get-Command winget -ErrorAction Stop
+                & winget install --id Microsoft.OpenSSH.Beta -e --source winget --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
+                $svc = Get-Service sshd -ErrorAction SilentlyContinue
+                if ($svc) {
+                    Write-Host "    OpenSSH Server installed ok (via winget)." -ForegroundColor Green
+                    $installed = $true
+                }
+            } catch {
+                Write-Host "    winget fallback failed: $($_.Exception.Message)" -ForegroundColor DarkGray
+            }
+        }
+        if (-not $installed) {
+            Write-Host "    Could not auto-install OpenSSH Server." -ForegroundColor Red
+            Write-Host "    Manual fix: Settings -> Apps -> Optional Features -> OpenSSH Server" -ForegroundColor DarkGray
+            Write-Host "    Or run as admin: Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0" -ForegroundColor DarkGray
+            Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
+        }
+        Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
+        Start-Service sshd -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        $svc = Get-Service sshd -ErrorAction SilentlyContinue
+        if (-not $svc -or $svc.Status -ne 'Running') {
+            Write-Host "    Could not start sshd after install. Run as admin: Start-Service sshd" -ForegroundColor Red
+            Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
+        }
+        Write-Host "    sshd started ok." -ForegroundColor Green
+        # Re-run key setup: ProgramData\ssh\ now exists after install, first call skipped it.
+        # ForceRestart=$true so sshd picks up administrators_authorized_keys (only re-read on start).
+        if ($PubB) { Install-ServerKey $PubB -ForceRestart $true }
+    } elseif ($svc.Status -ne 'Running') {
         StepFail "OpenSSH Server not running"
         Write-Host ""
         Write-Host "    Trying to start sshd..." -ForegroundColor Yellow
@@ -565,18 +618,19 @@ if ($go) {
     if (-not $fwRule) {
         Write-Host "    [!] Firewall rule for SSH missing - adding..." -ForegroundColor Yellow
         New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -DisplayName "OpenSSH SSH Server (sshd)" `
-            -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 `
+            -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -Profile Any `
             -ErrorAction SilentlyContinue | Out-Null
-    } elseif ($fwRule.Enabled.ToString() -ne 'True') {
-        Write-Host "    [!] Firewall rule for SSH was disabled - enabling..." -ForegroundColor Yellow
-        Enable-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
+    } elseif ($fwRule.Enabled.ToString() -ne 'True' -or $fwRule.Profile.ToString() -notmatch 'Any') {
+        Write-Host "    [!] Firewall rule for SSH needs update - fixing..." -ForegroundColor Yellow
+        Set-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -Enabled True -Profile Any -ErrorAction SilentlyContinue
     }
 
     $editorOpened = $false
 
     :mainLoop while ($true) {
-    $alreadyDown = $false
-    $bgTunnel    = $null
+    $alreadyDown  = $false
+    $bgTunnel     = $null
+    $editorOpened = $false
 
     try {
         :sessionLoop while ($true) {
@@ -635,6 +689,12 @@ if ($go) {
 
             Write-Host "      -> recovering stale mounts..." -ForegroundColor DarkGray
             SshX "$CM recover" 2>$null | Out-Null
+
+            # recover makes SSH connections back through the tunnel; verify it is still up
+            if (-not (Test-Tunnel)) {
+                Write-Host "      -> tunnel dropped during recover, restarting..." -ForegroundColor DarkGray
+                continue
+            }
 
             Step "Mounting files"
             $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
@@ -776,7 +836,7 @@ if ($go) {
             Write-Host ""
             Write-Host "    Disconnecting..." -ForegroundColor DarkGray
             SshX "$CM down '$($go.Id)'" 2>$null | Out-Null
-            if (-not $bgTunnel.HasExited) {
+            if ($bgTunnel -and -not $bgTunnel.HasExited) {
                 Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
             }
             $alreadyDown = $true
@@ -795,7 +855,9 @@ if ($go) {
         if (-not $alreadyDown) {
             Write-Host ""
             Write-Host "    Disconnecting..." -ForegroundColor DarkGray
-            SshX "$CM down '$($go.Id)'" 2>$null | Out-Null
+            # Short timeout: bound the hang if server is unreachable on window close (CLAUDE.md invariant)
+            ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=8 `
+                -o ServerAliveInterval=5 -o ServerAliveCountMax=2 $Alias "$CM down '$($go.Id)'" 2>$null | Out-Null
             Write-Host "    .git restored on Windows." -ForegroundColor Green
             Write-Host ""
         }

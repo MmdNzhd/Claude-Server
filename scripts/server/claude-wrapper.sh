@@ -7,4 +7,5 @@
 # accurately. Without this, it falls back to PPID (still works, less precise).
 
 export CLAUDE_WRAPPER_PID=$$
+unset ANTHROPIC_BASE_URL
 exec /usr/local/bin/claude-real "$@"

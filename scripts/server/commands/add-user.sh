@@ -44,7 +44,10 @@ fi
 
 step "2 - home directory"
 mkdir -p "/home/$USERNAME/work"
-chown -R "$USERNAME:$USERNAME" "/home/$USERNAME"
+# Avoid chown -R on the entire home tree: SSHFS mounts under ~/mounts/ are
+# owned by the remote user and cannot be chowned, which causes set -e to abort.
+chown "$USERNAME:$USERNAME" "/home/$USERNAME"
+chown "$USERNAME:$USERNAME" "/home/$USERNAME/work"
 chmod 700 "/home/$USERNAME"
 ok "/home/$USERNAME/work ready (isolated)"
 
@@ -64,7 +67,27 @@ if [ -x /usr/local/bin/claude-git-setup ]; then
     ok "~/.local/bin/claude-git-setup installed"
 fi
 
-chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.local"
+chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin"
+
+step "3b - Claude plugins (superpowers + ECC)"
+PLUGIN_SRC="/home/smart/.claude/plugins/cache/claude-plugins-official"
+PLUGIN_DST="/home/$USERNAME/.claude/plugins/cache/claude-plugins-official"
+mkdir -p "$PLUGIN_DST"
+if [ -d "$PLUGIN_SRC/superpowers" ]; then
+    cp -r "$PLUGIN_SRC/superpowers" "$PLUGIN_DST/"
+    ok "superpowers plugin copied"
+else
+    warn "superpowers not found in smart's cache — user must install manually"
+fi
+ECC_SRC="/home/smart/.claude/plugins/cache/ecc/latest"
+if [ -d "$ECC_SRC" ]; then
+    mkdir -p "/home/$USERNAME/.claude/plugins/cache/ecc"
+    cp -r "$ECC_SRC" "/home/$USERNAME/.claude/plugins/cache/ecc/"
+    ok "ECC plugin copied"
+else
+    warn "ECC not found — run: git clone --depth=1 https://github.com/affaan-m/ECC /home/smart/.claude/plugins/cache/ecc/latest"
+fi
+chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.claude/plugins"
 
 step "4 - Claude settings + hooks"
 # NOTE: if hooks change, update this settings.json template too — see CLAUDE.md
@@ -75,13 +98,48 @@ cat > "/home/$USERNAME/.claude/settings.json" << 'SETTINGS'
   "model": "claude-sonnet-4-6",
   "effortLevel": "low",
   "hooks": {
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/usr/local/bin/claude-hook-logout-block"}]}],
-    "PreToolUse":       [{"hooks": [{"type": "command", "command": "/usr/local/bin/claude-hook-pre"}]}],
-    "Stop":             [{"hooks": [{"type": "command", "command": "/usr/local/bin/claude-hook-stop"}]}]
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/usr/local/bin/claude-hook-logout-block.sh"}]}],
+    "PreToolUse":       [{"hooks": [{"type": "command", "command": "/usr/local/bin/claude-hook-pre.sh"}]}],
+    "Stop":             [{"hooks": [{"type": "command", "command": "/usr/local/bin/claude-hook-stop.sh"}]}]
+  },
+  "mcpServers": {
+    "codegraph": {
+      "type": "stdio",
+      "command": "codegraph",
+      "args": ["serve", "--mcp"]
+    },
+    "headroom": {
+      "type": "stdio",
+      "command": "headroom",
+      "args": ["mcp"]
+    },
+    "sqlserver": {
+      "type": "stdio",
+      "command": "/usr/bin/mcp-sqlserver",
+      "args": [],
+      "env": {
+        "SQLSERVER_HOST": "192.168.210.124",
+        "SQLSERVER_USER": "Mohammad",
+        "SQLSERVER_PASSWORD": "Mohammad123"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "ecc@ecc": true
+  },
+  "extraKnownMarketplaces": {
+    "ecc": {
+      "source": {
+        "source": "github",
+        "repo": "affaan-m/ECC"
+      }
+    }
   }
 }
 SETTINGS
-chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.claude"
+chown "$USERNAME:$USERNAME" "/home/$USERNAME/.claude"
+chown "$USERNAME:$USERNAME" "/home/$USERNAME/.claude/settings.json"
 ok "~/.claude/settings.json written"
 
 step "5 - SSH"

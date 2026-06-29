@@ -64,6 +64,11 @@ while true; do
         mountpoint -q "$local_lpath" 2>/dev/null || continue
 
         if mount_hung "$local_lpath"; then
+            # Kill the stale sshfs process first so fusermount can clean up fully.
+            # Without this, the zombie process stays alive and floods MaxStartups
+            # when the tunnel comes back, causing connection resets for new mounts.
+            pkill -u "$USER" -f "sshfs .*${local_lpath}" 2>/dev/null || true
+            sleep 1
             # Force unmount the hung mount
             fusermount -uz "$local_lpath" 2>/dev/null || \
             fusermount3 -uz "$local_lpath" 2>/dev/null || \

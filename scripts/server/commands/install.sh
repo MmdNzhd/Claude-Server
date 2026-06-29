@@ -78,8 +78,9 @@ fi
 for hook in claude-hook-logout-block claude-hook-pre claude-hook-stop; do
     src="$SERVER_DIR/hooks/${hook}.sh"
     if [ -f "$src" ]; then
-        install -m 755 "$src" "/usr/local/bin/$hook"
-        ok "$hook → /usr/local/bin/$hook"
+        install -m 755 "$src" "/usr/local/bin/${hook}.sh"
+        install -m 755 "$src" "/usr/local/bin/${hook}"
+        ok "$hook → /usr/local/bin/ (with and without .sh)"
     else
         warn "$hook not found in hooks/"
     fi
@@ -95,6 +96,10 @@ fi
 if [ -f "$SERVER_DIR/claude-mount.sh" ]; then
     install -m 644 "$SERVER_DIR/claude-mount.sh" /usr/local/lib/claude-mount
     ok "claude-mount → /usr/local/lib/claude-mount"
+fi
+if [ -f "$SERVER_DIR/claude-watchdog.sh" ]; then
+    install -m 755 "$SERVER_DIR/claude-watchdog.sh" /usr/local/bin/claude-watchdog
+    ok "claude-watchdog → /usr/local/bin/"
 fi
 if [ -f "$SERVER_DIR/claude-git-setup.sh" ]; then
     install -m 755 "$SERVER_DIR/claude-git-setup.sh" /usr/local/bin/claude-git-setup
@@ -158,7 +163,7 @@ fi
 
 # noVNC
 if [ ! -d /opt/novnc ]; then
-    NOVNC_SHARE=$(find /usr /opt -name "vnc.html" 2>/dev/null | head -1 | xargs dirname 2>/dev/null)
+    NOVNC_SHARE=$(find /usr /opt -name "vnc.html" 2>/dev/null | head -1 | xargs -r dirname 2>/dev/null || true)
     if [ -n "$NOVNC_SHARE" ]; then
         ln -sf "$NOVNC_SHARE" /opt/novnc
         ok "noVNC → /opt/novnc (system)"
@@ -182,8 +187,35 @@ else
     rm -f /tmp/chrome.deb
 fi
 
-# ─── Step 9: designer user ───────────────────────────────────────────────────
-step "9 - designer user"
+# ─── Step 9: CodeGraph (code intelligence MCP) ──────────────────────────────
+step "9 - CodeGraph"
+if command -v codegraph &>/dev/null; then
+    ok "CodeGraph: already installed ($(codegraph --version 2>/dev/null || echo 'ok'))"
+else
+    curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh
+    ok "CodeGraph installed"
+fi
+
+# ─── Step 10: Headroom (context compression MCP) ─────────────────────────────
+step "10 - Headroom"
+if command -v headroom &>/dev/null; then
+    ok "Headroom: already installed"
+else
+    pip3 install "headroom-ai[mcp]" --quiet && ok "headroom-ai[mcp] installed" || \
+        warn "headroom-ai install failed — run manually: pip3 install 'headroom-ai[mcp]'"
+fi
+
+# ─── Step 10b: mcp-sqlserver ──────────────────────────────────────────────────
+step "10b - mcp-sqlserver"
+if command -v mcp-sqlserver &>/dev/null; then
+    ok "mcp-sqlserver: already installed"
+else
+    npm install -g @bilims/mcp-sqlserver --quiet && ok "mcp-sqlserver installed" || \
+        warn "mcp-sqlserver install failed — run manually: npm install -g @bilims/mcp-sqlserver"
+fi
+
+# ─── Step 11: designer user ───────────────────────────────────────────────────
+step "11 - designer user"
 
 if ! id designer &>/dev/null; then
     useradd -m -s /bin/bash designer
@@ -193,13 +225,27 @@ else
     ok "designer user: exists"
 fi
 
-mkdir -p /opt/chrome-design-profile /home/designer/.designer /home/designer/.local/share
+mkdir -p /opt/chrome-design-profile/Default /home/designer/.designer /home/designer/.local/share
 chown -R designer:designer /opt/chrome-design-profile /home/designer/.designer /home/designer/.local
 chmod -R 755 /opt/chrome-design-profile
+
+# Use Chrome managed policy so Chrome can never overwrite the download directory setting.
+POLICY_DIR="/etc/opt/chrome/policies/managed"
+POLICY_FILE="$POLICY_DIR/designer-download.json"
+DOWNLOAD_PATH="/home/designer/mounts/laptop"
+mkdir -p "$POLICY_DIR"
+cat > "$POLICY_FILE" <<EOF
+{
+  "DownloadDirectory": "${DOWNLOAD_PATH}",
+  "PromptForDownloadLocation": false
+}
+EOF
+chmod 644 "$POLICY_FILE"
+ok "Chrome managed policy → ${DOWNLOAD_PATH}"
 ok "designer directories ready"
 
 # ─── Step 10: admin user smart ───────────────────────────────────────────────
-step "10 - admin user: smart"
+step "12 - admin user: smart"
 
 if ! id smart &>/dev/null; then
     useradd -m -s /bin/bash -G sudo smart
@@ -211,8 +257,11 @@ else
 fi
 chmod 755 /home/smart
 
+# run full user setup for smart (idempotent)
+bash "$SERVER_DIR/commands/add-user.sh" smart --no-password-change
+
 # ─── Step 11: install claude-server CLI ──────────────────────────────────────
-step "11 - install claude-server CLI"
+step "13 - install claude-server CLI"
 
 install -m 755 "$SERVER_DIR/claude-server" /usr/local/bin/claude-server
 
@@ -236,7 +285,8 @@ echo "  1. Set Claude auth token:"
 echo "     On a laptop with a browser: claude setup-token"
 echo "     Then on this server as root:"
 echo "       echo 'export CLAUDE_CODE_OAUTH_TOKEN=<token>' > /etc/profile.d/claude-auth.sh"
-echo "       chmod 644 /etc/profile.d/claude-auth.sh"
+echo "       chmod 640 /etc/profile.d/claude-auth.sh"
+echo "       chgrp sudo /etc/profile.d/claude-auth.sh 2>/dev/null || chgrp adm /etc/profile.d/claude-auth.sh 2>/dev/null || true"
 echo "       echo 'CLAUDE_CODE_OAUTH_TOKEN=<token>' >> /etc/environment"
 echo ""
 echo "  2. Add developers:"

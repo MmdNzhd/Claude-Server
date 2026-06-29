@@ -4,6 +4,7 @@ set -euo pipefail
 CONF_DIR="$HOME/.claude-mounts.d"
 CONNECT_CONF="$HOME/.claude-connect.conf"
 KEY="$HOME/.ssh/claude_laptop"
+KNOWN_HOSTS="$HOME/.ssh/known_hosts_claude_mount"
 
 # ---------------------------------------------------------------------------
 # Globals (populated by _load_global)
@@ -53,7 +54,8 @@ _win_ps() {
         return 0
     fi
     ssh -n -o BatchMode=yes -o ConnectTimeout=5 \
-        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
+        -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" \
         -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" \
         "powershell -NoProfile -Command \"${ps_cmd}\"" \
         2>/dev/null || true
@@ -176,7 +178,7 @@ _do_mount() {
     # Hide .git and create Claude stubs in one SSH call — from here on, any failure must restore .git
     _hide_git_and_create_stubs "$rpath"
 
-    local sshfs_opts="ServerAliveInterval=10,ServerAliveCountMax=3,idmap=user,allow_other,StrictHostKeyChecking=no,UserKnownHostsFile=/dev/null,ConnectTimeout=10,dir_cache=yes,dcache_timeout=60,attr_timeout=30,entry_timeout=30,max_conns=4"
+    local sshfs_opts="reconnect,ServerAliveInterval=15,ServerAliveCountMax=4,idmap=user,allow_other,StrictHostKeyChecking=accept-new,UserKnownHostsFile=${KNOWN_HOSTS},ConnectTimeout=20,dir_cache=yes,dcache_timeout=60,attr_timeout=30,entry_timeout=30,max_conns=4"
     local id_opt=""
     [ -f "$KEY" ] && id_opt=",IdentityFile=$KEY"
 
@@ -191,7 +193,9 @@ _do_mount() {
         local reason="$sshfs_out"
         # Check specific errors FIRST so a timed-out sshfs that printed a real
         # error before being killed (exit 124) still shows the actionable message.
-        if echo "$reason" | grep -qi "permission denied\|publickey"; then
+        if echo "$reason" | grep -qi "host key verification failed\|remote host identification has changed"; then
+            reason="laptop host key changed (laptop reinstalled?) - run: ssh-keygen -R [127.0.0.1]:${TUNNEL_PORT} -f ${KNOWN_HOSTS}"
+        elif echo "$reason" | grep -qi "permission denied\|publickey"; then
             reason="key auth failed - re-run connect.bat to reinstall the key"
         elif echo "$reason" | grep -qi "connection reset\|reset by peer"; then
             reason="connection reset - laptop SSH rejected the key (re-run connect.bat to reinstall)"
@@ -375,8 +379,21 @@ cmd_recover() {
         # active mount. mountpoint -q reads /proc/mounts: instant and reliable.
         # Also guard lpath: mountpoint -q "" exits 1, which would falsely
         # trigger restore on a malformed conf with empty lpath.
-        if [ -n "$rpath" ] && [ -n "$lpath" ] && ! mountpoint -q "$lpath" 2>/dev/null; then
-            _restore_git "$rpath"
+        if [ -n "$lpath" ] && [ -n "$rpath" ]; then
+            if ! mountpoint -q "$lpath" 2>/dev/null; then
+                # Not mounted at all — just restore .git
+                _restore_git "$rpath"
+            elif ! timeout 2 ls "$lpath" >/dev/null 2>&1; then
+                # Mounted but hung (stale sshfs process, tunnel dropped).
+                # Kill the zombie sshfs process so it doesn't flood MaxStartups
+                # when the tunnel comes back, then force-unmount and restore .git.
+                local lpath_esc
+                lpath_esc=$(printf '%s' "$lpath" | sed 's/[[\.*^$(){}+?|]/\\&/g')
+                pkill -u "$USER" -f "sshfs .*${lpath_esc}" 2>/dev/null || true
+                sleep 1
+                _do_unmount "$lpath"
+                _restore_git "$rpath"
+            fi
         fi
     done
 }

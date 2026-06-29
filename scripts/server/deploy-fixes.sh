@@ -77,4 +77,20 @@ for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
 done
 
 echo ""
+echo "=== Setting Chrome download dir for designer (managed policy) ==="
+# Use Chrome managed policy instead of Preferences — Chrome cannot overwrite managed policies.
+POLICY_DIR="/etc/opt/chrome/policies/managed"
+POLICY_FILE="$POLICY_DIR/designer-download.json"
+DOWNLOAD_PATH="/home/designer/mounts/laptop"
+mkdir -p "$POLICY_DIR"
+cat > "$POLICY_FILE" <<EOF
+{
+  "DownloadDirectory": "${DOWNLOAD_PATH}",
+  "PromptForDownloadLocation": false
+}
+EOF
+chmod 644 "$POLICY_FILE"
+echo "  OK: Chrome managed policy → ${DOWNLOAD_PATH}"
+
+echo ""
 echo "Done."

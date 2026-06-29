@@ -5,9 +5,9 @@
 
 set -uo pipefail
 
-SERVER_IP="192.168.210.240"
-ALIAS="claude-server"
-CFG_DIR="$HOME/.config/claude-connect"
+SERVER_IP="192.168.250.70"
+ALIAS="claude-server-sepidz"
+CFG_DIR="$HOME/.config/claude-connect-sepidz"
 CFG="$CFG_DIR/connect.conf"
 CM='$HOME/.local/bin/claude-mount'
 
@@ -68,7 +68,6 @@ enable_remote_login() {
     local out
     out="$(sudo systemsetup -setremotelogin on 2>&1)" || true
     printf '%s\n' "$out" | grep -qi 'On' || remote_login_on || return 1
-    # Wait up to 10s for sshd to be accepting connections after enable
     local _i
     for _i in 1 2 3 4 5 6 7 8 9 10; do
         nc -zw1 127.0.0.1 22 2>/dev/null && return 0
@@ -125,6 +124,10 @@ fi
 
 step "Server config"
 touch "$HOME/.ssh/config"; chmod 600 "$HOME/.ssh/config"
+# Migration: remove stale "Host claude-server" block written by the old sepidz script
+awk '/^[[:space:]]*Host[[:space:]]+/ { skip=0; for(i=2;i<=NF;i++) if($i=="claude-server") skip=1 } !skip' \
+    "$HOME/.ssh/config" > "$HOME/.ssh/config.tmp.${ALIAS}" 2>/dev/null && mv "$HOME/.ssh/config.tmp.${ALIAS}" "$HOME/.ssh/config"
+chmod 600 "$HOME/.ssh/config"
 awk -v a="$ALIAS" '
     /^[[:space:]]*Host[[:space:]]+/ { skip=0; for(i=2;i<=NF;i++) if($i==a) skip=1 }
     !skip
@@ -206,8 +209,8 @@ step "Tunnel port + server key"
 _init="$(sshx "id -u && (test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q) && cat ~/.ssh/claude_laptop.pub" 2>/dev/null)"
 _uid="$(printf '%s\n' "$_init" | tr -d '\r' | grep -E '^[0-9]+$' | head -1 | tr -dc '0-9')"
 PUB_B="$(printf '%s\n' "$_init" | tr -d '\r' | grep '^ssh-' | head -1)"
-PORT=$(( 20000 + ${_uid:-0} ))
-if [ "$PORT" -le 20000 ];   then step_fail "could not get UID from server"; exit 1; fi
+PORT=$(( 21000 + ${_uid:-0} ))
+if [ "$PORT" -le 21000 ];   then step_fail "could not get UID from server"; exit 1; fi
 if [ "$PORT" -gt 65535 ];   then step_fail "server UID too large (port $PORT > 65535)"; exit 1; fi
 if [ -z "$PUB_B" ];        then step_fail "could not read server key";     exit 1; fi
 step_ok "port $PORT"
@@ -460,6 +463,10 @@ if [ -n "$go_path" ]; then
         already_down=0
 
         pkill -f "ssh.*-R ${PORT}:localhost:22" 2>/dev/null || true
+        # Free any stale server-side port binding from a previous crashed session.
+        # fuser -k kills only the sshd child holding *:PORT — not the sshd master.
+        # Guard with command -v: fuser is in psmisc and may not be installed everywhere.
+        sshx "command -v fuser >/dev/null 2>&1 && fuser -k ${PORT}/tcp 2>/dev/null; true" 2>/dev/null || true
 
         step "Checking SSH service"
         if laptop_ssh_ready; then

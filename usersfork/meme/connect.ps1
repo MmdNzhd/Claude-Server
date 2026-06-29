@@ -1,4 +1,4 @@
-# connect.ps1 - Claude Code launcher for Windows.
+﻿# connect.ps1 - Claude Code launcher for Windows.
 # Usage:  double-click connect.bat
 #         connect.bat -Setup   (reconfigure username)
 
@@ -14,15 +14,9 @@ if (-not $isAdmin) {
 }
 
 $ErrorActionPreference = "Continue"
-
-if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
-    Write-Host "  [X] OpenSSH client (ssh.exe) not found." -ForegroundColor Red
-    Write-Host "      Install it via: Settings -> Apps -> Optional Features -> OpenSSH Client" -ForegroundColor DarkGray
-    Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
-}
-$ServerIP = "192.168.250.70"
-$Alias    = "claude-server-sepidz"
-$CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect-sepidz"
+$ServerIP = "192.168.210.240"
+$Alias    = "claude-server"
+$CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
 $CM       = '$HOME/.local/bin/claude-mount'
@@ -76,11 +70,7 @@ function Install-ServerKey([string]$pub, [bool]$ForceRestart = $false) {
         if (-not (Test-Path $akFile)) { New-Item -ItemType File -Path $akFile -Force -ErrorAction SilentlyContinue | Out-Null }
         if (-not (Test-Path $akFile)) { continue }
         $lines = @(Get-Content $akFile -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
-        # Remove any existing entry for this key (restricted or not), then add with from= restriction
-        $restricted = "from=`"127.0.0.1,::1`" $pub"
-        $lines = @($lines | Where-Object { $_ -notlike "*$pub*" })
-        $lines += $restricted
-        Set-Content -Path $akFile -Value $lines -Encoding ASCII
+        if ($lines -notcontains $pub) { Add-Content -Path $akFile -Value $pub -Encoding ASCII }
         if ($akFile -eq $userFile) { Repair-SshPerm $akFile "authorized_keys" }
     }
 
@@ -89,29 +79,10 @@ function Install-ServerKey([string]$pub, [bool]$ForceRestart = $false) {
     # On normal first-time setup, only start if stopped (no unnecessary restart).
     $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
     if ($ForceRestart -and $sshdSvc -and $sshdSvc.Status -eq 'Running') {
-        Write-Host "      -> sshd: restarting..." -ForegroundColor DarkGray
         Restart-Service sshd -ErrorAction SilentlyContinue
-        # Wait until sshd is actually accepting connections (up to 20s).
-        # A fixed 5s sleep races on slower machines and causes immediate retry failure.
-        $deadline = (Get-Date).AddSeconds(20)
-        $sshdReady = $false
-        while ((Get-Date) -lt $deadline) {
-            Start-Sleep -Seconds 1
-            $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
-            if ($sshdSvc -and $sshdSvc.Status -eq 'Running') {
-                try {
-                    $tcp = New-Object System.Net.Sockets.TcpClient
-                    if ($tcp.BeginConnect('127.0.0.1', 22, $null, $null).AsyncWaitHandle.WaitOne(1000)) {
-                        $tcp.Close(); $sshdReady = $true
-                        Write-Host "      -> sshd: ready" -ForegroundColor DarkGray
-                        break
-                    }
-                    $tcp.Close()
-                } catch {}
-            }
-        }
-        if (-not $sshdReady) {
-            Warn "sshd did not become ready within 20s - mount retry may fail"
+        Start-Sleep -Seconds 5
+        $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
+        if (-not $sshdSvc -or $sshdSvc.Status -ne 'Running') {
             $script:pendingFixes += "sshd restart failed - run connect.bat as administrator"
         }
     } elseif (-not $sshdSvc -or $sshdSvc.Status -ne 'Running') {
@@ -121,15 +92,14 @@ function Install-ServerKey([string]$pub, [bool]$ForceRestart = $false) {
 }
 
 function SshX([string]$Cmd) {
-    # ConnectTimeout=30: handles slow VPN/internet (was 10, too short)
-    ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 $Alias $Cmd
+    ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 $Alias $Cmd
 }
 
 function Test-Tunnel {
-    # Short timeout so VPN loss is detected quickly
-    $r = ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=8 `
-             -o ServerAliveInterval=3 -o ServerAliveCountMax=2 `
-             $Alias "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port' 2>/dev/null && echo UP" 2>$null
+    # Short timeout so VPN loss is detected quickly (3s connect + 2s port check)
+    $r = ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=3 `
+             -o ServerAliveInterval=2 -o ServerAliveCountMax=2 `
+             $Alias "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port' 2>/dev/null && echo UP" 2>$null
     return ($r -match 'UP')
 }
 
@@ -266,8 +236,6 @@ if (Test-Path $keyA) {
 $sshCfg = Join-Path $SshDir "config"
 if (-not (Test-Path $sshCfg)) { New-Item -ItemType File -Path $sshCfg | Out-Null }
 Remove-SshHostBlock $sshCfg $Alias
-# Migration: remove stale "Host claude-server" block written by the old sepidz script
-Remove-SshHostBlock $sshCfg "claude-server"
 @"
 
 Host $Alias
@@ -286,7 +254,7 @@ $needsKey  = $false
 for ($attempt = 1; $attempt -le 10; $attempt++) {
     Write-Host -NoNewline ("    Connecting $attempt/10").PadRight(46, '.') -ForegroundColor DarkCyan
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=15 $Alias "true" 2>$null
+    ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=5 $Alias "true" 2>$null
     $sw.Stop()
     $connT = [math]::Round($sw.Elapsed.TotalSeconds, 1)
     if ($LASTEXITCODE -eq 0) {
@@ -313,16 +281,13 @@ if (-not $connected -and -not $needsKey) {
 
 if ($needsKey) {
     Write-Host ""
-    # Clear stale known_hosts entry so host key mismatch doesn't block auth
-    ssh-keygen -R $ServerIP 2>$null | Out-Null
     Write-Host "    Enter server password (one time only):" -ForegroundColor Yellow
-    $pubKeyContent = (Get-Content "$keyA.pub").Trim() -replace "'", "'\''"
-    ssh -o StrictHostKeyChecking=accept-new "$RemoteUser@$ServerIP" `
-        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\n' '$pubKeyContent' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+    Get-Content "$keyA.pub" | ssh -o StrictHostKeyChecking=accept-new "$RemoteUser@$ServerIP" `
+        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     $keyCopyOk = ($LASTEXITCODE -eq 0)
     Step "Verifying connection"
     $verifySW = [System.Diagnostics.Stopwatch]::StartNew()
-    ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=15 $Alias "true" 2>$null
+    ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=6 $Alias "true" 2>$null
     $verifySW.Stop()
     $verifyT = [math]::Round($verifySW.Elapsed.TotalSeconds, 1)
     if ($LASTEXITCODE -ne 0) {
@@ -344,18 +309,16 @@ if ($needsKey) {
 }
 
 # tunnel setup
-Step "Getting tunnel port + server key"
-$initOut = (SshX "id -u && (test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q) && cat ~/.ssh/claude_laptop.pub") -join "`n"
-# Strip \r (CRLF edge case from some SSH servers/Windows line endings)
-$lines   = ($initOut -replace "`r",'') -split "`n" | Where-Object { $_.Trim() -ne '' }
-$uidStr  = ($lines | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1) -replace '\D',''
-$Port    = 21000 + [int]$uidStr
-$PubB    = ($lines | Where-Object { $_ -match '^ssh-' } | Select-Object -First 1).Trim()
-if ($Port -le 21000) { StepFail "could not get UID from server"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
-if (-not $PubB)      { StepFail "could not read server key";     Read-Host "    Press Enter to close" | Out-Null; exit 1 }
+Step "Getting tunnel port"
+$uidStr = (SshX "id -u") -join ""
+$Port   = 20000 + [int]($uidStr -replace '\D','')
+if ($Port -le 20000) { StepFail "could not get UID from server"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 StepOk "port $Port"
 
 Step "Setting up server key"
+SshX "test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q" 2>$null | Out-Null
+$PubB = ((SshX "cat ~/.ssh/claude_laptop.pub") -join '').Trim()
+if (-not $PubB) { StepFail "could not read server key"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 Install-ServerKey $PubB
 StepOk
 
@@ -372,31 +335,23 @@ Host $Alias
     ExitOnForwardFailure no
 "@ | Add-Content -Path $sshCfg -Encoding ASCII
 Repair-SshPerm $sshCfg "SSH config"
-SshX "mkdir -p ~/.local/bin && printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\n' '$LaptopUser' '$Port' > ~/.claude-connect.conf && chmod 600 ~/.claude-connect.conf || true" 2>$null | Out-Null
+SshX "printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\n' '$LaptopUser' '$Port' > ~/.claude-connect.conf" 2>$null | Out-Null
 StepOk "laptop=$LaptopUser port=$Port"
 
 # push server scripts (claude-mount + claude-git-setup) if available
 $serverScriptDir = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..\..\server"))
+SshX "mkdir -p ~/.local/bin" 2>$null | Out-Null
 
-$src    = Join-Path $serverScriptDir "claude-mount.sh"
+$src = Join-Path $serverScriptDir "claude-mount.sh"
+if (Test-Path $src) {
+    scp -o BatchMode=yes -o ConnectTimeout=10 -q $src "${Alias}:~/.local/bin/claude-mount" 2>$null
+    SshX "chmod +x ~/.local/bin/claude-mount; grep -q 'CLAUDE_LOCAL_BIN_PATH' ~/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=`$HOME/.local/bin:`$PATH\n' >> ~/.bashrc" 2>$null | Out-Null
+}
+
 $gitSrc = Join-Path $serverScriptDir "claude-git-setup.sh"
-
-if ((Test-Path $src) -or (Test-Path $gitSrc)) {
-    Step "Updating server scripts"
-    $pushOk = $true
-    if (Test-Path $src) {
-        scp -o BatchMode=yes -o ConnectTimeout=30 -q $src "${Alias}:~/.local/bin/claude-mount" 2>$null
-        if ($LASTEXITCODE -ne 0) { $pushOk = $false; $script:pendingFixes += "claude-mount push failed" }
-    }
-    if (Test-Path $gitSrc) {
-        scp -o BatchMode=yes -o ConnectTimeout=30 -q $gitSrc "${Alias}:~/.local/bin/claude-git-setup" 2>$null
-        if ($LASTEXITCODE -ne 0) { $pushOk = $false; $script:pendingFixes += "claude-git-setup push failed" }
-    }
-    $chmodCmd = @()
-    if (Test-Path $src)    { $chmodCmd += "chmod +x ~/.local/bin/claude-mount; grep -q 'CLAUDE_LOCAL_BIN_PATH' ~/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=`$HOME/.local/bin:`$PATH\n' >> ~/.bashrc" }
-    if (Test-Path $gitSrc) { $chmodCmd += "chmod +x ~/.local/bin/claude-git-setup" }
-    if ($chmodCmd.Count -gt 0) { SshX ($chmodCmd -join '; ') 2>$null | Out-Null }
-    if ($pushOk) { StepOk } else { StepFail ($script:pendingFixes -join ', ') }
+if (Test-Path $gitSrc) {
+    scp -o BatchMode=yes -o ConnectTimeout=10 -q $gitSrc "${Alias}:~/.local/bin/claude-git-setup" 2>$null
+    SshX "chmod +x ~/.local/bin/claude-git-setup" 2>$null | Out-Null
 }
 
 Write-Host ""
@@ -474,35 +429,9 @@ while (-not $go) {
 
 # mount first, then open VSCode
 if ($go) {
-    $haveCursor = [bool](Get-Command cursor -ErrorAction SilentlyContinue)
-    $haveCode   = [bool](Get-Command code   -ErrorAction SilentlyContinue)
-    if (-not $haveCursor -and -not $haveCode) {
-        Warn "No editor found. Install Cursor or VS Code (+ Remote-SSH extension), then re-run."
+    if (-not (Get-Command code -ErrorAction SilentlyContinue)) {
+        Warn "VSCode not found. Install it + the Remote-SSH extension, then re-run."
         Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
-    }
-    $EditorPrefFile = Join-Path $CfgDir "editor.conf"
-    if ($haveCursor -and $haveCode) {
-        $saved = if (Test-Path $EditorPrefFile) { (Get-Content $EditorPrefFile -Raw).Trim() } else { "" }
-        if ($saved -ne "cursor" -and $saved -ne "code") { $saved = "cursor" }
-        Write-Host ""
-        Write-Host "    Open with" -ForegroundColor White
-        Write-Host ""
-        Write-Host "    1  Cursor" -ForegroundColor DarkGray
-        Write-Host "    2  VS Code" -ForegroundColor DarkGray
-        Write-Host ""
-        Write-Host "    (Enter = $saved)" -ForegroundColor DarkGray
-        $edChoice = (Read-Host "    >").Trim().ToLower()
-        switch ($edChoice) {
-            { $_ -in "1","cursor","c" } { $EditorCmd = "cursor"; $EditorName = "Cursor" }
-            { $_ -in "2","code","vscode","v" } { $EditorCmd = "code"; $EditorName = "VS Code" }
-            "" { if ($saved -eq "code") { $EditorCmd = "code"; $EditorName = "VS Code" } else { $EditorCmd = "cursor"; $EditorName = "Cursor" } }
-            default { $EditorCmd = "cursor"; $EditorName = "Cursor" }
-        }
-        Set-Content -Path $EditorPrefFile -Value $EditorCmd -Encoding ASCII
-    } elseif ($haveCursor) {
-        $EditorCmd = "cursor"; $EditorName = "Cursor"
-    } else {
-        $EditorCmd = "code"; $EditorName = "VS Code"
     }
 
     Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
@@ -511,52 +440,7 @@ if ($go) {
 
     Step "Checking SSH service"
     $svc = Get-Service sshd -ErrorAction SilentlyContinue
-    if (-not $svc) {
-        StepFail "OpenSSH Server not installed"
-        Write-Host ""
-        Write-Host "    OpenSSH Server not found - installing now..." -ForegroundColor Yellow
-        $installed = $false
-        $wuSvc = Get-Service wuauserv -ErrorAction SilentlyContinue
-        if ($wuSvc -and $wuSvc.Status -ne 'Running') {
-            Write-Host "    Starting Windows Update service for install..." -ForegroundColor DarkGray
-            Start-Service wuauserv -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
-        }
-        try {
-            Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop | Out-Null
-            Write-Host "    OpenSSH Server installed ok (via Windows Capability)." -ForegroundColor Green
-            $installed = $true
-        } catch {
-            Write-Host "    Windows Capability install failed: $($_.Exception.Message)" -ForegroundColor DarkGray
-        }
-        if (-not $installed) {
-            Write-Host "    Trying winget fallback..." -ForegroundColor DarkGray
-            try {
-                $null = Get-Command winget -ErrorAction Stop
-                & winget install --id Microsoft.OpenSSH.Beta -e --source winget --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
-                $svc = Get-Service sshd -ErrorAction SilentlyContinue
-                if ($svc) { Write-Host "    OpenSSH Server installed ok (via winget)." -ForegroundColor Green; $installed = $true }
-            } catch {
-                Write-Host "    winget fallback failed: $($_.Exception.Message)" -ForegroundColor DarkGray
-            }
-        }
-        if (-not $installed) {
-            Write-Host "    Could not auto-install OpenSSH Server." -ForegroundColor Red
-            Write-Host "    Manual fix: Settings -> Apps -> Optional Features -> OpenSSH Server" -ForegroundColor DarkGray
-            Write-Host "    Or run as admin: Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0" -ForegroundColor DarkGray
-            Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
-        }
-        Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
-        Start-Service sshd -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-        $svc = Get-Service sshd -ErrorAction SilentlyContinue
-        if (-not $svc -or $svc.Status -ne 'Running') {
-            Write-Host "    Could not start sshd after install. Run as admin: Start-Service sshd" -ForegroundColor Red
-            Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
-        }
-        Write-Host "    sshd started ok." -ForegroundColor Green
-        if ($PubB) { Install-ServerKey $PubB }
-    } elseif ($svc.Status -ne 'Running') {
+    if (-not $svc -or $svc.Status -ne 'Running') {
         StepFail "OpenSSH Server not running"
         Write-Host ""
         Write-Host "    Trying to start sshd..." -ForegroundColor Yellow
@@ -590,8 +474,6 @@ if ($go) {
         Enable-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
     }
 
-    $editorOpened = $false
-
     :mainLoop while ($true) {
     $alreadyDown = $false
     $bgTunnel    = $null
@@ -602,15 +484,11 @@ if ($go) {
             if ($bgTunnel -and -not $bgTunnel.HasExited) {
                 Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
             }
-            # Free any stale server-side port binding from a previous crashed session.
-            # fuser -k kills only the sshd child holding *:Port — not the sshd master.
-            # Guard with command -v: fuser is in psmisc and may not be installed everywhere.
-            SshX "command -v fuser >/dev/null 2>&1 && fuser -k ${Port}/tcp 2>/dev/null; true" 2>$null | Out-Null
 
             Step "Starting SSH tunnel"
             $bgTunnel = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList @(
                 "-N", "-o", "ExitOnForwardFailure=no",
-                "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=5",
+                "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
                 "-R", "$Port`:localhost:22", $Alias)
             StepOk "pid $($bgTunnel.Id)"
 
@@ -655,7 +533,6 @@ if ($go) {
                 $alreadyDown = $true; break sessionLoop
             }
 
-            Write-Host "      -> recovering stale mounts..." -ForegroundColor DarkGray
             SshX "$CM recover" 2>$null | Out-Null
 
             Step "Mounting files"
@@ -666,43 +543,21 @@ if ($go) {
 
             if (-not $mountOk -and $mountOut -match 'key auth failed|connection reset|reset by peer|publickey|Permission denied') {
                 Write-Host " retrying..." -ForegroundColor DarkGray
-                Write-Host "      -> $($mountOut.Trim())" -ForegroundColor DarkGray
                 # "connection reset" = TCP-level drop (firewall, sshd permissions, or sshd stopped)
                 # "key auth failed" / "publickey" = authentication failure
                 if ($mountOut -match 'connection reset|reset by peer') {
-                    Warn "Connection reset - killing stale mounts, fixing firewall, restarting sshd"
-                    # Kill zombie sshfs processes on server — they flood MaxStartups and cause new connections to reset
-                    SshX 'pkill -u "$USER" sshfs 2>/dev/null; true' 2>$null | Out-Null
-                    # Fix firewall rule — check enabled state AND profile (not just enabled/disabled)
+                    Warn "Connection reset - checking firewall and restarting sshd"
                     $fw = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
-                    if (-not $fw) {
-                        New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -DisplayName "OpenSSH SSH Server (sshd)" `
-                            -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -Profile Any `
-                            -ErrorAction SilentlyContinue | Out-Null
-                        $script:pendingFixes += "SSH firewall rule created"
-                    } elseif ($fw.Enabled.ToString() -ne 'True' -or $fw.Profile.ToString() -notmatch 'Any') {
-                        Set-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -Enabled True -Profile Any -ErrorAction SilentlyContinue
-                        $script:pendingFixes += "SSH firewall rule fixed"
-                    } else {
-                        Write-Host "      -> firewall rule: ok" -ForegroundColor DarkGray
+                    if ($fw -and $fw.Enabled.ToString() -ne 'True') {
+                        Enable-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
+                        $script:pendingFixes += "SSH firewall rule re-enabled"
                     }
                 } else {
                     Warn "Key rejected - reinstalling server key and restarting sshd"
                 }
                 $newPub = ((SshX "cat ~/.ssh/claude_laptop.pub") -join '').Trim()
-                if (-not $newPub) { Warn "Could not fetch server public key - skipping key reinstall" }
                 if ($newPub) {
                     Install-ServerKey $newPub -ForceRestart $true
-                    # Give sshd 2s to finish loading host keys / authorized_keys after TCP port opens.
-                    # Without this, the immediate mount retry races and gets "connection reset" again.
-                    Write-Host "      -> waiting for sshd to stabilize..." -ForegroundColor DarkGray
-                    Start-Sleep -Seconds 2
-                    # sshd restart can kill the reverse tunnel — re-check before retrying mount.
-                    if (-not (Test-Tunnel)) {
-                        Write-Host ""; Warn "Tunnel dropped after sshd restart - reconnecting..."
-                        continue
-                    }
-                    Write-Host "      -> tunnel: alive" -ForegroundColor DarkGray
                     Step "Mounting files"
                     $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
                     $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String
@@ -734,15 +589,12 @@ if ($go) {
             $cleanOut = ($mountOut.Trim() -replace '^already mounted:\s*', '')
             if ($cleanOut) { Write-Host "      -> $cleanOut" -ForegroundColor DarkGray }
 
-            if (-not $editorOpened) {
-                Step "Opening $EditorName"
-                & $EditorCmd --folder-uri "vscode-remote://ssh-remote+$Alias$($go.Path)"
-                if ($LASTEXITCODE -eq 0) { StepOk $($go.Path) }
-                else { StepFail "$EditorName exited with code $LASTEXITCODE" }
-                $editorOpened = $true
-                Write-Host ""
-                Write-Host "    Run 'claude' in the $EditorName terminal." -ForegroundColor DarkGray
-            }
+            Step "Opening VSCode"
+            & code --folder-uri "vscode-remote://ssh-remote+$Alias$($go.Path)"
+            StepOk $($go.Path)
+
+            Write-Host ""
+            Write-Host "    Run 'claude' in the VSCode terminal." -ForegroundColor DarkGray
             Write-Host ""
             Write-Host "    ============================================" -ForegroundColor DarkGray
             Write-Host "    Session active -- keep this window open" -ForegroundColor Cyan
@@ -780,6 +632,7 @@ if ($go) {
                 Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
             }
             $alreadyDown = $true
+            Write-Host "    .git restored on Windows." -ForegroundColor Green
 
             if ($action -ne 'r') { break sessionLoop }
 
@@ -795,6 +648,7 @@ if ($go) {
             Write-Host ""
             Write-Host "    Disconnecting..." -ForegroundColor DarkGray
             SshX "$CM down '$($go.Id)'" 2>$null | Out-Null
+            Write-Host "    .git restored on Windows." -ForegroundColor Green
             Write-Host ""
         }
         # Always kill tunnel - even if $alreadyDown (e.g. tunnel-fail or mount-fail Q path)
@@ -803,33 +657,28 @@ if ($go) {
         }
     }
 
-    # Post-disconnect menu — flush buffered keys first to avoid accidental dismissal
-    while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
-
-    Write-Host ""
-    Write-Host "    Disconnected. What would you like to do?" -ForegroundColor Cyan
-    Write-Host "    C = connect again   X = exit" -ForegroundColor DarkGray
-    Write-Host ""
-
-    $choice = ""
-    while ($choice -ne "c" -and $choice -ne "x") {
-        if ([Console]::KeyAvailable) {
-            $ki = [Console]::ReadKey($true)
-            # Check both KeyChar (Latin layout) and Key (physical key, layout-independent)
-            # so C/X work even when a non-Latin keyboard layout (Persian, Arabic, etc.) is active.
-            $kc = $ki.KeyChar.ToString().ToLower()
-            if ($kc -eq "c" -or $ki.Key -eq [ConsoleKey]::C) {
-                Write-Host "    Reconnecting..." -ForegroundColor Green
-                Start-Sleep -Seconds 1
-                Write-Host ""
-                continue mainLoop
-            } elseif ($kc -eq "x" -or $ki.Key -eq [ConsoleKey]::X) {
-                Write-Host "    Exiting..." -ForegroundColor DarkGray
-                break mainLoop
+        # After disconnecting, ask user what to do
+        Write-Host "" 
+        Write-Host "    Disconnected. What would you like to do?" -ForegroundColor Cyan
+        Write-Host "    C = connect again   X = exit" -ForegroundColor DarkGray
+        Write-Host "" 
+        
+        $choice = "" 
+        while ($choice -ne "c" -and $choice -ne "x") {
+            if ([Console]::KeyAvailable) {
+                $ki = [Console]::ReadKey($true)
+                $choice = $ki.KeyChar.ToString().ToLower()
+                if ($choice -eq "c") {
+                    Write-Host "    Reconnecting..." -ForegroundColor Green
+                    Start-Sleep -Seconds 1
+                    continue mainLoop
+                } elseif ($choice -eq "x") {
+                    Write-Host "    Exiting..." -ForegroundColor DarkGray
+                    break mainLoop
+                }
             }
-        } else { Start-Sleep -Milliseconds 100 }
+            Start-Sleep -Milliseconds 100
+        }
     }
-
-    } # end :mainLoop
 }
 Write-Host ""
