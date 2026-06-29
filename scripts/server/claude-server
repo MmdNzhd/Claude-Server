@@ -32,6 +32,9 @@ usage() {
     echo "  add-user <name>      add a new developer user"
     echo "  verify               check all components"
     echo "  status               active sessions + usage stats"
+    echo "  diagnose-auth        find login / OAuth problems"
+    echo "  sync-auth [user]     push OAuth token to all users (after token change)"
+    echo "  update-server        git pull + full redeploy"
     echo ""
     echo "Options:"
     echo "  --help, -h           show this help"
@@ -49,7 +52,7 @@ CMD="${1:-}"
 shift 2>/dev/null || true
 
 case "$CMD" in
-    install|add-user|verify|status)
+    install|add-user|verify|status|diagnose-auth|sync-auth|update-server)
         if [ -z "$COMMANDS_DIR" ]; then
             echo -e "${RED}Error:${NC} commands directory not found." >&2
             echo "Run from repo: bash scripts/server/claude-server install" >&2

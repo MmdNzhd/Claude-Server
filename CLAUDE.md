@@ -36,10 +36,14 @@ scripts/
       add-user.sh                 # Add a developer account
       verify.sh                   # Test all components
       status.sh                   # Show sessions and usage
+      sync-auth.sh                # Push OAuth token to all users
+      diagnose-auth.sh            # Auth / login diagnostics
+      update-server.sh            # git pull + redeploy
     hooks/                        # Claude Code hooks → /usr/local/bin/
     claude-wrapper.sh
     claude-limits.conf
     claude-automount.sh
+    claude-auth-sync.sh             # OAuth → ~/.claude/settings.json + empty credentials.json
     claude-mount.sh               # Pushed to server ~/.local/bin/claude-mount on connect
 publish/
   publish.ps1                     # Builds distributable ZIP packages (run via publish.bat)
@@ -54,7 +58,12 @@ sudo claude-server install        # Full install/redeploy (idempotent, safe to r
 sudo claude-server add-user <name>
 sudo claude-server verify
 sudo claude-server status
+sudo claude-server sync-auth      # After token change — pushes OAuth to all ~/.claude/
+sudo claude-server diagnose-auth  # Find login / OAuth problems
+sudo claude-server update-server  # git pull + full redeploy
 ```
+
+**OAuth auth (automatic after install):** Server token lives in `/etc/environment` + `/etc/profile.d/claude-auth.sh`. `add-user`, `claude-automount` (on login), and `sync-auth` call `claude-auth-sync` which writes `env.CLAUDE_CODE_OAUTH_TOKEN` into each user's `~/.claude/settings.json` (required for VS Code extension) and resets `~/.claude/.credentials.json` to `{}` (Claude 2.1.x prefers credentials file over env var).
 
 **First-time bootstrap** (before `claude-server` is on PATH):
 ```bash
@@ -129,7 +138,9 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | `scripts/server/claude-wrapper.sh` | deploy wrapper |
 | `scripts/server/claude-limits.conf` | deploy config |
 | `scripts/server/claude-automount.sh` | deploy scripts — or: `install -m 755 claude-automount.sh /usr/local/bin/claude-automount` |
+| `scripts/server/claude-auth-sync.sh` | deploy scripts — `install -m 755 … /usr/local/bin/claude-auth-sync` |
 | `scripts/server/commands/add-user.sh` | verify settings.json template |
+| `scripts/server/commands/*.sh` | install copies all to `/usr/local/lib/claude-server/` |
 
 ## Client Script Invariants
 

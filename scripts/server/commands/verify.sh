@@ -1,6 +1,7 @@
 #!/bin/bash
 # commands/verify.sh - verify all Claude Code Server components
 # Usage: claude-server verify
+#        sudo claude-server verify   (required to read other users' home dirs)
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -15,6 +16,27 @@ ok()   { printf "  ${GREEN}ok${NC}    %s\n" "$1"; }
 warn() { printf "  ${YELLOW}warn${NC}  %s\n" "$1"; }
 fail() { printf "  ${RED}FAIL${NC}  %s\n" "$1"; FAILURES=$((FAILURES+1)); }
 info() { printf "  ${GRAY}--${NC}    %s\n" "$1"; }
+
+# Read another user's home file (needs root or sudo for mode-700 homes).
+_user_readable() {
+    local f="$1"
+    [ -f "$f" ] && [ -r "$f" ] && return 0
+    [ "$EUID" -eq 0 ] && [ -f "$f" ] && return 0
+    command -v sudo >/dev/null 2>&1 && sudo test -r "$f" 2>/dev/null
+}
+
+_user_grep() {
+    local f="$1" pattern="$2"
+    if [ -f "$f" ] && [ -r "$f" ]; then
+        grep -q "$pattern" "$f" 2>/dev/null
+    elif [ "$EUID" -eq 0 ] && [ -f "$f" ]; then
+        grep -q "$pattern" "$f" 2>/dev/null
+    elif command -v sudo >/dev/null 2>&1 && sudo test -r "$f" 2>/dev/null; then
+        sudo grep -q "$pattern" "$f" 2>/dev/null
+    else
+        return 1
+    fi
+}
 
 echo ""
 echo -e "${BOLD}=== Claude Code Server — Verify ===${NC}"
@@ -36,7 +58,7 @@ for h in claude-hook-pre claude-hook-stop claude-hook-logout-block; do
     [ -x "/usr/local/bin/$h" ] && ok "$h: installed" || fail "$h: missing or not executable"
 done
 
-for b in claude-automount claude-git-setup; do
+for b in claude-automount claude-auth-sync claude-git-setup; do
     [ -x "/usr/local/bin/$b" ] && ok "$b: installed" || warn "$b: missing"
 done
 
@@ -44,6 +66,12 @@ done
 [ -f /etc/claude-limits.conf ] && ok "claude-limits.conf: exists" || warn "claude-limits.conf: missing (default limit=2)"
 [ -d /var/run/claude-active ] && ok "/var/run/claude-active: exists" || fail "/var/run/claude-active: missing"
 [ -f /var/log/claude-activity.jsonl ] && ok "activity log: exists" || warn "activity log: missing (created on first use)"
+
+if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null; then
+    ok "server OAuth token: /etc/environment"
+else
+    fail "server OAuth token missing from /etc/environment"
+fi
 
 echo ""
 
@@ -65,6 +93,9 @@ echo ""
 
 # --- Users ---
 echo -e "${BOLD}Users${NC}"
+if [ "$EUID" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
+    info "Re-run as root to check other users: sudo claude-server verify"
+fi
 echo ""
 
 SYSTEM_USERS="nobody root daemon bin sys sync games man lp mail news uucp proxy www-data backup list irc gnats _apt designer administrator"
@@ -74,19 +105,21 @@ for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd | sort); do
     [ -d "$h" ] || continue
     echo "$SYSTEM_USERS" | grep -qw "$u" && continue
 
-    score=0; total=4
+    score=0; total=5
     has_mount=false
-    [ -f "$h/.local/bin/claude-mount" ] && has_mount=true && ((score++))
+    _user_readable "$h/.local/bin/claude-mount" && has_mount=true && ((score++))
 
     has_hooks=false
     has_effort=false
-    if [ -f "$h/.claude/settings.json" ]; then
-        grep -q 'claude-hook-pre' "$h/.claude/settings.json" 2>/dev/null && has_hooks=true && ((score++))
-        grep -q 'effortLevel'     "$h/.claude/settings.json" 2>/dev/null && has_effort=true && ((score++))
+    has_oauth=false
+    if _user_readable "$h/.claude/settings.json"; then
+        _user_grep "$h/.claude/settings.json" 'claude-hook-pre' && has_hooks=true && ((score++))
+        _user_grep "$h/.claude/settings.json" 'effortLevel'     && has_effort=true && ((score++))
+        _user_grep "$h/.claude/settings.json" 'CLAUDE_CODE_OAUTH_TOKEN' && has_oauth=true && ((score++))
     fi
 
     has_bashrc=false
-    grep -q 'claude-automount' "$h/.bashrc" 2>/dev/null && has_bashrc=true && ((score++))
+    _user_grep "$h/.bashrc" 'claude-automount' && has_bashrc=true && ((score++))
 
     if   [ "$score" -eq "$total" ]; then tag="${GREEN}READY${NC}"
     elif [ "$score" -eq 0 ];        then tag="${RED}EMPTY${NC}"
@@ -98,6 +131,7 @@ for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd | sort); do
     $has_mount   && ok "claude-mount"      || fail "claude-mount missing"
     $has_hooks   && ok "hooks configured"  || fail "hooks missing in settings.json"
     $has_effort  && ok "effortLevel set"   || warn "effortLevel missing"
+    $has_oauth   && ok "OAuth in settings" || fail "OAuth token missing in settings.json (run: sudo claude-server sync-auth)"
     $has_bashrc  && ok "automount .bashrc" || fail "automount missing in .bashrc"
     echo ""
 done

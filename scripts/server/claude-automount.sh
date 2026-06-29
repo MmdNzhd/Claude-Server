@@ -5,6 +5,11 @@
 
 set -u
 
+# Server-wide OAuth: keep credentials.json empty and sync token into settings.json.
+if [ -x /usr/local/bin/claude-auth-sync ]; then
+    /usr/local/bin/claude-auth-sync
+fi
+
 MOUNT_BIN="$HOME/.local/bin/claude-mount"
 [ -x "$MOUNT_BIN" ] || MOUNT_BIN="/usr/local/bin/claude-mount"
 

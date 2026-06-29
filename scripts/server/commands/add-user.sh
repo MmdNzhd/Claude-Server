@@ -142,6 +142,18 @@ chown "$USERNAME:$USERNAME" "/home/$USERNAME/.claude"
 chown "$USERNAME:$USERNAME" "/home/$USERNAME/.claude/settings.json"
 ok "~/.claude/settings.json written"
 
+if [ -x /usr/local/bin/claude-auth-sync ]; then
+    if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null; then
+        claude-auth-sync "$USERNAME"
+        ok "OAuth token synced (settings.json env + empty credentials.json)"
+    else
+        warn "no server OAuth token in /etc/environment yet"
+        warn "set token then run: sudo claude-server sync-auth $USERNAME"
+    fi
+else
+    warn "claude-auth-sync not installed — run: sudo claude-server install"
+fi
+
 step "5 - SSH"
 mkdir -p "/home/$USERNAME/.ssh"
 touch "/home/$USERNAME/.ssh/authorized_keys"

@@ -93,6 +93,10 @@ if [ -f "$SERVER_DIR/claude-automount.sh" ]; then
     install -m 755 "$SERVER_DIR/claude-automount.sh" /usr/local/bin/claude-automount
     ok "claude-automount → /usr/local/bin/"
 fi
+if [ -f "$SERVER_DIR/claude-auth-sync.sh" ]; then
+    install -m 755 "$SERVER_DIR/claude-auth-sync.sh" /usr/local/bin/claude-auth-sync
+    ok "claude-auth-sync → /usr/local/bin/"
+fi
 if [ -f "$SERVER_DIR/claude-mount.sh" ]; then
     install -m 644 "$SERVER_DIR/claude-mount.sh" /usr/local/lib/claude-mount
     ok "claude-mount → /usr/local/lib/claude-mount"
@@ -273,6 +277,11 @@ done
 ok "claude-server → /usr/local/bin/claude-server"
 ok "commands → /usr/local/lib/claude-server/"
 
+if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null && [ -x /usr/local/bin/claude-auth-sync ]; then
+    claude-auth-sync --all
+    ok "OAuth token synced to all users"
+fi
+
 # ─── Done ────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}${BOLD}========================================${NC}"
@@ -285,13 +294,15 @@ echo "  1. Set Claude auth token:"
 echo "     On a laptop with a browser: claude setup-token"
 echo "     Then on this server as root:"
 echo "       echo 'export CLAUDE_CODE_OAUTH_TOKEN=<token>' > /etc/profile.d/claude-auth.sh"
-echo "       chmod 640 /etc/profile.d/claude-auth.sh"
-echo "       chgrp sudo /etc/profile.d/claude-auth.sh 2>/dev/null || chgrp adm /etc/profile.d/claude-auth.sh 2>/dev/null || true"
+echo "       chmod 644 /etc/profile.d/claude-auth.sh"
 echo "       echo 'CLAUDE_CODE_OAUTH_TOKEN=<token>' >> /etc/environment"
 echo ""
 echo "  2. Add developers:"
 echo "       sudo claude-server add-user <username>"
 echo ""
 echo "  3. Verify:"
-echo "       claude-server verify"
+echo "       sudo claude-server verify"
+echo ""
+echo "  After OAuth token change:"
+echo "       sudo claude-server sync-auth"
 echo ""
