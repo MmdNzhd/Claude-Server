@@ -113,8 +113,9 @@ fi
 
 if [ -f "$AUTH_FILE" ]; then
     perms="$(stat -c '%a %U:%G' "$AUTH_FILE" 2>/dev/null || stat -f '%OLp %Su:%Sg' "$AUTH_FILE" 2>/dev/null || echo '?')"
+    mode="${perms%% *}"
     info "permissions: $perms"
-    case "$perms" in
+    case "$mode" in
         644|640|600) ok "auth file permissions look fine" ;;
         *) warn "auth file permissions may block login shells: $perms (use chmod 644)" ;;
     esac
