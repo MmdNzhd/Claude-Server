@@ -44,6 +44,19 @@ function StepFail {
 }
 $script:pendingFixes = @()
 
+# Shared editor launch (smart + sepidz + all Windows connect forks)
+$_editorLaunch = Join-Path $PSScriptRoot 'editor-launch.ps1'
+if (-not (Test-Path $_editorLaunch)) {
+    $_editorLaunch = Join-Path (Split-Path $PSScriptRoot -Parent) 'editor-launch.ps1'
+}
+if (-not (Test-Path $_editorLaunch)) {
+    $_editorLaunch = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'editor-launch.ps1'
+}
+if (-not (Test-Path $_editorLaunch)) {
+    Die "editor-launch.ps1 not found — re-copy the full windows package"
+}
+. $_editorLaunch
+
 function Repair-SshPerm([string]$path, [string]$label) {
     if (-not (Test-Path $path)) { return }
     $out = (icacls $path 2>$null) -join ' '
@@ -773,31 +786,34 @@ if ($go) {
             if ($cleanOut) { Write-Host "      -> $cleanOut" -ForegroundColor DarkGray }
 
             if (-not $editorOpened) {
+                $editorLaunchedOk = $false
                 if ($resolvedIde -eq 'vscode' -or $resolvedIde -eq 'both') {
                     Step "Opening VS Code"
                     if (-not (Get-Command code -ErrorAction SilentlyContinue)) {
                         StepFail "VS Code not found - install VS Code or add 'code' to PATH"
                     } else {
-                        & code --folder-uri "vscode-remote://ssh-remote+$Alias$($go.Path)"
-                        if ($LASTEXITCODE -eq 0) { StepOk $($go.Path) }
-                        else { StepFail "VS Code exited with code $LASTEXITCODE" }
+                        $folderUri = "vscode-remote://ssh-remote+$Alias$($go.Path)"
+                        $editorExit = Invoke-RemoteEditor -EditorCmd 'code' -FolderUri $folderUri
+                        if ($editorExit -eq 0) { StepOk $($go.Path); $editorLaunchedOk = $true }
+                        else { StepFail "VS Code exited with code $editorExit" }
                     }
                 }
                 if ($resolvedIde -eq 'rider' -or $resolvedIde -eq 'both') {
                     Step "Opening JetBrains Rider"
                     $riderExe = Find-Rider
                     if ($riderExe) {
-                        # [Uri]::EscapeDataString works on PS5.1 and PS7+ (System.Web not needed)
                         $encodedPath = [Uri]::EscapeDataString($go.Path)
                         $gatewayUri  = "jetbrains-gateway://connect#host=${Alias}&user=${RemoteUser}&projectPath=${encodedPath}&type=ssh&deploy=false&newUi=true"
                         Start-Process $gatewayUri
                         StepOk $($go.Path)
+                        $editorLaunchedOk = $true
                     } else {
                         StepFail "Rider not found - install JetBrains Rider or add rider64.exe to PATH"
                         if (Test-Path $EditorPref) { Remove-Item $EditorPref -ErrorAction SilentlyContinue }
                     }
                 }
-                $editorOpened = $true
+                if ($editorLaunchedOk) { $editorOpened = $true }
+                else { Write-Host "    Press R to reconnect and retry opening the editor." -ForegroundColor DarkGray }
                 $editorLabel = switch ($resolvedIde) { 'rider' { 'Rider' } 'both' { 'VS Code / Rider' } default { 'VS Code' } }
                 Write-Host ""
                 Write-Host "    Run 'claude' in the $editorLabel terminal." -ForegroundColor DarkGray

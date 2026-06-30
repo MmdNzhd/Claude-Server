@@ -23,7 +23,8 @@ scripts/
   client/
     mac/connect.sh                # Mac launcher (bash, runs in Terminal)
     windows/connect.ps1           # Windows launcher (PowerShell, self-elevates to admin)
-    users/<name>/connect.ps1      # Per-user Windows forks (e.g. sepidz)
+    editor-launch.ps1             # Shared VS Code/Cursor launch (dot-sourced by connect.ps1)
+    users/<name>/connect.ps1      # Per-user Windows forks (e.g. sepidz) — IP/alias/cfg only
     users/<name>/connect.sh       # Per-user Mac forks (e.g. sepidz)
     users/designer/connect.sh     # Designer Mac launcher: SSHFS + noVNC port forward (no editor)
     users/designer/connect.ps1    # Designer Windows launcher: SSHFS + noVNC port forward (no editor)
@@ -192,7 +193,9 @@ Every user fork **must** include these three things, or self-healing breaks:
 2. `$editorOpened = $false` declared before `:mainLoop`
 3. All editor-open logic wrapped in `if (-not $editorOpened) { ... }`
 
-When creating a new user fork, copy from `scripts/client/windows/connect.ps1` and update `$ServerIP`.
+When creating a new user fork, copy from `scripts/client/windows/connect.ps1` and update `$ServerIP` (and alias/cfg dir). Editor launch logic lives in `editor-launch.ps1` — do not duplicate it.
+
+**Client sync rule:** Editor-launch changes go in `scripts/client/editor-launch.ps1` only. Both `windows/connect.ps1` and `users/sepidz/connect.ps1` dot-source it. `publish.ps1` copies `editor-launch.ps1` next to each `connect.ps1` in both ZIP packages.
 
 ## Self-Healing Behaviours
 

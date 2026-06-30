@@ -44,6 +44,19 @@ function StepFail {
 }
 $script:pendingFixes = @()
 
+# Shared editor launch (smart + sepidz + all Windows connect forks)
+$_editorLaunch = Join-Path $PSScriptRoot 'editor-launch.ps1'
+if (-not (Test-Path $_editorLaunch)) {
+    $_editorLaunch = Join-Path (Split-Path $PSScriptRoot -Parent) 'editor-launch.ps1'
+}
+if (-not (Test-Path $_editorLaunch)) {
+    $_editorLaunch = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'editor-launch.ps1'
+}
+if (-not (Test-Path $_editorLaunch)) {
+    Die "editor-launch.ps1 not found — re-copy the full windows package"
+}
+. $_editorLaunch
+
 function Repair-SshPerm([string]$path, [string]$label) {
     if (-not (Test-Path $path)) { return }
     $out = (icacls $path 2>$null) -join ' '
@@ -736,10 +749,15 @@ if ($go) {
 
             if (-not $editorOpened) {
                 Step "Opening $EditorName"
-                & $EditorCmd --folder-uri "vscode-remote://ssh-remote+$Alias$($go.Path)"
-                if ($LASTEXITCODE -eq 0) { StepOk $($go.Path) }
-                else { StepFail "$EditorName exited with code $LASTEXITCODE" }
-                $editorOpened = $true
+                $folderUri = "vscode-remote://ssh-remote+$Alias$($go.Path)"
+                $editorExit = Invoke-RemoteEditor -EditorCmd $EditorCmd -FolderUri $folderUri
+                if ($editorExit -eq 0) {
+                    StepOk $($go.Path)
+                    $editorOpened = $true
+                } else {
+                    StepFail "$EditorName exited with code $editorExit"
+                    Write-Host "    Press R to reconnect and retry opening $EditorName." -ForegroundColor DarkGray
+                }
                 Write-Host ""
                 Write-Host "    Run 'claude' in the $EditorName terminal." -ForegroundColor DarkGray
             }

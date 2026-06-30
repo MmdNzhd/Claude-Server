@@ -19,12 +19,14 @@ $OutDir      = Join-Path $OutBase $PackageName
 $FilesToCopy = @(
     @{ Src = "scripts\client\windows\connect.bat"; Dst = "windows\connect.bat" }
     @{ Src = "scripts\client\windows\connect.ps1"; Dst = "windows\connect.ps1" }
+    @{ Src = "scripts\client\editor-launch.ps1"; Dst = "windows\editor-launch.ps1" }
     @{ Src = "scripts\client\mac\connect.sh";      Dst = "mac\connect.sh"      }
 )
 
 $SepidFiles = @(
     @{ Src = "scripts\client\users\sepidz\connect.bat";    Dst = "claude-code\windows\connect.bat";  PatchIp = $false }
     @{ Src = "scripts\client\users\sepidz\connect.ps1";    Dst = "claude-code\windows\connect.ps1";  PatchIp = $false }
+    @{ Src = "scripts\client\editor-launch.ps1";           Dst = "claude-code\windows\editor-launch.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\users\sepidz\connect.sh";     Dst = "claude-code\mac\connect.sh";       PatchIp = $false }
     @{ Src = "scripts\client\users\designer\connect.bat";  Dst = "designer\windows\connect.bat";     PatchIp = $false }
     @{ Src = "scripts\client\users\designer\connect.ps1";  Dst = "designer\windows\connect.ps1";     PatchIp = $true  }
