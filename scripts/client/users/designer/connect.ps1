@@ -116,7 +116,7 @@ function SshX([string]$Cmd) {
 function Test-Tunnel {
     $r = ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=8 `
              -o ServerAliveInterval=3 -o ServerAliveCountMax=2 `
-             $Alias "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port' 2>/dev/null && echo UP" 2>$null
+             $Alias "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port' 2`>/dev/null && echo UP" 2>$null
     return ($r -match 'UP')
 }
 
@@ -306,7 +306,7 @@ Write-Host "    Ready" -ForegroundColor Green
 Write-Host ""
 
 $MountLpath = "/home/$RemoteUser/mounts/$MountId"
-$existingMount = (SshX "$CM list 2>/dev/null") | Where-Object { $_ -match "^${MountId}\|" } | Select-Object -First 1
+$existingMount = (SshX "$CM list 2`>/dev/null") | Where-Object { $_ -match "^${MountId}\|" } | Select-Object -First 1
 $cleanPath = $LaptopPath -replace "'", "-"
 if (-not $existingMount) {
     Step "Configuring laptop mount"
@@ -442,7 +442,7 @@ try {
 
         Step "Mounting files"
         $mountSW  = [System.Diagnostics.Stopwatch]::StartNew()
-        $mountOut = (SshX "$CM up '$MountId' 2>&1") | Out-String
+        $mountOut = (SshX "$CM up '$MountId' 2`>&1") | Out-String
         $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
         $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
 
@@ -474,7 +474,7 @@ try {
                 }
                 Step "Mounting files"
                 $mountSW  = [System.Diagnostics.Stopwatch]::StartNew()
-                $mountOut = (SshX "$CM up '$MountId' 2>&1") | Out-String
+                $mountOut = (SshX "$CM up '$MountId' 2`>&1") | Out-String
                 $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
                 $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
             }

@@ -53,7 +53,7 @@ if (-not (Test-Path $_editorLaunch)) {
     $_editorLaunch = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'editor-launch.ps1'
 }
 if (-not (Test-Path $_editorLaunch)) {
-    Die "editor-launch.ps1 not found — re-copy the full windows package"
+    Die "editor-launch.ps1 not found - re-copy the full windows package"
 }
 . $_editorLaunch
 
@@ -161,7 +161,7 @@ function Test-Tunnel {
     # Short timeout so VPN loss is detected quickly
     $r = ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=8 `
              -o ServerAliveInterval=3 -o ServerAliveCountMax=2 `
-             $Alias "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port' 2>/dev/null && echo UP" 2>$null
+             $Alias "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port' 2`>/dev/null && echo UP" 2>$null
     return ($r -match 'UP')
 }
 
@@ -188,7 +188,7 @@ function Remove-SshHostBlock($cfgPath, $alias) {
 function Get-Mounts {
     # Use 'list' (reads configs only, fast) instead of 'status' (checks mounts, slow/hangs on stale mounts)
     $out = @()
-    foreach ($line in ((SshX "$CM list 2>/dev/null") -split "`n")) {
+    foreach ($line in ((SshX "$CM list 2`>/dev/null") -split "`n")) {
         if ($line.Trim() -match '^([^\|]+)\|([^\|]*)\|([^\|]*)\|([^\|]+)$') {
             $out += [PSCustomObject]@{
                 Id    = $matches[1].Trim()
@@ -711,7 +711,7 @@ if ($go) {
 
             Step "Mounting files"
             $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
-            $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String
+            $mountOut = (SshX "$CM up '$($go.Id)' 2`>&1") | Out-String
             $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
             $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
 
@@ -756,7 +756,7 @@ if ($go) {
                     Write-Host "      -> tunnel: alive" -ForegroundColor DarkGray
                     Step "Mounting files"
                     $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
-                    $mountOut = (SshX "$CM up '$($go.Id)' 2>&1") | Out-String
+                    $mountOut = (SshX "$CM up '$($go.Id)' 2`>&1") | Out-String
                     $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
                     $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
                 }
