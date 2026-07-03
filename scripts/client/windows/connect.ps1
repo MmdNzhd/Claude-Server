@@ -712,7 +712,7 @@ $exitRequested = $false
         Write-Host ""
         Write-Host "    OpenSSH Server not found - installing now..." -ForegroundColor Yellow
         $installed = $false
-        # Method 1: Windows Capability (Win10/11 built-in) — requires Windows Update service
+        # Method 1: Windows Capability (Win10/11 built-in) - requires Windows Update service
         $wuSvc = Get-Service wuauserv -ErrorAction SilentlyContinue
         if ($wuSvc -and $wuSvc.Status -ne 'Running') {
             Write-Host "    Starting Windows Update service for install..." -ForegroundColor DarkGray
@@ -901,7 +901,7 @@ $exitRequested = $false
 
             if (-not $mountOk) {
                 if ($script:adminFixAttempted) {
-                    Warn "Auto-fix exhausted: $($mountOut.Trim()) — try e edit path, then R"
+                    Warn ('Auto-fix exhausted: {0} - try e edit path, then R' -f $mountOut.Trim())
                 }
                 StepFail $mountOut.Trim()
                 if ($mountOut -match 'No such file|not found|cannot find') {
@@ -964,7 +964,7 @@ $exitRequested = $false
                 $sessionExtras += 'P = push server login to golden (after sign-in in [Claude Server] only)'
             }
             Write-SessionBox -ExtraLines $sessionExtras
-            Set-ConnectTitle "Claude Connect | $($go.Id) | $(Get-GitModeLabel)"
+            Set-ConnectTitle ('Claude Connect | {0} | {1}' -f $go.Id, (Get-GitModeLabel))
 
             while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
 

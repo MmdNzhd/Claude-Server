@@ -19,6 +19,11 @@ Assert ($connectUiPs1 -notmatch 'function Get-GitModeLabel') 'connect-ui.ps1 doe
 foreach ($rel in @('windows\connect.ps1')) {
     $path = Get-ClientFile $rel
     $src = Get-Content $path -Raw
+    $parseErrs = $null
+    $null = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$parseErrs)
+    Assert ((-not $parseErrs) -or ($parseErrs.Count -eq 0)) "$rel parses cleanly in PS 5.1"
+    Assert ($src -notmatch '[\u201C\u201D\u2018\u2019]') "$rel has no smart/curly quotes (PS 5.1 break)"
+    Assert ($src -notmatch 'Set-ConnectTitle "Claude Connect \| \$\(') "$rel Set-ConnectTitle avoids pipe-in-double-quote PS 5.1 bug"
     $bundle = $src + $gitModePs1
     Assert ($src -match 'function Choose-Project') "$rel uses Choose-Project (no while-loop pipeline leak)"
     Assert ($src -notmatch '(?m)^\s+\$go = \[PSCustomObject\]') "$rel has no bare `$go = [PSCustomObject]"
