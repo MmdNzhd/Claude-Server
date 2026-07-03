@@ -119,6 +119,14 @@ ui_session_box() {
     echo ""
 }
 
+ui_session_status_line() {
+    local project="$1" git_label="$2" tunnel_ok="${3:-1}" editor_open="${4:-0}" editor_name="${5:-Cursor}"
+    local tunnel ed
+    [ "$tunnel_ok" -eq 1 ] && tunnel=up || tunnel=down
+    [ "$editor_open" -eq 1 ] && ed="$editor_name" || ed=closed
+    printf '    \033[0;36m[%s | git:%s | tunnel:%s | %s]\033[0m\n' "$project" "$git_label" "$tunnel" "$ed"
+}
+
 ui_set_title() {
     printf '\033]0;%s\007' "${1:-Claude Connect}"
 }

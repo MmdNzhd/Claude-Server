@@ -639,7 +639,13 @@ while [ "$exit_requested" -eq 0 ]; do
 
             _action="q"
             _got_key=0
+            _status_at=0
             while _tunnel_alive "$bg_pid"; do
+                _now="$(date +%s 2>/dev/null || printf '0')"
+                if [ "$_now" != "0" ] && [ $(( _now - _status_at )) -ge 30 ]; then
+                    ui_session_status_line "$go_id" "$(get_git_mode_label "$(get_git_mode)")" 1 "$_editor_opened" "$EDITOR_NAME"
+                    _status_at="$_now"
+                fi
                 if read -r -t 1 -n 1 _key </dev/tty 2>/dev/null; then
                     _key_lower="$(printf '%s' "$_key" | tr '[:upper:]' '[:lower:]')"
                     [ -z "$_key_lower" ] && _key_lower="q"

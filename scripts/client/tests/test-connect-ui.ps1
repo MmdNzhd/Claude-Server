@@ -14,6 +14,8 @@ Assert ((Get-LayoutTier 120) -eq 'wide') 'tier wide at 120'
 Assert ((Format-TruncPath 'D:\Smart\Very\Long\Path\ai' 20).Length -le 20) 'trunc path length'
 
 $src = Get-Content (Join-Path $ClientRoot 'connect-ui.ps1') -Raw
+$connectUiSh = Get-Content (Join-Path $ClientRoot 'connect-ui.sh') -Raw
 Assert ($src -notmatch 'SetWindowSize|Set_BufferSize') 'no console resize'
+Assert ($connectUiSh -match 'ui_session_status_line') 'connect-ui.sh has session status line'
 
 Write-Host 'OK test-connect-ui.ps1' -ForegroundColor Green
