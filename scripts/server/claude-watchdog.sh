@@ -11,6 +11,17 @@ CONNECT_CONF="$HOME/.claude-connect.conf"
 CHECK_INTERVAL=30   # seconds between checks
 HANG_TIMEOUT=5      # seconds before declaring a mount hung
 
+_load_active_mount() {
+    ACTIVE_MOUNT=""
+    [ -f "$CONNECT_CONF" ] || return 0
+    while IFS='=' read -r k v; do
+        v="${v#\"}" v="${v%\"}"
+        case "$k" in
+            ACTIVE_MOUNT|active_mount) ACTIVE_MOUNT="$v" ;;
+        esac
+    done < "$CONNECT_CONF"
+}
+
 # Only one watchdog per user
 if [ -f "$LOCK_FILE" ]; then
     OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null)
@@ -80,9 +91,12 @@ while true; do
             # If tunnel is down, restore silently fails; connect.bat will recover on next connect.
             "$MOUNT_BIN" recover 2>/dev/null || true
 
-            # Remount only if tunnel is back up
+            # Remount only if tunnel is back and this project is the active session mount
             if tunnel_up; then
-                "$MOUNT_BIN" up "$local_id" 2>/dev/null || true
+                _load_active_mount
+                if [ -n "$ACTIVE_MOUNT" ] && [ "$local_id" = "$ACTIVE_MOUNT" ]; then
+                    "$MOUNT_BIN" up "$local_id" 2>/dev/null || true
+                fi
             fi
         fi
     done

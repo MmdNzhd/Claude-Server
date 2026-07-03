@@ -97,25 +97,116 @@ if [ -f "$SERVER_DIR/claude-auth-sync.sh" ]; then
     install -m 755 "$SERVER_DIR/claude-auth-sync.sh" /usr/local/bin/claude-auth-sync
     ok "claude-auth-sync → /usr/local/bin/"
 fi
-if [ -f "$SERVER_DIR/claude-mount.sh" ]; then
-    install -m 644 "$SERVER_DIR/claude-mount.sh" /usr/local/lib/claude-mount
-    ok "claude-mount → /usr/local/lib/claude-mount"
+if [ -f "$SERVER_DIR/claude-auth-lib.py" ]; then
+    mkdir -p /usr/local/lib/claude-server
+    install -m 644 "$SERVER_DIR/claude-auth-lib.py" /usr/local/lib/claude-server/claude-auth-lib.py
+    ok "claude-auth-lib.py → /usr/local/lib/claude-server/"
 fi
-if [ -f "$SERVER_DIR/claude-watchdog.sh" ]; then
-    install -m 755 "$SERVER_DIR/claude-watchdog.sh" /usr/local/bin/claude-watchdog
-    ok "claude-watchdog → /usr/local/bin/"
+if [ -f "$SERVER_DIR/claude-auth-probe.sh" ]; then
+    install -m 755 "$SERVER_DIR/claude-auth-probe.sh" /usr/local/bin/claude-auth-probe
+    ok "claude-auth-probe → /usr/local/bin/"
+fi
+
+touch /var/log/claude-auth.log
+chmod 644 /var/log/claude-auth.log
+ok "/var/log/claude-auth.log ready"
+
+if [ -x /usr/local/bin/claude-auth-probe ]; then
+    cat > /etc/cron.d/claude-auth-probe <<'CRON'
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+*/30 * * * * root /usr/local/bin/claude-auth-probe cron >> /var/log/claude-auth.log 2>&1
+CRON
+    chmod 644 /etc/cron.d/claude-auth-probe
+    ok "claude-auth-probe cron → every 30 min"
+fi
+if [ -f "$SERVER_DIR/claude-mount.sh" ]; then
+    install -m 755 "$SERVER_DIR/claude-mount.sh" /usr/local/lib/claude-mount
+    ok "claude-mount → /usr/local/lib/claude-mount"
+    ln -sf /usr/local/lib/claude-mount /usr/local/bin/claude-mount 2>/dev/null || true
+    for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
+        [ -d "/home/$u" ] || continue
+        mkdir -p "/home/$u/.local/bin"
+        install -m 755 /usr/local/lib/claude-mount "/home/$u/.local/bin/claude-mount"
+        chown "$u:$u" "/home/$u/.local/bin/claude-mount"
+    done
+    ok "claude-mount → all users ~/.local/bin/"
+    if [ -x /usr/local/bin/claude-automount ]; then
+        for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
+            [ -d "/home/$u" ] || continue
+            mkdir -p "/home/$u/.local/bin"
+            install -m 755 /usr/local/bin/claude-automount "/home/$u/.local/bin/claude-automount"
+            chown "$u:$u" "/home/$u/.local/bin/claude-automount"
+            br="/home/$u/.bashrc"
+            if [ -f "$br" ] && grep -q 'claude-automount' "$br" && ! grep -q '.local/bin/claude-automount' "$br"; then
+                sed -i 's|/usr/local/bin/claude-automount 2>/dev/null|"$HOME/.local/bin/claude-automount" 2>/dev/null \|\| /usr/local/bin/claude-automount 2>/dev/null|' "$br"
+            fi
+        done
+        ok "claude-automount → all users ~/.local/bin/ + bashrc"
+    fi
 fi
 if [ -f "$SERVER_DIR/claude-git-setup.sh" ]; then
     install -m 755 "$SERVER_DIR/claude-git-setup.sh" /usr/local/bin/claude-git-setup
     ok "claude-git-setup → /usr/local/bin/"
+    for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
+        [ -d "/home/$u" ] || continue
+        mkdir -p "/home/$u/.local/bin"
+        install -m 755 /usr/local/bin/claude-git-setup "/home/$u/.local/bin/claude-git-setup"
+        chown "$u:$u" "/home/$u/.local/bin/claude-git-setup"
+    done
+    ok "claude-git-setup → all users ~/.local/bin/"
 fi
-if [ -f "$SERVER_DIR/designer-start.sh" ]; then
+if [ -f "$SERVER_DIR/claude-watchdog.sh" ]; then
     install -m 755 "$SERVER_DIR/designer-start.sh" /usr/local/bin/designer-start
     ok "designer-start → /usr/local/bin/"
 fi
 if [ -f "$SERVER_DIR/check-tokens.py" ]; then
     install -m 755 "$SERVER_DIR/check-tokens.py" /usr/local/bin/claude-check-tokens
     ok "claude-check-tokens → /usr/local/bin/"
+fi
+if [ -f "$SERVER_DIR/cursor-auth-lib.py" ]; then
+    mkdir -p /usr/local/lib/claude-server
+    install -m 644 "$SERVER_DIR/cursor-auth-lib.py" /usr/local/lib/claude-server/cursor-auth-lib.py
+    ok "cursor-auth-lib.py → /usr/local/lib/claude-server/"
+fi
+if [ -f "$SERVER_DIR/cursor-auth-export.sh" ]; then
+    install -m 755 "$SERVER_DIR/cursor-auth-export.sh" /usr/local/bin/cursor-auth-export
+    ok "cursor-auth-export → /usr/local/bin/"
+fi
+if [ -f "$SERVER_DIR/cursor-auth-sync.sh" ]; then
+    install -m 755 "$SERVER_DIR/cursor-auth-sync.sh" /usr/local/bin/cursor-auth-sync
+    ok "cursor-auth-sync → /usr/local/bin/"
+fi
+if [ -f "$SERVER_DIR/cursor-auth-refresh.sh" ]; then
+    install -m 755 "$SERVER_DIR/cursor-auth-refresh.sh" /usr/local/bin/cursor-auth-refresh
+    ok "cursor-auth-refresh → /usr/local/bin/"
+fi
+if [ -f "$SERVER_DIR/cursor-auth-source-path.sh" ]; then
+    install -m 755 "$SERVER_DIR/cursor-auth-source-path.sh" /usr/local/bin/cursor-auth-source-path
+    ok "cursor-auth-source-path → /usr/local/bin/"
+fi
+if [ -f "$SERVER_DIR/audit-cursor-golden-deep.py" ]; then
+    mkdir -p /usr/local/lib/claude-server
+    install -m 755 "$SERVER_DIR/audit-cursor-golden-deep.py" /usr/local/lib/claude-server/audit-cursor-golden-deep.py
+    ok "audit-cursor-golden-deep.py → /usr/local/lib/claude-server/"
+fi
+
+mkdir -p /etc/cursor-auth/golden
+chmod 755 /etc/cursor-auth/golden
+ok "/etc/cursor-auth/golden ready (755, readable for automount sync)"
+
+touch /var/log/cursor-auth-refresh.log
+chmod 644 /var/log/cursor-auth-refresh.log
+ok "/var/log/cursor-auth-refresh.log ready"
+
+if [ -x /usr/local/bin/cursor-auth-refresh ]; then
+    cat > /etc/cron.d/cursor-auth-refresh <<'CRON'
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+0 */6 * * * root /usr/local/bin/cursor-auth-refresh >> /var/log/cursor-auth-refresh.log 2>&1
+CRON
+    chmod 644 /etc/cron.d/cursor-auth-refresh
+    ok "cursor-auth-refresh cron → /etc/cron.d/cursor-auth-refresh (every 6h)"
 fi
 
 # ─── Step 6: config + runtime dirs ──────────────────────────────────────────
@@ -209,6 +300,21 @@ else
         warn "headroom-ai install failed — run manually: pip3 install 'headroom-ai[mcp]'"
 fi
 
+# ─── Step 10a: Cursor CLI (optional bootstrap for agent login) ────────────────
+step "10a - Cursor CLI"
+
+if command -v agent &>/dev/null; then
+    ok "Cursor CLI: already installed ($(agent --version 2>/dev/null | head -1 || echo ok))"
+else
+    if curl -fsSL https://cursor.com/install -o /tmp/cursor-install.sh 2>/dev/null; then
+        bash /tmp/cursor-install.sh 2>/dev/null && ok "Cursor CLI installed" || \
+            warn "Cursor CLI install failed — run manually: curl https://cursor.com/install -fsS | bash"
+        rm -f /tmp/cursor-install.sh
+    else
+        warn "Cursor CLI download failed — install manually for bootstrap login"
+    fi
+fi
+
 # ─── Step 10b: mcp-sqlserver ──────────────────────────────────────────────────
 step "10b - mcp-sqlserver"
 if command -v mcp-sqlserver &>/dev/null; then
@@ -282,6 +388,11 @@ if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null && [ -x /usr
     ok "OAuth token synced to all users"
 fi
 
+if [ -f /etc/cursor-auth/golden/auth.json ] && [ -x /usr/local/bin/cursor-auth-sync ]; then
+    cursor-auth-sync --all
+    ok "Cursor golden identity synced to all users"
+fi
+
 # ─── Done ────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}${BOLD}========================================${NC}"
@@ -305,4 +416,9 @@ echo "       sudo claude-server verify"
 echo ""
 echo "  After OAuth token change:"
 echo "       sudo claude-server sync-auth"
+echo ""
+echo "  Cursor golden auth (one-time bootstrap):"
+echo "       agent login   # or connect once via Remote SSH to populate ~/.config/Cursor/"
+echo "       sudo cursor-auth-export --from-user smart"
+echo "       sudo claude-server sync-cursor-auth"
 echo ""

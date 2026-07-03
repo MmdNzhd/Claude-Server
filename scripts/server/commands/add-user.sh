@@ -66,6 +66,11 @@ if [ -x /usr/local/bin/claude-git-setup ]; then
     chown "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin/claude-git-setup"
     ok "~/.local/bin/claude-git-setup installed"
 fi
+if [ -x /usr/local/bin/claude-automount ]; then
+    install -m 755 /usr/local/bin/claude-automount "/home/$USERNAME/.local/bin/claude-automount"
+    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin/claude-automount"
+    ok "~/.local/bin/claude-automount installed"
+fi
 
 chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin"
 
@@ -74,16 +79,24 @@ PLUGIN_SRC="/home/smart/.claude/plugins/cache/claude-plugins-official"
 PLUGIN_DST="/home/$USERNAME/.claude/plugins/cache/claude-plugins-official"
 mkdir -p "$PLUGIN_DST"
 if [ -d "$PLUGIN_SRC/superpowers" ]; then
-    cp -r "$PLUGIN_SRC/superpowers" "$PLUGIN_DST/"
-    ok "superpowers plugin copied"
+    if [ "$PLUGIN_SRC" = "$PLUGIN_DST" ] || [ -d "$PLUGIN_DST/superpowers" ]; then
+        ok "superpowers plugin present"
+    else
+        cp -r "$PLUGIN_SRC/superpowers" "$PLUGIN_DST/"
+        ok "superpowers plugin copied"
+    fi
 else
     warn "superpowers not found in smart's cache — user must install manually"
 fi
 ECC_SRC="/home/smart/.claude/plugins/cache/ecc/latest"
 if [ -d "$ECC_SRC" ]; then
     mkdir -p "/home/$USERNAME/.claude/plugins/cache/ecc"
-    cp -r "$ECC_SRC" "/home/$USERNAME/.claude/plugins/cache/ecc/"
-    ok "ECC plugin copied"
+    if [ "$USERNAME" = "smart" ] && [ -d "/home/$USERNAME/.claude/plugins/cache/ecc/latest" ]; then
+        ok "ECC plugin present"
+    else
+        cp -r "$ECC_SRC" "/home/$USERNAME/.claude/plugins/cache/ecc/"
+        ok "ECC plugin copied"
+    fi
 else
     warn "ECC not found — run: git clone --depth=1 https://github.com/affaan-m/ECC /home/smart/.claude/plugins/cache/ecc/latest"
 fi
@@ -154,6 +167,16 @@ else
     warn "claude-auth-sync not installed — run: sudo claude-server install"
 fi
 
+if [ -x /usr/local/bin/cursor-auth-sync ] && [ -f /etc/cursor-auth/golden/auth.json ]; then
+    cursor-auth-sync "$USERNAME"
+    ok "Cursor golden identity synced (~/.config/Cursor/)"
+elif [ -f /etc/cursor-auth/golden/auth.json ]; then
+    warn "cursor-auth-sync not installed — run: sudo claude-server install"
+else
+    warn "no Cursor golden auth yet — after first login run: sudo cursor-auth-export --from-user $USERNAME"
+    warn "then: sudo claude-server sync-cursor-auth $USERNAME"
+fi
+
 step "5 - SSH"
 mkdir -p "/home/$USERNAME/.ssh"
 touch "/home/$USERNAME/.ssh/authorized_keys"
@@ -171,9 +194,9 @@ if ! grep -q "claude-automount" "$BASHRC"; then
 # --- Claude Code auto-mount ---
 case $- in
   *i*)
-    if [ -z "$CLAUDE_AUTOMOUNT_DONE" ] && [ -x /usr/local/bin/claude-automount ]; then
+    if [ -z "$CLAUDE_AUTOMOUNT_DONE" ] && { [ -x "$HOME/.local/bin/claude-automount" ] || [ -x /usr/local/bin/claude-automount ]; }; then
         export CLAUDE_AUTOMOUNT_DONE=1
-        /usr/local/bin/claude-automount 2>/dev/null
+        "$HOME/.local/bin/claude-automount" 2>/dev/null || /usr/local/bin/claude-automount 2>/dev/null
         [ "$PWD" = "$HOME" ] && [ -d "$HOME/work" ] && cd "$HOME/work"
     fi
     ;;

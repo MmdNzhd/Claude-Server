@@ -45,6 +45,10 @@ else
     bash "$SYNC_BIN" --all
 fi
 
+PROBE="/usr/local/bin/claude-auth-probe"
+[ -x "$PROBE" ] && bash "$PROBE" "sync-auth" || true
+
 echo ""
 echo -e "${GREEN}Done.${NC} Users should reload VS Code (Developer: Reload Window)."
+echo "  Audit log: /var/log/claude-auth.log"
 echo ""

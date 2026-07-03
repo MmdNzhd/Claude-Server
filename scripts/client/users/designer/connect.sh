@@ -26,6 +26,8 @@ step_fail() { printf ' failed\n'; [ -n "${1:-}" ] && printf '      -> %s\n' "$*"
 
 sshx() { ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "$ALIAS" "$@"; }
 
+_tunnel_alive() { kill -0 "$1" 2>/dev/null && ps -p "$1" -o state= 2>/dev/null | grep -qv 'Z'; }
+
 tunnel_up() {
     sshx "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$PORT' 2>/dev/null && echo UP" 2>/dev/null | grep -q UP
 }
@@ -197,6 +199,14 @@ if [ "$PORT" -gt 65535 ];   then step_fail "server UID too large (port $PORT > 6
 if [ -z "$PUB_B" ];         then step_fail "could not read server key"; exit 1; fi
 step_ok "port $PORT"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_GIT_MODE_SH="$SCRIPT_DIR/git-mode.sh"
+[ -f "$_GIT_MODE_SH" ] || _GIT_MODE_SH="$SCRIPT_DIR/../git-mode.sh"
+[ -f "$_GIT_MODE_SH" ] || _GIT_MODE_SH="$SCRIPT_DIR/../../git-mode.sh"
+# shellcheck source=../git-mode.sh
+[ -f "$_GIT_MODE_SH" ] || die "git-mode.sh not found - re-copy the full designer package"
+. "$_GIT_MODE_SH"
+
 step "Server key"
 touch "$HOME/.ssh/authorized_keys"; chmod 600 "$HOME/.ssh/authorized_keys"
 grep -vF "$PUB_B" "$HOME/.ssh/authorized_keys" > "$HOME/.ssh/authorized_keys.tmp" 2>/dev/null && mv "$HOME/.ssh/authorized_keys.tmp" "$HOME/.ssh/authorized_keys" || true
@@ -219,14 +229,24 @@ Host $ALIAS
     RemoteForward $PORT localhost:22
     ExitOnForwardFailure no
 EOF
-sshx "printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\n' '${LAPTOP_USER}' '$PORT' > ~/.claude-connect.conf" 2>/dev/null || true
-step_ok "laptop=$LAPTOP_USER port=$PORT"
+push_server_connect_conf
+step_ok "laptop=$LAPTOP_USER port=$PORT git=$(get_git_mode)"
 
-SRC="$(cd "$(dirname "$0")" && pwd)/../../server/claude-mount.sh"
-if [ -f "$SRC" ]; then
+server_dir="$(resolve_server_script_dir "$SCRIPT_DIR" 2>/dev/null || true)"
+SRC=""
+GIT_SRC=""
+if [ -n "$server_dir" ]; then
+    [ -f "$server_dir/claude-mount.sh" ] && SRC="$server_dir/claude-mount.sh"
+    [ -f "$server_dir/claude-git-setup.sh" ] && GIT_SRC="$server_dir/claude-git-setup.sh"
+fi
+if [ -n "$SRC" ] || [ -n "$GIT_SRC" ]; then
     sshx "mkdir -p ~/.local/bin" 2>/dev/null || true
-    scp -o BatchMode=yes -o ConnectTimeout=30 -q "$SRC" "$ALIAS:~/.local/bin/claude-mount" 2>/dev/null || true
-    sshx "chmod +x ~/.local/bin/claude-mount; grep -q 'CLAUDE_LOCAL_BIN_PATH' ~/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=\$HOME/.local/bin:\$PATH\n' >> ~/.bashrc" 2>/dev/null || true
+    [ -f "$SRC" ] && scp -o BatchMode=yes -o ConnectTimeout=30 -q "$SRC" "$ALIAS:~/.local/bin/claude-mount" 2>/dev/null || true
+    [ -f "$GIT_SRC" ] && scp -o BatchMode=yes -o ConnectTimeout=30 -q "$GIT_SRC" "$ALIAS:~/.local/bin/claude-git-setup" 2>/dev/null || true
+    _chmod=""
+    [ -f "$SRC" ] && _chmod="chmod +x ~/.local/bin/claude-mount; grep -q 'CLAUDE_LOCAL_BIN_PATH' ~/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=\$HOME/.local/bin:\$PATH\n' >> ~/.bashrc"
+    [ -f "$GIT_SRC" ] && _chmod="${_chmod:+"$_chmod; "}chmod +x ~/.local/bin/claude-git-setup"
+    [ -n "$_chmod" ] && sshx "$_chmod" 2>/dev/null || true
 fi
 
 echo ""
@@ -258,8 +278,9 @@ cleanup_session() {
     [ "$already_down" -eq 1 ] && return 0
     already_down=1
     printf '\n    Disconnecting...\n'
-    # timeout 8: bounds hang if remote claude-mount down gets stuck
     timeout 8 ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$ALIAS" "$CM down '$MOUNT_ID'" 2>/dev/null || true
+    ACTIVE_MOUNT_ID=""
+    push_server_connect_conf
     [ -n "$bg_pid" ] && kill "$bg_pid" 2>/dev/null || true
 }
 trap cleanup_session EXIT
@@ -328,11 +349,21 @@ while true; do
             _rk="$(printf '%s' "$_rk" | tr '[:upper:]' '[:lower:]')"
         done
         [ "$_rk" = "r" ] && { echo ""; continue; }
+        ACTIVE_MOUNT_ID=""
+        push_server_connect_conf
         kill "$bg_pid" 2>/dev/null || true
         already_down=1; break
     fi
 
     sshx "$CM recover" 2>/dev/null || true
+    if ! _git_mode_tunnel_ok; then
+        warn "Tunnel dropped during recover — reconnecting..."
+        continue
+    fi
+
+    ACTIVE_MOUNT_ID="$MOUNT_ID"
+    push_server_connect_conf
+    unmount_other_projects "$MOUNT_ID"
 
     step "Mounting files"
     mount_start=$SECONDS
@@ -343,6 +374,7 @@ while true; do
     if [ $mount_exit -eq 0 ] && ! echo "$mount_out" | grep -q 'error:\|FAILED\|No tunnel\|not configured'; then
         mount_ok=1
     fi
+    show_mount_git_warn "$mount_out"
 
     # Auto-fix: connection reset or key rejected -> fix and retry once
     if [ $mount_ok -eq 0 ] && echo "$mount_out" | grep -qi 'key auth failed\|connection reset\|reset by peer\|publickey\|Permission denied'; then
@@ -389,11 +421,14 @@ while true; do
             _rk="$(printf '%s' "$_rk" | tr '[:upper:]' '[:lower:]')"
         done
         [ "$_rk" = "r" ] && { echo ""; continue; }
+        ACTIVE_MOUNT_ID=""
+        push_server_connect_conf
         kill "$bg_pid" 2>/dev/null || true
         already_down=1; break
     fi
 
     step_ok "${mount_t}s"
+    ACTIVE_PROJECT_ID="$MOUNT_ID"
     clean_out="$(printf '%s' "$mount_out" | sed 's/^already mounted: //')"
     [ -n "$clean_out" ] && printf '      -> \033[0;90m%s\033[0m\n' "$clean_out"
 
@@ -414,15 +449,12 @@ while true; do
     printf '    ============================================\n'
     printf '    Session active -- keep this window open\n'
     printf '    Files mounted at: %s\n' "$MOUNT_LPATH"
-    printf '    R = reconnect   Q or Enter = disconnect\n'
+    printf '    G = git mode   R = reconnect   Q or Enter = disconnect\n'
     printf '    ============================================\n'
     echo ""
 
     # Flush buffered keypresses before entering wait loop
     while read -r -t 0 </dev/tty 2>/dev/null; do read -r -n 1 </dev/tty 2>/dev/null || true; done
-
-    # kill -0 returns 0 for zombie processes; ps state check filters zombies
-    _tunnel_alive() { kill -0 "$1" 2>/dev/null && ps -p "$1" -o state= 2>/dev/null | grep -qv 'Z'; }
 
     _action="q"
     _got_key=0
@@ -430,17 +462,24 @@ while true; do
         if read -r -t 1 -n 1 _key </dev/tty 2>/dev/null; then
             _key_lower="$(printf '%s' "$_key" | tr '[:upper:]' '[:lower:]')"
             [ "$_key_lower" = "r" ] && _action="r"
+            [ "$_key_lower" = "g" ] && _action="g"
             _got_key=1; break
         fi
     done
     if [ "$_got_key" -eq 0 ] && ! _tunnel_alive "$bg_pid"; then
-        _action="r"
-        printf '\n    Connection dropped - reconnecting...\n'
+        tunnel_drop_session_action
+    fi
+
+    if [ "$_action" = "g" ]; then
+        configure_git_mode
+        continue
     fi
 
     echo ""
     printf '    Disconnecting...\n'
     ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$ALIAS" "$CM down '$MOUNT_ID'" 2>/dev/null || true
+    ACTIVE_MOUNT_ID=""
+    push_server_connect_conf
     kill "$bg_pid" 2>/dev/null || true
     already_down=1
 

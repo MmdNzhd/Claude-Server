@@ -10,8 +10,13 @@ if [ -x /usr/local/bin/claude-auth-sync ]; then
     /usr/local/bin/claude-auth-sync
 fi
 
+if [ -x /usr/local/bin/cursor-auth-sync ] && [ -f /etc/cursor-auth/golden/auth.json ]; then
+    /usr/local/bin/cursor-auth-sync
+fi
+
 MOUNT_BIN="$HOME/.local/bin/claude-mount"
 [ -x "$MOUNT_BIN" ] || MOUNT_BIN="/usr/local/bin/claude-mount"
+[ -x "$MOUNT_BIN" ] || MOUNT_BIN="/usr/local/lib/claude-mount"
 
 # Fall back to legacy single-mount if new system not available
 if [ ! -x "$MOUNT_BIN" ]; then
@@ -24,11 +29,15 @@ CONF_DIR="$HOME/.claude-mounts.d"
 
 # Check tunnel is up before attempting mounts (avoids 30s sshfs timeout on login)
 CONNECT_CONF="$HOME/.claude-connect.conf"
+ACTIVE_MOUNT=""
 if [ -f "$CONNECT_CONF" ]; then
     TUNNEL_PORT=""
     while IFS='=' read -r k v; do
         v="${v#\"}" v="${v%\"}"
-        [ "$k" = "TUNNEL_PORT" ] && TUNNEL_PORT="$v"
+        case "$k" in
+            TUNNEL_PORT) TUNNEL_PORT="$v" ;;
+            ACTIVE_MOUNT|active_mount) ACTIVE_MOUNT="$v" ;;
+        esac
     done < "$CONNECT_CONF"
     if [ -n "$TUNNEL_PORT" ]; then
         if ! timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$TUNNEL_PORT" 2>/dev/null; then
@@ -40,7 +49,10 @@ fi
 # Restore any .git dirs hidden by a previous crashed session before mounting
 "$MOUNT_BIN" recover 2>/dev/null || true
 
-"$MOUNT_BIN" up 2>/dev/null
+# Only mount the project connect.bat selected (never mount all projects on login)
+if [ -n "$ACTIVE_MOUNT" ]; then
+    "$MOUNT_BIN" up "$ACTIVE_MOUNT" 2>/dev/null || true
+fi
 
 # Auto-init CodeGraph and Headroom for any newly mounted project.
 # Runs in background after a short delay so SSHFS mounts settle first.

@@ -422,15 +422,40 @@ cmd_edit(rpath)   → restore old → update config
 
 ## Deployment
 
-Scripts are deployed to all users via `deploy-fixes.sh`:
+Deploy to **all users** and system lib:
 
 ```bash
-sudo bash ~/mounts/claude-code-server/scripts/server/deploy-fixes.sh
+sudo claude-server install    # idempotent — copies claude-mount to /usr/local/lib + per-user
+sudo claude-server verify     # checks GIT_MODE in /usr/local/lib/claude-mount
 ```
 
-This copies `claude-mount.sh` to `/usr/local/lib/claude-mount` and then installs it to every user's `~/.local/bin/claude-mount`. The `connect.ps1` client also pushes `claude-mount.sh` directly to the connecting user's `~/.local/bin/` on every connect, keeping individual installs current without requiring admin access.
+On every connect, `connect.ps1` also pushes `claude-mount.sh` + `claude-git-setup.sh` to the connecting user's `~/.local/bin/`. Individual users may be ahead of `/usr/local/lib/` until admin runs install.
 
-13 users on this server: `administrator`, `mohammad`, `smart`, `hamed`, `aria`, `amirhossein`, `amir`, `mehrdad`, `parsa`, `reza`, `kiana`, `hamed.kh`, `testuser2`.
+**Do not use** removed legacy `deploy-fixes.sh` — use `sudo claude-server install`.
+
+13 users on smart server: `administrator`, `mohammad`, `smart`, `hamed`, `aria`, `amirhossein`, `amir`, `mehrdad`, `parsa`, `reza`, `kiana`, `hamed.kh`, `testuser2`.
+
+---
+
+## Client Package (v20260703.12)
+
+Windows folder must contain **all four** files: `connect.bat`, `connect.ps1`, `editor-launch.ps1`, `git-mode.ps1`.
+
+`connect.bat` guards against stale copies (checks `ConnectVersion`, `@(Choose-Project`, `Path.Combine`, `git-mode.ps1`).
+
+See [client-connect.md](client-connect.md) for user guide, hotkeys, and troubleshooting.
+
+---
+
+## Join-Path Pipeline Bug (Fixed .10)
+
+**Symptom:** After selecting project `1`, PowerShell prompts for `Join-Path -ChildPath`.
+
+**Cause:** PSCustomObject leaked into pipeline; `editor-launch.ps1` used `Join-Path` which bound the object as `-Path`.
+
+**Fix:** `Choose-Project` with `return ,($obj)`; capture with `@(...)[-1]`; `editor-launch.ps1` uses `[System.IO.Path]::Combine`.
+
+Regression tests: `scripts/client/tests/run-all.bat`.
 
 ---
 
@@ -480,9 +505,47 @@ Ubuntu 24 Server
 
 | File | Purpose |
 |------|---------|
-| `scripts/server/claude-mount.sh` | Core: git hide/restore, stubs, cache warm, recover, self-healing |
+| `scripts/server/claude-mount.sh` | Core: GIT_MODE hide/restore, stubs, cache warm, recover, self-healing |
+| `scripts/server/claude-git-setup.sh` | Local git mirror; skipped when `GIT_MODE=server` |
 | `scripts/server/claude-automount.sh` | Login: recover + mount all projects + start watchdog |
 | `scripts/server/claude-watchdog.sh` | Background: detect hung mounts, recover, remount |
-| `scripts/client/windows/connect.ps1` | Client: tunnel + recover + mount + open VSCode |
-| `scripts/server/deploy-fixes.sh` | Admin: deploy updated scripts to all 13 users |
+| `scripts/client/git-mode.ps1` | Shared Windows: Get-GitMode, Configure-GitMode, remount |
+| `scripts/client/git-mode.sh` | Shared Mac/bash: same helpers |
+| `scripts/client/editor-launch.ps1` | Cursor/VS Code Remote SSH (`Path.Combine` for paths) |
+| `scripts/client/windows/connect.ps1` | Client: tunnel + recover + mount + open editor |
+| `scripts/client/tests/run-all.bat` | Regression test runner |
+| `docs/client-connect.md` | Client user + developer guide |
 | `docs/sshfs-performance.md` | This document |
+
+---
+
+## GIT_MODE — User-Controlled Git Visibility (v20260703.12)
+
+By default **hide mode** renames `.git` → `.git.server-session` on the laptop before SSHFS mount. Git on the server uses a local mirror (`claude-git-setup`) instead of slow SSHFS stat storms.
+
+**server mode** keeps `.git` visible on the mount — full git over SSHFS (slow, but some workflows need it).
+
+| Control | When | Action |
+|---------|------|--------|
+| `g` | Project menu (before session) | Toggle hide/server, save to `~/.config/claude-connect/git.conf` |
+| `G` | Active session | Same toggle + remount current project |
+| Per-project override | Server only | Add `git_mode=hide` or `git_mode=server` to `~/.claude-mounts.d/<id>.conf` |
+
+**Config flow:**
+
+```
+Laptop git.conf  →  connect.ps1/sh pushes  →  ~/.claude-connect.conf (GIT_MODE, LAPTOP_OS)
+                                                      ↓
+                                              claude-mount (hide/restore on mount)
+                                              claude-git-setup (skip mirror when server)
+```
+
+**Shared modules:** `scripts/client/git-mode.ps1` (Windows) and `git-mode.sh` (Mac) — dot-sourced by developer + designer launchers.
+
+**If hide fails** (Cursor locks `.git`): client shows `warn: git hide failed …`; mount retries rename 3× and stops `git.exe` on attempt 2. Close Cursor Remote or run `git status` on laptop, then press `G` → Off to retry.
+
+**Designer:** same `G` hotkey and git.conf; mount id is always `laptop`.
+
+**Verify on server:** `sudo claude-server verify` checks `/usr/local/lib/claude-mount` contains `GIT_MODE`.
+
+**Regression tests:** `scripts/client/tests/test-git-mode-deep.ps1` + `run-all.bat`.

@@ -1,4 +1,4 @@
-﻿# connect-design.ps1 - Claude Design launcher for Windows.
+# connect-design.ps1 - Claude Design launcher for Windows.
 # Usage: double-click connect-design.bat
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -198,7 +198,7 @@ Step "Starting Chrome session"
 $sessionOut = (SshX "designer-start start $screenW $screenH 2>&1") -join "`n"
 if ($sessionOut -notmatch 'OK') {
     StepFail $sessionOut.Trim()
-    Die "Could not start Chrome session. Ask admin to run setup-designer.sh."
+    Die "Could not start Chrome session. Ask admin to run: sudo claude-server install"
 }
 $novncPort = ($sessionOut -split "`n" |
     Where-Object { $_ -match '^NOVNC_PORT=' } |

@@ -58,11 +58,14 @@ for h in claude-hook-pre claude-hook-stop claude-hook-logout-block; do
     [ -x "/usr/local/bin/$h" ] && ok "$h: installed" || fail "$h: missing or not executable"
 done
 
-for b in claude-automount claude-auth-sync claude-git-setup; do
+for b in claude-automount claude-auth-sync claude-git-setup cursor-auth-sync cursor-auth-export cursor-auth-refresh; do
     [ -x "/usr/local/bin/$b" ] && ok "$b: installed" || warn "$b: missing"
 done
 
 [ -f /usr/local/lib/claude-mount ] && ok "claude-mount: installed" || warn "claude-mount: missing"
+if [ -f /usr/local/lib/claude-mount ]; then
+    grep -q 'GIT_MODE' /usr/local/lib/claude-mount && ok "claude-mount: GIT_MODE support" || warn "claude-mount: outdated (no GIT_MODE — run claude-server install)"
+fi
 [ -f /etc/claude-limits.conf ] && ok "claude-limits.conf: exists" || warn "claude-limits.conf: missing (default limit=2)"
 [ -d /var/run/claude-active ] && ok "/var/run/claude-active: exists" || fail "/var/run/claude-active: missing"
 [ -f /var/log/claude-activity.jsonl ] && ok "activity log: exists" || warn "activity log: missing (created on first use)"
@@ -71,6 +74,12 @@ if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null; then
     ok "server OAuth token: /etc/environment"
 else
     fail "server OAuth token missing from /etc/environment"
+fi
+
+if [ -f /etc/cursor-auth/golden/auth.json ]; then
+    ok "Cursor golden auth: /etc/cursor-auth/golden/"
+else
+    warn "Cursor golden auth not configured (optional until Cursor IDE is used)"
 fi
 
 echo ""
@@ -105,17 +114,56 @@ for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd | sort); do
     [ -d "$h" ] || continue
     echo "$SYSTEM_USERS" | grep -qw "$u" && continue
 
-    score=0; total=5
+    score=0
+    total=5
     has_mount=false
     _user_readable "$h/.local/bin/claude-mount" && has_mount=true && ((score++))
 
     has_hooks=false
     has_effort=false
     has_oauth=false
+    has_cursor=false
+    has_cursor_machine=false
+    cursor_golden=false
+    [ -f /etc/cursor-auth/golden/auth.json ] && cursor_golden=true && total=7
     if _user_readable "$h/.claude/settings.json"; then
         _user_grep "$h/.claude/settings.json" 'claude-hook-pre' && has_hooks=true && ((score++))
         _user_grep "$h/.claude/settings.json" 'effortLevel'     && has_effort=true && ((score++))
         _user_grep "$h/.claude/settings.json" 'CLAUDE_CODE_OAUTH_TOKEN' && has_oauth=true && ((score++))
+    fi
+
+    if $cursor_golden; then
+        golden_mid="$(tr -d '[:space:]' < /etc/cursor-auth/golden/machine-id.txt 2>/dev/null || true)"
+        user_mid="$(python3 - "$h" <<'PY' 2>/dev/null || true
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location(
+    "cal", "/usr/local/lib/claude-server/cursor-auth-lib.py"
+)
+cal = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cal)
+print(cal.user_machine_id(Path(sys.argv[1])) or "", end="")
+PY
+)"
+        access_ok="$(python3 - "$h" <<'PY' 2>/dev/null || true
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location(
+    "cal", "/usr/local/lib/claude-server/cursor-auth-lib.py"
+)
+cal = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cal)
+print("yes" if cal.user_has_tokens(Path(sys.argv[1])) else "no", end="")
+PY
+)"
+        if [ "$access_ok" = "yes" ]; then
+            has_cursor=true
+            ((score++))
+        fi
+        if [ -n "$user_mid" ] && [ -n "$golden_mid" ] && [ "$user_mid" = "$golden_mid" ]; then
+            has_cursor_machine=true
+            ((score++))
+        fi
     fi
 
     has_bashrc=false
@@ -132,6 +180,10 @@ for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd | sort); do
     $has_hooks   && ok "hooks configured"  || fail "hooks missing in settings.json"
     $has_effort  && ok "effortLevel set"   || warn "effortLevel missing"
     $has_oauth   && ok "OAuth in settings" || fail "OAuth token missing in settings.json (run: sudo claude-server sync-auth)"
+    if [ -f /etc/cursor-auth/golden/auth.json ]; then
+        $has_cursor && ok "Cursor auth in state.vscdb" || fail "Cursor auth missing (run: sudo claude-server sync-cursor-auth $u)"
+        $has_cursor_machine && ok "Cursor machineId matches golden" || warn "Cursor machineId mismatch (run: sudo claude-server sync-cursor-auth $u)"
+    fi
     $has_bashrc  && ok "automount .bashrc" || fail "automount missing in .bashrc"
     echo ""
 done

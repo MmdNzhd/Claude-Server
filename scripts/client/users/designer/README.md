@@ -1,32 +1,78 @@
 # Designer Connect — Quick Start
 
+SSHFS mount of laptop design folder + noVNC browser desktop. No Cursor/VS Code.
+
+Client scripts: **v20260703.12** (Windows developer package uses same git-mode modules).
+
 ## Windows
 
-1. Copy `connect.bat` + `connect.ps1` to your laptop
-2. Double-click `connect.bat`
-3. First time: enter your server username and the path to your design files on this laptop
-4. Browser opens automatically with the remote desktop (noVNC)
+Required files (same folder):
 
-**Reconnect:** press `R` in the connect window  
-**Disconnect:** press `Q` or close the window  
-**Reconfigure:** `connect.bat -Setup`
+| File |
+|------|
+| `connect.bat` |
+| `connect.ps1` |
+| `git-mode.ps1` |
+
+1. Double-click `connect.bat`
+2. First time: enter server username + laptop folder path (`-Setup` to change later)
+3. Browser opens noVNC: `http://localhost:27015/vnc.html`
+
+**Git mode:** preference in `%USERPROFILE%\.config\claude-connect-designer\git.conf`
+
+| Key | Action |
+|-----|--------|
+| `G` | Change git mode + remount (`laptop` mount id) |
+| `R` | Reconnect |
+| `Q` | Disconnect |
+
+Default: **hide** — `.git` hidden on laptop (fast). Use `G` → On only if you need git over SSHFS on server.
+
+**Reconfigure path:** `connect.bat -Setup`
 
 ---
 
 ## Mac
 
+Required: `connect.sh` + `git-mode.sh`
+
 ```bash
 bash connect.sh
+bash connect.sh --setup
 ```
 
-Same flow as Windows. Browser opens automatically with the remote desktop.
-
-**Reconfigure:** `bash connect.sh --setup`
+Same hotkeys (`G`, `R`, `Q`).
 
 ---
 
 ## What This Does
 
-- Mounts your laptop's design folder on the server so design tools and files are accessible remotely
-- Opens a browser-based remote desktop (noVNC) connected to the server
-- All changes save directly to your laptop
+- Reverse SSH tunnel: server → laptop OpenSSH
+- SSHFS: server `/home/designer/mounts/laptop` ← your laptop folder
+- SSH local forward: laptop `127.0.0.1:27015` → server noVNC
+- Chrome on server downloads to mounted laptop folder (managed policy)
+
+---
+
+## Server (Admin)
+
+```bash
+sudo claude-server install
+sudo designer-start start    # VNC stack for designer user
+```
+
+Designer Chrome download dir: `/home/designer/mounts/laptop` (via managed policy).
+
+---
+
+## Troubleshooting
+
+| Issue | Action |
+|-------|--------|
+| noVNC not reachable | Admin: `sudo designer-start start` on server |
+| Mount fails | Check laptop path with `-Setup`; ensure OpenSSH Server running |
+| Git hide warning | `G` → Off; close apps locking `.git` on laptop |
+
+Sepidz package uses the same connect scripts; publish patches only the server IP.
+
+See [docs/client-connect.md](../../../../docs/client-connect.md) for GIT_MODE details.

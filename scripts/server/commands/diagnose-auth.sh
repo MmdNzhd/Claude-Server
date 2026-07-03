@@ -122,6 +122,21 @@ if [ -f "$AUTH_FILE" ]; then
 fi
 
 [ -x /usr/local/bin/claude-auth-sync ] && ok "claude-auth-sync installed" || warn "claude-auth-sync missing — run: sudo claude-server install"
+[ -x /usr/local/bin/claude-auth-probe ] && ok "claude-auth-probe installed" || warn "claude-auth-probe missing — run: sudo claude-server install"
+[ -f /var/log/claude-auth.log ] && ok "audit log: /var/log/claude-auth.log" || info "audit log not created yet — run: sudo claude-server install"
+
+if [ -f /etc/cron.d/claude-auth-probe ]; then
+    ok "probe cron: /etc/cron.d/claude-auth-probe (every 30 min)"
+else
+    warn "probe cron missing — run: sudo claude-server install"
+fi
+
+if [ -f /var/log/claude-auth.log ]; then
+    last_probe="$(grep '"event":"PROBE_' /var/log/claude-auth.log 2>/dev/null | tail -1 || true)"
+    if [ -n "$last_probe" ]; then
+        info "last probe: $last_probe"
+    fi
+fi
 
 # ─── 2. Live env check (simulates login shell vs VS Code shell) ─────────────
 step "Environment visibility"
@@ -281,7 +296,7 @@ if command -v claude &>/dev/null && [ -n "$login_token" ]; then
         fail "Claude rejected the token — token is missing, wrong, or expired"
         note_fail
         info "Re-run on a laptop: claude setup-token"
-        info "Then update $AUTH_FILE and $ENV_FILE with the new token"
+        info "Then: sudo claude-server deploy-auth '<token>'"
         info "Probe output (last 5 lines):"
         printf '%s\n' "$probe_out" | tail -5 | while read -r line; do info "  $line"; done
     else
@@ -291,6 +306,145 @@ if command -v claude &>/dev/null && [ -n "$login_token" ]; then
     fi
 else
     info "skipped (no claude binary or no token)"
+fi
+
+# ─── 8. Cursor golden auth ───────────────────────────────────────────────────
+step "Cursor golden auth"
+
+GOLDEN_DIR="/etc/cursor-auth/golden"
+GOLDEN_AUTH="$GOLDEN_DIR/auth.json"
+GOLDEN_MID="$GOLDEN_DIR/machine-id.txt"
+
+if [ -f "$GOLDEN_AUTH" ]; then
+    ok "golden bundle: $GOLDEN_AUTH"
+    golden_mid="$(tr -d '[:space:]' < "$GOLDEN_MID" 2>/dev/null || true)"
+    if [ -n "$golden_mid" ]; then
+        ok "golden machineId: ${golden_mid:0:12}..."
+    else
+        fail "golden machine-id.txt missing or empty"
+        note_fail
+    fi
+    if [ -f "$GOLDEN_DIR/exported-at" ]; then
+        info "exported: $(tr -d '\n' < "$GOLDEN_DIR/exported-at" 2>/dev/null)"
+    fi
+    access_token="$(python3 - "$GOLDEN_AUTH" <<'PY' 2>/dev/null || true
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+print(data.get("accessToken", ""), end="")
+PY
+)"
+    if [ -n "$access_token" ]; then
+        exp_info="$(python3 - "$access_token" <<'PY' 2>/dev/null || true
+import base64, json, sys, time
+token = sys.argv[1]
+parts = token.split(".")
+if len(parts) < 2:
+    print("unknown", end="")
+    raise SystemExit
+payload = parts[1] + "=" * (-len(parts[1]) % 4)
+data = json.loads(base64.urlsafe_b64decode(payload.encode()))
+exp = data.get("exp")
+if exp:
+    print(f"exp={exp} in={int(exp)-int(time.time())}s", end="")
+else:
+    print("no-exp", end="")
+PY
+)"
+        ok "golden access token present ($exp_info)"
+    else
+        fail "golden accessToken missing"
+        note_fail
+    fi
+    refresh_token="$(python3 - "$GOLDEN_AUTH" <<'PY' 2>/dev/null || true
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+print(data.get("refreshToken", ""), end="")
+PY
+)"
+    if [ -n "$refresh_token" ]; then
+        ok "golden refresh token present"
+    else
+        fail "golden refreshToken missing"
+        note_fail
+    fi
+    if [ -f "$GOLDEN_DIR/state-keys.json" ]; then
+        ok "golden state-keys.json present"
+    else
+        warn "golden state-keys.json missing — re-export: sudo cursor-auth-export --from-user <name>"
+    fi
+else
+    warn "no golden Cursor auth — optional until Cursor IDE is used"
+    info "Bootstrap: agent login (or Remote SSH once), then sudo cursor-auth-export --from-user <name>"
+fi
+
+[ -x /usr/local/bin/cursor-auth-sync ] && ok "cursor-auth-sync installed" || warn "cursor-auth-sync missing — run: sudo claude-server install"
+[ -x /usr/local/bin/cursor-auth-export ] && ok "cursor-auth-export installed" || warn "cursor-auth-export missing"
+[ -x /usr/local/bin/cursor-auth-refresh ] && ok "cursor-auth-refresh installed" || warn "cursor-auth-refresh missing"
+
+if [ -f /etc/cron.d/cursor-auth-refresh ]; then
+    ok "refresh cron: /etc/cron.d/cursor-auth-refresh"
+else
+    warn "refresh cron missing — run: sudo claude-server install"
+fi
+
+if [ -f /var/log/cursor-auth-refresh.log ]; then
+    last_refresh="$(grep 'OK tokens refreshed' /var/log/cursor-auth-refresh.log 2>/dev/null | tail -1 || true)"
+    if [ -n "$last_refresh" ]; then
+        info "last refresh: $last_refresh"
+    else
+        info "no successful refresh logged yet"
+    fi
+fi
+
+if [ -f "$GOLDEN_AUTH" ] && [ -n "${golden_mid:-}" ]; then
+    for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd | sort); do
+        h="/home/$u"
+        [ -d "$h" ] || continue
+        echo "$SYSTEM_USERS" | grep -qw "$u" && continue
+        user_mid="$(python3 - "$h" <<'PY' 2>/dev/null || true
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location(
+    "cal", "/usr/local/lib/claude-server/cursor-auth-lib.py"
+)
+cal = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cal)
+print(cal.user_machine_id(Path(sys.argv[1])) or "", end="")
+PY
+)"
+        has_tokens="$(python3 - "$h" <<'PY' 2>/dev/null || true
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location(
+    "cal", "/usr/local/lib/claude-server/cursor-auth-lib.py"
+)
+cal = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cal)
+print("yes" if cal.user_has_tokens(Path(sys.argv[1])) else "no", end="")
+PY
+)"
+        if [ "$has_tokens" != "yes" ]; then
+            warn "$u — Cursor tokens not synced (run: sudo claude-server sync-cursor-auth $u)"
+            continue
+        fi
+        if [ -z "$user_mid" ]; then
+            fail "$u — Cursor machineId missing (run: sudo claude-server sync-cursor-auth $u)"
+            note_fail
+        elif [ "$user_mid" = "$golden_mid" ]; then
+            ok "$u — machineId matches golden"
+        else
+            fail "$u — machineId drift (run: sudo claude-server sync-cursor-auth $u)"
+            note_fail
+        fi
+    done
+fi
+
+if [ -d /home/smart/.cursor-server ] || compgen -G "/home/*/.cursor-server" >/dev/null 2>&1; then
+    ok "cursor-server runtime present on at least one user home"
+else
+    info "cursor-server not installed yet (normal until first Remote SSH connect)"
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
@@ -304,18 +458,20 @@ if [ "$ISSUES" -eq 0 ]; then
     echo "    - Cursor/VS Code terminal → token must be in /etc/environment (see above)"
     echo "    - claude CLI in terminal  → refresh OAuth token (claude setup-token)"
     echo "    - Designer Chrome/noVNC   → log in to claude.ai once in server Chrome"
+    echo "    - Cursor Chat/Composer    → run: sudo claude-server sync-cursor-auth"
 else
     echo -e "  ${RED}${BOLD}$ISSUES issue(s) found — see FAIL lines above.${NC}"
     echo ""
     echo "  Most common fix for 'claude keeps asking to log in':"
     echo "    1. On laptop:  claude setup-token"
-    echo "    2. On server (root):"
-    echo "         echo 'export CLAUDE_CODE_OAUTH_TOKEN=<paste-token>' > /etc/profile.d/claude-auth.sh"
-    echo "         chmod 644 /etc/profile.d/claude-auth.sh"
-    echo "         grep -v CLAUDE_CODE_OAUTH_TOKEN /etc/environment > /tmp/env && mv /tmp/env /etc/environment"
-    echo "         echo 'CLAUDE_CODE_OAUTH_TOKEN=<paste-token>' >> /etc/environment"
-    echo "    3. sudo claude-server sync-auth"
-    echo "    4. Disconnect and reconnect Cursor/VS Code"
+    echo "    2. On server (root):  sudo claude-server deploy-auth '<paste-token>'"
+    echo "    3. sudo claude-server diagnose-auth"
+    echo ""
+    echo "  Cursor IDE golden auth fix:"
+    echo "    1. Log in once (Remote SSH or: agent login)"
+    echo "    2. sudo cursor-auth-export --from-user <name>"
+    echo "    3. sudo claude-server sync-cursor-auth"
+    echo "    4. Reload Cursor window (Developer: Reload Window)"
 fi
 echo ""
 

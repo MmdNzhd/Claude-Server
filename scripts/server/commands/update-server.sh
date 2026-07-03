@@ -72,6 +72,10 @@ step "2 - claude-server install"
 export CLAUDE_SERVER_REPO="$REPO_DIR"
 bash "$REPO_DIR/scripts/server/commands/install.sh"
 
+if [ -f /etc/cursor-auth/golden/auth.json ] && [ -x /usr/local/bin/cursor-auth-sync ]; then
+    cursor-auth-sync --all && ok "Cursor golden identity re-synced" || warn "Cursor sync failed (see above)"
+fi
+
 # ─── 3. OAuth token (optional) ───────────────────────────────────────────────
 step "3 - OAuth token"
 
@@ -94,6 +98,10 @@ if $REFRESH_TOKEN; then
         ok "OAuth token synced to all users"
     else
         warn "run after install: sudo claude-server sync-auth"
+    fi
+    if [ -f /etc/cursor-auth/golden/auth.json ] && [ -x /usr/local/bin/cursor-auth-sync ]; then
+        cursor-auth-sync --all
+        ok "Cursor golden identity synced to all users"
     fi
 else
     if [ -f /etc/profile.d/claude-auth.sh ]; then

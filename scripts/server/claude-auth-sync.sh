@@ -53,6 +53,18 @@ PY
     if [ -n "$owner" ]; then
         chown -R "$owner" "$h/.claude"
     fi
+
+    if [ -f /usr/local/lib/claude-server/claude-auth-lib.py ]; then
+        python3 -c "
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location(
+    'claude_auth_lib', '/usr/local/lib/claude-server/claude-auth-lib.py'
+)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+m.log_event('SYNC_HOME', user=sys.argv[1], token=m.token_fingerprint(sys.argv[2]))
+" "$(basename "$h")" "$token" 2>/dev/null || true
+    fi
 }
 
 case "${1:-}" in

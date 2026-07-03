@@ -6,10 +6,9 @@ param([switch]$Setup)
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    $scriptPath = $PSCommandPath -replace "'", "''"
-    $setupFlag  = if ($Setup) { ' -Setup' } else { '' }
-    $cmd = "& '$scriptPath'$setupFlag; if (`$LASTEXITCODE -ne 0) { Write-Host ''; Read-Host '    Press Enter to close' }"
-    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $cmd
+    $elevArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
+    if ($Setup) { $elevArgs += '-Setup' }
+    Start-Process powershell -Verb RunAs -ArgumentList $elevArgs
     exit
 }
 
@@ -19,6 +18,8 @@ if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
     Write-Host "      Install it via: Settings -> Apps -> Optional Features -> OpenSSH Client" -ForegroundColor DarkGray
     Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
 }
+
+$script:ConnectScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 
 $ServerIP   = "192.168.210.240"
 $Alias      = "claude-server"
@@ -119,6 +120,18 @@ function Test-Tunnel {
              $Alias "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port' 2`>/dev/null && echo UP" 2>$null
     return ($r -match 'UP')
 }
+
+$_gitMode = Join-Path $script:ConnectScriptDir 'git-mode.ps1'
+if (-not (Test-Path $_gitMode)) {
+    $_gitMode = Join-Path (Split-Path $script:ConnectScriptDir -Parent) 'git-mode.ps1'
+}
+if (-not (Test-Path $_gitMode)) {
+    $_gitMode = Join-Path (Split-Path (Split-Path $script:ConnectScriptDir -Parent) -Parent) 'git-mode.ps1'
+}
+if (-not (Test-Path $_gitMode)) {
+    Die "git-mode.ps1 not found - re-copy the full designer package"
+}
+. $_gitMode
 
 function Test-NovncLocal {
     try {
@@ -267,7 +280,7 @@ $lines   = ($initOut -replace "`r",'') -split "`n" | Where-Object { $_.Trim() -n
 $uidStr  = ($lines | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1) -replace '\D',''
 $Port    = 20000 + [int]$uidStr
 $PubB    = ($lines | Where-Object { $_ -match '^ssh-' } | Select-Object -First 1).Trim()
-if ($Port -le 20000) { StepFail "could not get UID from server"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
+if ($Port -le 20000 -or $Port -gt 65535) { StepFail "could not get UID from server"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 if (-not $PubB)      { StepFail "could not read server key";     Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 StepOk "port $Port"
 
@@ -288,18 +301,12 @@ Host $Alias
     ExitOnForwardFailure no
 "@ | Add-Content -Path $sshCfg -Encoding ASCII
 Repair-SshPerm $sshCfg "SSH config"
-SshX "mkdir -p ~/.local/bin && printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\n' '$LaptopUser' '$Port' > ~/.claude-connect.conf" 2>$null | Out-Null
-StepOk "laptop=$LaptopUser port=$Port"
+Push-ServerConnectConf
+StepOk "laptop=$LaptopUser port=$Port git=$(Get-GitMode)"
 
-$serverScriptDir = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..\..\server"))
-$src    = Join-Path $serverScriptDir "claude-mount.sh"
-$gitSrc = Join-Path $serverScriptDir "claude-git-setup.sh"
-if (Test-Path $src)    { scp -o BatchMode=yes -o ConnectTimeout=30 -q $src    "${Alias}:~/.local/bin/claude-mount"     2>$null }
-if (Test-Path $gitSrc) { scp -o BatchMode=yes -o ConnectTimeout=30 -q $gitSrc "${Alias}:~/.local/bin/claude-git-setup" 2>$null }
-$chmodCmd = @()
-if (Test-Path $src)    { $chmodCmd += "chmod +x ~/.local/bin/claude-mount; grep -q 'CLAUDE_LOCAL_BIN_PATH' ~/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=`$HOME/.local/bin:`$PATH\n' >> ~/.bashrc" }
-if (Test-Path $gitSrc) { $chmodCmd += "chmod +x ~/.local/bin/claude-git-setup" }
-if ($chmodCmd.Count -gt 0) { SshX ($chmodCmd -join '; ') 2>$null | Out-Null }
+if (Resolve-ServerScriptDir -ConnectScriptDir $script:ConnectScriptDir) {
+    Push-ClaudeServerScripts -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias | Out-Null
+}
 
 Write-Host ""
 Write-Host "    Ready" -ForegroundColor Green
@@ -426,25 +433,28 @@ try {
             else { Warn "Check Windows Firewall - port 22 must allow inbound connections" }
             Write-Host ""
             Write-Host "    R = retry   Q = quit" -ForegroundColor DarkGray
-            $rk = ''
-            while ($rk -ne 'r' -and $rk -ne 'q') {
-                if ([Console]::KeyAvailable) {
-                    $ki2 = [Console]::ReadKey($true)
-                    if ($ki2.KeyChar.ToString().ToLower() -eq 'r' -or $ki2.Key -eq [ConsoleKey]::R) { $rk = 'r' }
-                    elseif ($ki2.KeyChar.ToString().ToLower() -eq 'q' -or $ki2.Key -eq [ConsoleKey]::Q) { $rk = 'q' }
-                } else { Start-Sleep -Milliseconds 200 }
-            }
+            $rk = Read-RetryQuitKey
             if ($rk -eq 'r') { Write-Host ""; continue }
+            Push-ServerConnectConf -ActiveMount ''
             $alreadyDown = $true; break sessionLoop
         }
 
         SshX "$CM recover" 2>$null | Out-Null
+        if (-not (Test-Tunnel)) {
+            Write-Host "      -> tunnel dropped during recover, restarting..." -ForegroundColor DarkGray
+            continue sessionLoop
+        }
+
+        Push-ServerConnectConf -ActiveMount $MountId
+        Unmount-OtherProjects -KeepProjectId $MountId
 
         Step "Mounting files"
         $mountSW  = [System.Diagnostics.Stopwatch]::StartNew()
-        $mountOut = (SshX "$CM up '$MountId' 2`>&1") | Out-String
+        $mountResult = Invoke-MountProject -ProjectId $MountId -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias
+        $mountOut = $mountResult.Out
         $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
-        $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
+        $mountOk  = $mountResult.Ok
+        Show-MountGitWarn $mountOut
 
         if (-not $mountOk -and $mountOut -match 'key auth failed|connection reset|reset by peer|publickey|Permission denied' -and $autoFixCount -lt 3) {
             $autoFixCount++
@@ -474,9 +484,10 @@ try {
                 }
                 Step "Mounting files"
                 $mountSW  = [System.Diagnostics.Stopwatch]::StartNew()
-                $mountOut = (SshX "$CM up '$MountId' 2`>&1") | Out-String
+                $mountResult = Invoke-MountProject -ProjectId $MountId -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias
+                $mountOut = $mountResult.Out
                 $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
-                $mountOk  = $LASTEXITCODE -eq 0 -and $mountOut -notmatch 'error:|FAILED|No tunnel|not configured'
+                $mountOk  = $mountResult.Ok
             }
         }
 
@@ -487,19 +498,14 @@ try {
             }
             Write-Host ""
             Write-Host "    R = retry   Q = quit" -ForegroundColor DarkGray
-            $rk = ''
-            while ($rk -ne 'r' -and $rk -ne 'q') {
-                if ([Console]::KeyAvailable) {
-                    $ki2 = [Console]::ReadKey($true)
-                    if ($ki2.KeyChar.ToString().ToLower() -eq 'r' -or $ki2.Key -eq [ConsoleKey]::R) { $rk = 'r' }
-                    elseif ($ki2.KeyChar.ToString().ToLower() -eq 'q' -or $ki2.Key -eq [ConsoleKey]::Q) { $rk = 'q' }
-                } else { Start-Sleep -Milliseconds 200 }
-            }
+            $rk = Read-RetryQuitKey
             if ($rk -eq 'r') { Write-Host ""; continue }
+            Push-ServerConnectConf -ActiveMount ''
             $alreadyDown = $true; break sessionLoop
         }
 
         StepOk "${mountT}s"
+        $script:ActiveProjectId = $MountId
         $cleanOut = ($mountOut.Trim() -replace '^already mounted:\s*', '')
         if ($cleanOut) { Write-Host "      -> $cleanOut" -ForegroundColor DarkGray }
 
@@ -520,7 +526,7 @@ try {
         Write-Host "    ============================================" -ForegroundColor DarkGray
         Write-Host "    Session active -- keep this window open" -ForegroundColor Cyan
         Write-Host "    Files mounted at: $MountLpath" -ForegroundColor DarkCyan
-        Write-Host "    R = reconnect   Q or Enter = disconnect" -ForegroundColor DarkGray
+        Write-Host "    G = git mode   R = reconnect   Q or Enter = disconnect" -ForegroundColor DarkGray
         Write-Host "    ============================================" -ForegroundColor DarkGray
         Write-Host ""
 
@@ -535,6 +541,7 @@ try {
             if ([Console]::KeyAvailable) {
                 $ki = [Console]::ReadKey($true)
                 if ($ki.KeyChar.ToString().ToLower() -eq 'r' -or $ki.Key -eq [ConsoleKey]::R) { $action = 'r' }
+                elseif ($ki.KeyChar.ToString().ToLower() -eq 'g' -or $ki.Key -eq [ConsoleKey]::G) { $action = 'g' }
                 $gotKey = $true
                 break
             }
@@ -552,9 +559,15 @@ try {
             }
         }
 
+        if ($action -eq 'g') {
+            Configure-GitMode
+            continue sessionLoop
+        }
+
         Write-Host ""
         Write-Host "    Disconnecting..." -ForegroundColor DarkGray
         SshX "$CM down '$MountId'" 2>$null | Out-Null
+        Push-ServerConnectConf -ActiveMount ''
         if (-not $bgTunnel.HasExited) {
             Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
         }
@@ -575,6 +588,7 @@ try {
         Write-Host ""
         Write-Host "    Disconnecting..." -ForegroundColor DarkGray
         SshX "$CM down '$MountId'" 2>$null | Out-Null
+        Push-ServerConnectConf -ActiveMount ''
         Write-Host ""
     }
     if ($bgTunnel -and -not $bgTunnel.HasExited) {

@@ -1,5 +1,7 @@
 # Claude Design — راهنمای کامل
 
+> **تفاوت با Designer Connect:** این سند مربوط به `connect-design.bat` (claude.ai/design در Chrome مشترک سرور) است. برای mount فولدر لپ‌تاپ + noVNC ببینید [`users/designer/README.md`](../scripts/client/users/designer/README.md) و [`docs/client-connect.md`](client-connect.md).
+
 ## چیست؟
 
 Claude Design یک محیط مرور مشترک روی سرور است که به طراحان اجازه می‌دهد با fingerprint سرور (نه laptop خود) به claude.ai/design متصل شوند. یک Chrome session مشترک روی سرور وجود دارد که همه طراحان به آن وصل می‌شوند.
@@ -33,20 +35,14 @@ Windows (laptop)
 ## نصب اولیه روی سرور (یک بار)
 
 ```bash
-# ۱. نصب dependencies
-sudo bash scripts/server/install-designer-deps.sh
-
-# ۲. ساخت یوزر designer و نصب اسکریپت
-sudo bash scripts/server/setup-designer.sh
-
-# ۳. اضافه کردن SSH key هر طراح
-sudo bash scripts/server/setup-designer.sh --add-key "ssh-ed25519 AAAA..."
+sudo claude-server add-user designer --no-password-change
+sudo claude-server install    # designer deps + Chrome policy (idempotent)
 ```
 
 ## اضافه کردن SSH key طراح جدید
 
 ```bash
-sudo bash scripts/server/setup-designer.sh --add-key "$(cat /path/to/key.pub)"
+sudo claude-server add-user designer   # or append key to designer ~/.ssh/authorized_keys
 ```
 
 ## اتصال از Windows
@@ -206,7 +202,8 @@ sudo -u designer designer-start start 1920 1080
 
 ### SSH key تایید نمی‌شود
 ```bash
-sudo bash scripts/server/setup-designer.sh --add-key "$(cat ~/.ssh/id_ed25519.pub)"
+sudo claude-server add-user designer
+# then add laptop pubkey to designer ~/.ssh/authorized_keys
 ```
 
 ### سرور host key تغییر کرده

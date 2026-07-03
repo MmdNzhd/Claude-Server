@@ -28,12 +28,20 @@ LOG_DIR="$GIT_REPOS_DIR/logs"
 _log() { mkdir -p "$LOG_DIR"; echo "[$(date -Iseconds)] $*" >> "$LOG_DIR/${PROJECT_ID:-unknown}.log"; }
 
 _load_conn() {
-    LAPTOP_USER="" TUNNEL_PORT=""
+    LAPTOP_USER="" TUNNEL_PORT="" GIT_MODE="hide"
     [ -f "$CONNECT_CONF" ] || return 1
     while IFS='=' read -r k v; do
         v="${v#\"}" v="${v%\"}"
-        case "$k" in LAPTOP_USER) LAPTOP_USER="$v";; TUNNEL_PORT) TUNNEL_PORT="$v";; esac
+        case "$k" in
+            LAPTOP_USER) LAPTOP_USER="$v";;
+            TUNNEL_PORT) TUNNEL_PORT="$v";;
+            GIT_MODE|git_mode) GIT_MODE="$v";;
+        esac
     done < "$CONNECT_CONF"
+    case "${GIT_MODE,,}" in
+        server|on|yes|1|slow) GIT_MODE="server" ;;
+        *) GIT_MODE="hide" ;;
+    esac
     [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ]
 }
 
@@ -139,6 +147,11 @@ cmd_status() {
 cmd_init() {
     _load_conn         || { _log "no connection config"; exit 0; }
     _load_project "$PROJECT_ID" || { _log "no project config"; exit 0; }
+
+    if [ "$GIT_MODE" = "server" ]; then
+        _log "GIT_MODE=server — skip local mirror (using SSHFS git)"
+        exit 0
+    fi
 
     local lock_file="$GIT_REPOS_DIR/${PROJECT_ID}.lock"
 
@@ -352,6 +365,11 @@ PSEOF
 cmd_sync() {
     _load_conn         || exit 0
     _load_project "$PROJECT_ID" || exit 0
+
+    if [ "$GIT_MODE" = "server" ]; then
+        _log "sync: GIT_MODE=server — skip mirror sync"
+        exit 0
+    fi
 
     _mount_accessible || { _log "sync: mount not accessible"; exit 0; }
 
