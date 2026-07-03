@@ -218,6 +218,16 @@ function Invoke-LaptopAdminOps {
     return ($proc.ExitCode -eq 0)
 }
 
+function Test-AuthorizedKeyFragment {
+    param(
+        [string]$Path,
+        [string]$PubFragment
+    )
+    if (-not $PubFragment -or -not (Test-Path $Path)) { return $false }
+    $pattern = [regex]::Escape($PubFragment)
+    return [bool](Select-String -Path $Path -Pattern $pattern -Quiet -ErrorAction SilentlyContinue)
+}
+
 function Test-LaptopSshReady {
     param([string]$PubFragment = '')
     $reasons = [System.Collections.Generic.List[string]]::new()
@@ -231,8 +241,10 @@ function Test-LaptopSshReady {
     }
     if ($PubFragment) {
         $userAk = Join-Path $SshDir 'authorized_keys'
-        $hasKey = (Test-Path $userAk) -and (Select-String -Path $userAk -Pattern [regex]::Escape($PubFragment) -Quiet -ErrorAction SilentlyContinue)
-        if (-not $hasKey) { $reasons.Add('Server laptop key not in user authorized_keys') }
+        $adminAk = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+        $hasKey = (Test-AuthorizedKeyFragment -Path $userAk -PubFragment $PubFragment) `
+               -or (Test-AuthorizedKeyFragment -Path $adminAk -PubFragment $PubFragment)
+        if (-not $hasKey) { $reasons.Add('Server laptop key not in authorized_keys') }
     }
     return [PSCustomObject]@{ Ready = ($reasons.Count -eq 0); Reasons = @($reasons) }
 }

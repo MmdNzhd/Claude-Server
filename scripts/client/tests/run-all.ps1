@@ -9,6 +9,7 @@ $suites = @(
     @{ Name = 'connect-ui';           Script = 'test-connect-ui.ps1' }
     @{ Name = 'select-project';       Script = 'test-select-project.ps1' }
     @{ Name = 'connect-pipeline';     Script = 'test-connect-pipeline.ps1' }
+    @{ Name = 'laptop-ssh-ready';     Script = 'test-laptop-ssh-ready.ps1' }
     @{ Name = 'git-mode-deep';        Script = 'test-git-mode-deep.ps1' }
     @{ Name = 'editor-launch';        Script = 'test-editor-launch.ps1' }
     @{ Name = 'cursor-auth-merge';    Script = 'test-cursor-auth-merge.ps1' }

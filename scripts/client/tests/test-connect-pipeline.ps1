@@ -43,6 +43,8 @@ foreach ($rel in @('windows\connect.ps1')) {
     Assert ($bundle -match 'Push-ServerConnectConf') "$rel has Push-ServerConnectConf"
     Assert ($src -match '@\(Choose-Project -Mounts \$mounts\)\[-1\]') "$rel uses safe Choose-Project capture"
     Assert ($src -match '@\(Resolve-EditorChoice -CfgDir \$CfgDir\)\[-1\]') "$rel uses safe Resolve-EditorChoice capture"
+    Assert ($src -match 'Test-AuthorizedKeyFragment|Test-LaptopSshReady') "$rel has laptop SSH key check helper"
+    Assert ($src -notmatch 'Select-String -Path \$userAk -Pattern \[regex\]::Escape') "$rel Select-String uses safe Pattern variable"
     Assert ($src -match 'Invoke-LaptopAdminOps|Start-Process powershell\.exe -Verb RunAs') "$rel supports conditional elevation"
 }
 
