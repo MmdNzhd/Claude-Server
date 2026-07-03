@@ -98,7 +98,9 @@ stop_remote_editor() {
     }
 
     _stop_remote_editor_pass 0
-    [ "$found" -eq 1 ] && sleep 2
+    if [ "$found" -eq 1 ]; then
+        sleep 12
+    fi
     _stop_remote_editor_pass 1
 }
 

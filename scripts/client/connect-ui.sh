@@ -62,8 +62,32 @@ ui_git_mode_banner() {
     printf '    \033[0;90mGit mode: %s (%s) — press g to change\033[0m\n\n' "$label" "$desc"
 }
 
+ui_trunc_label() {
+    local t="$1" max="$2"
+    [ -z "$t" ] && return 0
+    if [ "$max" -le 0 ]; then printf '%s' "$t"; return 0; fi
+    if [ "${#t}" -le "$max" ]; then printf '%s' "$t"; return 0; fi
+    if [ "$max" -le 3 ]; then printf '...'; return 0; fi
+    printf '%s...' "${t:0:$((max - 3))}"
+}
+
+ui_project_name_col() {
+    local raw="$1" w="$2" path_max="$3" max_label=0 len fixed avail want
+    while IFS='|' read -r mid mlabel _ _; do
+        [ -z "$mid" ] && continue
+        len="${#mlabel}"
+        [ "$len" -gt "$max_label" ] && max_label=$len
+    done <<< "$raw"
+    [ "$max_label" -lt 10 ] && max_label=10
+    fixed=$(( 4 + 2 + 2 + 2 + path_max ))
+    avail=$(( w - fixed ))
+    if [ "$avail" -lt 10 ]; then printf '0'; return 0; fi
+    want=$(( max_label + 9 ))
+    if [ "$want" -gt "$avail" ]; then printf '%s' "$avail"; else printf '%s' "$want"; fi
+}
+
 ui_project_table() {
-    local raw="$1" last_id="${2:-}" tier w path_max i=1
+    local raw="$1" last_id="${2:-}" tier w path_max name_col i=1
     w="$(ui_terminal_width)"
     tier="$(ui_layout_tier "$w")"
     case "$tier" in
@@ -72,6 +96,14 @@ ui_project_table() {
         narrow) path_max=24 ;;
         *) path_max=0 ;;
     esac
+    name_col=0
+    if [ "$path_max" -gt 0 ]; then
+        name_col="$(ui_project_name_col "$raw" "$w" "$path_max")"
+        if [ "$name_col" -eq 0 ]; then
+            tier=tiny
+            path_max=0
+        fi
+    fi
     printf '    \033[1;37mProjects\033[0m\n\n'
     if [ -z "$raw" ]; then
         printf '    \033[0;90m(no projects configured)\033[0m\n\n'
@@ -85,12 +117,18 @@ ui_project_table() {
         if [ "$path_max" -gt 0 ]; then
             path_show="$(ui_trunc_path "$mrpath" "$path_max")"
             if [ -n "$active_tag" ]; then
-                printf '    \033[1;37m%2d  %-14s  %s\033[0;32m%s\033[0m\n' "$i" "$mlabel" "$path_show" "$active_tag"
+                name_show="$(ui_trunc_label "$mlabel" $(( name_col - 9 )) )"
+                padded="$(printf '%-*s' $(( name_col - 9 )) "$name_show")"
+                printf '    \033[1;37m%2d  %s\033[0;32m%s\033[0m  %s\n' "$i" "$padded" "$active_tag" "$path_show"
             else
-                printf '    \033[0;90m%2d  %-14s  %s\033[0m\n' "$i" "$mlabel" "$path_show"
+                name_show="$(ui_trunc_label "$mlabel" "$name_col")"
+                printf '    \033[0;90m%2d  %-*s  %s\033[0m\n' "$i" "$name_col" "$name_show" "$path_show"
             fi
         else
             printf '    \033[0;90m%d  %s%s\033[0m\n' "$i" "$mlabel" "$active_tag"
+            if [ -n "$mrpath" ]; then
+                printf '         %s\n' "$(ui_trunc_path "$mrpath" 56)"
+            fi
         fi
         i=$(( i + 1 ))
     done <<< "$raw"

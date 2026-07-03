@@ -61,6 +61,7 @@ Assert ($automount -match 'up "\$ACTIVE_MOUNT"') 'automount only mounts ACTIVE_M
 foreach ($rel in @('windows\connect.ps1', 'users\designer\connect.ps1')) {
     $src = Get-Content (Get-ClientFile $rel) -Raw
     Assert ($src -match 'git-mode\.ps1') "$rel dot-sources git-mode.ps1"
+    Assert ($src -notmatch 'Unmount-OtherProjects') "$rel does not unmount other projects on connect"
 }
 
 foreach ($rel in @('mac\connect.sh', 'users\designer\connect.sh')) {
@@ -82,7 +83,7 @@ foreach ($rel in @('mac\connect.sh')) {
     Assert ($src -match 'ui_session_box|G = git mode') "$rel has session git hotkey"
     Assert ($src -match 'clear_session_mount') "$rel closes editor on disconnect"
     Assert ($src -match 'initialize_server_session') "$rel uses parallel server setup"
-    Assert ($src -match 'unmount_other_projects') "$rel unmounts other projects before mount"
+    Assert ($src -notmatch 'unmount_other_projects|Unmount-OtherProjects') "$rel does not unmount other projects on connect"
     Assert ($src -match 'ACTIVE_MOUNT_ID') "$rel tracks ACTIVE_MOUNT on server"
     Assert ($bundle -match 'remount_project_git') "$rel has mid-session git remount"
     Assert ($src -match '_editor_opened') "$rel opens editor only once per menu pick"

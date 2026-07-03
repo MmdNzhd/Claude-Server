@@ -75,17 +75,18 @@ Mac: same keys via terminal read.
 
 ---
 
-## Single-Project Mount (ACTIVE_MOUNT)
+## ACTIVE_MOUNT (session tracking)
 
-Only the **selected** project is mounted per session. Other projects stay unmounted so `.git` is not touched on every laptop folder.
+Each connect session sets `ACTIVE_MOUNT` to the project you picked. That tells **automount** and **watchdog** which mount to restore if the tunnel drops. **Other already-mounted projects are not unmounted** — connect only runs `up` on the project you selected.
 
 | Layer | Mechanism |
 |-------|-----------|
-| Client | `Push-ServerConnectConf -ActiveMount <id>` + `down-others` before `up` |
+| Client | `Push-ServerConnectConf -ActiveMount <id>` then `recover` + `up <id>` |
 | Server runtime | `~/.claude-connect.conf` → `ACTIVE_MOUNT=ai` |
 | Login guard | `claude-automount` runs `up "$ACTIVE_MOUNT"` only (not bulk mount) |
+| Manual cleanup | `claude-mount down-others <id>` on server if you want one mount left |
 
-On disconnect, `ACTIVE_MOUNT` is cleared so automount does not remount stale projects.
+On disconnect, `ACTIVE_MOUNT` is cleared and **only the current project** is unmounted (`claude-mount down <id>`).
 
 **Designer:** always `ACTIVE_MOUNT=laptop` (single mount id).
 
@@ -144,15 +145,22 @@ See also: [sshfs-performance.md](sshfs-performance.md) — full performance inve
 
 ## Cursor Chat Auth (Golden — No Laptop Login)
 
-Chat/Composer in Remote SSH still reads **laptop** `%APPDATA%\Cursor\User\globalStorage\state.vscdb`.  
-You do **not** need to stay logged in on the laptop — `connect.bat` syncs golden tokens from the server before opening Cursor:
+Chat/Composer in Remote SSH reads the **isolated laptop profile**  
+`%LOCALAPPDATA%\ClaudeServerCursorProfile\User\globalStorage\state.vscdb`  
+(not the server, not your personal `%APPDATA%\Cursor` profile).
 
-1. Server: `cursor-auth-sync --force` (from `/etc/cursor-auth/golden/`)
-2. Laptop: pulls `state.vscdb` + `storage.json` from server
+Auth tokens are merged with SQLite UPSERT only (auth keys, never full file replace).  
+If auth is already complete, connect skips the merge while Cursor is open.
 
-If Chat still asks to log in after a local logout: close all Cursor windows, run `connect.bat` again, or `Developer: Reload Window`.
+**Agent chat history**
 
-**Do not** use Sign Out in local Cursor if a remote session is open — it can invalidate shared tokens. Use connect instead.
+- History is stored locally in the profile above (`composer.composerHeaders` + `cursorDiskKV`).
+- Use the **Agent** sidebar history (clock icon), not only the empty new tab.
+- Before pressing **Q** in connect, close Cursor with **File > Exit** so history flushes to disk.  
+  Force-close on disconnect can hide history in the UI even when data still exists on disk.
+- If Cursor was closed manually during a session, press **O** in connect to reopen the editor.
+
+If Chat asks to log in: run `connect.bat` again, or **Developer: Reload Window** in the `[Claude Server]` window.
 
 Admin bootstrap (once): `sudo cursor-auth-export --from-user smart` then `sudo claude-server sync-cursor-auth`
 

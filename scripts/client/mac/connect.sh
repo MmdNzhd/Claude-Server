@@ -503,10 +503,8 @@ while [ "$exit_requested" -eq 0 ]; do
                 break
             fi
 
-            printf '      -> single project mode: unmounting others...\n'
             ACTIVE_MOUNT_ID="$go_id"
             push_server_connect_conf
-            unmount_other_projects "$go_id"
 
             sshx "$CM recover" 2>/dev/null || true
 

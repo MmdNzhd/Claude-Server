@@ -146,7 +146,6 @@ try:
                 (k, v),
             )
     conn.commit()
-    conn.execute("PRAGMA wal_checkpoint(FULL)")
 except sqlite3.Error:
     sys.exit(1)
 finally:
@@ -374,9 +373,118 @@ function Push-CursorGoldenFromServerProfile {
 }
 
 
+function Repair-CursorComposerWorkspaceBindings {
+    param(
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][string]$RemotePath
+    )
+    $gs = Get-LocalCursorGlobalStorage
+    $dbPath = Join-Path $gs 'state.vscdb'
+    if (-not (Test-Path $dbPath)) { return $false }
+
+    $pathNorm = $RemotePath.TrimEnd('/')
+    $folderUri = "vscode-remote://ssh-remote+${Alias}${pathNorm}"
+    $wsRoot = Join-Path (Get-CursorRemoteProfileDir) 'User\workspaceStorage'
+    $wsId = ''
+    if (Test-Path $wsRoot) {
+        foreach ($dir in Get-ChildItem $wsRoot -Directory -ErrorAction SilentlyContinue) {
+            $wj = Join-Path $dir.FullName 'workspace.json'
+            if (-not (Test-Path $wj)) { continue }
+            try {
+                $raw = (Get-Content $wj -Raw | ConvertFrom-Json).folder
+                if ($raw -and ($raw -replace '%2B', '+') -match [regex]::Escape($pathNorm)) {
+                    $wsId = $dir.Name
+                    break
+                }
+            } catch { }
+        }
+    }
+
+    $prevDb = $env:_CURSOR_REPAIR_DB
+    $prevUri = $env:_CURSOR_REPAIR_URI
+    $prevId = $env:_CURSOR_REPAIR_WS_ID
+    $env:_CURSOR_REPAIR_DB = $dbPath
+    $env:_CURSOR_REPAIR_URI = $folderUri
+    $env:_CURSOR_REPAIR_WS_ID = $wsId
+    try {
+        $code = Invoke-CursorAuthPython @'
+import json, os, sqlite3, sys
+db = os.environ['_CURSOR_REPAIR_DB']
+folder_uri = os.environ['_CURSOR_REPAIR_URI']
+ws_id = os.environ.get('_CURSOR_REPAIR_WS_ID') or ''
+conn = sqlite3.connect(db, timeout=30)
+conn.execute("PRAGMA busy_timeout=30000")
+try:
+    row = conn.execute(
+        "SELECT value FROM ItemTable WHERE key='composer.composerHeaders' LIMIT 1"
+    ).fetchone()
+    if not row:
+        sys.exit(0)
+    data = json.loads(row[0])
+    composers = data.get('allComposers') or []
+    changed = 0
+    for item in composers:
+        wi = item.get('workspaceIdentifier') or {}
+        uri = wi.get('uri') or {}
+        ext = uri.get('external') or uri.get('fsPath') or wi.get('id') or ''
+        if ext:
+            continue
+        cid = item.get('composerId') or ''
+        if not cid:
+            continue
+        has_data = conn.execute(
+            "SELECT 1 FROM cursorDiskKV WHERE key=? LIMIT 1",
+            (f"composerData:{cid}",),
+        ).fetchone()
+        if not has_data:
+            continue
+        path = folder_uri.split('vscode-remote://ssh-remote+', 1)[-1]
+        if '/' in path:
+            auth, remote_path = path.split('/', 1)
+            remote_path = '/' + remote_path
+        else:
+            auth, remote_path = path, '/'
+        item['workspaceIdentifier'] = {
+            'id': ws_id,
+            'uri': {
+                '$mid': 1,
+                'fsPath': remote_path.replace('/', '\\'),
+                '_sep': 1,
+                'external': folder_uri.replace('+', '%2B'),
+                'path': remote_path,
+                'scheme': 'vscode-remote',
+                'authority': f'ssh-remote+{auth}',
+            },
+        }
+        changed += 1
+    if changed:
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            ('composer.composerHeaders', json.dumps(data)),
+        )
+        conn.commit()
+except (json.JSONDecodeError, sqlite3.Error, KeyError):
+    sys.exit(1)
+finally:
+    conn.close()
+'@
+        return ($code -eq 0)
+    } finally {
+        if ($null -eq $prevDb) { Remove-Item Env:\_CURSOR_REPAIR_DB -ErrorAction SilentlyContinue }
+        else { $env:_CURSOR_REPAIR_DB = $prevDb }
+        if ($null -eq $prevUri) { Remove-Item Env:\_CURSOR_REPAIR_URI -ErrorAction SilentlyContinue }
+        else { $env:_CURSOR_REPAIR_URI = $prevUri }
+        if ($null -eq $prevId) { Remove-Item Env:\_CURSOR_REPAIR_WS_ID -ErrorAction SilentlyContinue }
+        else { $env:_CURSOR_REPAIR_WS_ID = $prevId }
+    }
+}
+
 function Sync-CursorGoldenAuth {
     param(
-        [Parameter(Mandatory)][string]$Alias
+        [Parameter(Mandatory)][string]$Alias,
+        [switch]$Force,
+        [string]$RemotePath = ''
     )
 
     $skipped = [PSCustomObject]@{ Ok = $false; Skipped = $true }
@@ -389,6 +497,14 @@ function Sync-CursorGoldenAuth {
     $localGs = Get-LocalCursorGlobalStorage
     $dbPath = Join-Path $localGs 'state.vscdb'
     $storagePath = Join-Path $localGs 'storage.json'
+
+    if (-not $Force -and (Test-LocalCursorAuthComplete -DbPath $dbPath)) {
+        return [PSCustomObject]@{
+            Ok              = $true
+            Skipped         = $true
+            AlreadyComplete = $true
+        }
+    }
 
     $authValues = Get-RemoteCursorAuthFromGolden -Alias $Alias
     if (-not $authValues) { return $skipped }

@@ -33,6 +33,35 @@ function Format-TruncPath {
     return $Path.Substring(0, $head) + '...' + $Path.Substring($Path.Length - $tail)
 }
 
+function Format-TruncLabel {
+    param(
+        [string]$Text,
+        [int]$MaxLen
+    )
+    if (-not $Text) { return '' }
+    if ($MaxLen -le 0) { return $Text }
+    if ($Text.Length -le $MaxLen) { return $Text }
+    if ($MaxLen -le 3) { return '...' }
+    return $Text.Substring(0, $MaxLen - 3) + '...'
+}
+
+function Get-ProjectNameColWidth {
+    param(
+        [array]$Mounts,
+        [int]$TerminalWidth,
+        [int]$PathMax
+    )
+    if (-not $Mounts -or $Mounts.Count -eq 0) { return 14 }
+    $maxLabel = ($Mounts | ForEach-Object { $_.Label.Length } | Measure-Object -Maximum).Maximum
+    if (-not $maxLabel) { $maxLabel = 10 }
+    # Longest label + " (active)" must fit in the name column
+    $want = $maxLabel + 9
+    $fixed = 4 + 2 + 2 + 2 + $PathMax
+    $avail = $TerminalWidth - $fixed
+    if ($avail -lt 10) { return 0 }
+    return [Math]::Max(10, [Math]::Min($want, $avail))
+}
+
 function Write-ConnectHeader {
     param(
         [string]$Alias,
@@ -85,6 +114,11 @@ function Write-ProjectTable {
         return
     }
     $pathMax = if ($tier -eq 'wide') { 50 } elseif ($tier -eq 'normal') { 36 } elseif ($tier -eq 'narrow') { 24 } else { 0 }
+    $nameCol = if ($pathMax -gt 0) { Get-ProjectNameColWidth -Mounts $Mounts -TerminalWidth $W -PathMax $pathMax } else { 0 }
+    if ($pathMax -gt 0 -and $nameCol -eq 0) {
+        $tier = 'tiny'
+        $pathMax = 0
+    }
     $i = 1
     foreach ($m in $Mounts) {
         $activeTag = if ($m.Active) { ' (active)' } else { '' }
@@ -92,13 +126,18 @@ function Write-ProjectTable {
         if ($tier -eq 'tiny') {
             $fg = if ($m.Active) { 'White' } else { 'DarkGray' }
             Write-Host ("    {0}  {1}{2}" -f $i, $name, $activeTag) -ForegroundColor $fg
+            if ($m.Rpath) {
+                Write-Host ("         {0}" -f (Format-TruncPath -Path $m.Rpath -MaxLen 56)) -ForegroundColor DarkGray
+            }
         } elseif ($pathMax -gt 0) {
             $pathShow = Format-TruncPath -Path $m.Rpath -MaxLen $pathMax
+            $nameMax = $nameCol - $activeTag.Length
+            $nameShow = Format-TruncLabel -Text $name -MaxLen $nameMax
+            $fmt = "    {0,2}  {1,-$nameCol}  {2}"
             if ($m.Active) {
-                Write-Host -NoNewline ("    {0,2}  {1,-14}  {2}" -f $i, $name, $pathShow) -ForegroundColor White
-                Write-Host ' (active)' -ForegroundColor Green
+                Write-Host ($fmt -f $i, ($nameShow + $activeTag), $pathShow) -ForegroundColor White
             } else {
-                Write-Host ("    {0,2}  {1,-14}  {2}" -f $i, $name, $pathShow) -ForegroundColor DarkGray
+                Write-Host ($fmt -f $i, $nameShow, $pathShow) -ForegroundColor DarkGray
             }
         }
         $i++
@@ -121,7 +160,8 @@ function Write-SessionBox {
     Write-Host ''
     Write-Host '    ============================================' -ForegroundColor DarkGray
     Write-Host '    Session active -- keep this window open' -ForegroundColor Cyan
-    Write-Host '    G = git mode   R = reconnect   Q or Enter = disconnect (closes editor)' -ForegroundColor DarkGray
+    Write-Host '    G = git mode   R = reconnect   O = reopen editor   Q or Enter = disconnect' -ForegroundColor DarkGray
+    Write-Host '    Tip: File > Exit Cursor before Q so Agent chat history saves' -ForegroundColor DarkGray
     foreach ($ln in $ExtraLines) {
         Write-Host "    $ln" -ForegroundColor Yellow
     }

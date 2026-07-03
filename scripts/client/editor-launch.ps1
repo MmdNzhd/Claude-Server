@@ -205,7 +205,13 @@ function Stop-RemoteEditor {
             }
         } catch { }
     }
-    Start-Sleep -Seconds 2
+    $deadline = (Get-Date).AddSeconds(12)
+    while ((Get-Date) -lt $deadline) {
+        if (@(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath).Count -eq 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 500
+    }
     foreach ($p in @(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)) {
         Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
     }
@@ -222,7 +228,7 @@ function Launch-RemoteEditor {
     if (-not $cli) { return $false }
 
     $uri = "vscode-remote://ssh-remote+${Alias}${RemotePath}"
-    $argList = @('--folder-uri', $uri)
+    $argList = @('--reuse-window', '--folder-uri', $uri)
     if ($EditorCmd -eq 'cursor') {
         Initialize-CursorServerProfile
         $argList = @('--user-data-dir', (Get-CursorRemoteProfileDir)) + $argList

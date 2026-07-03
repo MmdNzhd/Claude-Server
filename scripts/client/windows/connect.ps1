@@ -861,9 +861,7 @@ $exitRequested = $false
                 $alreadyDown = $true; break sessionLoop
             }
 
-            Write-Host "      -> single project mode: unmounting others..." -ForegroundColor DarkGray
             Push-ServerConnectConf -ActiveMount $go.Id
-            Unmount-OtherProjects -KeepProjectId $go.Id
 
             Write-Host "      -> recovering stale mounts..." -ForegroundColor DarkGray
             SshX "$CM recover" 2>$null | Out-Null
@@ -937,22 +935,34 @@ $exitRequested = $false
 
             $script:CursorAuthNeedsBootstrap = $false
             if ($EditorCmd -eq 'cursor' -and (Get-Command Sync-CursorGoldenAuth -ErrorAction SilentlyContinue)) {
+                $gsPath = Join-Path (Get-LocalCursorGlobalStorage) 'state.vscdb'
+                $cursorRunning = @(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path).Count -gt 0
                 Step "Syncing Cursor auth"
-                $authSync = Sync-CursorGoldenAuth -Alias $Alias
-                if ($authSync.Skipped) { StepOk 'skipped' }
-                elseif ($authSync.Ok) {
-                    StepOk
-                    Set-Content -Path ([System.IO.Path]::Combine($CfgDir, 'cursor-auth.ok')) -Value (Get-Date -Format 'o') -Encoding ASCII | Out-Null
+                if ($cursorRunning -and (Test-LocalCursorAuthComplete -DbPath $gsPath)) {
+                    StepOk 'skipped (editor open)'
+                } else {
+                    $authSync = Sync-CursorGoldenAuth -Alias $Alias
+                    if ($authSync.Skipped) {
+                        if ($authSync.AlreadyComplete) { StepOk 'already ok' }
+                        else { StepOk 'skipped' }
+                    }
+                    elseif ($authSync.Ok) {
+                        StepOk
+                        Set-Content -Path ([System.IO.Path]::Combine($CfgDir, 'cursor-auth.ok')) -Value (Get-Date -Format 'o') -Encoding ASCII | Out-Null
+                    }
+                    elseif ($authSync.TokensOnly) {
+                        StepOk 'tokens only'
+                        $script:CursorAuthNeedsBootstrap = $true
+                        Warn 'Chat needs server account profile - sign in inside [Claude Server] only, then press P'
+                    }
+                    else {
+                        StepFail 'could not merge server auth'
+                        $script:CursorAuthNeedsBootstrap = $true
+                        Warn 'Sign in to SERVER account in [Claude Server] window - personal Cursor is never touched'
+                    }
                 }
-                elseif ($authSync.TokensOnly) {
-                    StepOk 'tokens only'
-                    $script:CursorAuthNeedsBootstrap = $true
-                    Warn 'Chat needs server account profile - sign in inside [Claude Server] only, then press P'
-                }
-                else {
-                    StepFail 'could not merge server auth'
-                    $script:CursorAuthNeedsBootstrap = $true
-                    Warn 'Sign in to SERVER account in [Claude Server] window - personal Cursor is never touched'
+                if (-not $cursorRunning -and (Get-Command Repair-CursorComposerWorkspaceBindings -ErrorAction SilentlyContinue)) {
+                    $null = Repair-CursorComposerWorkspaceBindings -Alias $Alias -RemotePath $go.Path
                 }
             }
 
@@ -985,6 +995,9 @@ $exitRequested = $false
             $lastStatusAt = [DateTime]::MinValue
             $script:lastToastAt = $null
             while (-not $bgTunnel.HasExited) {
+                if ($editorOpened -and $EditorCmd -eq 'cursor') {
+                    $editorOpened = @(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path).Count -gt 0
+                }
                 if ((Get-Date) - $lastStatusAt -gt [TimeSpan]::FromSeconds(30)) {
                     Update-SessionStatusLine -ProjectLabel $go.Id -GitLabel (Get-GitModeLabel) -TunnelOk $true -EditorOpen $editorOpened -EditorName $EditorName
                     $lastStatusAt = Get-Date
@@ -993,6 +1006,7 @@ $exitRequested = $false
                     $ki = [Console]::ReadKey($true)
                     if ($ki.KeyChar.ToString().ToLower() -eq 'r' -or $ki.Key -eq [ConsoleKey]::R) { $action = 'r' }
                     elseif ($ki.KeyChar.ToString().ToLower() -eq 'g' -or $ki.Key -eq [ConsoleKey]::G) { $action = 'g' }
+                    elseif ($ki.KeyChar.ToString().ToLower() -eq 'o' -or $ki.Key -eq [ConsoleKey]::O) { $action = 'o' }
                     elseif ($ki.Key -eq [ConsoleKey]::Enter) { $action = 'q' }
                     elseif ($script:CursorAuthNeedsBootstrap -and (
                         $ki.KeyChar.ToString().ToLower() -eq 'p' -or $ki.Key -eq [ConsoleKey]::P)) { $action = 'p' }
@@ -1020,6 +1034,21 @@ $exitRequested = $false
 
             if ($action -eq 'g') {
                 Configure-GitMode
+                continue sessionLoop
+            }
+
+            if ($action -eq 'o') {
+                if (-not $editorOpened) {
+                    Write-Host ''
+                    Step "Reopening $EditorName"
+                    if (Launch-RemoteEditor -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path) {
+                        StepOk $go.Path
+                        $editorOpened = $true
+                    } else {
+                        StepFail "$EditorName not found"
+                    }
+                    Write-Host ''
+                }
                 continue sessionLoop
             }
 

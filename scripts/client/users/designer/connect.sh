@@ -363,7 +363,6 @@ while true; do
 
     ACTIVE_MOUNT_ID="$MOUNT_ID"
     push_server_connect_conf
-    unmount_other_projects "$MOUNT_ID"
 
     step "Mounting files"
     mount_start=$SECONDS

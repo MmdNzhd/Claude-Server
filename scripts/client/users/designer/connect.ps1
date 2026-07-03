@@ -446,7 +446,6 @@ try {
         }
 
         Push-ServerConnectConf -ActiveMount $MountId
-        Unmount-OtherProjects -KeepProjectId $MountId
 
         Step "Mounting files"
         $mountSW  = [System.Diagnostics.Stopwatch]::StartNew()

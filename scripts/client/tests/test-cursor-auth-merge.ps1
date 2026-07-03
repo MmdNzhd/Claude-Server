@@ -14,9 +14,14 @@ Assert ($src -notmatch 'Stop-Cursor|CloseMainWindow|Stop-Process') 'no close/kil
 Assert ($src -notmatch 'Remove-Item.*wal|wal.*Remove-Item') 'does not delete WAL files'
 Assert ($src -match 'Get-RemoteCursorAuthFromGolden') 'reads auth from golden bundle'
 Assert ($src -match 'golden/storage.json') 'storage merge from golden'
+Assert ($src -notmatch 'wal_checkpoint\(FULL\)') 'auth merge does not force WAL checkpoint'
+Assert ($src -match 'AlreadyComplete') 'auth sync skips when local tokens complete'
+Assert ($src -match 'Repair-CursorComposerWorkspaceBindings') 'auth can repair composer workspace links'
 
 $winConnect = Get-Content (Join-Path $PSScriptRoot '..\windows\connect.ps1') -Raw
 Assert ($winConnect -match 'Sync-CursorGoldenAuth -Alias \$Alias') 'auth sync on every mount'
+Assert ($winConnect -match 'skipped \(editor open\)') 'auth sync skipped while Cursor open'
+Assert ($winConnect -match "action -eq 'o'") 'session can reopen editor with O'
 Assert ($winConnect -match 'if \(-not \$editorOpened\)') 'editor opens only once'
 
 Write-Host ''
