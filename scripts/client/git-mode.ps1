@@ -238,6 +238,29 @@ function Test-ProjectMountHealthy {
     return ($out -eq 'ok')
 }
 
+function Test-LaptopReverseSsh {
+    if (-not $Port -or -not $LaptopUser) { return $false }
+    if (-not (Test-TunnelUp)) { return $false }
+    SshX "timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -i ~/.ssh/claude_laptop -p $Port ${LaptopUser}@127.0.0.1 true" 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Ensure-LaptopReverseSshCached {
+    param([string]$PubB = '')
+    if ($script:LaptopSshVerified -and (Test-LaptopReverseSsh)) { return $true }
+    if (Test-LaptopReverseSsh) {
+        $script:LaptopSshVerified = $true
+        return $true
+    }
+    if (-not (Ensure-LaptopSshReady -PubB $PubB)) { return $false }
+    if (Test-LaptopReverseSsh) {
+        $script:LaptopSshVerified = $true
+        return $true
+    }
+    $script:LaptopSshVerified = $false
+    return $false
+}
+
 function Invoke-RecoverIfNeeded {
     param(
         [Parameter(Mandatory)][string]$ProjectId,

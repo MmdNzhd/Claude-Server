@@ -157,6 +157,61 @@ if [ -n "${PORT:-}" ]; then
     esac
 fi
 
+if [ -n "${PORT:-}" ] && [ -n "$pub" ]; then
+    echo ""
+    echo "=== ensure_laptop_reverse_ssh_cached ==="
+    LAPTOP_SSH_VERIFIED=0
+    if ensure_laptop_reverse_ssh_cached "$pub"; then
+        pass "ensure_laptop_reverse_ssh_cached (full)"
+    else
+        fail "ensure_laptop_reverse_ssh_cached (full)"
+    fi
+    if ensure_laptop_reverse_ssh_cached "$pub"; then
+        pass "ensure_laptop_reverse_ssh_cached (cached)"
+    else
+        fail "ensure_laptop_reverse_ssh_cached (cached)"
+    fi
+fi
+
+if [ -n "${PORT:-}" ]; then
+    echo ""
+    echo "=== server claude-mount check / recover-if-needed ==="
+    _check="$(sshx "$CM check claude-server 2>&1" 2>/dev/null || true)"
+    case "$_check" in
+        ok) pass "server check claude-server=ok" ;;
+        need_mount) pass "server check claude-server=need_mount (not mounted)" ;;
+        *) fail "server check unexpected: $_check" ;;
+    esac
+    _recover="$(sshx "$CM recover-if-needed claude-server 2>&1" 2>/dev/null | head -1 || true)"
+    case "$_recover" in
+        *skip*) pass "server recover-if-needed skipped or ran" ;;
+        "") pass "server recover-if-needed (empty ok)" ;;
+        *) pass "server recover-if-needed ran" ;;
+    esac
+    if sshx "grep -q 'CLAUDE_TRUSTED_TUNNEL' ~/.local/bin/claude-mount" 2>/dev/null; then
+        pass "server claude-mount has CLAUDE_TRUSTED_TUNNEL"
+    else
+        fail "server claude-mount missing CLAUDE_TRUSTED_TUNNEL"
+    fi
+fi
+
+if declare -F ensure_session_tunnel >/dev/null 2>&1 && [ -n "${PORT:-}" ] && [ -n "${tunnel_pid:-}" ]; then
+    echo ""
+    echo "=== ensure_session_tunnel reuse ==="
+    _tunnel_alive() { kill -0 "$1" 2>/dev/null && ps -p "$1" -o state= 2>/dev/null | grep -qv 'Z'; }
+    bg_pid="$tunnel_pid"
+    TUNNEL_REUSED=0
+    if ensure_session_tunnel; then
+        if [ "${TUNNEL_REUSED:-0}" = "1" ]; then
+            pass "ensure_session_tunnel reuses live tunnel"
+        else
+            fail "ensure_session_tunnel should reuse pid=$tunnel_pid"
+        fi
+    else
+        fail "ensure_session_tunnel failed on reuse path"
+    fi
+fi
+
 echo ""
 if [ "$FAIL" -eq 0 ]; then
     echo "ALL LIVE TESTS PASSED ($FAIL failures)"

@@ -848,6 +848,19 @@ $exitRequested = $false
                 continue
             }
 
+            Step 'Verifying laptop SSH key'
+            if (Ensure-LaptopReverseSshCached -PubB $PubB) {
+                StepOk
+            } else {
+                StepFail 'server cannot authenticate to this PC'
+                Write-Host ''
+                Write-Host '    R = retry   Q = quit' -ForegroundColor DarkGray
+                $rk = Read-RetryQuitKey
+                if ($rk -eq 'r') { Write-Host ''; continue }
+                Push-ServerConnectConf -ActiveMount ''
+                $alreadyDown = $true; break sessionLoop
+            }
+
             Step "Mounting files"
             $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
             $mountResult = Invoke-MountProject -ProjectId $go.Id -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias -TrustedTunnel
