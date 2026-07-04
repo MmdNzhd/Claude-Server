@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/smart/.claude/**)",
+      "Read(//home/aria/.claude/**)",
+      "Bash(bash -c ' *)",
+      "Bash(bash -c 'touch /tmp/aria..active /tmp/aria.1234.active; find /tmp -maxdepth 1 -name \"aria.*.active\"; rm /tmp/aria..active /tmp/aria.1234.active')"
+    ]
+  }
+}

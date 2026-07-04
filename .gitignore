@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local scratch (may contain auth exports)
+.tmp/
+
+# Local IDE / agent
+.cursor/
+
+# CodeGraph + session hooks (also have local .gitignore)
+.codegraph/*
+!.codegraph/.gitignore
+.remember/*
+!.remember/.gitignore
+
+# OS junk
+.DS_Store
+Thumbs.db
+__MACOSX/
+
+# FAST git-mode session stub (never commit)
+.git.server-session/
