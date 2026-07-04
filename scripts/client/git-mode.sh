@@ -76,13 +76,23 @@ resolve_server_script_dir() {
 
 stop_remote_editor() {
     local editor_cmd="$1" alias_name="$2" remote_path="$3"
-    local uri_needle="ssh-remote+${alias_name}" path_needle="${remote_path%/}"
-    local profile="" line pid cmd found=0
 
     if [ "$editor_cmd" = "cursor" ]; then
         _stop_cursor_server_profile
         return
     fi
+    if [ "$editor_cmd" = "code" ]; then
+        _stop_code_server_profile
+        return
+    fi
+
+    _stop_remote_editor_by_uri "$alias_name" "$remote_path"
+}
+
+_stop_remote_editor_by_uri() {
+    local alias_name="$1" remote_path="$2"
+    local uri_needle="ssh-remote+${alias_name}" path_needle="${remote_path%/}"
+    local line pid cmd found=0
 
     _stop_remote_editor_pass() {
         local force="${1:-0}"
@@ -110,10 +120,11 @@ stop_remote_editor() {
 
 # Cursor Remote-SSH spawns a profile tree: only the main binary carries folder-uri;
 # GPU/renderer/network helpers only show --user-data-dir=...ClaudeServerCursorProfile.
-_stop_cursor_server_profile() {
-    local profile_tag="ClaudeServerCursorProfile" line pid cmd found=0
+_stop_editor_server_profile() {
+    local profile_tag="$1"
+    local line pid cmd found=0
 
-    _stop_cursor_profile_pass() {
+    _stop_editor_profile_pass() {
         local force="${1:-0}"
         while IFS= read -r line; do
             [ -z "$line" ] && continue
@@ -129,11 +140,19 @@ _stop_cursor_server_profile() {
         done < <(ps ax -o pid=,command= 2>/dev/null || true)
     }
 
-    _stop_cursor_profile_pass 0
+    _stop_editor_profile_pass 0
     if [ "$found" -eq 1 ]; then
         sleep 12
     fi
-    _stop_cursor_profile_pass 1
+    _stop_editor_profile_pass 1
+}
+
+_stop_cursor_server_profile() {
+    _stop_editor_server_profile "ClaudeServerCursorProfile"
+}
+
+_stop_code_server_profile() {
+    _stop_editor_server_profile "ClaudeServerCodeProfile"
 }
 
 clear_session_mount() {
@@ -192,6 +211,14 @@ run_mac_admin_cmd() {
 grant_laptop_ssh_access() {
     local user="${LAPTOP_USER:-$(whoami)}"
     run_mac_admin_cmd "dseditgroup -o edit -a '$user' -t user com.apple.access_ssh 2>/dev/null || true"
+}
+
+fix_laptop_ssh_firewall() {
+    local sshd="/usr/sbin/sshd"
+    [ "$(uname -s)" = "Darwin" ] || return 0
+    [ -x "$sshd" ] || sshd="$(command -v sshd 2>/dev/null || true)"
+    [ -n "$sshd" ] || return 1
+    run_mac_admin_cmd "/usr/libexec/ApplicationFirewall/socketfilterfw --add '$sshd' 2>/dev/null; /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp '$sshd' 2>/dev/null; true"
 }
 
 cycle_remote_login() {
@@ -574,26 +601,47 @@ laptop_ssh_bootstrap_local() {
 }
 
 invoke_laptop_admin_ops() {
-    local pub="$1"
+    local pub="$1" firewall_fix="${2:-0}"
     pub="$(printf '%s' "$pub" | tr -d '\r')"
-    [ -n "$pub" ] || return 1
     [ "$(uname -s)" = "Darwin" ] || return 1
+    if [ -z "$pub" ] && [ "$firewall_fix" != "1" ]; then
+        return 1
+    fi
 
     grant_laptop_ssh_access || true
-    install_laptop_server_pubkey "$pub" || return 1
+    [ "$firewall_fix" = "1" ] && fix_laptop_ssh_firewall || true
+    if [ -n "$pub" ]; then
+        install_laptop_server_pubkey "$pub" || return 1
+    fi
     restart_laptop_sshd || true
-    verify_laptop_local_pubkey "$pub" && return 0
+    if [ -n "$pub" ] && verify_laptop_local_pubkey "$pub"; then
+        unset LAPTOP_ADMIN_PW
+        return 0
+    fi
+    [ -z "$pub" ] && return 0
 
     cycle_remote_login || true
-    install_laptop_server_pubkey "$pub" || true
+    fix_laptop_ssh_firewall || true
+    install_laptop_server_pubkey "$pub" || return 1
     restart_laptop_sshd || true
-    verify_laptop_local_pubkey "$pub" && return 0
+    verify_laptop_local_pubkey "$pub" && { unset LAPTOP_ADMIN_PW; return 0; }
 
-    laptop_ssh_bootstrap_local || return 1
-    install_laptop_server_pubkey "$pub" || true
+    laptop_ssh_bootstrap_local || {
+        warn "Remote Login fix needs your Mac password (GUI prompt or terminal)."
+        warn "Or enable: System Settings -> General -> Sharing -> Remote Login"
+        unset LAPTOP_ADMIN_PW
+        return 1
+    }
+    fix_laptop_ssh_firewall || true
+    install_laptop_server_pubkey "$pub" || return 1
     restart_laptop_sshd || true
-    verify_laptop_local_pubkey "$pub"
+    if verify_laptop_local_pubkey "$pub"; then
+        unset LAPTOP_ADMIN_PW
+        return 0
+    fi
+    warn "Remote Login still failing — check Mac password prompt or Sharing settings."
     unset LAPTOP_ADMIN_PW
+    return 1
 }
 
 ensure_laptop_ssh_key() {
@@ -738,7 +786,10 @@ configure_git_mode() {
 show_mount_git_warn() {
     local out="$1" line
     line="$(printf '%s\n' "$out" | grep '^warn: git hide failed' | head -1 || true)"
-    [ -n "$line" ] && warn "$line"
+    if [ -n "$line" ]; then
+        warn "$line"
+        warn "Close the editor on this project folder, then press R to retry."
+    fi
     line="$(printf '%s\n' "$out" | grep '^warn: laptop tunnel down' | head -1 || true)"
     [ -n "$line" ] && warn "$line"
 }

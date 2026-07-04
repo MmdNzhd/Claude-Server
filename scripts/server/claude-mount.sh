@@ -195,7 +195,8 @@ p='${safe}'; \
 if [ ! -e \"\$p/.git\" ] && [ ! -e \"\$p/.git.server-session\" ]; then echo GIT_HIDE:skip; \
 elif [ -e \"\$p/.git.server-session\" ] && [ ! -e \"\$p/.git\" ]; then echo GIT_HIDE:already; \
 elif [ -e \"\$p/.git\" ] && [ ! -e \"\$p/.git.server-session\" ]; then \
-  n=0; ok=0; while [ \$n -lt 3 ]; do n=\$((n+1)); mv \"\$p/.git\" \"\$p/.git.server-session\" 2>/dev/null && { echo GIT_HIDE:hidden; ok=1; break; }; sleep 2; done; \
+  n=0; ok=0; while [ \$n -lt 3 ]; do n=\$((n+1)); mv \"\$p/.git\" \"\$p/.git.server-session\" 2>/dev/null && { echo GIT_HIDE:hidden; ok=1; break; }; \
+  if [ \$n -eq 2 ]; then pkill -x git 2>/dev/null || true; sleep 1; else sleep 2; fi; done; \
   [ \$ok -eq 0 ] && echo GIT_HIDE:fail:mv_denied; \
 else echo GIT_HIDE:skip; fi; \
 has=0; [ -e \"\$p/.git\" ] || [ -e \"\$p/.git.server-session\" ] && has=1; \

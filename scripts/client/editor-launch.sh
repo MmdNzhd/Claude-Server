@@ -73,14 +73,52 @@ resolve_editor_choice() {
     return 0
 }
 
+get_cursor_server_profile_dir() {
+    printf '%s' "$HOME/Library/Application Support/ClaudeServerCursorProfile"
+}
+
+get_code_server_profile_dir() {
+    printf '%s' "$HOME/Library/Application Support/ClaudeServerCodeProfile"
+}
+
+remote_editor_running() {
+    local editor_cmd="$1" alias_name="$2" remote_path="$3"
+    local profile_tag="" uri_needle path_needle cmd line
+
+    uri_needle="ssh-remote+${alias_name}"
+    path_needle="${remote_path%/}"
+    case "$editor_cmd" in
+        cursor) profile_tag="ClaudeServerCursorProfile" ;;
+        code)   profile_tag="ClaudeServerCodeProfile" ;;
+        *) return 1 ;;
+    esac
+
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        cmd="${line#* }"
+        case "$cmd" in *"$profile_tag"*) ;; *) continue ;; esac
+        case "$cmd" in *"$uri_needle"*) return 0 ;; esac
+        case "$cmd" in *"$path_needle"*) return 0 ;; esac
+    done < <(ps ax -o pid=,command= 2>/dev/null || true)
+
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        cmd="${line#* }"
+        case "$cmd" in *"$profile_tag"*) return 0 ;; esac
+    done < <(ps ax -o pid=,command= 2>/dev/null || true)
+    return 1
+}
+
 launch_remote_editor() {
     local cmd="$1" alias="$2" remote_path="$3" uri profile
     uri="vscode-remote://ssh-remote+${alias}${remote_path}"
     if [ "$cmd" = "cursor" ]; then
-        profile="$HOME/Library/Application Support/ClaudeServerCursorProfile"
+        profile="$(get_cursor_server_profile_dir)"
         mkdir -p "$profile/User" 2>/dev/null || true
-        cursor --user-data-dir "$profile" --folder-uri "$uri" >/dev/null 2>&1 &
+        cursor --user-data-dir "$profile" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
     else
-        code --folder-uri "$uri" >/dev/null 2>&1 &
+        profile="$(get_code_server_profile_dir)"
+        mkdir -p "$profile/User" 2>/dev/null || true
+        code --user-data-dir "$profile" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
     fi
 }

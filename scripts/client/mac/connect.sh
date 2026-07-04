@@ -5,7 +5,7 @@
 
 set -uo pipefail
 
-CONNECT_VERSION='20260703.12'
+CONNECT_VERSION='20260704.1'
 CONNECT_PORT_BASE=20000
 
 SERVER_IP="192.168.210.240"
@@ -519,8 +519,9 @@ while [ "$exit_requested" -eq 0 ]; do
             if [ $mount_ok -eq 0 ] && echo "$mount_out" | grep -qi 'key auth failed\|connection reset\|reset by peer\|publickey\|Permission denied'; then
                 printf ' retrying...\n'
                 if echo "$mount_out" | grep -qi 'connection reset\|reset by peer'; then
-                    warn "Connection reset - killing stale mounts and restarting sshd"
+                    warn "Connection reset - killing stale mounts, fixing firewall, restarting sshd"
                     sshx 'pkill -u "$USER" sshfs 2>/dev/null; true' 2>/dev/null || true
+                    invoke_laptop_admin_ops "" 1 || true
                 else
                     warn "Key rejected - reinstalling server key"
                 fi
@@ -610,9 +611,14 @@ while [ "$exit_requested" -eq 0 ]; do
                     _editor_opened=1
                     printf '      -> \033[0;90mServer profile [Claude Server] - personal Cursor is separate\033[0m\n'
                     printf '      -> \033[0;90mAgent history: clock icon in sidebar (not empty new tab)\033[0m\n'
-                elif "$EDITOR_CMD" --folder-uri "vscode-remote://ssh-remote+$ALIAS$go_path"; then
+                elif command -v "$EDITOR_CMD" >/dev/null 2>&1; then
+                    _code_profile="$(get_code_server_profile_dir)"
+                    mkdir -p "$_code_profile/User" 2>/dev/null || true
+                    "$EDITOR_CMD" --user-data-dir "$_code_profile" --reuse-window \
+                        --folder-uri "vscode-remote://ssh-remote+$ALIAS$go_path" >/dev/null 2>&1 &
                     step_ok "$go_path"
                     _editor_opened=1
+                    printf '      -> \033[0;90mServer profile [Claude Server Code] - personal VS Code is separate\033[0m\n'
                 else
                     _ec=$?
                     step_fail "$EDITOR_NAME failed to launch (exit $_ec)"
@@ -626,7 +632,11 @@ while [ "$exit_requested" -eq 0 ]; do
             fi
             _session_extras=()
             [ "$CURSOR_AUTH_NEEDS_BOOTSTRAP" -eq 1 ] && _session_extras+=('P = push server login to golden (after sign-in in [Claude Server] only)')
-            _session_extras+=('Before Q: File > Exit Cursor so Agent chat history saves')
+            if [ "$EDITOR_CMD" = "cursor" ]; then
+                _session_extras+=('Before Q: File > Exit Cursor so Agent chat history saves')
+            else
+                _session_extras+=('Before Q: File > Exit VS Code to save unsaved work')
+            fi
             if [ "${#_session_extras[@]}" -gt 0 ]; then
                 ui_session_box "${_session_extras[@]}"
             else
@@ -640,9 +650,18 @@ while [ "$exit_requested" -eq 0 ]; do
             _got_key=0
             _status_at=0
             while _tunnel_alive "$bg_pid"; do
+                if [ "$_editor_opened" -eq 1 ] && declare -F remote_editor_running >/dev/null 2>&1; then
+                    if remote_editor_running "$EDITOR_CMD" "$ALIAS" "$go_path"; then
+                        _editor_opened=1
+                    else
+                        _editor_opened=0
+                    fi
+                fi
                 _now="$(date +%s 2>/dev/null || printf '0')"
                 if [ "$_now" != "0" ] && [ $(( _now - _status_at )) -ge 30 ]; then
-                    ui_session_status_line "$go_id" "$(get_git_mode_label "$(get_git_mode)")" 1 "$_editor_opened" "$EDITOR_NAME"
+                    _tunnel_ok=1
+                    _tunnel_alive "$bg_pid" || _tunnel_ok=0
+                    ui_session_status_line "$go_id" "$(get_git_mode_label "$(get_git_mode)")" "$_tunnel_ok" "$_editor_opened" "$EDITOR_NAME"
                     _status_at="$_now"
                 fi
                 if read -r -t 1 -n 1 _key </dev/tty 2>/dev/null; then
