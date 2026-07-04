@@ -73,6 +73,7 @@ $gitModeSh = Get-Content (Get-ClientFile 'git-mode.sh') -Raw
 Assert ($gitModeSh -match 'function clear_session_mount|clear_session_mount\(\)') 'git-mode.sh has clear_session_mount'
 Assert ($gitModeSh -match 'initialize_server_session') 'git-mode.sh has initialize_server_session'
 Assert ($gitModeSh -match 'stop_remote_editor') 'git-mode.sh has stop_remote_editor'
+Assert ($gitModeSh -match '_stop_cursor_server_profile') 'git-mode.sh kills ClaudeServerCursorProfile tree on disconnect'
 
 foreach ($rel in @('mac\connect.sh')) {
     $src = Get-Content (Get-ClientFile $rel) -Raw

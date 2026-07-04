@@ -79,7 +79,10 @@ stop_remote_editor() {
     local uri_needle="ssh-remote+${alias_name}" path_needle="${remote_path%/}"
     local profile="" line pid cmd found=0
 
-    [ "$editor_cmd" = "cursor" ] && profile="$(get_cursor_remote_profile_dir)"
+    if [ "$editor_cmd" = "cursor" ]; then
+        _stop_cursor_server_profile
+        return
+    fi
 
     _stop_remote_editor_pass() {
         local force="${1:-0}"
@@ -89,9 +92,6 @@ stop_remote_editor() {
             cmd="${line#* }"
             case "$cmd" in *"$uri_needle"*) ;; *) continue ;; esac
             case "$cmd" in *"$path_needle"*) ;; *) continue ;; esac
-            if [ -n "$profile" ]; then
-                case "$cmd" in *"$profile"*) ;; *) continue ;; esac
-            fi
             found=1
             if [ "$force" -eq 1 ]; then
                 kill -9 "$pid" 2>/dev/null || true
@@ -106,6 +106,34 @@ stop_remote_editor() {
         sleep 12
     fi
     _stop_remote_editor_pass 1
+}
+
+# Cursor Remote-SSH spawns a profile tree: only the main binary carries folder-uri;
+# GPU/renderer/network helpers only show --user-data-dir=...ClaudeServerCursorProfile.
+_stop_cursor_server_profile() {
+    local profile_tag="ClaudeServerCursorProfile" line pid cmd found=0
+
+    _stop_cursor_profile_pass() {
+        local force="${1:-0}"
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            pid="${line%% *}"
+            cmd="${line#* }"
+            case "$cmd" in *"$profile_tag"*) ;; *) continue ;; esac
+            found=1
+            if [ "$force" -eq 1 ]; then
+                kill -9 "$pid" 2>/dev/null || true
+            else
+                kill "$pid" 2>/dev/null || true
+            fi
+        done < <(ps ax -o pid=,command= 2>/dev/null || true)
+    }
+
+    _stop_cursor_profile_pass 0
+    if [ "$found" -eq 1 ]; then
+        sleep 12
+    fi
+    _stop_cursor_profile_pass 1
 }
 
 clear_session_mount() {
