@@ -31,9 +31,16 @@ if [ -d "$PUB" ]; then
     for pair in \
         "scripts/client/mac/connect.sh:mac/connect.sh" \
         "scripts/client/git-mode.sh:mac/git-mode.sh" \
+        "scripts/client/connect-ui.sh:mac/connect-ui.sh" \
+        "scripts/client/editor-launch.sh:mac/editor-launch.sh" \
         "scripts/server/claude-mount.sh:mac/claude-mount.sh" \
         "scripts/client/windows/connect.ps1:windows/connect.ps1" \
-        "scripts/client/git-mode.ps1:windows/git-mode.ps1"; do
+        "scripts/client/git-mode.ps1:windows/git-mode.ps1" \
+        "scripts/client/connect-ui.ps1:windows/connect-ui.ps1" \
+        "scripts/client/editor-launch.ps1:windows/editor-launch.ps1" \
+        "scripts/client/cursor-auth-laptop.ps1:windows/cursor-auth-laptop.ps1" \
+        "scripts/client/windows/connect.bat:windows/connect.bat" \
+        "scripts/client/windows/connect-rider.bat:windows/connect-rider.bat"; do
         a="$ROOT/${pair%%:*}"
         b="$PUB/${pair##*:}"
         if cmp -s "$a" "$b" 2>/dev/null; then
@@ -43,6 +50,13 @@ if [ -d "$PUB" ]; then
             fail=1
         fi
     done
+    pub_count="$(find "$PUB" -type f | wc -l | tr -d ' ')"
+    if [ "$pub_count" -eq 13 ]; then
+        echo "OK  publish file count 13"
+    else
+        echo "MISMATCH publish file count (got $pub_count, want 13)" >&2
+        fail=1
+    fi
     echo ""
 fi
 
