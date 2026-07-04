@@ -29,8 +29,21 @@ foreach ($rel in $prodFiles) {
     $null = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$parseErrs)
     Assert ((-not $parseErrs) -or ($parseErrs.Count -eq 0)) "$rel parses cleanly"
     Assert ($src -notmatch '[\u201C\u201D\u2018\u2019]') "$rel no smart quotes"
+    $codeBody = (($src -split "`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+    Assert ($codeBody -notmatch '[\u2013\u2014]') "$rel no en/em dashes in executable lines"
     Assert ($src -notmatch 'Select-String[^\n]*-Pattern\s+\[regex\]::Escape') "$rel no bare Select-String [regex]::Escape"
     Assert ($src -notmatch 'Set-ConnectTitle\s+"[^"]*\|[^"]*\$\(') "$rel no pipe-in-Set-ConnectTitle double-quote"
+}
+
+# Repo git-mode must dot-source (em-dash in strings breaks PS 5.1 parse)
+Write-Host ''
+Write-Host '--- repo git-mode dot-source ---' -ForegroundColor Cyan
+try {
+    . (Get-ClientFile 'git-mode.ps1')
+    Assert (Get-Command Sanitize-SshAliasConfig -ErrorAction SilentlyContinue) 'repo git-mode loads Sanitize-SshAliasConfig'
+    Assert (Get-Command Acquire-TunnelPort -ErrorAction SilentlyContinue) 'repo git-mode loads Acquire-TunnelPort'
+} catch {
+    Assert $false "repo git-mode dot-source failed: $($_.Exception.Message)"
 }
 
 # Dot-source chain smoke (no main script run)
@@ -59,7 +72,7 @@ Write-Host ''
 Write-Host '--- connect.bat bundle guards ---' -ForegroundColor Cyan
 $bat = Get-ClientFile 'windows\connect.bat'
 $batSrc = Get-Content $bat -Raw
-$required = @('connect-ui.ps1', 'editor-launch.ps1', 'git-mode.ps1', 'cursor-auth-laptop.ps1', '20260703.12', 'Path.Combine', '@(Choose-Project')
+$required = @('connect-ui.ps1', 'editor-launch.ps1', 'git-mode.ps1', 'cursor-auth-laptop.ps1', '20260703.12', 'Path.Combine', '@(Choose-Project', 'Acquire-TunnelPort')
 foreach ($r in $required) {
     Assert ($batSrc -match [regex]::Escape($r)) "connect.bat requires $r"
 }

@@ -57,12 +57,12 @@ function Warn-InvalidProjectRpath {
     )
     $suffix = if ($Num) { " Press e to edit project #$Num." } else { '' }
     if (-not (Test-LaptopRpathCompatible -Rpath $Rpath -Os $Os)) {
-        if ($Os -eq 'mac') { Warn "Windows path — not usable on Mac.$suffix" }
-        else { Warn "Mac path — not usable on Windows.$suffix" }
+        if ($Os -eq 'mac') { Warn "Windows path - not usable on Mac.$suffix" }
+        else { Warn "Mac path - not usable on Windows.$suffix" }
         return $false
     }
     if (-not (Test-LaptopRpathExists -Rpath $Rpath)) {
-        $suffix2 = if ($Num) { " — press e to edit project #$Num." } else { '' }
+        $suffix2 = if ($Num) { " - press e to edit project #$Num." } else { '' }
         Warn "Folder not found on this laptop: $Rpath$suffix2"
         return $false
     }

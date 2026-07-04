@@ -14,6 +14,7 @@ findstr /C:"Path.Combine" "%HERE%editor-launch.ps1" >nul 2>&1 || set "OUTDATED=1
 findstr /C:"@(Choose-Project" "%HERE%connect.ps1" >nul 2>&1 || set "OUTDATED=1"
 findstr /C:"g git" "%HERE%connect.ps1" >nul 2>&1 || set "OUTDATED=1"
 findstr /C:"ConnectVersion = '20260703.12'" "%HERE%connect.ps1" >nul 2>&1 || set "OUTDATED=1"
+findstr /C:"Acquire-TunnelPort" "%HERE%git-mode.ps1" >nul 2>&1 || set "OUTDATED=1"
 
 if "%OUTDATED%"=="1" (
     echo.

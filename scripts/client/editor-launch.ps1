@@ -114,9 +114,9 @@ function Configure-EditorPref {
     $cur = Get-EditorPref -CfgDir $CfgDir
     Write-Host "    Current: $cur" -ForegroundColor DarkGray
     Write-Host ''
-    Write-Host '    1  cursor — always open Cursor' -ForegroundColor DarkGray
-    Write-Host '    2  code   — always open VS Code' -ForegroundColor DarkGray
-    Write-Host '    3  ask    — pick each connect' -ForegroundColor DarkGray
+    Write-Host '    1  cursor - always open Cursor' -ForegroundColor DarkGray
+    Write-Host '    2  code   - always open VS Code' -ForegroundColor DarkGray
+    Write-Host '    3  ask    - pick each connect' -ForegroundColor DarkGray
     Write-Host ''
     $choice = (Read-Host '    >').Trim().ToLower()
     $val = switch ($choice) {
