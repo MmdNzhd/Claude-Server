@@ -2,6 +2,9 @@
 # test-project-rpath.sh — laptop path validation helpers (Mac client)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CFG_DIR="${TMPDIR:-/tmp}/claude-rpath-test-$$"
+mkdir -p "$CFG_DIR"
+export CFG_DIR
 # shellcheck source=../git-mode.sh
 . "$ROOT/git-mode.sh"
 export GIT_MODE_LAPTOP_OS=mac
