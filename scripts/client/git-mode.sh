@@ -235,13 +235,18 @@ verify_laptop_local_pubkey() {
 }
 
 fetch_tunnel_banner() {
+    tunnel_fetch_banner
+}
+
+# One sshx RTT: TCP open + SSH banner (replaces separate port_open + banner calls).
+tunnel_fetch_banner() {
     [ -n "${PORT:-}" ] || return 1
-    sshx "timeout 3 nc 127.0.0.1 ${PORT} 2>/dev/null | head -1" 2>/dev/null | tr -d '\r\n'
+    sshx "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${PORT} 2>/dev/null && timeout 2 nc 127.0.0.1 ${PORT} 2>/dev/null | head -1'" 2>/dev/null | tr -d '\r\n'
 }
 
 tunnel_banner_is_this_laptop() {
     local banner="${1:-}" os="${GIT_MODE_LAPTOP_OS:-mac}"
-    [ -n "$banner" ] || banner="$(fetch_tunnel_banner)"
+    [ -n "$banner" ] || banner="$(tunnel_fetch_banner)"
     [ -n "$banner" ] || return 1
     echo "$banner" | grep -q '^SSH-2.0-' || return 1
     case "$os" in
@@ -256,13 +261,155 @@ tunnel_banner_is_this_laptop() {
 }
 
 tunnel_port_open() {
-    [ -n "${PORT:-}" ] || return 1
-    sshx "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${PORT}' 2>/dev/null && echo UP" 2>/dev/null | grep -q UP
+    [ -n "$(tunnel_fetch_banner 2>/dev/null || true)" ]
 }
 
 tunnel_up() {
-    tunnel_port_open || return 1
-    tunnel_banner_is_this_laptop
+    local banner
+    banner="$(tunnel_fetch_banner 2>/dev/null || true)"
+    [ -n "$banner" ] || return 1
+    tunnel_banner_is_this_laptop "$banner"
+}
+
+wait_for_tunnel_up() {
+    local pid="${1:-}" i sleep_s
+    for i in $(seq 1 12); do
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            return 1
+        fi
+        if tunnel_up; then
+            return 0
+        fi
+        sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
+        sleep "$sleep_s"
+    done
+    return 1
+}
+
+poll_tunnel_with_progress() {
+    local pid="${1:-}" i sleep_s up=""
+    for i in $(seq 1 12); do
+        sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
+        sleep "$sleep_s"
+        printf '    Tunnel check %d/12...' "$i"
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            printf ' SSH process died\n'
+            release_stale_tunnel_port || true
+            return 1
+        fi
+        if tunnel_up; then
+            printf ' port %d is open\n' "$PORT"
+            return 0
+        fi
+        printf ' port %d not open yet\n' "$PORT"
+    done
+    return 1
+}
+
+find_claude_mount_src() {
+    local script_dir="$1" _mount_src="" _mount_dir=""
+    if [ -f "$script_dir/claude-mount.sh" ]; then
+        printf '%s' "$script_dir/claude-mount.sh"
+        return 0
+    fi
+    _mount_dir="$(resolve_server_script_dir "$script_dir" 2>/dev/null || true)"
+    if [ -n "$_mount_dir" ] && [ -f "$_mount_dir/claude-mount.sh" ]; then
+        printf '%s' "$_mount_dir/claude-mount.sh"
+        return 0
+    fi
+    return 1
+}
+
+local_file_sha256() {
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+}
+
+remote_claude_mount_sha256() {
+    sshx "sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print \$1}'" 2>/dev/null | tr -d '\r\n'
+}
+
+push_claude_mount_if_changed() {
+    local src="$1" local_h="" remote_h=""
+    [ -f "$src" ] || return 0
+    local_h="$(local_file_sha256 "$src")"
+    if [ -n "$local_h" ]; then
+        remote_h="$(remote_claude_mount_sha256)"
+        [ "$local_h" = "$remote_h" ] && return 0
+    fi
+    scp -o BatchMode=yes -o ConnectTimeout=20 -q "$src" "$ALIAS:~/.local/bin/claude-mount" 2>/dev/null \
+        && sshx "chmod +x ~/.local/bin/claude-mount" 2>/dev/null || true
+}
+
+prepare_server_session_parallel() {
+    local go_id="$1" mount_src="${2:-}" pp="" sp=""
+    ACTIVE_MOUNT_ID="$go_id"
+    push_server_connect_conf &
+    pp=$!
+    if [ -n "$mount_src" ]; then
+        push_claude_mount_if_changed "$mount_src" &
+        sp=$!
+    fi
+    wait "$pp" 2>/dev/null || true
+    [ -n "$sp" ] && wait "$sp" 2>/dev/null || true
+}
+
+project_mount_healthy() {
+    local id="$1"
+    [ -n "$id" ] || return 1
+    sshx "$CM check '$id' 2>/dev/null" 2>/dev/null | grep -q '^ok$'
+}
+
+recover_mounts_if_needed() {
+    local id="$1" fresh_tunnel="${2:-0}"
+    if [ "$fresh_tunnel" = "0" ] && project_mount_healthy "$id"; then
+        return 0
+    fi
+    printf '    \033[0;90mRecovering stale mounts...\033[0m\n'
+    timeout 30 sshx "$CM recover-if-needed '$id'" 2>/dev/null || timeout 30 sshx "$CM recover" 2>/dev/null || true
+    printf '    \033[0;90mRecover done\033[0m\n'
+}
+
+invoke_mount_project() {
+    local id="$1"
+    sshx "CLAUDE_TRUSTED_TUNNEL=1 $CM up '$id' 2>&1"
+}
+
+ensure_laptop_reverse_ssh_cached() {
+    local pub="${1:-}" rc=0
+    if [ "${LAPTOP_SSH_VERIFIED:-0}" = "1" ] && verify_laptop_reverse_ssh; then
+        return 0
+    fi
+    ensure_laptop_reverse_ssh "$pub" || rc=$?
+    [ "$rc" -eq 0 ] && LAPTOP_SSH_VERIFIED=1
+    return "$rc"
+}
+
+# Reuse live tunnel when possible; sets TUNNEL_REUSED=0|1 and bg_pid.
+ensure_session_tunnel() {
+    TUNNEL_REUSED=0
+    if [ -n "${bg_pid:-}" ] && _tunnel_alive "$bg_pid" && tunnel_up; then
+        TUNNEL_REUSED=1
+        return 0
+    fi
+    [ -n "${bg_pid:-}" ] && kill "$bg_pid" 2>/dev/null || true
+    bg_pid=""
+    pkill -f "ssh.*-R ${PORT}:localhost:22" 2>/dev/null || true
+    local uid_str=""
+    uid_str="$(sshx 'id -u' 2>/dev/null | tr -d '\r' | grep -E '^[0-9]+$' | head -1 | tr -dc '0-9')"
+    if [ -n "$uid_str" ]; then
+        acquire_tunnel_port "$uid_str" || true
+    fi
+    release_stale_tunnel_port || true
+    sanitize_ssh_alias_config
+    ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=5 \
+        -R "${PORT}:localhost:22" "$ALIAS" 2>/dev/null &
+    bg_pid=$!
+    if poll_tunnel_with_progress "$bg_pid"; then
+        return 0
+    fi
+    kill "$bg_pid" 2>/dev/null || true
+    bg_pid=""
+    return 1
 }
 
 release_stale_tunnel_port() {
@@ -454,12 +601,22 @@ initialize_server_session() {
         [ -f "$server_dir/claude-git-setup.sh" ] && git_src="$server_dir/claude-git-setup.sh"
         sshx "mkdir -p ~/.local/bin" 2>/dev/null || true
         if [ -n "$src" ]; then
-            scp -o BatchMode=yes -o ConnectTimeout=30 -q "$src" "$ALIAS:~/.local/bin/claude-mount" &
-            scp_pids="$scp_pids $!"
+            local local_h remote_h
+            local_h="$(local_file_sha256 "$src" 2>/dev/null || true)"
+            remote_h="$(remote_claude_mount_sha256 2>/dev/null || true)"
+            if [ -z "$local_h" ] || [ "$local_h" != "$remote_h" ]; then
+                scp -o BatchMode=yes -o ConnectTimeout=30 -q "$src" "$ALIAS:~/.local/bin/claude-mount" &
+                scp_pids="$scp_pids $!"
+            fi
         fi
         if [ -n "$git_src" ]; then
-            scp -o BatchMode=yes -o ConnectTimeout=30 -q "$git_src" "$ALIAS:~/.local/bin/claude-git-setup" &
-            scp_pids="$scp_pids $!"
+            local git_local git_remote
+            git_local="$(local_file_sha256 "$git_src" 2>/dev/null || true)"
+            git_remote="$(sshx "sha256sum ~/.local/bin/claude-git-setup 2>/dev/null | awk '{print \$1}'" 2>/dev/null | tr -d '\r\n')"
+            if [ -z "$git_local" ] || [ "$git_local" != "$git_remote" ]; then
+                scp -o BatchMode=yes -o ConnectTimeout=30 -q "$git_src" "$ALIAS:~/.local/bin/claude-git-setup" &
+                scp_pids="$scp_pids $!"
+            fi
         fi
     fi
 
@@ -611,7 +768,7 @@ remount_project_git() {
         return 1
     fi
     local mount_out
-    mount_out="$(sshx "$CM up '$pid' 2>&1")"
+    mount_out="$(sshx "CLAUDE_TRUSTED_TUNNEL=1 $CM up '$pid' 2>&1")"
     show_mount_git_warn "$mount_out"
     if ! test_mount_success "$mount_out"; then
         warn "$(printf '%s' "$mount_out" | head -3)"

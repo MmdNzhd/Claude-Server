@@ -204,6 +204,9 @@ if ! initialize_server_session "$_script_dir"; then
 fi
 step_ok "port $PORT git=$(get_git_mode)"
 
+ensure_laptop_ssh_key "$PUB_B" 2>/dev/null || true
+LAPTOP_SSH_VERIFIED=0
+
 echo ""
 printf '    \033[0;32mReady\033[0m\n'
 echo ""
@@ -417,8 +420,6 @@ while [ "$exit_requested" -eq 0 ]; do
 
         session_done=0
         while [ "$session_done" -eq 0 ]; do
-            [ -n "$bg_pid" ] && kill "$bg_pid" 2>/dev/null || true
-            bg_pid=""
             already_down=0
 
             step "Checking SSH service"
@@ -435,37 +436,9 @@ while [ "$exit_requested" -eq 0 ]; do
                 fi
             fi
 
-            pkill -f "ssh.*-R ${PORT}:localhost:22" 2>/dev/null || true
-            uid_str="$(sshx 'id -u' 2>/dev/null | tr -d '\r' | grep -E '^[0-9]+$' | head -1 | tr -dc '0-9')"
-            if [ -n "$uid_str" ]; then
-                acquire_tunnel_port "$uid_str" || true
-            fi
-            release_stale_tunnel_port || true
-
-            sanitize_ssh_alias_config
-            step "Starting SSH tunnel"
-            ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=5 \
-                -R "${PORT}:localhost:22" "$ALIAS" 2>/dev/null &
-            bg_pid=$!
-            step_ok "pid $bg_pid"
-
-            up=""
-            for i in $(seq 1 8); do
-                sleep 2
-                printf '    Tunnel check %d/8...' "$i"
-                if ! kill -0 "$bg_pid" 2>/dev/null; then
-                    printf ' SSH process died\n'
-                    release_stale_tunnel_port || true
-                    break
-                fi
-                if tunnel_up; then
-                    printf ' port %d is open\n' "$PORT"
-                    up=1; break
-                fi
-                printf ' port %d not open yet\n' "$PORT"
-            done
-
-            if [ -z "$up" ]; then
+            if ! ensure_session_tunnel; then
+                step "Starting SSH tunnel"
+                step_fail "did not come up"
                 echo ""
                 warn "Tunnel did not come up on port $PORT"
                 if ! port_open "$SERVER_IP" 22; then
@@ -483,45 +456,35 @@ while [ "$exit_requested" -eq 0 ]; do
                 [ "$_rk" = "r" ] && { echo ""; continue; }
                 ACTIVE_MOUNT_ID=""
                 push_server_connect_conf
-                kill "$bg_pid" 2>/dev/null || true
+                [ -n "$bg_pid" ] && kill "$bg_pid" 2>/dev/null || true
                 already_down=1
                 session_done=1
                 break
             fi
-
-            ACTIVE_MOUNT_ID="$go_id"
-            push_server_connect_conf
-
-            _mount_src=""
-            if [ -f "$SCRIPT_DIR/claude-mount.sh" ]; then
-                _mount_src="$SCRIPT_DIR/claude-mount.sh"
-            else
-                _mount_dir="$(resolve_server_script_dir "$SCRIPT_DIR" 2>/dev/null || true)"
-                if [ -n "$_mount_dir" ] && [ -f "$_mount_dir/claude-mount.sh" ]; then
-                    _mount_src="$_mount_dir/claude-mount.sh"
-                fi
-            fi
-            if [ -n "$_mount_src" ]; then
-                scp -o BatchMode=yes -o ConnectTimeout=20 -q "$_mount_src" "$ALIAS:~/.local/bin/claude-mount" 2>/dev/null \
-                    && sshx "chmod +x ~/.local/bin/claude-mount" 2>/dev/null || true
+            if [ "${TUNNEL_REUSED:-0}" = "1" ]; then
+                step "SSH tunnel"
+                step_ok "reusing pid $bg_pid"
             fi
 
-            printf '    \033[0;90mRecovering stale mounts...\033[0m\n'
-            timeout 30 sshx "$CM recover" 2>/dev/null || true
-            printf '    \033[0;90mRecover done\033[0m\n'
+            _mount_src="$(find_claude_mount_src "$SCRIPT_DIR" 2>/dev/null || true)"
+            prepare_server_session_parallel "$go_id" "$_mount_src"
+
+            recover_mounts_if_needed "$go_id" "$(( TUNNEL_REUSED ^ 1 ))"
 
             if ! _tunnel_alive "$bg_pid"; then
                 printf '      -> tunnel dropped during recover, restarting...\n'
+                LAPTOP_SSH_VERIFIED=0
                 continue
             fi
 
             step "Verifying laptop SSH key"
             _laptop_ssh_rc=0
-            ensure_laptop_reverse_ssh "$PUB_B" || _laptop_ssh_rc=$?
+            ensure_laptop_reverse_ssh_cached "$PUB_B" || _laptop_ssh_rc=$?
             if [ "$_laptop_ssh_rc" -eq 0 ]; then
                 step_ok
             elif [ "$_laptop_ssh_rc" -eq 1 ]; then
                 step_fail "tunnel auth failed, retrying..."
+                LAPTOP_SSH_VERIFIED=0
                 echo ""
                 continue
             else
@@ -544,7 +507,7 @@ while [ "$exit_requested" -eq 0 ]; do
 
             step "Mounting files"
             mount_start=$SECONDS
-            mount_out="$(sshx "$CM up '$go_id' 2>&1")"
+            mount_out="$(invoke_mount_project "$go_id")"
             mount_exit=$?
             mount_t=$(( SECONDS - mount_start ))
             mount_ok=0
@@ -567,7 +530,7 @@ while [ "$exit_requested" -eq 0 ]; do
                     fi
                     step "Mounting files"
                     mount_start=$SECONDS
-                    mount_out="$(sshx "$CM up '$go_id' 2>&1")"
+                    mount_out="$(invoke_mount_project "$go_id")"
                     mount_exit=$?
                     mount_t=$(( SECONDS - mount_start ))
                     if [ $mount_exit -eq 0 ] && ! echo "$mount_out" | grep -q 'error:\|FAILED\|No tunnel\|not configured'; then
@@ -610,12 +573,17 @@ while [ "$exit_requested" -eq 0 ]; do
             fi
             ACTIVE_PROJECT_ID="$go_id"
             CURSOR_AUTH_NEEDS_BOOTSTRAP=0
+            _cursor_auth_ok=0
             if [ "$EDITOR_CMD" = "cursor" ] && declare -F sync_cursor_golden_auth_status >/dev/null 2>&1; then
-                step "Syncing Cursor auth"
                 _cursor_gs="$(get_cursor_remote_profile_dir)/User/globalStorage/state.vscdb"
                 if [ -f "$_cursor_gs" ] && local_cursor_auth_complete "$_cursor_gs"; then
-                    step_ok "already ok"
-                else
+                    _cursor_auth_ok=1
+                fi
+            fi
+
+            if [ "$_editor_opened" -eq 0 ]; then
+                if [ "$_cursor_auth_ok" -eq 0 ] && [ "$EDITOR_CMD" = "cursor" ] && declare -F sync_cursor_golden_auth_status >/dev/null 2>&1; then
+                    step "Syncing Cursor auth"
                     sync_cursor_golden_auth_status
                     case "$CURSOR_AUTH_SYNC_RESULT" in
                         ok) step_ok; date -u +%Y-%m-%dT%H:%M:%SZ > "$CFG_DIR/cursor-auth.ok" 2>/dev/null || true ;;
@@ -627,11 +595,10 @@ while [ "$exit_requested" -eq 0 ]; do
                         skipped) step_ok "skipped" ;;
                         *) step_fail "could not merge server auth"; CURSOR_AUTH_NEEDS_BOOTSTRAP=1 ;;
                     esac
+                    repair_cursor_composer_workspace_bindings "$ALIAS" "$go_path" || true
+                elif [ "$EDITOR_CMD" = "cursor" ] && declare -F repair_cursor_composer_workspace_bindings >/dev/null 2>&1; then
+                    repair_cursor_composer_workspace_bindings "$ALIAS" "$go_path" &
                 fi
-                repair_cursor_composer_workspace_bindings "$ALIAS" "$go_path" || true
-            fi
-
-            if [ "$_editor_opened" -eq 0 ]; then
                 step "Opening $EDITOR_NAME"
                 if [ "$EDITOR_CMD" = "cursor" ]; then
                     init_cursor_server_profile
@@ -648,6 +615,10 @@ while [ "$exit_requested" -eq 0 ]; do
                 else
                     _ec=$?
                     step_fail "$EDITOR_NAME failed to launch (exit $_ec)"
+                fi
+                if [ "$_cursor_auth_ok" -eq 1 ] && [ "$EDITOR_CMD" = "cursor" ]; then
+                    step "Syncing Cursor auth"
+                    step_ok "already ok"
                 fi
                 echo ""
                 printf "    \033[0;90mRun 'claude' in the %s terminal.\033[0m\n" "$EDITOR_NAME"
@@ -706,26 +677,29 @@ while [ "$exit_requested" -eq 0 ]; do
                 continue
             fi
 
-            echo ""
-            printf '    Disconnecting...\n'
-            if [ "$_action" = "r" ] && [ "$_got_key" -eq 0 ]; then
-                clear_session_mount "$go_id" "" "$ALIAS" "$go_path" 1
-            else
-                clear_session_mount "$go_id" "$EDITOR_CMD" "$ALIAS" "$go_path"
-            fi
-            kill "$bg_pid" 2>/dev/null || true
-            already_down=1
-            printf '    Laptop folder restored.\n'
-
             if [ "$_action" = "r" ]; then
-                [ "$_got_key" -eq 1 ] && _editor_opened=0
-                already_down=0
-                echo ""
-                printf '    Reconnecting in 2s...\n'
-                sleep 2
+                if [ "$_got_key" -eq 1 ]; then
+                    already_down=0
+                    echo ""
+                    printf '    Reconnecting...\n'
+                    echo ""
+                    continue
+                fi
+                printf '    Connection dropped - recovering...\n'
+                clear_session_mount "$go_id" "" "$ALIAS" "$go_path" 1
+                [ -n "$bg_pid" ] && kill "$bg_pid" 2>/dev/null || true
+                bg_pid=""
+                already_down=1
+                LAPTOP_SSH_VERIFIED=0
                 echo ""
                 continue
             fi
+
+            printf '    Disconnecting...\n'
+            clear_session_mount "$go_id" "$EDITOR_CMD" "$ALIAS" "$go_path"
+            [ -n "$bg_pid" ] && kill "$bg_pid" 2>/dev/null || true
+            already_down=1
+            printf '    Laptop folder restored.\n'
 
             session_done=1
         done

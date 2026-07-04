@@ -14,7 +14,10 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 grep -q '_tunnel_banner_matches_laptop' "$MOUNT" || fail 'mount: missing banner check'
 grep -q '_tunnel_auth_ok' "$MOUNT" || fail 'mount: missing auth check'
 grep -q 'cmd_tunnel_status' "$MOUNT" || fail 'mount: missing tunnel-status command'
-grep -q 'tunnel-status' "$MOUNT" || fail 'mount: tunnel-status not in dispatch'
+grep -q 'cmd_check' "$MOUNT" || fail 'mount: missing check command'
+grep -q 'cmd_recover_if_needed' "$MOUNT" || fail 'mount: missing recover-if-needed command'
+grep -q 'CLAUDE_TRUSTED_TUNNEL' "$MOUNT" || fail 'mount: missing trusted tunnel fast path'
+grep -q 'recover-if-needed' "$MOUNT" || fail 'mount: recover-if-needed not in dispatch'
 grep -q 'another laptop' "$MOUNT" || fail 'mount: stale port error message missing'
 grep -q '_tunnel_banner_matches_laptop' "$GIT_SETUP" || fail 'git-setup: missing banner check'
 

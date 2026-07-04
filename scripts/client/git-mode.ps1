@@ -133,6 +133,145 @@ function Read-PostDisconnectKey {
     return $DefaultChar.ToString().ToLower()
 }
 
+function Get-TunnelBanner {
+    if (-not $Port) { return '' }
+    $r = SshX "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port 2>/dev/null && timeout 2 nc 127.0.0.1 $Port 2>/dev/null | head -1'" 2>$null
+    return (($r -join '') -replace "`r",'').Trim()
+}
+
+function Test-TunnelBannerIsWindows {
+    param([string]$Banner)
+    if (-not $Banner) { return $false }
+    if ($Banner -notmatch '^SSH-2\.0-') { return $false }
+    return ($Banner -match 'OpenSSH_for_Windows')
+}
+
+function Test-TunnelUp {
+    $banner = Get-TunnelBanner
+    return (Test-TunnelBannerIsWindows -Banner $banner)
+}
+
+function Test-Tunnel {
+    return (Test-TunnelUp)
+}
+
+function Wait-ForTunnelUp {
+    param([System.Diagnostics.Process]$TunnelProc)
+    for ($i = 1; $i -le 12; $i++) {
+        $sleepSec = [math]::Min(1.5, 0.25 + ($i - 1) * 0.2)
+        Start-Sleep -Seconds $sleepSec
+        Write-Host -NoNewline "    Tunnel check $i/12..." -ForegroundColor DarkGray
+        if ($TunnelProc -and $TunnelProc.HasExited) {
+            Write-Host ' SSH process died' -ForegroundColor Red
+            return $false
+        }
+        if (Test-TunnelUp) {
+            Write-Host " port $Port is open" -ForegroundColor Green
+            return $true
+        }
+        Write-Host " port $Port not open yet" -ForegroundColor DarkGray
+    }
+    return $false
+}
+
+function Get-ClaudeMountSrc {
+    param([Parameter(Mandatory)][string]$ConnectScriptDir)
+    $direct = Join-Path $ConnectScriptDir 'claude-mount.sh'
+    if (Test-Path $direct) { return $direct }
+    $dir = Resolve-ServerScriptDir -ConnectScriptDir $ConnectScriptDir
+    if ($dir) {
+        $src = Join-Path $dir 'claude-mount.sh'
+        if (Test-Path $src) { return $src }
+    }
+    return $null
+}
+
+function Push-ClaudeMountIfChanged {
+    param(
+        [Parameter(Mandatory)][string]$Src,
+        [Parameter(Mandatory)][string]$Alias
+    )
+    if (-not (Test-Path $Src)) { return }
+    $localHash = (Get-FileHash -Algorithm SHA256 -Path $Src).Hash
+    $remoteHash = ((SshX "sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print `$1}'") -join '').Trim()
+    if ($localHash -and $remoteHash -and ($localHash.ToLower() -eq $remoteHash.ToLower())) { return }
+    scp -o BatchMode=yes -o ConnectTimeout=20 -q $Src "${Alias}:~/.local/bin/claude-mount" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        SshX 'chmod +x ~/.local/bin/claude-mount' 2>$null | Out-Null
+    }
+}
+
+function Prepare-ServerSessionParallel {
+    param(
+        [Parameter(Mandatory)][string]$ProjectId,
+        [string]$MountSrc = '',
+        [Parameter(Mandatory)][string]$Alias
+    )
+    $script:ActiveProjectId = $ProjectId
+    $scpJob = $null
+    $needScp = $false
+    if ($MountSrc -and (Test-Path $MountSrc)) {
+        $localHash = (Get-FileHash -Algorithm SHA256 -Path $MountSrc).Hash
+        $remoteHash = ((SshX "sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print `$1}'") -join '').Trim()
+        $needScp = -not ($localHash -and $remoteHash -and ($localHash.ToLower() -eq $remoteHash.ToLower()))
+        if ($needScp) {
+            $scpJob = Start-Job -ScriptBlock {
+                param($src, $alias)
+                scp -o BatchMode=yes -o ConnectTimeout=20 -q $src "${alias}:~/.local/bin/claude-mount" 2>$null
+                exit $LASTEXITCODE
+            } -ArgumentList $MountSrc, $Alias
+        }
+    }
+    Push-ServerConnectConf -ActiveMount $ProjectId
+    if ($scpJob) {
+        Wait-Job $scpJob | Out-Null
+        if (($scpJob | Receive-Job) -eq 0) {
+            SshX 'chmod +x ~/.local/bin/claude-mount' 2>$null | Out-Null
+        }
+        Remove-Job $scpJob -Force
+    }
+}
+
+function Test-ProjectMountHealthy {
+    param([Parameter(Mandatory)][string]$ProjectId)
+    $out = ((SshX "$CM check '$ProjectId' 2>/dev/null") -join '').Trim()
+    return ($out -eq 'ok')
+}
+
+function Invoke-RecoverIfNeeded {
+    param(
+        [Parameter(Mandatory)][string]$ProjectId,
+        [switch]$FreshTunnel
+    )
+    if (-not $FreshTunnel -and (Test-ProjectMountHealthy -ProjectId $ProjectId)) { return }
+    Write-Host '      -> recovering stale mounts...' -ForegroundColor DarkGray
+    SshX "$CM recover-if-needed '$ProjectId'" 2>$null | Out-Null
+}
+
+function Ensure-SessionTunnel {
+    param(
+        [Parameter(Mandatory)][string]$Alias,
+        [ref]$BgTunnel,
+        [ref]$TunnelReused
+    )
+    $TunnelReused.Value = $false
+    if ($BgTunnel.Value -and -not $BgTunnel.Value.HasExited -and (Test-TunnelUp)) {
+        $TunnelReused.Value = $true
+        return $true
+    }
+    if ($BgTunnel.Value -and -not $BgTunnel.Value.HasExited) {
+        Stop-Process -Id $BgTunnel.Value.Id -Force -ErrorAction SilentlyContinue
+    }
+    Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match "-R\s+${Port}:localhost:22" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $BgTunnel.Value = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList @(
+        '-N', '-o', 'ExitOnForwardFailure=no',
+        '-o', 'ServerAliveInterval=20', '-o', 'ServerAliveCountMax=5',
+        '-R', "$Port`:localhost:22", $Alias)
+    return (Wait-ForTunnelUp -TunnelProc $BgTunnel.Value)
+}
+
 function Push-ServerConnectConf {
     param(
         [string]$GitMode = (Get-GitMode),
@@ -233,12 +372,15 @@ function Push-ClaudeServerScripts {
     $gitSrc = [System.IO.Path]::Combine($dir, 'claude-git-setup.sh')
     $pushOk = $true
     if (Test-Path $src) {
-        scp -o BatchMode=yes -o ConnectTimeout=30 -q $src "${Alias}:~/.local/bin/claude-mount" 2>$null
-        if ($LASTEXITCODE -ne 0) { $pushOk = $false; $script:pendingFixes += 'claude-mount push failed' }
+        Push-ClaudeMountIfChanged -Src $src -Alias $Alias
     }
     if (Test-Path $gitSrc) {
-        scp -o BatchMode=yes -o ConnectTimeout=30 -q $gitSrc "${Alias}:~/.local/bin/claude-git-setup" 2>$null
-        if ($LASTEXITCODE -ne 0) { $pushOk = $false; $script:pendingFixes += 'claude-git-setup push failed' }
+        $localGit = (Get-FileHash -Algorithm SHA256 -Path $gitSrc).Hash
+        $remoteGit = ((SshX "sha256sum ~/.local/bin/claude-git-setup 2>/dev/null | awk '{print `$1}'") -join '').Trim()
+        if (-not ($localGit -and $remoteGit -and ($localGit.ToLower() -eq $remoteGit.ToLower()))) {
+            scp -o BatchMode=yes -o ConnectTimeout=30 -q $gitSrc "${Alias}:~/.local/bin/claude-git-setup" 2>$null
+            if ($LASTEXITCODE -ne 0) { $pushOk = $false; $script:pendingFixes += 'claude-git-setup push failed' }
+        }
     }
     $chmodCmd = @()
     if (Test-Path $src) { $chmodCmd += "chmod +x ~/.local/bin/claude-mount; grep -q 'CLAUDE_LOCAL_BIN_PATH' ~/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=`$HOME/.local/bin:`$PATH\n' >> ~/.bashrc" }
@@ -262,9 +404,11 @@ function Invoke-MountProject {
     param(
         [Parameter(Mandatory)][string]$ProjectId,
         [Parameter(Mandatory)][string]$ConnectScriptDir,
-        [Parameter(Mandatory)][string]$Alias
+        [Parameter(Mandatory)][string]$Alias,
+        [switch]$TrustedTunnel
     )
-    $mountOut = (SshX "$CM up '$ProjectId' 2>&1") | Out-String
+    $trusted = if ($TrustedTunnel) { 'CLAUDE_TRUSTED_TUNNEL=1 ' } else { '' }
+    $mountOut = (SshX "${trusted}$CM up '$ProjectId' 2>&1") | Out-String
     $exitCode = $LASTEXITCODE
     if (Test-MountSuccess -MountOut $mountOut -ExitCode $exitCode) {
         return @{ Ok = $true; Out = $mountOut }
@@ -272,7 +416,7 @@ function Invoke-MountProject {
     if ($mountOut -match 'unbound variable|syntax error near unexpected') {
         Write-Host '      -> server mount script outdated, pushing update...' -ForegroundColor DarkGray
         if (Push-ClaudeServerScripts -ConnectScriptDir $ConnectScriptDir -Alias $Alias) {
-            $mountOut = (SshX "$CM up '$ProjectId' 2>&1") | Out-String
+            $mountOut = (SshX "${trusted}$CM up '$ProjectId' 2>&1") | Out-String
             $exitCode = $LASTEXITCODE
             if (Test-MountSuccess -MountOut $mountOut -ExitCode $exitCode) {
                 return @{ Ok = $true; Out = $mountOut }

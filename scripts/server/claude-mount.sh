@@ -641,6 +641,36 @@ cmd_rm() {
 # Restore .git for all projects whose mount is NOT currently active.
 # Called at session start (connect.bat, automount) to recover from crashes.
 # Safe to call while other mounts are active — mounted projects are skipped.
+cmd_check() {
+    _load_global
+    local id="$1" conf="" lpath=""
+    [ -n "$id" ] || { echo "need_mount"; return 1; }
+    conf="$CONF_DIR/${id}.conf"
+    [ -f "$conf" ] || { echo "need_mount"; return 1; }
+    while IFS='=' read -r k v; do
+        v="${v#\"}" v="${v%\"}"
+        case "$k" in
+            lpath|LOCAL_PATH) lpath="$v" ;;
+        esac
+    done < "$conf"
+    lpath="${lpath//\\//}"
+    if [ -n "$lpath" ] && _is_mounted "$lpath"; then
+        echo "ok"
+        return 0
+    fi
+    echo "need_mount"
+    return 1
+}
+
+cmd_recover_if_needed() {
+    local id="${1:-}"
+    if [ -n "$id" ] && cmd_check "$id" >/dev/null 2>&1; then
+        echo "recover: skip (mount ok)"
+        return 0
+    fi
+    cmd_recover
+}
+
 cmd_recover() {
     _load_global
     mkdir -p "$CONF_DIR"
@@ -689,9 +719,11 @@ cmd_up() {
         echo "error: port $TUNNEL_PORT is another laptop (stale TUNNEL_PORT?) — reconnect connect from this Mac/PC" >&2
         return 1
     fi
-    if ! _tunnel_auth_ok; then
-        echo "error: laptop SSH rejected key on port $TUNNEL_PORT" >&2
-        return 1
+    if [ "${CLAUDE_TRUSTED_TUNNEL:-}" != "1" ]; then
+        if ! _tunnel_auth_ok; then
+            echo "error: laptop SSH rejected key on port $TUNNEL_PORT" >&2
+            return 1
+        fi
     fi
 
     local target="${1:-}"
@@ -806,9 +838,11 @@ case "$cmd" in
     down|umount|unmount) cmd_down "$@" ;;
     down-others)         cmd_down_others "$@" ;;
     recover)             cmd_recover ;;
+    recover-if-needed)   cmd_recover_if_needed "$@" ;;
+    check)               cmd_check "$@" ;;
     tunnel-status)       cmd_tunnel_status ;;
     *)
-        echo "Usage: claude-mount {list|status|tunnel-status|add|edit|rm|up|down|down-others|recover} [id]" >&2
+        echo "Usage: claude-mount {list|status|check|tunnel-status|add|edit|rm|up|down|down-others|recover|recover-if-needed} [id]" >&2
         exit 1
         ;;
 esac

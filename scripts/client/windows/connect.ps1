@@ -368,14 +368,6 @@ function SshX([string]$Cmd) {
     ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 $Alias $Cmd
 }
 
-function Test-Tunnel {
-    # Short timeout so VPN loss is detected quickly
-    $r = ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=8 `
-             -o ServerAliveInterval=3 -o ServerAliveCountMax=2 `
-             $Alias "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port' 2`>/dev/null && echo UP" 2>$null
-    return ($r -match 'UP')
-}
-
 function PortOpen($ip, $port) {
     try {
         $tcp = New-Object System.Net.Sockets.TcpClient
@@ -694,6 +686,7 @@ Write-Host '    Ready' -ForegroundColor Green
 Write-Host ''
 Mark-BootstrapDone -CfgDir $CfgDir
 $null = Ensure-LaptopSshReady -PubB $PubB
+$script:LaptopSshVerified = $false
 
 $exitRequested = $false
 :menuLoop while (-not $exitRequested) {
@@ -819,41 +812,13 @@ $exitRequested = $false
 
     try {
         :sessionLoop while ($true) {
-            # Kill any stale tunnel before starting a new one
-            if ($bgTunnel -and -not $bgTunnel.HasExited) {
-                Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
-            }
-
-            Step "Starting SSH tunnel"
-            $bgTunnel = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList @(
-                "-N", "-o", "ExitOnForwardFailure=no",
-                "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=5",
-                "-R", "$Port`:localhost:22", $Alias)
-            StepOk "pid $($bgTunnel.Id)"
-
-            $up = $false
-            $tunnelMsg = ""
-            for ($i = 1; $i -le 8; $i++) {
-                Start-Sleep -Seconds 2
-                Write-Host -NoNewline "    Tunnel check $i/8..." -ForegroundColor DarkGray
-                if ($bgTunnel.HasExited) {
-                    $tunnelMsg = "SSH process exited with code $($bgTunnel.ExitCode)"
-                    Write-Host " SSH process died" -ForegroundColor Red
-                    break
-                }
-                if (Test-Tunnel) {
-                    Write-Host " port $Port is open" -ForegroundColor Green
-                    $up = $true; break
-                }
-                Write-Host " port $Port not open yet" -ForegroundColor DarkGray
-            }
-
-            if (-not $up) {
+            $tunnelReused = $false
+            if (-not (Ensure-SessionTunnel -Alias $Alias -BgTunnel ([ref]$bgTunnel) -TunnelReused ([ref]$tunnelReused))) {
+                Step 'Starting SSH tunnel'
+                StepFail "did not come up on port $Port"
                 Write-Host ""
                 Warn "Tunnel did not come up on port $Port"
-                if ($tunnelMsg) {
-                    Warn $tunnelMsg
-                } elseif (-not (PortOpen $ServerIP 22)) {
+                if (-not (PortOpen $ServerIP 22)) {
                     Warn "Server unreachable - VPN disconnected?"
                 } else {
                     Warn "Check Windows Firewall - port 22 must allow inbound connections"
@@ -865,21 +830,27 @@ $exitRequested = $false
                 Push-ServerConnectConf -ActiveMount ''
                 $alreadyDown = $true; break sessionLoop
             }
+            if (-not $tunnelReused) {
+                # Wait-ForTunnelUp already printed progress lines
+            } elseif ($tunnelReused) {
+                Step 'SSH tunnel'
+                StepOk "reusing pid $($bgTunnel.Id)"
+            }
 
-            Push-ServerConnectConf -ActiveMount $go.Id
+            $mountSrc = Get-ClaudeMountSrc -ConnectScriptDir $script:ConnectScriptDir
+            Prepare-ServerSessionParallel -ProjectId $go.Id -MountSrc $mountSrc -Alias $Alias
 
-            Write-Host "      -> recovering stale mounts..." -ForegroundColor DarkGray
-            SshX "$CM recover" 2>$null | Out-Null
+            Invoke-RecoverIfNeeded -ProjectId $go.Id -FreshTunnel:(-not $tunnelReused)
 
-            # recover makes SSH connections back through the tunnel; verify it is still up
-            if (-not (Test-Tunnel)) {
+            if (-not (Test-TunnelUp)) {
                 Write-Host "      -> tunnel dropped during recover, restarting..." -ForegroundColor DarkGray
+                $script:LaptopSshVerified = $false
                 continue
             }
 
             Step "Mounting files"
             $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
-            $mountResult = Invoke-MountProject -ProjectId $go.Id -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias
+            $mountResult = Invoke-MountProject -ProjectId $go.Id -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias -TrustedTunnel
             $mountOut = $mountResult.Out
             $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
             $mountOk  = $mountResult.Ok
@@ -907,7 +878,7 @@ $exitRequested = $false
                     Write-Host '      -> tunnel: alive' -ForegroundColor DarkGray
                     Step 'Mounting files'
                     $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
-                    $mountResult = Invoke-MountProject -ProjectId $go.Id -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias
+                    $mountResult = Invoke-MountProject -ProjectId $go.Id -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias -TrustedTunnel
                     $mountOut = $mountResult.Out
                     $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
                     $mountOk  = $mountResult.Ok
@@ -1072,26 +1043,36 @@ $exitRequested = $false
                 continue sessionLoop
             }
 
-            # Disconnect
+            if ($action -eq 'r') {
+                if ($gotKey) {
+                    $alreadyDown = $false
+                    Write-Host ''
+                    Write-Host '    Reconnecting...' -ForegroundColor Cyan
+                    Write-Host ''
+                    continue sessionLoop
+                }
+                Write-Host '    Connection dropped - recovering...' -ForegroundColor Yellow
+                Clear-SessionMount -ProjectId $go.Id -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -SkipEditorStop
+                if ($bgTunnel -and -not $bgTunnel.HasExited) {
+                    Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
+                }
+                $bgTunnel = $null
+                $alreadyDown = $true
+                $script:LaptopSshVerified = $false
+                Write-Host ''
+                continue sessionLoop
+            }
+
+            # Disconnect (Q)
             Write-Host ""
             Write-Host "    Disconnecting..." -ForegroundColor DarkGray
-            $skipEditor = ($action -eq 'r' -and -not $gotKey)
-            Clear-SessionMount -ProjectId $go.Id -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -SkipEditorStop:$skipEditor
+            Clear-SessionMount -ProjectId $go.Id -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
             if ($bgTunnel -and -not $bgTunnel.HasExited) {
                 Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
             }
             $alreadyDown = $true
             Write-Host "    Laptop folder restored." -ForegroundColor Green
-
-            if ($action -ne 'r') { break sessionLoop }
-
-            if ($gotKey) { $editorOpened = $false }
-
-            $alreadyDown = $false
-            Write-Host ""
-            Write-Host "    Reconnecting in 2s..." -ForegroundColor Cyan
-            Start-Sleep -Seconds 2
-            Write-Host ""
+            break sessionLoop
         }
     } finally {
         # Runs on window close (CTRL_CLOSE_EVENT) - ensure cleanup even if window is force-closed

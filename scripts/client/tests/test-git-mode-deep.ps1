@@ -110,6 +110,11 @@ Assert ($pushIdx -gt 0 -and $chooseIdx -gt $pushIdx) 'Initial conf push before C
 $install = Get-Content (Get-ServerFile 'server\commands\install.sh') -Raw
 Assert ($install -match 'claude-mount\.sh.* /usr/local/lib/claude-mount') 'install.sh deploys to /usr/local/lib'
 Assert ($install -match 'all users ~/.local/bin') 'install.sh redeploys claude-mount to all users'
+Assert ($gitModeSh -match 'ensure_session_tunnel') 'git-mode.sh has ensure_session_tunnel'
+Assert ($gitModeSh -match 'invoke_mount_project') 'git-mode.sh has invoke_mount_project'
+Assert ($gitModePs1 -match 'Ensure-SessionTunnel') 'git-mode.ps1 has Ensure-SessionTunnel'
+Assert ($mount -match 'cmd_check') 'claude-mount has check command'
+Assert ($mount -match 'CLAUDE_TRUSTED_TUNNEL') 'claude-mount supports trusted tunnel skip'
 Assert ($mount -match 'ControlMaster=no') 'claude-mount disables SSH mux to laptop'
 
 $gitSetup = Get-Content (Get-ServerFile 'server\claude-git-setup.sh') -Raw
