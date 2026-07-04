@@ -146,6 +146,79 @@ function Test-TunnelBannerIsWindows {
     return ($Banner -match 'OpenSSH_for_Windows')
 }
 
+function Test-TunnelBannerIsThisLaptop {
+    param([string]$Banner)
+    if (-not $Banner) { $Banner = Get-TunnelBanner }
+    return (Test-TunnelBannerIsWindows -Banner $Banner)
+}
+
+function Save-TunnelSlot {
+    if (-not $Cfg) { return }
+    $lines = @()
+    if (Test-Path $Cfg) {
+        $lines = @(Get-Content $Cfg -ErrorAction SilentlyContinue | Where-Object { $_ -notmatch '^TUNNEL_SLOT=' })
+    }
+    $lines += "TUNNEL_SLOT=$($script:TunnelSlot)"
+    Set-Content -Path $Cfg -Value $lines -Encoding ASCII
+}
+
+function Sanitize-SshAliasConfig {
+    param(
+        [Parameter(Mandatory)][string]$CfgPath,
+        [string]$AliasName = 'claude-server'
+    )
+    if (-not (Test-Path $CfgPath)) { return }
+    $out = New-Object System.Collections.Generic.List[string]
+    $skip = $false
+    foreach ($ln in (Get-Content $CfgPath -ErrorAction SilentlyContinue)) {
+        if ($ln -match '^\s*Host\s+(.+)$') {
+            $hosts = $matches[1].Trim() -split '\s+'
+            $skip = ($hosts -contains $AliasName)
+        }
+        if ($skip -and $ln -match '^\s*RemoteForward\b') { continue }
+        $out.Add($ln)
+    }
+    Set-Content -Path $CfgPath -Value $out -Encoding ASCII
+}
+
+function Release-StaleTunnelPort {
+    if (-not $Port) { return }
+    $banner = Get-TunnelBanner
+    if (-not $banner) { return }
+    if (Test-TunnelBannerIsThisLaptop -Banner $banner) { return }
+    SshX "pkill -u `$USER -f ' -p ${Port} ' 2>/dev/null || true" 2>$null | Out-Null
+    Start-Sleep -Seconds 1
+}
+
+function Acquire-TunnelPort {
+    param([string]$UidStr)
+    $portBase = 20000
+    if (-not $UidStr) { return $false }
+    $preferred = ''
+    if ($Cfg -and (Test-Path $Cfg)) {
+        $slotLine = Get-Content $Cfg -ErrorAction SilentlyContinue | Where-Object { $_ -match '^TUNNEL_SLOT=' } | Select-Object -Last 1
+        if ($slotLine -match 'TUNNEL_SLOT=(\d+)') { $preferred = $matches[1] }
+    }
+    $trySlots = @()
+    if ($preferred -match '^\d+$' -and [int]$preferred -le 9) { $trySlots += [int]$preferred }
+    0..9 | ForEach-Object { if ($_ -ne [int]$preferred) { $trySlots += $_ } }
+    foreach ($slot in $trySlots) {
+        $port = $portBase + [int]$UidStr + $slot
+        if ($port -gt 65535) { continue }
+        $script:Port = $port
+        $banner = Get-TunnelBanner
+        if (-not $banner -or (Test-TunnelBannerIsThisLaptop -Banner $banner)) {
+            $script:TunnelSlot = $slot
+            Save-TunnelSlot
+            Push-ServerConnectConf
+            return $true
+        }
+    }
+    $script:Port = $portBase + [int]$UidStr
+    $script:TunnelSlot = 0
+    return $false
+}
+
 function Test-TunnelUp {
     $banner = Get-TunnelBanner
     return (Test-TunnelBannerIsWindows -Banner $banner)
@@ -274,6 +347,7 @@ function Invoke-RecoverIfNeeded {
 function Ensure-SessionTunnel {
     param(
         [Parameter(Mandatory)][string]$Alias,
+        [string]$SshCfgPath = '',
         [ref]$BgTunnel,
         [ref]$TunnelReused
     )
@@ -288,11 +362,20 @@ function Ensure-SessionTunnel {
     Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match "-R\s+${Port}:localhost:22" } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $uidStr = ((SshX 'id -u' 2>$null) -join '').Trim() -replace '\D', ''
+    if ($uidStr) { $null = Acquire-TunnelPort -UidStr $uidStr }
+    Release-StaleTunnelPort
+    if ($SshCfgPath) { Sanitize-SshAliasConfig -CfgPath $SshCfgPath -AliasName $Alias }
     $BgTunnel.Value = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList @(
-        '-N', '-o', 'ExitOnForwardFailure=no',
+        '-N', '-o', 'ExitOnForwardFailure=yes',
         '-o', 'ServerAliveInterval=20', '-o', 'ServerAliveCountMax=5',
         '-R', "$Port`:localhost:22", $Alias)
-    return (Wait-ForTunnelUp -TunnelProc $BgTunnel.Value)
+    if (Wait-ForTunnelUp -TunnelProc $BgTunnel.Value) { return $true }
+    if ($BgTunnel.Value -and -not $BgTunnel.Value.HasExited) {
+        Stop-Process -Id $BgTunnel.Value.Id -Force -ErrorAction SilentlyContinue
+    }
+    $BgTunnel.Value = $null
+    return $false
 }
 
 function Push-ServerConnectConf {

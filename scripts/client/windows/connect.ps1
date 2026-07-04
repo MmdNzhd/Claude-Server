@@ -296,8 +296,11 @@ function Initialize-ServerSession {
     $initOut = (SshX "id -u && (test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q) && cat ~/.ssh/claude_laptop.pub") -join "`n"
     $lines = ($initOut -replace "`r",'') -split "`n" | Where-Object { $_.Trim() -ne '' }
     $uidStr = [string]($lines | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1) -replace '\D',''
-    $script:Port = 20000 + [int]$uidStr
     $pubB = ($lines | Where-Object { $_ -match '^ssh-' } | Select-Object -First 1).Trim()
+    if (-not (Acquire-TunnelPort -UidStr $uidStr)) {
+        $script:Port = 20000 + [int]$uidStr
+        $script:TunnelSlot = 0
+    }
     if ($script:Port -le 20000 -or $script:Port -gt 65535) {
         return @{ Ok = $false; Error = 'could not get UID from server'; PubB = '' }
     }
@@ -330,9 +333,8 @@ Host $Alias
     User $RemoteUser
     IdentityFile ~/.ssh/id_ed25519
     StrictHostKeyChecking accept-new
-    RemoteForward $Port localhost:22
-    ExitOnForwardFailure no
 "@ | Add-Content -Path $SshCfgPath -Encoding ASCII
+    Sanitize-SshAliasConfig -CfgPath $SshCfgPath -AliasName $Alias
     Repair-SshPerm $SshCfgPath "SSH config"
     Push-ServerConnectConf
 
@@ -606,6 +608,7 @@ Host $Alias
     IdentityFile ~/.ssh/id_ed25519
     StrictHostKeyChecking accept-new
 "@ | Add-Content -Path $sshCfg -Encoding ASCII
+Sanitize-SshAliasConfig -CfgPath $sshCfg -AliasName $Alias
 # Fix SSH config permissions silently - shown later under the step that calls StepOk
 icacls $sshCfg /reset 2>$null | Out-Null
 icacls $sshCfg /inheritance:r /grant "$env:USERNAME`:F" 2>$null | Out-Null
@@ -678,7 +681,7 @@ Step "Server setup"
 $boot = Initialize-ServerSession -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias -SshCfgPath $sshCfg
 if ($boot.Error) { StepFail $boot.Error; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 if (-not $boot.Ok) { StepFail ($script:pendingFixes -join ', ') }
-else { StepOk "port $Port git=$(Get-GitMode)" }
+else { StepOk "port $Port slot=$($script:TunnelSlot) git=$(Get-GitMode)" }
 $PubB = $boot.PubB
 
 Write-Host ''
@@ -813,7 +816,7 @@ $exitRequested = $false
     try {
         :sessionLoop while ($true) {
             $tunnelReused = $false
-            if (-not (Ensure-SessionTunnel -Alias $Alias -BgTunnel ([ref]$bgTunnel) -TunnelReused ([ref]$tunnelReused))) {
+            if (-not (Ensure-SessionTunnel -Alias $Alias -SshCfgPath $sshCfg -BgTunnel ([ref]$bgTunnel) -TunnelReused ([ref]$tunnelReused))) {
                 Step 'Starting SSH tunnel'
                 StepFail "did not come up on port $Port"
                 Write-Host ""
@@ -884,8 +887,13 @@ $exitRequested = $false
                     $null = Invoke-LaptopAdminOps -PubB $newPub -ForceRestart
                     Write-Host '      -> waiting for sshd to stabilize...' -ForegroundColor DarkGray
                     Start-Sleep -Seconds 2
-                    if (-not (Test-Tunnel)) {
+                    $script:LaptopSshVerified = $false
+                    if (-not (Test-TunnelUp)) {
                         Write-Host ''; Warn 'Tunnel dropped after sshd restart - reconnecting...'
+                        continue
+                    }
+                    if (-not (Ensure-LaptopReverseSshCached -PubB $newPub)) {
+                        StepFail 'tunnel auth failed after sshd restart'
                         continue
                     }
                     Write-Host '      -> tunnel: alive' -ForegroundColor DarkGray

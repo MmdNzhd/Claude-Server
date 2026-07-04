@@ -13,6 +13,8 @@ for t in "$ROOT/scripts/client/tests"/test-*.sh; do
     [ -f "$t" ] || continue
     base="$(basename "$t")"
     [ "$base" = "verify-all.sh" ] && continue
+    [ "$base" = "test-connect-pipeline.ps1" ] && continue
+    [ "$base" = "test-git-mode-deep.ps1" ] && continue
     echo "--- ${base} ---"
     if bash "$t"; then
         echo ""

@@ -44,6 +44,12 @@ foreach ($rel in @('windows\connect.ps1')) {
     Assert ($src -match '@\(Choose-Project -Mounts \$mounts\)\[-1\]') "$rel uses safe Choose-Project capture"
     Assert ($src -match '@\(Resolve-EditorChoice -CfgDir \$CfgDir\)\[-1\]') "$rel uses safe Resolve-EditorChoice capture"
     Assert ($src -match 'Test-AuthorizedKeyFragment|Test-LaptopSshReady') "$rel has laptop SSH key check helper"
+    Assert ($bundle -match 'Acquire-TunnelPort') "$rel uses tunnel slot acquisition"
+    Assert ($bundle -match 'Sanitize-SshAliasConfig') "$rel sanitizes ssh config (no RemoteForward)"
+    Assert ($bundle -match 'Ensure-LaptopReverseSshCached') "$rel caches laptop SSH verify"
+    Assert ($src -match 'Ensure-SessionTunnel') "$rel uses Ensure-SessionTunnel"
+    Assert ($src -match 'TrustedTunnel') "$rel uses trusted tunnel mount"
+    Assert ($src -notmatch 'RemoteForward \$Port') "$rel ssh config has no RemoteForward"
     Assert ($src -notmatch 'Select-String -Path \$userAk -Pattern \[regex\]::Escape') "$rel Select-String uses safe Pattern variable"
     Assert ($src -match 'Invoke-LaptopAdminOps|Start-Process powershell\.exe -Verb RunAs') "$rel supports conditional elevation"
 }
