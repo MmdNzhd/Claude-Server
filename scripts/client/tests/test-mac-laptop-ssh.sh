@@ -28,6 +28,9 @@ grep -q 'ensure_laptop_reverse_ssh_cached' "$MAC" || fail 'connect.sh must use e
 grep -q 'Ensure-LaptopReverseSshCached' "$GIT_PS" || fail 'missing Ensure-LaptopReverseSshCached in git-mode.ps1'
 grep -q 'ensure_session_tunnel' "$GIT" || fail 'missing ensure_session_tunnel'
 grep -q 'invoke_mount_project' "$GIT" || fail 'missing invoke_mount_project'
+grep -q 'server mount script outdated' "$GIT" || fail 'invoke_mount_project must auto-push stale mount script'
+UI="$ROOT/scripts/client/connect-ui.sh"
+grep -q 'O = reopen editor' "$UI" || fail 'connect-ui.sh must advertise O reopen hotkey'
 grep -q 'release_stale_tunnel_port' "$GIT" || fail 'missing release_stale_tunnel_port'
 grep -q 'acquire_tunnel_port' "$GIT" || fail 'missing acquire_tunnel_port'
 grep -q 'tunnel_banner_is_this_laptop' "$GIT" || fail 'missing tunnel_banner_is_this_laptop'

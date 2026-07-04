@@ -31,7 +31,7 @@ Every **Windows** connect folder must contain **all seven** files side by side:
 | `cursor-auth-laptop.ps1` | Golden auth sync to isolated profile |
 | `connect-rider.bat` | Optional — `-Ide cursor` shortcut |
 
-Mac folders need `connect.sh`, `git-mode.sh`, `connect-ui.sh`, `editor-launch.sh` (12 client files total in ZIP).
+Mac folders need `connect.sh`, `git-mode.sh`, `connect-ui.sh`, `editor-launch.sh`, plus `mac/claude-mount.sh` (offline bootstrap copy when repo layout is absent). **13 client files** total in ZIP.
 
 Published by `publish\publish.bat` → `Desktop\claude-publish\`.
 
@@ -106,6 +106,7 @@ On disconnect, `ACTIVE_MOUNT` is cleared and **only the current project** is unm
 | `mac/git-mode.sh` | GIT_MODE, tunnel slot scan, Mac SSH self-heal, Cursor P-key |
 | `mac/connect-ui.sh` | Header, project table, session box |
 | `mac/editor-launch.sh` | IDE pick (`ask` / cursor / code) |
+| `mac/claude-mount.sh` | Bootstrap copy pushed to server when repo `scripts/server/` is not on disk |
 
 Cursor on Mac uses isolated profile: `~/Library/Application Support/ClaudeServerCursorProfile` (same idea as Windows `ClaudeServerCursorProfile`).
 
@@ -142,7 +143,7 @@ Example for `smart` (uid 1002):
 **Server checks (`claude-mount`):**
 
 - `tunnel-status` — diagnostic: `tcp`, `banner`, `banner_match`, `auth`.
-- `up` — requires TCP + banner match + pubkey auth (not TCP alone).
+- `up` — requires TCP + banner match; pubkey auth unless client set `CLAUDE_TRUSTED_TUNNEL=1` (client already ran `verify_laptop_reverse_ssh`).
 
 **Persisted on laptop:** `~/.config/claude-connect/connect.conf` → `TUNNEL_SLOT=1` (fast reconnect).
 

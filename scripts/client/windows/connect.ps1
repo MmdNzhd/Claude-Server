@@ -132,7 +132,7 @@ function Install-ServerKey([string]$pub, [bool]$ForceRestart = $false, [switch]$
         if (-not (Test-Path $akFile)) { continue }
         $lines = @(Get-Content $akFile -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
         # Remove any existing entry for this key (restricted or not), then add with from= restriction
-        $restricted = "from=`"127.0.0.1,::1`" $pub"
+        $restricted = "from=`"127.0.0.1,::1,localhost,::ffff:127.0.0.1`" $pub"
         $lines = @($lines | Where-Object { $_ -notlike "*$pub*" })
         $lines += $restricted
         Set-Content -Path $akFile -Value $lines -Encoding ASCII
@@ -311,14 +311,23 @@ function Initialize-ServerSession {
     $scpProcs = @()
     $dir = Resolve-ServerScriptDir -ConnectScriptDir $ConnectScriptDir
     if ($dir) {
-        foreach ($pair in @(
-            @{ File = 'claude-mount.sh'; Dest = 'claude-mount' },
-            @{ File = 'claude-git-setup.sh'; Dest = 'claude-git-setup' }
-        )) {
-            $src = [System.IO.Path]::Combine($dir, $pair.File)
-            if (Test-Path $src) {
+        SshX 'mkdir -p ~/.local/bin' 2>$null | Out-Null
+        $mountSrc = [System.IO.Path]::Combine($dir, 'claude-mount.sh')
+        if (Test-Path $mountSrc) {
+            $localHash = (Get-FileHash -Algorithm SHA256 -Path $mountSrc).Hash
+            $remoteHash = ((SshX "sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print `$1}'") -join '').Trim()
+            if (-not ($localHash -and $remoteHash -and ($localHash.ToLower() -eq $remoteHash.ToLower()))) {
                 $scpProcs += Start-Process -FilePath 'scp' -PassThru -NoNewWindow `
-                    -ArgumentList @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=30', '-q', $src, "${Alias}:~/.local/bin/$($pair.Dest)")
+                    -ArgumentList @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=30', '-q', $mountSrc, "${Alias}:~/.local/bin/claude-mount")
+            }
+        }
+        $gitSrc = [System.IO.Path]::Combine($dir, 'claude-git-setup.sh')
+        if (Test-Path $gitSrc) {
+            $gitLocal = (Get-FileHash -Algorithm SHA256 -Path $gitSrc).Hash
+            $gitRemote = ((SshX "sha256sum ~/.local/bin/claude-git-setup 2>/dev/null | awk '{print `$1}'") -join '').Trim()
+            if (-not ($gitLocal -and $gitRemote -and ($gitLocal.ToLower() -eq $gitRemote.ToLower()))) {
+                $scpProcs += Start-Process -FilePath 'scp' -PassThru -NoNewWindow `
+                    -ArgumentList @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=30', '-q', $gitSrc, "${Alias}:~/.local/bin/claude-git-setup")
             }
         }
     }
@@ -442,6 +451,11 @@ function Add-Project {
     $d = (Read-Host "    Name [$nLbl]").Trim(); if ($d) { $nLbl = $d }
     if (-not $nId) { $nId = $nLbl.ToLower() -replace '[^a-z0-9_-]','-' -replace '-+','-' -replace '^-|-$','' }
     if (-not $nId) { Warn "Could not derive a project name."; return $null }
+    $existing = @(Get-Mounts) | Where-Object { $_.Id -eq $nId }
+    if ($existing.Count -gt 0) {
+        Warn "Project '$nId' already exists. Enter a different name."
+        return $null
+    }
     $nLpath = "/home/$RemoteUser/mounts/$nId"
     Write-Host ""
     $nLbl_sh  = $nLbl  -replace "'", "'\\''"; $nPath_sh = $nPath -replace "'", "'\\''";
@@ -852,8 +866,14 @@ $exitRequested = $false
             }
 
             Step 'Verifying laptop SSH key'
-            if (Ensure-LaptopReverseSshCached -PubB $PubB) {
+            $laptopSshRc = Ensure-LaptopReverseSshCached -PubB $PubB
+            if ($laptopSshRc -eq 0) {
                 StepOk
+            } elseif ($laptopSshRc -eq 1) {
+                StepFail 'tunnel auth failed, retrying...'
+                $script:LaptopSshVerified = $false
+                Write-Host ''
+                continue
             } else {
                 StepFail 'server cannot authenticate to this PC'
                 Write-Host ''
@@ -892,7 +912,8 @@ $exitRequested = $false
                         Write-Host ''; Warn 'Tunnel dropped after sshd restart - reconnecting...'
                         continue
                     }
-                    if (-not (Ensure-LaptopReverseSshCached -PubB $newPub)) {
+                    $postRestartRc = Ensure-LaptopReverseSshCached -PubB $newPub
+                    if ($postRestartRc -ne 0) {
                         StepFail 'tunnel auth failed after sshd restart'
                         continue
                     }

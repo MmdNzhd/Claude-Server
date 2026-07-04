@@ -236,6 +236,7 @@ function Wait-ForTunnelUp {
         Write-Host -NoNewline "    Tunnel check $i/12..." -ForegroundColor DarkGray
         if ($TunnelProc -and $TunnelProc.HasExited) {
             Write-Host ' SSH process died' -ForegroundColor Red
+            Release-StaleTunnelPort
             return $false
         }
         if (Test-TunnelUp) {
@@ -318,20 +319,35 @@ function Test-LaptopReverseSsh {
     return ($LASTEXITCODE -eq 0)
 }
 
+function Ensure-LaptopReverseSsh {
+    param([string]$PubB = '')
+    if (-not (Ensure-LaptopSshReady -PubB $PubB)) { return 2 }
+    if (Test-LaptopReverseSsh) { return 0 }
+    $uidStr = ((SshX 'id -u' 2>$null) -join '').Trim() -replace '\D', ''
+    if ($uidStr -and (Acquire-TunnelPort -UidStr $uidStr)) {
+        if (Test-LaptopReverseSsh) { return 0 }
+    }
+    Release-StaleTunnelPort
+    $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
+    if ($sshdSvc -and $sshdSvc.Status -eq 'Running') {
+        Restart-Service sshd -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+    if (Test-LaptopReverseSsh) { return 0 }
+    return 1
+}
+
 function Ensure-LaptopReverseSshCached {
     param([string]$PubB = '')
-    if ($script:LaptopSshVerified -and (Test-LaptopReverseSsh)) { return $true }
+    if ($script:LaptopSshVerified -and (Test-LaptopReverseSsh)) { return 0 }
     if (Test-LaptopReverseSsh) {
         $script:LaptopSshVerified = $true
-        return $true
+        return 0
     }
-    if (-not (Ensure-LaptopSshReady -PubB $PubB)) { return $false }
-    if (Test-LaptopReverseSsh) {
-        $script:LaptopSshVerified = $true
-        return $true
-    }
-    $script:LaptopSshVerified = $false
-    return $false
+    $rc = Ensure-LaptopReverseSsh -PubB $PubB
+    if ($rc -eq 0) { $script:LaptopSshVerified = $true }
+    else { $script:LaptopSshVerified = $false }
+    return $rc
 }
 
 function Invoke-RecoverIfNeeded {
@@ -341,7 +357,7 @@ function Invoke-RecoverIfNeeded {
     )
     if (-not $FreshTunnel -and (Test-ProjectMountHealthy -ProjectId $ProjectId)) { return }
     Write-Host '      -> recovering stale mounts...' -ForegroundColor DarkGray
-    SshX "$CM recover-if-needed '$ProjectId'" 2>$null | Out-Null
+    SshX "timeout 30 $CM recover-if-needed '$ProjectId' 2>/dev/null || timeout 30 $CM recover 2>/dev/null || true" 2>$null | Out-Null
 }
 
 function Ensure-SessionTunnel {
@@ -544,7 +560,7 @@ function Remount-ProjectGit {
         Warn 'Tunnel dropped during remount - press R to reconnect'
         return $false
     }
-    $mountOut = (SshX "$CM up '$ProjectId' 2>&1") | Out-String
+    $mountOut = (SshX "CLAUDE_TRUSTED_TUNNEL=1 $CM up '$ProjectId' 2>&1") | Out-String
     Show-MountGitWarn $mountOut
     $mountOk = Test-MountSuccess -MountOut $mountOut -ExitCode $LASTEXITCODE
     if (-not $mountOk) {

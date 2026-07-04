@@ -147,7 +147,7 @@ ui_session_box() {
     echo ""
     printf '    ============================================\n'
     printf '    \033[0;36mSession active -- keep this window open\033[0m\n'
-    printf '    \033[0;90mG = git mode   R = reconnect   Q or Enter = disconnect (closes editor)\033[0m\n'
+    printf '    \033[0;90mG = git mode   O = reopen editor   R = reconnect   Q or Enter = disconnect (closes editor)\033[0m\n'
     while [ "$#" -gt 0 ]; do
         printf '    \033[0;33m%s\033[0m\n' "$1"
         shift

@@ -370,8 +370,28 @@ recover_mounts_if_needed() {
 }
 
 invoke_mount_project() {
-    local id="$1"
-    sshx "CLAUDE_TRUSTED_TUNNEL=1 $CM up '$id' 2>&1"
+    local id="$1" script_dir="${2:-${CONNECT_SCRIPT_DIR:-}}" mount_out="" ec=0 src=""
+    mount_out="$(sshx "CLAUDE_TRUSTED_TUNNEL=1 $CM up '$id' 2>&1")"
+    ec=$?
+    if test_mount_success "$mount_out" "$ec"; then
+        printf '%s' "$mount_out"
+        return 0
+    fi
+    if echo "$mount_out" | grep -qE 'unbound variable|syntax error near unexpected'; then
+        printf '      -> server mount script outdated, pushing update...\n' >&2
+        if [ -n "$script_dir" ]; then
+            src="$(find_claude_mount_src "$script_dir" 2>/dev/null || true)"
+            [ -n "$src" ] && push_claude_mount_if_changed "$src"
+            mount_out="$(sshx "CLAUDE_TRUSTED_TUNNEL=1 $CM up '$id' 2>&1")"
+            ec=$?
+            if test_mount_success "$mount_out" "$ec"; then
+                printf '%s' "$mount_out"
+                return 0
+            fi
+        fi
+    fi
+    printf '%s' "$mount_out"
+    return "$ec"
 }
 
 ensure_laptop_reverse_ssh_cached() {

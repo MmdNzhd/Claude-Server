@@ -67,6 +67,7 @@ fi
 . "$CFG"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONNECT_SCRIPT_DIR="$SCRIPT_DIR"
 _GIT_MODE_SH="$SCRIPT_DIR/git-mode.sh"
 [ -f "$_GIT_MODE_SH" ] || _GIT_MODE_SH="$SCRIPT_DIR/../git-mode.sh"
 [ -f "$_GIT_MODE_SH" ] || _GIT_MODE_SH="$SCRIPT_DIR/../../git-mode.sh"
@@ -507,7 +508,7 @@ while [ "$exit_requested" -eq 0 ]; do
 
             step "Mounting files"
             mount_start=$SECONDS
-            mount_out="$(invoke_mount_project "$go_id")"
+            mount_out="$(invoke_mount_project "$go_id" "$SCRIPT_DIR")"
             mount_exit=$?
             mount_t=$(( SECONDS - mount_start ))
             mount_ok=0
@@ -530,7 +531,7 @@ while [ "$exit_requested" -eq 0 ]; do
                     fi
                     step "Mounting files"
                     mount_start=$SECONDS
-                    mount_out="$(invoke_mount_project "$go_id")"
+                    mount_out="$(invoke_mount_project "$go_id" "$SCRIPT_DIR")"
                     mount_exit=$?
                     mount_t=$(( SECONDS - mount_start ))
                     if [ $mount_exit -eq 0 ] && ! echo "$mount_out" | grep -q 'error:\|FAILED\|No tunnel\|not configured'; then
@@ -649,6 +650,7 @@ while [ "$exit_requested" -eq 0 ]; do
                     [ -z "$_key_lower" ] && _key_lower="q"
                     [ "$_key_lower" = "r" ] && _action="r"
                     [ "$_key_lower" = "g" ] && _action="g"
+                    [ "$_key_lower" = "o" ] && _action="o"
                     [ "$_key_lower" = "p" ] && [ "$CURSOR_AUTH_NEEDS_BOOTSTRAP" -eq 1 ] && _action="p"
                     _got_key=1; break
                 fi
@@ -660,6 +662,22 @@ while [ "$exit_requested" -eq 0 ]; do
 
             if [ "$_action" = "g" ]; then
                 configure_git_mode
+                continue
+            fi
+
+            if [ "$_action" = "o" ]; then
+                if [ "$_editor_opened" -eq 0 ]; then
+                    echo ""
+                    step "Reopening $EDITOR_NAME"
+                    if command -v "$EDITOR_CMD" >/dev/null 2>&1; then
+                        launch_remote_editor "$EDITOR_CMD" "$ALIAS" "$go_path"
+                        step_ok "$go_path"
+                        _editor_opened=1
+                    else
+                        step_fail "$EDITOR_NAME not found"
+                    fi
+                    echo ""
+                fi
                 continue
             fi
 

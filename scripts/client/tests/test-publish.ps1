@@ -20,10 +20,15 @@ function Test-PackageRoot {
     }
     $serverDirs = @(Get-ChildItem -Path $Root -Recurse -Directory -Filter 'server' -ErrorAction SilentlyContinue)
     Assert ($serverDirs.Count -eq 0) "$Label has no server/ folder"
-    foreach ($name in @('deploy-server-mount-fix.ps1', 'deploy-server-mount-fix.bat', 'deploy-mount-fix.sh', 'claude-mount.sh', 'claude-automount.sh', 'claude-watchdog.sh')) {
+    foreach ($name in @('deploy-server-mount-fix.ps1', 'deploy-server-mount-fix.bat', 'deploy-mount-fix.sh', 'claude-automount.sh', 'claude-watchdog.sh')) {
         $hits = @(Get-ChildItem -Path $Root -Recurse -File -Filter $name -ErrorAction SilentlyContinue)
         Assert ($hits.Count -eq 0) "$Label has no $name"
     }
+    $mountHits = @(Get-ChildItem -Path $Root -Recurse -File -Filter 'claude-mount.sh' -ErrorAction SilentlyContinue)
+    $relMounts = @($mountHits | ForEach-Object { $_.FullName.Replace($Root, '').TrimStart('\', '/') })
+    $extraMounts = @($relMounts | Where-Object { $_ -ne 'mac\claude-mount.sh' -and $_ -ne 'mac/claude-mount.sh' })
+    Assert ($extraMounts.Count -eq 0) "$Label has claude-mount.sh only at mac/claude-mount.sh"
+    Assert (Test-Path (Join-Path $Root 'mac\claude-mount.sh')) "$Label has mac/claude-mount.sh bootstrap copy"
     $hasWin = (Test-Path (Join-Path $Root 'windows\connect.ps1')) -or
               (Test-Path (Join-Path $Root 'claude-code\windows\connect.ps1'))
     Assert $hasWin "$Label includes windows\connect.ps1"
@@ -126,7 +131,8 @@ if ($main) {
     Assert ($mainFiles -contains 'windows\connect-ui.ps1') 'main has connect-ui.ps1'
     Assert ($mainFiles -contains 'mac\connect-ui.sh') 'main has connect-ui.sh'
     Assert ($mainFiles -contains 'mac\editor-launch.sh') 'main has editor-launch.sh'
-    Assert ($mainFiles.Count -eq 12) "main has exactly 12 client files (got $($mainFiles.Count))"
+    Assert ($mainFiles -contains 'mac\claude-mount.sh') 'main has mac/claude-mount.sh bootstrap copy'
+    Assert ($mainFiles.Count -eq 13) "main has exactly 13 client files (got $($mainFiles.Count))"
     $smartPs1 = Get-Content (Join-Path $main.FullName 'windows\connect.ps1') -Raw
     Assert ($smartPs1 -match 'claude-server') 'main connect.ps1 alias claude-server'
     Assert ($smartPs1 -match 'claude-connect') 'main connect.ps1 cfg claude-connect'
