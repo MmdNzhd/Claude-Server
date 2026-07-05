@@ -51,7 +51,8 @@ foreach ($rel in @('windows\connect.ps1')) {
     Assert ($src -match 'TrustedTunnel') "$rel uses trusted tunnel mount"
     Assert ($src -notmatch 'RemoteForward \$Port') "$rel ssh config has no RemoteForward"
     Assert ($src -notmatch 'Select-String -Path \$userAk -Pattern \[regex\]::Escape') "$rel Select-String uses safe Pattern variable"
-    Assert ($src -match 'Invoke-LaptopAdminOps|Start-Process powershell\.exe -Verb RunAs') "$rel supports conditional elevation"
+    Assert ($src -match 'Start-Process powershell\.exe -Verb RunAs') "$rel self-elevates to administrator on launch"
+    Assert ($src -match 'Invoke-LaptopAdminOps') "$rel has laptop admin SSH helpers"
 }
 
 $authLaptop = Get-Content (Get-ClientFile 'cursor-auth-laptop.ps1') -Raw

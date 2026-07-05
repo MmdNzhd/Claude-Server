@@ -23,6 +23,18 @@ function Dot-SourceSibling {
 
 $script:RunAdminFix = [bool]$AdminFix
 
+# Always run elevated (sshd, firewall, administrators_authorized_keys need admin).
+if (-not $AdminFix) {
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        $elevArgs = @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
+        if ($Setup) { $elevArgs += '-Setup' }
+        if ($Ide) { $elevArgs += '-Ide'; $elevArgs += $Ide }
+        Start-Process powershell.exe -Verb RunAs -ArgumentList $elevArgs -Wait | Out-Null
+        exit 0
+    }
+}
+
 if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
     Write-Host "  [X] OpenSSH client (ssh.exe) not found." -ForegroundColor Red
     Write-Host "      Install it via: Settings -> Apps -> Optional Features -> OpenSSH Client" -ForegroundColor DarkGray
