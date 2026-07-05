@@ -341,7 +341,9 @@ function Test-ProjectMountHealthy {
 
 function Clear-ServerTunnelKnownHost {
     if (-not $Port) { return }
-    SshX "ssh-keygen -f `$HOME/.ssh/known_hosts -R '[127.0.0.1]:${Port}' 2>/dev/null; ssh-keygen -f `$HOME/.ssh/known_hosts -R '127.0.0.1' 2>/dev/null; rm -f `$HOME/.ssh/known_hosts_claude_tunnel 2>/dev/null; true" 2>$null | Out-Null
+    # Probe + claude-mount sshfs both use known_hosts_claude_mount; tunnel file is legacy.
+    # Truncate dedicated files so a rotated laptop sshd host key cannot loop forever.
+    SshX "ssh-keygen -f `$HOME/.ssh/known_hosts -R '[127.0.0.1]:${Port}' 2>/dev/null || true; ssh-keygen -f `$HOME/.ssh/known_hosts -R '127.0.0.1' 2>/dev/null || true; : > `$HOME/.ssh/known_hosts_claude_mount 2>/dev/null || true; : > `$HOME/.ssh/known_hosts_claude_tunnel 2>/dev/null || true; chmod 600 `$HOME/.ssh/known_hosts_claude_mount `$HOME/.ssh/known_hosts_claude_tunnel 2>/dev/null || true; true" 2>$null | Out-Null
 }
 
 function Invoke-LaptopReverseSshProbe {
@@ -357,8 +359,15 @@ function Invoke-LaptopReverseSshProbe {
     $kh = '$HOME/.ssh/known_hosts_claude_mount'
     SshX "touch $kh 2>/dev/null; chmod 600 $kh 2>/dev/null" 2>$null | Out-Null
     # Windows OpenSSH has no `true` — use cmd exit 0 (connect.ps1 always runs on Windows laptops).
-    $out = (SshX "timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$kh -i ~/.ssh/claude_laptop -p $Port ${LaptopUser}@127.0.0.1 cmd /c exit 0 2>&1") -join "`n"
-    if ($LASTEXITCODE -eq 0) { return $true }
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $out = (SshX "timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$kh -i ~/.ssh/claude_laptop -p $Port ${LaptopUser}@127.0.0.1 cmd /c exit 0 2>&1") -join "`n"
+        if ($LASTEXITCODE -eq 0) { return $true }
+        if ($attempt -eq 1 -and ($out -match 'Host key verification failed|HOST IDENTIFICATION HAS CHANGED|Offending|system administrator')) {
+            Clear-ServerTunnelKnownHost
+            continue
+        }
+        break
+    }
     $detail = @($out -split "`n" | ForEach-Object { $_.Trim() } | Where-Object {
         $_ -match 'Permission denied|Host key verification failed|Connection refused|Could not resolve|No route|authenticity of host|Please contact your system administrator|publickey|reset by peer'
     }) -join ' '

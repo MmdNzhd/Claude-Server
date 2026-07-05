@@ -117,6 +117,8 @@ Assert ($gitModeSh -match 'invoke_mount_project') 'git-mode.sh has invoke_mount_
 Assert ($gitModePs1 -match 'Ensure-LaptopReverseSshCached') 'git-mode.ps1 has Ensure-LaptopReverseSshCached'
 Assert ($gitModePs1 -match 'Acquire-TunnelPort') 'git-mode.ps1 has Acquire-TunnelPort'
 Assert ($gitModePs1 -match 'known_hosts_claude_mount') 'git-mode.ps1 uses mount known_hosts for reverse SSH probe'
+Assert ($gitModePs1 -match 'known_hosts_claude_mount.*known_hosts_claude_tunnel|known_hosts_claude_tunnel.*known_hosts_claude_mount') 'Clear-ServerTunnelKnownHost resets mount and tunnel known_hosts'
+Assert ($gitModePs1 -match 'Host key verification failed.*Clear-ServerTunnelKnownHost|Clear-ServerTunnelKnownHost[\s\S]{0,800}Host key verification failed') 'probe retries after host-key clear'
 Assert ($gitModePs1 -match 'LastLaptopReverseSshError') 'git-mode.ps1 surfaces reverse SSH error detail'
 Assert ($gitModePs1 -match 'cmd /c exit 0') 'git-mode.ps1 uses Windows-safe reverse SSH probe'
 Assert ($gitModePs1 -match 'mac\\claude-mount\.sh') 'git-mode.ps1 finds claude-mount.sh in mac package folder'
