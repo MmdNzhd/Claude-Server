@@ -228,6 +228,22 @@ function Test-AuthorizedKeyFragment {
     return [bool](Select-String -Path $Path -Pattern $pattern -Quiet -ErrorAction SilentlyContinue)
 }
 
+function Test-WindowsAccountIsLocalAdmin {
+    param([string]$UserName = $script:LaptopUser)
+    if (-not $UserName) { return $false }
+    try {
+        $adminSid = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'
+        $groupLabel = ($adminSid.Translate([System.Security.Principal.NTAccount]).Value -split '\\')[-1]
+        $members = (& net localgroup $groupLabel 2>$null | Out-String)
+        if ($LASTEXITCODE -ne 0) {
+            $members = (& net localgroup Administrators 2>$null | Out-String)
+        }
+        return [bool]($members -match "(?m)^\s*$([regex]::Escape($UserName))\s*$")
+    } catch {
+        return $false
+    }
+}
+
 function Test-LaptopSshReady {
     param([string]$PubFragment = '')
     $reasons = [System.Collections.Generic.List[string]]::new()
@@ -242,9 +258,15 @@ function Test-LaptopSshReady {
     if ($PubFragment) {
         $userAk = Join-Path $SshDir 'authorized_keys'
         $adminAk = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
-        $hasKey = (Test-AuthorizedKeyFragment -Path $userAk -PubFragment $PubFragment) `
-               -or (Test-AuthorizedKeyFragment -Path $adminAk -PubFragment $PubFragment)
-        if (-not $hasKey) { $reasons.Add('Server laptop key not in authorized_keys') }
+        $adminDir = Split-Path $adminAk
+        $userIsAdmin = Test-WindowsAccountIsLocalAdmin
+        if ($userIsAdmin -and (Test-Path $adminDir)) {
+            if (-not (Test-AuthorizedKeyFragment -Path $adminAk -PubFragment $PubFragment)) {
+                $reasons.Add('Server laptop key not in administrators_authorized_keys (Windows admin user)')
+            }
+        } elseif (-not (Test-AuthorizedKeyFragment -Path $userAk -PubFragment $PubFragment)) {
+            $reasons.Add('Server laptop key not in authorized_keys')
+        }
     }
     return [PSCustomObject]@{ Ready = ($reasons.Count -eq 0); Reasons = @($reasons) }
 }
@@ -333,6 +355,11 @@ function Initialize-ServerSession {
     }
 
     Install-ServerKey $pubB -UserOnly
+    if (Test-WindowsAccountIsLocalAdmin) {
+        if (-not (Ensure-LaptopSshReady -PubB $pubB)) {
+            return @{ Ok = $false; Error = 'laptop SSH key setup failed'; PubB = $pubB }
+        }
+    }
 
     Remove-SshHostBlock $SshCfgPath $Alias
     @"
@@ -705,6 +732,7 @@ Mark-BootstrapDone -CfgDir $CfgDir
 $null = Ensure-LaptopSshReady -PubB $PubB
 $script:LaptopSshVerified = $false
 
+$script:tunnelAuthAdminFixAttempted = $false
 $exitRequested = $false
 :menuLoop while (-not $exitRequested) {
     Step "Loading projects"
@@ -712,6 +740,7 @@ $exitRequested = $false
     StepOk (Get-MountListStepLabel -Os 'windows' -Mounts $allMounts)
     $go = @(Choose-Project -Mounts $allMounts)[-1]
     if (-not $go) { break }
+    $script:tunnelAuthAdminFixAttempted = $false
 
     if ($Ide) {
         $EditorCmd = if ($Ide -eq 'code' -or $Ide -eq 'vscode') { 'code' } else { 'cursor' }
@@ -871,7 +900,12 @@ $exitRequested = $false
                 StepOk
             } elseif ($laptopSshRc -eq 1) {
                 StepFail 'tunnel auth failed, retrying...'
-                $script:LaptopSshVerified = $false
+                if ($PubB -and -not $script:tunnelAuthAdminFixAttempted) {
+                    $script:tunnelAuthAdminFixAttempted = $true
+                    Write-Host '      -> reinstalling server key (admin authorized_keys)...' -ForegroundColor DarkGray
+                    $null = Invoke-LaptopAdminOps -PubB $PubB -ForceRestart
+                    $script:LaptopSshVerified = $false
+                }
                 Write-Host ''
                 continue
             } else {

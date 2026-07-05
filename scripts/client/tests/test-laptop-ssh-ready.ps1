@@ -22,6 +22,8 @@ try {
 . (Join-Path $PSScriptRoot '_paths.ps1')
 $src = Get-Content (Get-ClientFile 'windows\connect.ps1') -Raw
 Assert ($src -match 'function Test-AuthorizedKeyFragment') 'connect.ps1 has Test-AuthorizedKeyFragment helper'
+Assert ($src -match 'function Test-WindowsAccountIsLocalAdmin') 'connect.ps1 checks if laptop user is Windows admin'
+Assert ($src -match 'administrators_authorized_keys \(Windows admin user\)') 'connect.ps1 requires admin authorized_keys for admin users'
 Assert ($src -match 'administrators_authorized_keys') 'connect.ps1 checks admin authorized_keys too'
 Assert ($src -notmatch 'Select-String -Path \$userAk -Pattern \[regex\]::Escape') 'no unparenthesized Select-String Pattern'
 
