@@ -51,6 +51,9 @@ foreach ($rel in @('windows\connect.ps1')) {
     Assert ($src -match 'TrustedTunnel') "$rel uses trusted tunnel mount"
     Assert ($src -notmatch 'RemoteForward \$Port') "$rel ssh config has no RemoteForward"
     Assert ($src -notmatch 'Select-String -Path \$userAk -Pattern \[regex\]::Escape') "$rel Select-String uses safe Pattern variable"
+    Assert ($src -match 'function Get-InteractiveLaptopUser') "$rel resolves logged-on laptop user when elevated"
+    Assert ($src -match 'Get-InteractiveLaptopUser') "$rel stores LAPTOP_USER from interactive session not elevated token"
+    Assert ($src -match 'tunnelAuthRetryCount') "$rel caps tunnel auth retry loop"
     Assert ($src -match 'Start-Process powershell\.exe -Verb RunAs') "$rel self-elevates to administrator on launch"
     Assert ($src -match 'Invoke-LaptopAdminOps') "$rel has laptop admin SSH helpers"
 }

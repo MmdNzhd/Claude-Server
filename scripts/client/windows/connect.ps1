@@ -30,8 +30,21 @@ if (-not $AdminFix) {
         $elevArgs = @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
         if ($Setup) { $elevArgs += '-Setup' }
         if ($Ide) { $elevArgs += '-Ide'; $elevArgs += $Ide }
-        Start-Process powershell.exe -Verb RunAs -ArgumentList $elevArgs -Wait | Out-Null
-        exit 0
+        try {
+            $elev = Start-Process powershell.exe -Verb RunAs -ArgumentList $elevArgs -Wait -PassThru -ErrorAction Stop
+        } catch {
+            Write-Host ''
+            Write-Host '  [X] Administrator approval is required to run Claude Connect.' -ForegroundColor Red
+            Write-Host ''; Read-Host '    Press Enter to close' | Out-Null
+            exit 1
+        }
+        if (-not $elev) {
+            Write-Host ''
+            Write-Host '  [X] Administrator approval was cancelled.' -ForegroundColor Red
+            Write-Host ''; Read-Host '    Press Enter to close' | Out-Null
+            exit 1
+        }
+        exit $elev.ExitCode
     }
 }
 
@@ -193,6 +206,18 @@ function Test-IsAdmin {
     return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Get-InteractiveLaptopUser {
+    if ($script:LaptopUser) { return $script:LaptopUser }
+    try {
+        $owner = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName
+        if ($owner) {
+            $name = ($owner -split '\\')[-1]
+            if ($name) { return $name }
+        }
+    } catch {}
+    return $env:USERNAME
+}
+
 function Invoke-LaptopAdminOps {
     param(
         [string]$PubB = '',
@@ -305,7 +330,11 @@ if ($script:RunAdminFix) {
     if (-not (Test-Path $fixFile)) { Write-Host '[X] No admin fix pending' -ForegroundColor Red; exit 1 }
     $fixLines = @{}; Get-Content $fixFile | ForEach-Object { if ($_ -match '^(.+?)=(.*)$') { $fixLines[$matches[1]] = $matches[2] } }
     Remove-Item $fixFile -Force -ErrorAction SilentlyContinue
-    if ($fixLines.LAPTOP_USER) { $SshDir = Join-Path "C:\Users\$($fixLines.LAPTOP_USER)" '.ssh' }
+    if ($fixLines.LAPTOP_USER) {
+        $script:LaptopUser = $fixLines.LAPTOP_USER
+        $SshDir = Join-Path "C:\Users\$($fixLines.LAPTOP_USER)" '.ssh'
+        $CfgDir = Join-Path "C:\Users\$($fixLines.LAPTOP_USER)" '.config\claude-connect'
+    }
     $pub = $fixLines.PUB
     if ($pub) { Install-ServerKey $pub -ForceRestart:($fixLines.FORCE_RESTART -eq '1') }
     if ($fixLines.FIREWALL -eq '1') {
@@ -366,11 +395,9 @@ function Initialize-ServerSession {
         }
     }
 
-    Install-ServerKey $pubB -UserOnly
-    if (Test-WindowsAccountIsLocalAdmin) {
-        if (-not (Ensure-LaptopSshReady -PubB $pubB)) {
-            return @{ Ok = $false; Error = 'laptop SSH key setup failed'; PubB = $pubB }
-        }
+    Install-ServerKey $pubB
+    if (-not (Ensure-LaptopSshReady -PubB $pubB)) {
+        return @{ Ok = $false; Error = 'laptop SSH key setup failed'; PubB = $pubB }
     }
 
     Remove-SshHostBlock $SshCfgPath $Alias
@@ -582,7 +609,7 @@ function Choose-Project {
                     '1' {
                         $nUser = (Read-Host '    New server username (Enter to cancel)').Trim()
                         if ($nUser -and $nUser -ne $RemoteUser) {
-                            @("REMOTE_USER=$nUser", "LAPTOP_USER=$env:USERNAME") | Set-Content -Path $Cfg -Encoding ASCII
+                            @("REMOTE_USER=$nUser", "LAPTOP_USER=$(Get-InteractiveLaptopUser)") | Set-Content -Path $Cfg -Encoding ASCII
                             Remove-SshHostBlock $sshCfg $Alias
                             Write-Host ''; Write-Host '    Saved. Re-run connect.bat.' -ForegroundColor Green
                             Write-Host ''; exit 0
@@ -606,7 +633,8 @@ if ($Setup -or -not (Test-Path $Cfg)) {
     Write-Host "  First-time setup" -ForegroundColor Cyan
     Write-Host ""
     $RemoteUser = Read-Host "    Server username"
-    @("REMOTE_USER=$RemoteUser", "LAPTOP_USER=$env:USERNAME") | Set-Content -Path $Cfg -Encoding ASCII
+    $laptopUser = Get-InteractiveLaptopUser
+    @("REMOTE_USER=$RemoteUser", "LAPTOP_USER=$laptopUser") | Set-Content -Path $Cfg -Encoding ASCII
     Write-Host ""
 }
 $conf = @{}
@@ -720,7 +748,7 @@ if ($needsKey) {
         Write-Host "    Current username: $RemoteUser" -ForegroundColor DarkGray
         $fix = (Read-Host "    Username changed? Enter new username (or Enter to exit)").Trim()
         if ($fix) {
-            @("REMOTE_USER=$fix", "LAPTOP_USER=$env:USERNAME") | Set-Content -Path $Cfg -Encoding ASCII
+            @("REMOTE_USER=$fix", "LAPTOP_USER=$(Get-InteractiveLaptopUser)") | Set-Content -Path $Cfg -Encoding ASCII
             Remove-SshHostBlock $sshCfg $Alias
             Write-Host ""; Write-Host "    Saved. Re-run connect.bat." -ForegroundColor Green
         }
@@ -753,6 +781,7 @@ $exitRequested = $false
     $go = @(Choose-Project -Mounts $allMounts)[-1]
     if (-not $go) { break }
     $script:tunnelAuthAdminFixAttempted = $false
+    $script:tunnelAuthRetryCount = 0
 
     if ($Ide) {
         $EditorCmd = if ($Ide -eq 'code' -or $Ide -eq 'vscode') { 'code' } else { 'cursor' }
@@ -911,12 +940,27 @@ $exitRequested = $false
             if ($laptopSshRc -eq 0) {
                 StepOk
             } elseif ($laptopSshRc -eq 1) {
+                $script:tunnelAuthRetryCount++
                 StepFail 'tunnel auth failed, retrying...'
                 if ($PubB -and -not $script:tunnelAuthAdminFixAttempted) {
                     $script:tunnelAuthAdminFixAttempted = $true
                     Write-Host '      -> reinstalling server key (admin authorized_keys)...' -ForegroundColor DarkGray
                     $null = Invoke-LaptopAdminOps -PubB $PubB -ForceRestart
                     $script:LaptopSshVerified = $false
+                }
+                if ($script:tunnelAuthRetryCount -ge 5) {
+                    Write-Host ''
+                    Warn 'Tunnel auth failed 5 times - check sshd service and administrators_authorized_keys'
+                    Write-Host '    R = retry   Q = quit' -ForegroundColor DarkGray
+                    $rk = Read-RetryQuitKey
+                    if ($rk -eq 'r') {
+                        $script:tunnelAuthRetryCount = 0
+                        $script:tunnelAuthAdminFixAttempted = $false
+                        Write-Host ''
+                        continue
+                    }
+                    Push-ServerConnectConf -ActiveMount ''
+                    $alreadyDown = $true; break sessionLoop
                 }
                 Write-Host ''
                 continue
