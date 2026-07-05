@@ -22,7 +22,7 @@ function Test-LaptopRpathCompatible {
         [ValidateSet('mac','windows')][string]$Os = 'windows'
     )
     if (-not $Rpath) { return $false }
-    $p = ($Rpath -replace '\','/').Trim()
+    $p = $Rpath.Replace('\', '/').Trim()
     if ($Os -eq 'mac') {
         if ($p -match '^[A-Za-z]:') { return $false }
     } else {
@@ -34,7 +34,7 @@ function Test-LaptopRpathCompatible {
 function Test-LaptopRpathExists {
     param([string]$Rpath)
     if (-not $Rpath) { return $false }
-    $p = ($Rpath -replace '\','/').Trim()
+    $p = $Rpath.Replace('\', '/').Trim()
     if ($p -match '^[A-Za-z]:$') { $p = "$p/" }
     return (Test-Path -LiteralPath $p)
 }

@@ -31,6 +31,7 @@ foreach ($rel in $prodFiles) {
     Assert ($src -notmatch '[\u201C\u201D\u2018\u2019]') "$rel no smart quotes"
     $codeBody = (($src -split "`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
     Assert ($codeBody -notmatch '[\u2013\u2014]') "$rel no en/em dashes in executable lines"
+    Assert ($codeBody -notmatch "-replace '\\',") "$rel no invalid -replace backslash regex"
     Assert ($src -notmatch 'Select-String[^\n]*-Pattern\s+\[regex\]::Escape') "$rel no bare Select-String [regex]::Escape"
     Assert ($src -notmatch 'Set-ConnectTitle\s+"[^"]*\|[^"]*\$\(') "$rel no pipe-in-Set-ConnectTitle double-quote"
 }

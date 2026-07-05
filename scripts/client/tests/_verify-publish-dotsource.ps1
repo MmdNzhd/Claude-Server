@@ -32,6 +32,21 @@ foreach ($fn in $need) {
     }
     Write-Host "PASS  $fn loaded" -ForegroundColor Green
 }
+foreach ($rp in @('D:\Smart\test', 'D:/Smart/test')) {
+    try {
+        $null = Test-LaptopRpathCompatible -Rpath $rp -Os 'windows'
+    } catch {
+        Write-Host "FAIL  Test-LaptopRpathCompatible throws on $rp : $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "PASS  Test-LaptopRpathCompatible $rp" -ForegroundColor Green
+}
+$gmSrc = Get-Content (Join-Path $pub 'git-mode.ps1') -Raw
+if ($gmSrc -match "-replace '\\',") {
+    Write-Host 'FAIL  git-mode.ps1 uses invalid -replace backslash regex' -ForegroundColor Red
+    exit 1
+}
+Write-Host 'PASS  git-mode.ps1 uses literal path slash normalize' -ForegroundColor Green
 $bat = Get-Content (Join-Path $pub 'connect.bat') -Raw
 if ($bat -notmatch 'Acquire-TunnelPort') {
     Write-Host 'FAIL  connect.bat missing Acquire-TunnelPort guard' -ForegroundColor Red
