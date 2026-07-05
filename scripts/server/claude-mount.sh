@@ -235,9 +235,16 @@ _win_hide_git_and_create_stubs() {
 _hide_git_and_create_stubs() {
     local rpath="$1"
     [ -z "$rpath" ] && return 0
-    if [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ] && ! _tunnel_up; then
-        echo "warn: laptop tunnel down — git mode not applied (reconnect connect.bat)" >&2
-        return 0
+    if [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ]; then
+        if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ]; then
+            _tunnel_tcp_open && _tunnel_banner_matches_laptop || {
+                echo "warn: laptop tunnel down - git mode not applied (reconnect connect.bat)" >&2
+                return 0
+            }
+        elif ! _tunnel_up; then
+            echo "warn: laptop tunnel down - git mode not applied (reconnect connect.bat)" >&2
+            return 0
+        fi
     fi
     if [ "$LAPTOP_OS" = "mac" ]; then
         _mac_hide_git_and_create_stubs "$rpath"
@@ -286,11 +293,16 @@ _tunnel_banner_matches_laptop() {
 
 _tunnel_auth_ok() {
     [ -n "$LAPTOP_USER" ] && [ -f "$KEY" ] || return 1
+    local rcmd=true
+    case "${LAPTOP_OS,,}" in
+        mac|darwin|osx) rcmd=true ;;
+        *) rcmd='cmd /c exit 0' ;;
+    esac
     ssh -n -o BatchMode=yes -o ConnectTimeout=5 \
         -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
         -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" \
         -o ControlMaster=no -o ControlPath=none \
-        -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" true 2>/dev/null
+        -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" $rcmd 2>/dev/null
 }
 
 _tunnel_up() {

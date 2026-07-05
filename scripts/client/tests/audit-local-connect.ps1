@@ -6,7 +6,7 @@ param(
 
 . (Join-Path $PSScriptRoot '_paths.ps1')
 $ErrorActionPreference = 'SilentlyContinue'
-$ExpectedVersion = '20260703.12'
+$ExpectedVersion = Get-ConnectVersion
 
 function Test-ConnectBundle {
     param([string]$Dir)

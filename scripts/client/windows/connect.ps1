@@ -31,20 +31,14 @@ if (-not $AdminFix) {
         if ($Setup) { $elevArgs += '-Setup' }
         if ($Ide) { $elevArgs += '-Ide'; $elevArgs += $Ide }
         try {
-            $elev = Start-Process powershell.exe -Verb RunAs -ArgumentList $elevArgs -Wait -PassThru -ErrorAction Stop
+            Start-Process powershell.exe -Verb RunAs -ArgumentList $elevArgs -ErrorAction Stop | Out-Null
         } catch {
             Write-Host ''
             Write-Host '  [X] Administrator approval is required to run Claude Connect.' -ForegroundColor Red
             Write-Host ''; Read-Host '    Press Enter to close' | Out-Null
             exit 1
         }
-        if (-not $elev) {
-            Write-Host ''
-            Write-Host '  [X] Administrator approval was cancelled.' -ForegroundColor Red
-            Write-Host ''; Read-Host '    Press Enter to close' | Out-Null
-            exit 1
-        }
-        exit $elev.ExitCode
+        exit 0
     }
 }
 
@@ -55,7 +49,7 @@ if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
 }
 $ServerIP = "192.168.210.240"
 $Alias    = "claude-server"
-$script:ConnectVersion = '20260703.12'
+$script:ConnectVersion = '20260705.4'
 $CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
@@ -92,6 +86,7 @@ if (-not (Test-Path $_editorLaunch)) {
     Die "editor-launch.ps1 not found - re-copy the full windows package"
 }
 . $_editorLaunch
+Show-ConnectConsoleIfHidden
 
 $_gitMode = Join-Path $script:ConnectScriptDir 'git-mode.ps1'
 if (-not (Test-Path $_gitMode)) {
@@ -377,11 +372,12 @@ function Initialize-ServerSession {
         SshX 'mkdir -p ~/.local/bin' 2>$null | Out-Null
         $mountSrc = [System.IO.Path]::Combine($dir, 'claude-mount.sh')
         if (Test-Path $mountSrc) {
-            $localHash = (Get-FileHash -Algorithm SHA256 -Path $mountSrc).Hash
+            $uploadSrc = Get-LfNormalizedShCopy -Src $mountSrc
+            $localHash = (Get-FileHash -Algorithm SHA256 -Path $uploadSrc).Hash
             $remoteHash = ((SshX "sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print `$1}'") -join '').Trim()
             if (-not ($localHash -and $remoteHash -and ($localHash.ToLower() -eq $remoteHash.ToLower()))) {
                 $scpProcs += Start-Process -FilePath 'scp' -PassThru -NoNewWindow `
-                    -ArgumentList @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=30', '-q', $mountSrc, "${Alias}:~/.local/bin/claude-mount")
+                    -ArgumentList @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=30', '-q', $uploadSrc, "${Alias}:~/.local/bin/claude-mount")
             }
         }
         $gitSrc = [System.IO.Path]::Combine($dir, 'claude-git-setup.sh')
@@ -429,10 +425,10 @@ Host $Alias
     if ($dir -and $scpProcs.Count -gt 0) {
         $chmodCmd = @()
         if (Test-Path ([System.IO.Path]::Combine($dir, 'claude-mount.sh'))) {
-            $chmodCmd += "chmod +x ~/.local/bin/claude-mount; grep -q 'CLAUDE_LOCAL_BIN_PATH' ~/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=`$HOME/.local/bin:`$PATH\n' >> ~/.bashrc"
+            $chmodCmd += "sed -i 's/\r$//' ~/.local/bin/claude-mount 2>/dev/null; chmod +x ~/.local/bin/claude-mount; grep -q 'CLAUDE_LOCAL_BIN_PATH' ~/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=`$HOME/.local/bin:`$PATH\n' >> ~/.bashrc"
         }
         if (Test-Path ([System.IO.Path]::Combine($dir, 'claude-git-setup.sh'))) {
-            $chmodCmd += 'chmod +x ~/.local/bin/claude-git-setup'
+            $chmodCmd += "sed -i 's/\r$//' ~/.local/bin/claude-git-setup 2>/dev/null; chmod +x ~/.local/bin/claude-git-setup"
         }
         if ($chmodCmd.Count -gt 0) { SshX ($chmodCmd -join '; ') 2>$null | Out-Null }
     }
@@ -653,6 +649,7 @@ New-Item -ItemType Directory -Force -Path $CfgDir | Out-Null
 New-Item -ItemType Directory -Force -Path $SshDir  | Out-Null
 
 Clear-Host
+if (Test-IsAdmin) { Initialize-EditorLaunchTask | Out-Null }
 Write-ConnectHeader -Alias $Alias -ServerIP $ServerIP -Version $script:ConnectVersion
 Set-ConnectTitle 'Claude Connect'
 Write-BootstrapHint -CfgDir $CfgDir
@@ -771,6 +768,8 @@ Write-Host ''
 Mark-BootstrapDone -CfgDir $CfgDir
 $null = Ensure-LaptopSshReady -PubB $PubB
 $script:LaptopSshVerified = $false
+$script:SessionBgTunnel = $null
+$null = Initialize-SessionBgTunnel -Alias $Alias -SshCfgPath $sshCfg -Quiet
 
 $script:tunnelAuthAdminFixAttempted = $false
 $exitRequested = $false
@@ -797,10 +796,6 @@ $exitRequested = $false
         $EditorCmd = $editorChoice.EditorCmd
         $EditorName = $editorChoice.EditorName
     }
-
-    Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "-R\s+${Port}:localhost:22" } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
     Step "Checking SSH service"
     $svc = Get-Service sshd -ErrorAction SilentlyContinue
@@ -890,12 +885,14 @@ $exitRequested = $false
         Set-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -Enabled True -Profile Any -ErrorAction SilentlyContinue
     }
 
+    $null = Initialize-SessionBgTunnel -Alias $Alias -SshCfgPath $sshCfg -Quiet
+
     $editorOpened = $false
     $script:CursorAuthNeedsBootstrap = $false
 
     :mainLoop while ($true) {
     $alreadyDown  = $false
-    $bgTunnel     = $null
+    $bgTunnel     = $script:SessionBgTunnel
 
     try {
         :sessionLoop while ($true) {
@@ -917,6 +914,7 @@ $exitRequested = $false
                 Push-ServerConnectConf -ActiveMount ''
                 $alreadyDown = $true; break sessionLoop
             }
+            $script:SessionBgTunnel = $bgTunnel
             if (-not $tunnelReused) {
                 # Wait-ForTunnelUp already printed progress lines
             } elseif ($tunnelReused) {
@@ -941,11 +939,17 @@ $exitRequested = $false
                 StepOk
             } elseif ($laptopSshRc -eq 1) {
                 $script:tunnelAuthRetryCount++
-                StepFail 'tunnel auth failed, retrying...'
-                if ($PubB -and -not $script:tunnelAuthAdminFixAttempted) {
+                $failDetail = if ($script:LastLaptopReverseSshError) { $script:LastLaptopReverseSshError } else { 'tunnel auth failed' }
+                StepFail $failDetail
+                if ($failDetail -match 'Host key verification failed|Offending') {
+                    Write-Host '      -> clearing stale server known_hosts for tunnel port...' -ForegroundColor DarkGray
+                    Clear-ServerTunnelKnownHost
+                    $script:LaptopSshVerified = $false
+                } elseif ($PubB -and -not $script:tunnelAuthAdminFixAttempted) {
                     $script:tunnelAuthAdminFixAttempted = $true
                     Write-Host '      -> reinstalling server key (admin authorized_keys)...' -ForegroundColor DarkGray
                     $null = Invoke-LaptopAdminOps -PubB $PubB -ForceRestart
+                    Clear-ServerTunnelKnownHost
                     $script:LaptopSshVerified = $false
                 }
                 if ($script:tunnelAuthRetryCount -ge 5) {
@@ -1043,7 +1047,7 @@ $exitRequested = $false
             $script:CursorAuthNeedsBootstrap = $false
             if ($EditorCmd -eq 'cursor' -and (Get-Command Sync-CursorGoldenAuth -ErrorAction SilentlyContinue)) {
                 $gsPath = Join-Path (Get-LocalCursorGlobalStorage) 'state.vscdb'
-                $cursorRunning = @(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path).Count -gt 0
+                $cursorRunning = Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
                 Step "Syncing Cursor auth"
                 if ($cursorRunning -and (Test-LocalCursorAuthComplete -DbPath $gsPath)) {
                     StepOk 'skipped (editor open)'
@@ -1103,7 +1107,7 @@ $exitRequested = $false
             $script:lastToastAt = $null
             while (-not $bgTunnel.HasExited) {
                 if ($editorOpened -and $EditorCmd -eq 'cursor') {
-                    $editorOpened = @(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path).Count -gt 0
+                    $editorOpened = Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
                 }
                 if ((Get-Date) - $lastStatusAt -gt [TimeSpan]::FromSeconds(30)) {
                     Update-SessionStatusLine -ProjectLabel $go.Id -GitLabel (Get-GitModeLabel) -TunnelOk $true -EditorOpen $editorOpened -EditorName $EditorName
@@ -1219,6 +1223,7 @@ $exitRequested = $false
         if ($bgTunnel -and -not $bgTunnel.HasExited) {
             Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
         }
+        $script:SessionBgTunnel = $null
     }
 
     while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
@@ -1228,6 +1233,7 @@ $exitRequested = $false
         'm' {
             Write-Host '    Back to project menu...' -ForegroundColor Green
             $editorOpened = $false
+            $null = Initialize-SessionBgTunnel -Alias $Alias -SshCfgPath $sshCfg -Quiet
             Start-Sleep -Seconds 1
             Write-Host ''
             break mainLoop

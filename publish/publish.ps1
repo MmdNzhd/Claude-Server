@@ -4,13 +4,22 @@
 # Server scripts and deploy tools stay in the repo — NOT shipped in ZIPs.
 
 param(
-    [switch]$NoZip
+    [switch]$NoZip,
+    [switch]$SkipVersionBump
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot 'bump-connect-version.ps1')
+if (-not $SkipVersionBump) {
+    $ConnectVersion = Invoke-BumpConnectVersion -ProjectRoot $ProjectRoot
+    Write-Host "  Client version: v$ConnectVersion" -ForegroundColor DarkGray
+} else {
+    $ConnectVersion = Get-RepoConnectVersion -ProjectRoot $ProjectRoot
+    Write-Host "  Client version: v$ConnectVersion (no bump)" -ForegroundColor DarkGray
+}
 $Version     = Get-Date -Format 'yyyyMMdd'
 $PackageName = "claude-code-client-$Version"
 $OutBase     = Join-Path $env:USERPROFILE "Desktop\claude-publish"
@@ -21,6 +30,7 @@ $SepidIp = '192.168.250.70'
 
 $ClientFiles = @(
     @{ Src = "scripts\client\windows\connect.bat";       Dst = "windows\connect.bat";       PatchIp = $false }
+    @{ Src = "scripts\client\windows\connect-version.txt"; Dst = "windows\connect-version.txt"; PatchIp = $false }
     @{ Src = "scripts\client\windows\connect.ps1";       Dst = "windows\connect.ps1";       PatchIp = $true  }
     @{ Src = "scripts\client\windows\connect-rider.bat"; Dst = "windows\connect-rider.bat"; PatchIp = $false }
     @{ Src = "scripts\client\editor-launch.ps1";         Dst = "windows\editor-launch.ps1"; PatchIp = $false }

@@ -344,19 +344,25 @@ wait_for_tunnel_up() {
 poll_tunnel_with_progress() {
     local pid="${1:-}" i sleep_s up=""
     for i in $(seq 1 12); do
-        sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
-        sleep "$sleep_s"
-        printf '    Tunnel check %d/12...' "$i"
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-            printf ' SSH process died\n'
+            printf '    Tunnel check... SSH process died\n'
             release_stale_tunnel_port || true
             return 1
         fi
         if tunnel_up; then
-            printf ' port %d is open\n' "$PORT"
+            if [ "$i" -eq 1 ]; then
+                printf '    Tunnel check... port %d is open\n' "$PORT"
+            else
+                printf '    Tunnel check %d/12... port %d is open\n' "$i" "$PORT"
+            fi
             return 0
         fi
-        printf ' port %d not open yet\n' "$PORT"
+        if [ "$i" -ge 12 ]; then
+            break
+        fi
+        sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
+        printf '    Tunnel check %d/12... port %d not open yet\n' "$i" "$PORT"
+        sleep "$sleep_s"
     done
     return 1
 }
@@ -560,7 +566,7 @@ acquire_tunnel_port() {
 verify_laptop_reverse_ssh() {
     [ -n "${PORT:-}" ] && [ -n "${LAPTOP_USER:-}" ] || return 1
     tunnel_banner_is_this_laptop || return 1
-    sshx "timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -i ~/.ssh/claude_laptop -p ${PORT} ${LAPTOP_USER}@127.0.0.1 true" >/dev/null 2>&1
+    sshx "ssh-keygen -f \$HOME/.ssh/known_hosts -R '[127.0.0.1]:${PORT}' 2>/dev/null; ssh-keygen -f \$HOME/.ssh/known_hosts -R '127.0.0.1' 2>/dev/null; rm -f \$HOME/.ssh/known_hosts_claude_tunnel 2>/dev/null; touch \$HOME/.ssh/known_hosts_claude_tunnel; chmod 600 \$HOME/.ssh/known_hosts_claude_tunnel 2>/dev/null; timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=\$HOME/.ssh/known_hosts_claude_tunnel -i ~/.ssh/claude_laptop -p ${PORT} ${LAPTOP_USER}@127.0.0.1 true" >/dev/null 2>&1
 }
 
 wait_laptop_sshd() {

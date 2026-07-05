@@ -229,21 +229,30 @@ function Test-Tunnel {
 }
 
 function Wait-ForTunnelUp {
-    param([System.Diagnostics.Process]$TunnelProc)
+    param(
+        [System.Diagnostics.Process]$TunnelProc,
+        [switch]$Quiet
+    )
     for ($i = 1; $i -le 12; $i++) {
-        $sleepSec = [math]::Min(1.5, 0.25 + ($i - 1) * 0.2)
-        Start-Sleep -Seconds $sleepSec
-        Write-Host -NoNewline "    Tunnel check $i/12..." -ForegroundColor DarkGray
         if ($TunnelProc -and $TunnelProc.HasExited) {
-            Write-Host ' SSH process died' -ForegroundColor Red
+            if (-not $Quiet) { Write-Host '    Tunnel check... SSH process died' -ForegroundColor Red }
             Release-StaleTunnelPort
             return $false
         }
         if (Test-TunnelUp) {
-            Write-Host " port $Port is open" -ForegroundColor Green
+            if (-not $Quiet) {
+                $label = if ($i -eq 1) { '    Tunnel check...' } else { "    Tunnel check $i/12..." }
+                Write-Host -NoNewline $label -ForegroundColor DarkGray
+                Write-Host " port $Port is open" -ForegroundColor Green
+            }
             return $true
         }
-        Write-Host " port $Port not open yet" -ForegroundColor DarkGray
+        if ($i -ge 12) { break }
+        $sleepSec = [math]::Min(1.5, 0.25 + ($i - 1) * 0.2)
+        if (-not $Quiet) {
+            Write-Host "    Tunnel check $i/12... port $Port not open yet" -ForegroundColor DarkGray
+        }
+        Start-Sleep -Seconds $sleepSec
     }
     return $false
 }
@@ -252,6 +261,12 @@ function Get-ClaudeMountSrc {
     param([Parameter(Mandatory)][string]$ConnectScriptDir)
     $direct = Join-Path $ConnectScriptDir 'claude-mount.sh'
     if (Test-Path $direct) { return $direct }
+    foreach ($rel in @('mac\claude-mount.sh', '..\mac\claude-mount.sh')) {
+        try {
+            $p = [System.IO.Path]::GetFullPath((Join-Path $ConnectScriptDir $rel))
+            if (Test-Path $p) { return $p }
+        } catch { }
+    }
     $dir = Resolve-ServerScriptDir -ConnectScriptDir $ConnectScriptDir
     if ($dir) {
         $src = Join-Path $dir 'claude-mount.sh'
@@ -260,18 +275,29 @@ function Get-ClaudeMountSrc {
     return $null
 }
 
+function Get-LfNormalizedShCopy {
+    param([Parameter(Mandatory)][string]$Src)
+    if (-not (Test-Path $Src)) { return $Src }
+    $raw = [System.IO.File]::ReadAllText($Src)
+    if ($raw -notmatch "`r") { return $Src }
+    $tmp = Join-Path $env:TEMP ("claude-lf-" + [System.IO.Path]::GetFileName($Src))
+    [System.IO.File]::WriteAllText($tmp, ($raw -replace "`r`n", "`n" -replace "`r", "`n"))
+    return $tmp
+}
+
 function Push-ClaudeMountIfChanged {
     param(
         [Parameter(Mandatory)][string]$Src,
         [Parameter(Mandatory)][string]$Alias
     )
     if (-not (Test-Path $Src)) { return }
-    $localHash = (Get-FileHash -Algorithm SHA256 -Path $Src).Hash
+    $uploadSrc = Get-LfNormalizedShCopy -Src $Src
+    $localHash = (Get-FileHash -Algorithm SHA256 -Path $uploadSrc).Hash
     $remoteHash = ((SshX "sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print `$1}'") -join '').Trim()
     if ($localHash -and $remoteHash -and ($localHash.ToLower() -eq $remoteHash.ToLower())) { return }
-    scp -o BatchMode=yes -o ConnectTimeout=20 -q $Src "${Alias}:~/.local/bin/claude-mount" 2>$null
+    scp -o BatchMode=yes -o ConnectTimeout=20 -q $uploadSrc "${Alias}:~/.local/bin/claude-mount" 2>$null
     if ($LASTEXITCODE -eq 0) {
-        SshX 'chmod +x ~/.local/bin/claude-mount' 2>$null | Out-Null
+        SshX 'sed -i "s/\r$//" ~/.local/bin/claude-mount 2>/dev/null; chmod +x ~/.local/bin/claude-mount' 2>$null | Out-Null
     }
 }
 
@@ -285,7 +311,8 @@ function Prepare-ServerSessionParallel {
     $scpJob = $null
     $needScp = $false
     if ($MountSrc -and (Test-Path $MountSrc)) {
-        $localHash = (Get-FileHash -Algorithm SHA256 -Path $MountSrc).Hash
+        $uploadSrc = Get-LfNormalizedShCopy -Src $MountSrc
+        $localHash = (Get-FileHash -Algorithm SHA256 -Path $uploadSrc).Hash
         $remoteHash = ((SshX "sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print `$1}'") -join '').Trim()
         $needScp = -not ($localHash -and $remoteHash -and ($localHash.ToLower() -eq $remoteHash.ToLower()))
         if ($needScp) {
@@ -293,14 +320,14 @@ function Prepare-ServerSessionParallel {
                 param($src, $alias)
                 scp -o BatchMode=yes -o ConnectTimeout=20 -q $src "${alias}:~/.local/bin/claude-mount" 2>$null
                 exit $LASTEXITCODE
-            } -ArgumentList $MountSrc, $Alias
+            } -ArgumentList $uploadSrc, $Alias
         }
     }
     Push-ServerConnectConf -ActiveMount $ProjectId
     if ($scpJob) {
         Wait-Job $scpJob | Out-Null
         if (($scpJob | Receive-Job) -eq 0) {
-            SshX 'chmod +x ~/.local/bin/claude-mount' 2>$null | Out-Null
+            SshX 'sed -i "s/\r$//" ~/.local/bin/claude-mount 2>/dev/null; chmod +x ~/.local/bin/claude-mount' 2>$null | Out-Null
         }
         Remove-Job $scpJob -Force
     }
@@ -312,27 +339,59 @@ function Test-ProjectMountHealthy {
     return ($out -eq 'ok')
 }
 
+function Clear-ServerTunnelKnownHost {
+    if (-not $Port) { return }
+    SshX "ssh-keygen -f `$HOME/.ssh/known_hosts -R '[127.0.0.1]:${Port}' 2>/dev/null; ssh-keygen -f `$HOME/.ssh/known_hosts -R '127.0.0.1' 2>/dev/null; rm -f `$HOME/.ssh/known_hosts_claude_tunnel 2>/dev/null; true" 2>$null | Out-Null
+}
+
+function Invoke-LaptopReverseSshProbe {
+    $script:LastLaptopReverseSshError = ''
+    if (-not $Port -or -not $LaptopUser) {
+        $script:LastLaptopReverseSshError = 'missing TUNNEL_PORT or LAPTOP_USER'
+        return $false
+    }
+    if (-not (Test-TunnelUp)) {
+        $script:LastLaptopReverseSshError = "tunnel port $Port not open on server"
+        return $false
+    }
+    $kh = '$HOME/.ssh/known_hosts_claude_mount'
+    SshX "touch $kh 2>/dev/null; chmod 600 $kh 2>/dev/null" 2>$null | Out-Null
+    # Windows OpenSSH has no `true` — use cmd exit 0 (connect.ps1 always runs on Windows laptops).
+    $out = (SshX "timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$kh -i ~/.ssh/claude_laptop -p $Port ${LaptopUser}@127.0.0.1 cmd /c exit 0 2>&1") -join "`n"
+    if ($LASTEXITCODE -eq 0) { return $true }
+    $detail = @($out -split "`n" | ForEach-Object { $_.Trim() } | Where-Object {
+        $_ -match 'Permission denied|Host key verification failed|Connection refused|Could not resolve|No route|authenticity of host|Please contact your system administrator|publickey|reset by peer'
+    }) -join ' '
+    if (-not $detail) {
+        $detail = @($out -split "`n" | Where-Object { $_.Trim() -ne '' } | Select-Object -Last 1)[0]
+    }
+    if (-not $detail) { $detail = "server ssh exit $LASTEXITCODE" }
+    $script:LastLaptopReverseSshError = $detail
+    return $false
+}
+
 function Test-LaptopReverseSsh {
-    if (-not $Port -or -not $LaptopUser) { return $false }
-    if (-not (Test-TunnelUp)) { return $false }
-    SshX "timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -i ~/.ssh/claude_laptop -p $Port ${LaptopUser}@127.0.0.1 true" 2>$null | Out-Null
-    return ($LASTEXITCODE -eq 0)
+    return (Invoke-LaptopReverseSshProbe)
 }
 
 function Ensure-LaptopReverseSsh {
     param([string]$PubB = '')
     if (-not (Ensure-LaptopSshReady -PubB $PubB)) { return 2 }
+    Clear-ServerTunnelKnownHost
     if (Test-LaptopReverseSsh) { return 0 }
     $uidStr = ((SshX 'id -u' 2>$null) -join '').Trim() -replace '\D', ''
     if ($uidStr -and (Acquire-TunnelPort -UidStr $uidStr)) {
+        Clear-ServerTunnelKnownHost
         if (Test-LaptopReverseSsh) { return 0 }
     }
     Release-StaleTunnelPort
+    Clear-ServerTunnelKnownHost
     $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
     if ($sshdSvc -and $sshdSvc.Status -eq 'Running') {
         Restart-Service sshd -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
     }
+    Clear-ServerTunnelKnownHost
     if (Test-LaptopReverseSsh) { return 0 }
     return 1
 }
@@ -365,7 +424,8 @@ function Ensure-SessionTunnel {
         [Parameter(Mandatory)][string]$Alias,
         [string]$SshCfgPath = '',
         [ref]$BgTunnel,
-        [ref]$TunnelReused
+        [ref]$TunnelReused,
+        [switch]$WaitQuiet
     )
     $TunnelReused.Value = $false
     if ($BgTunnel.Value -and -not $BgTunnel.Value.HasExited -and (Test-TunnelUp)) {
@@ -386,11 +446,30 @@ function Ensure-SessionTunnel {
         '-N', '-o', 'ExitOnForwardFailure=yes',
         '-o', 'ServerAliveInterval=20', '-o', 'ServerAliveCountMax=5',
         '-R', "$Port`:localhost:22", $Alias)
-    if (Wait-ForTunnelUp -TunnelProc $BgTunnel.Value) { return $true }
+    if (Wait-ForTunnelUp -TunnelProc $BgTunnel.Value -Quiet:$WaitQuiet) { return $true }
     if ($BgTunnel.Value -and -not $BgTunnel.Value.HasExited) {
         Stop-Process -Id $BgTunnel.Value.Id -Force -ErrorAction SilentlyContinue
     }
     $BgTunnel.Value = $null
+    return $false
+}
+
+function Initialize-SessionBgTunnel {
+    param(
+        [Parameter(Mandatory)][string]$Alias,
+        [string]$SshCfgPath = '',
+        [switch]$Quiet
+    )
+    if ($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited -and (Test-TunnelUp)) {
+        return $true
+    }
+    $reused = $false
+    $tunnel = $null
+    if (Ensure-SessionTunnel -Alias $Alias -SshCfgPath $SshCfgPath -BgTunnel ([ref]$tunnel) -TunnelReused ([ref]$reused) -WaitQuiet:$Quiet) {
+        $script:SessionBgTunnel = $tunnel
+        return $true
+    }
+    $script:SessionBgTunnel = $null
     return $false
 }
 

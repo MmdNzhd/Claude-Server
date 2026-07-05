@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_paths.ps1')
 $fail = 0
+$ver = Get-ConnectVersion
 
 function Assert($cond, $msg) {
     if ($cond) { Write-Host "  PASS  $msg" -ForegroundColor Green }
@@ -28,7 +29,7 @@ foreach ($rel in @('windows\connect.ps1')) {
     Assert ($src -match 'function Choose-Project') "$rel uses Choose-Project (no while-loop pipeline leak)"
     Assert ($src -notmatch '(?m)^\s+\$go = \[PSCustomObject\]') "$rel has no bare `$go = [PSCustomObject]"
     Assert ($src -match 'Launch-RemoteEditor') "$rel launches editor via Launch-RemoteEditor"
-    Assert ($src -match 'ConnectVersion = ''20260703\.12''') "$rel has current ConnectVersion"
+    Assert ($src -match "ConnectVersion = '$([regex]::Escape($ver))'") "$rel has current ConnectVersion ($ver)"
     Assert ($src -match 'connect-ui\.ps1') "$rel dot-sources connect-ui"
     Assert ($src -match '\-AdminFix') "$rel supports AdminFix"
     Assert ($src -match 'Read-PostDisconnectKey') "$rel has post-disconnect helper"
@@ -41,7 +42,8 @@ foreach ($rel in @('windows\connect.ps1')) {
     Assert ($bundle -match 'LAPTOP_OS=windows') "$rel pushes LAPTOP_OS to server"
     Assert ($src -match '"g" \{ Configure-GitMode \}') "$rel has git menu option"
     Assert ($bundle -match 'Push-ServerConnectConf') "$rel has Push-ServerConnectConf"
-    Assert ($src -match '@\(Choose-Project -Mounts \$mounts\)\[-1\]') "$rel uses safe Choose-Project capture"
+    Assert ($src -match '@\(Choose-Project -Mounts \$allMounts\)\[-1\]') "$rel uses safe Choose-Project capture"
+    Assert ($src -match 'Initialize-SessionBgTunnel') "$rel pre-warms tunnel after Ready"
     Assert ($src -match '@\(Resolve-EditorChoice -CfgDir \$CfgDir\)\[-1\]') "$rel uses safe Resolve-EditorChoice capture"
     Assert ($src -match 'Test-AuthorizedKeyFragment|Test-LaptopSshReady') "$rel has laptop SSH key check helper"
     Assert ($bundle -match 'Acquire-TunnelPort') "$rel uses tunnel slot acquisition"
@@ -54,7 +56,7 @@ foreach ($rel in @('windows\connect.ps1')) {
     Assert ($src -match 'function Get-InteractiveLaptopUser') "$rel resolves logged-on laptop user when elevated"
     Assert ($src -match 'Get-InteractiveLaptopUser') "$rel stores LAPTOP_USER from interactive session not elevated token"
     Assert ($src -match 'tunnelAuthRetryCount') "$rel caps tunnel auth retry loop"
-    Assert ($src -match 'Start-Process powershell\.exe -Verb RunAs') "$rel self-elevates to administrator on launch"
+    Assert ($src -match 'Start-ProcessAsInteractiveUser|Start-Process powershell\.exe -Verb RunAs') "$rel self-elevates to administrator on launch"
     Assert ($src -match 'Invoke-LaptopAdminOps') "$rel has laptop admin SSH helpers"
 }
 
@@ -62,7 +64,10 @@ $authLaptop = Get-Content (Get-ClientFile 'cursor-auth-laptop.ps1') -Raw
 $editorLaunch = Get-Content (Get-ClientFile 'editor-launch.ps1') -Raw
 Assert ($authLaptop -match 'Merge-CursorAuthIntoLocalDb') 'cursor-auth-laptop uses merge not file replace'
 Assert ($authLaptop -notmatch 'Stop-Cursor|CloseMainWindow') 'cursor-auth-laptop never closes Cursor'
-Assert ($editorLaunch -match 'ClaudeServerCursorProfile') 'editor-launch uses isolated profile'
+Assert ($editorLaunch -match 'NonElevatedLauncher') 'editor-launch uses explorer token for fast de-elevated start'
+Assert ($editorLaunch -match 'Initialize-EditorLaunchTask') 'editor-launch has reusable schtasks fallback'
+Assert ($editorLaunch -match 'Invoke-SchTasksQuiet') 'editor-launch suppresses schtasks console noise'
+Assert ($editorLaunch -match 'Test-RemoteEditorWindowOpen') 'editor-launch detects visible editor window'
 Assert ($editorLaunch -match 'Initialize-CursorServerProfile') 'editor-launch marks server windows'
 
 foreach ($rel in @('windows\connect.ps1')) {

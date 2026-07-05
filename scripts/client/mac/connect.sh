@@ -5,7 +5,7 @@
 
 set -uo pipefail
 
-CONNECT_VERSION='20260704.1'
+CONNECT_VERSION='20260705.4'
 CONNECT_PORT_BASE=20000
 
 SERVER_IP="192.168.210.240"
@@ -135,7 +135,7 @@ EOF
 sanitize_ssh_alias_config
 step_ok "$REMOTE_USER"
 
-# connect — retry until reachable, 5s between attempts
+# connect ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â retry until reachable, 5s between attempts
 connected=""
 needs_key=""
 for attempt in $(seq 1 10); do
@@ -213,7 +213,7 @@ printf '    \033[0;32mReady\033[0m\n'
 echo ""
 ui_mark_bootstrap_done "$CFG_DIR"
 
-# helpers — use 'list' not 'status' (status is slow/hangs on stale mounts)
+# helpers ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â use 'list' not 'status' (status is slow/hangs on stale mounts)
 load_mounts() {
     sshx "$CM list 2>/dev/null" 2>/dev/null || true
 }

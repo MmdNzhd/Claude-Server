@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_paths.ps1')
 $fail = 0
+$ver = Get-ConnectVersion
 
 function Assert($cond, $msg) {
     if ($cond) { Write-Host "  PASS  $msg" -ForegroundColor Green }
@@ -78,7 +79,7 @@ Assert ($gitModeSh -match '_stop_cursor_server_profile') 'git-mode.sh kills Clau
 foreach ($rel in @('mac\connect.sh')) {
     $src = Get-Content (Get-ClientFile $rel) -Raw
     $bundle = $src + $gitModeSh
-    Assert ($src -match "CONNECT_VERSION='20260703\.12'") "$rel has current CONNECT_VERSION"
+    Assert ($src -match "CONNECT_VERSION='$([regex]::Escape($ver))'") "$rel has current CONNECT_VERSION ($ver)"
     Assert ($src -match 'exit_requested|menuLoop') "$rel has post-disconnect menu loop"
     Assert ($src -match 'read_post_disconnect_key') "$rel has post-disconnect countdown"
     Assert ($src -match 'ui_session_box|G = git mode') "$rel has session git hotkey"
@@ -115,8 +116,14 @@ Assert ($gitModeSh -match 'ensure_session_tunnel') 'git-mode.sh has ensure_sessi
 Assert ($gitModeSh -match 'invoke_mount_project') 'git-mode.sh has invoke_mount_project'
 Assert ($gitModePs1 -match 'Ensure-LaptopReverseSshCached') 'git-mode.ps1 has Ensure-LaptopReverseSshCached'
 Assert ($gitModePs1 -match 'Acquire-TunnelPort') 'git-mode.ps1 has Acquire-TunnelPort'
+Assert ($gitModePs1 -match 'known_hosts_claude_mount') 'git-mode.ps1 uses mount known_hosts for reverse SSH probe'
+Assert ($gitModePs1 -match 'LastLaptopReverseSshError') 'git-mode.ps1 surfaces reverse SSH error detail'
+Assert ($gitModePs1 -match 'cmd /c exit 0') 'git-mode.ps1 uses Windows-safe reverse SSH probe'
+Assert ($gitModePs1 -match 'mac\\claude-mount\.sh') 'git-mode.ps1 finds claude-mount.sh in mac package folder'
 Assert ($mount -match 'cmd_check') 'claude-mount has check command'
+Assert ($gitModePs1 -match 'Initialize-SessionBgTunnel') 'git-mode.ps1 pre-warms background tunnel'
 Assert ($mount -match 'CLAUDE_TRUSTED_TUNNEL') 'claude-mount supports trusted tunnel skip'
+Assert ($mount -match '_hide_git_and_create_stubs') 'claude-mount has git hide with tunnel guard'
 Assert ($mount -match 'ControlMaster=no') 'claude-mount disables SSH mux to laptop'
 
 $gitSetup = Get-Content (Get-ServerFile 'server\claude-git-setup.sh') -Raw

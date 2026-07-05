@@ -23,7 +23,7 @@ Write-Host '=== Claude Connect — full desktop sync ===' -ForegroundColor White
 Write-Host ''
 
 Write-Step 'Publishing packages...'
-& $PublishScript
+& $PublishScript -SkipVersionBump
 Write-Ok 'publish complete'
 
 $pub = Get-ChildItem (Join-Path $env:USERPROFILE 'Desktop\claude-publish\claude-code-client-*') -Directory |
@@ -33,6 +33,7 @@ if (-not $pub) { throw 'Publish folder not found under Desktop\claude-publish' }
 Write-Step "Syncing Desktop\Claude-Connect from $($pub.Name) (client only)..."
 $maps = @(
     @{ S = 'windows\connect.bat'; D = 'connect.bat' },
+    @{ S = 'windows\connect-version.txt'; D = 'connect-version.txt' },
     @{ S = 'windows\connect.ps1'; D = 'connect.ps1' },
     @{ S = 'windows\connect-rider.bat'; D = 'connect-rider.bat' },
     @{ S = 'windows\editor-launch.ps1'; D = 'editor-launch.ps1' },
@@ -52,14 +53,16 @@ Copy-Item (Join-Path $pub.FullName 'mac\connect.sh') (Join-Path $macDir 'connect
 Copy-Item (Join-Path $pub.FullName 'mac\git-mode.sh') (Join-Path $macDir 'git-mode.sh') -Force
 Copy-Item (Join-Path $pub.FullName 'mac\connect-ui.sh') (Join-Path $macDir 'connect-ui.sh') -Force
 Copy-Item (Join-Path $pub.FullName 'mac\editor-launch.sh') (Join-Path $macDir 'editor-launch.sh') -Force
-# Admin deploy tools — repo only, never in published ZIP
+Copy-Item (Join-Path $pub.FullName 'mac\claude-mount.sh') (Join-Path $macDir 'claude-mount.sh') -Force
 Copy-Item (Join-Path $PSScriptRoot 'deploy-server-mount-fix.ps1') (Join-Path $Desk 'deploy-server-mount-fix.ps1') -Force
 Copy-Item (Join-Path $PSScriptRoot 'deploy-server-mount-fix.bat') (Join-Path $Desk 'deploy-server-mount-fix.bat') -Force
-foreach ($stale in @('server', 'claude-mount.sh', 'claude-automount.sh', 'claude-watchdog.sh', 'claude-git-setup.sh', 'deploy-mount-fix.sh')) {
+foreach ($stale in @('server', 'claude-automount.sh', 'claude-watchdog.sh', 'claude-git-setup.sh', 'deploy-mount-fix.sh')) {
     $p = Join-Path $Desk $stale
     if (Test-Path $p) { Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue }
 }
-Write-Ok "Desktop\Claude-Connect (client v20260703.12 + mac; deploy tools from repo)"
+Copy-Item (Join-Path $pub.FullName 'mac\claude-mount.sh') (Join-Path $Desk 'claude-mount.sh') -Force
+$deskVer = (Get-Content (Join-Path $Desk 'connect-version.txt') -Raw).Trim()
+Write-Ok "Desktop\Claude-Connect (client v$deskVer + mac; deploy tools from repo)"
 
 if ($DeployServer) {
     Write-Step "Deploying mount fix to $Server..."

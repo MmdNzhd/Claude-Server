@@ -11,3 +11,10 @@ function Get-ClientFile([string]$Rel) {
 function Get-ServerFile([string]$Rel) {
     Join-Path $script:ScriptsRoot ($Rel -replace '/', '\')
 }
+
+function Get-ConnectVersion {
+    $f = Get-ClientFile 'windows\connect.ps1'
+    $raw = Get-Content $f -Raw
+    if ($raw -match "ConnectVersion = '([^']+)'") { return $Matches[1] }
+    throw 'ConnectVersion not found in windows/connect.ps1'
+}

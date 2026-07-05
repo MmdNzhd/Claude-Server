@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_paths.ps1')
 $fail = 0
+$ver = Get-ConnectVersion
 
 function Assert($cond, $msg) {
     if ($cond) { Write-Host "  PASS  $msg" -ForegroundColor Green }
@@ -48,9 +49,9 @@ $win = Get-ClientFile 'windows\connect.ps1'
 $ed  = Get-ClientFile 'editor-launch.ps1'
 $src = Get-Content $win -Raw
 $eds = Get-Content $ed -Raw
-Assert ($src -match "ConnectVersion = '20260703\.12'") "connect.ps1 version 20260703.12"
+Assert ($src -match "ConnectVersion = '$([regex]::Escape($ver))'") "connect.ps1 version $ver"
 Assert ($eds -match '\[System\.IO\.Path\]::Combine') "editor-launch uses Path.Combine not Join-Path"
-Assert ($src -match '@\(Choose-Project -Mounts \$mounts\)\[-1\]') "safe Choose-Project capture"
+Assert ($src -match '@\(Choose-Project -Mounts \$allMounts\)\[-1\]') "safe Choose-Project capture"
 Assert ($src -match '@\(Resolve-EditorChoice -CfgDir \$CfgDir\)\[-1\]') "safe Resolve-EditorChoice capture"
 
 Write-Host ""

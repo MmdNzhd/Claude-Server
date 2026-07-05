@@ -73,10 +73,12 @@ Write-Host ''
 Write-Host '--- connect.bat bundle guards ---' -ForegroundColor Cyan
 $bat = Get-ClientFile 'windows\connect.bat'
 $batSrc = Get-Content $bat -Raw
-$required = @('connect-ui.ps1', 'editor-launch.ps1', 'git-mode.ps1', 'cursor-auth-laptop.ps1', '20260703.12', 'Path.Combine', '@(Choose-Project', 'Acquire-TunnelPort')
+$ver = Get-ConnectVersion
+$required = @('connect-ui.ps1', 'editor-launch.ps1', 'git-mode.ps1', 'cursor-auth-laptop.ps1', 'connect-version.txt', 'Path.Combine', '@(Choose-Project', 'Acquire-TunnelPort')
 foreach ($r in $required) {
     Assert ($batSrc -match [regex]::Escape($r)) "connect.bat requires $r"
 }
+Assert ($batSrc -match 'ConnectVersion = ''!EXPECT_VER!''') 'connect.bat checks ConnectVersion from connect-version.txt'
 
 Write-Host ''
 if ($fail -eq 0) {

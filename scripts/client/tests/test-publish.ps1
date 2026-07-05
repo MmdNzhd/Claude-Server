@@ -26,9 +26,15 @@ function Test-PackageRoot {
     }
     $mountHits = @(Get-ChildItem -Path $Root -Recurse -File -Filter 'claude-mount.sh' -ErrorAction SilentlyContinue)
     $relMounts = @($mountHits | ForEach-Object { $_.FullName.Replace($Root, '').TrimStart('\', '/') })
-    $extraMounts = @($relMounts | Where-Object { $_ -ne 'mac\claude-mount.sh' -and $_ -ne 'mac/claude-mount.sh' })
-    Assert ($extraMounts.Count -eq 0) "$Label has claude-mount.sh only at mac/claude-mount.sh"
-    Assert (Test-Path (Join-Path $Root 'mac\claude-mount.sh')) "$Label has mac/claude-mount.sh bootstrap copy"
+    $allowedMounts = @(
+        'mac\claude-mount.sh', 'mac/claude-mount.sh',
+        'claude-code\mac\claude-mount.sh', 'claude-code/mac/claude-mount.sh'
+    )
+    $extraMounts = @($relMounts | Where-Object { $allowedMounts -notcontains $_ })
+    Assert ($extraMounts.Count -eq 0) "$Label has claude-mount.sh only under mac/ (or claude-code/mac/)"
+    $hasMount = (Test-Path (Join-Path $Root 'mac\claude-mount.sh')) -or
+                (Test-Path (Join-Path $Root 'claude-code\mac\claude-mount.sh'))
+    Assert $hasMount "$Label has mac/claude-mount.sh bootstrap copy"
     $hasWin = (Test-Path (Join-Path $Root 'windows\connect.ps1')) -or
               (Test-Path (Join-Path $Root 'claude-code\windows\connect.ps1'))
     Assert $hasWin "$Label includes windows\connect.ps1"
@@ -132,7 +138,8 @@ if ($main) {
     Assert ($mainFiles -contains 'mac\connect-ui.sh') 'main has connect-ui.sh'
     Assert ($mainFiles -contains 'mac\editor-launch.sh') 'main has editor-launch.sh'
     Assert ($mainFiles -contains 'mac\claude-mount.sh') 'main has mac/claude-mount.sh bootstrap copy'
-    Assert ($mainFiles.Count -eq 13) "main has exactly 13 client files (got $($mainFiles.Count))"
+    Assert ($mainFiles -contains 'windows\connect-version.txt') 'main has connect-version.txt'
+    Assert ($mainFiles.Count -eq 14) "main has exactly 14 client files (got $($mainFiles.Count))"
     $smartPs1 = Get-Content (Join-Path $main.FullName 'windows\connect.ps1') -Raw
     Assert ($smartPs1 -match 'claude-server') 'main connect.ps1 alias claude-server'
     Assert ($smartPs1 -match 'claude-connect') 'main connect.ps1 cfg claude-connect'
@@ -140,7 +147,7 @@ if ($main) {
     Test-SingleIpLiteral -Path (Join-Path $main.FullName 'windows\connect.ps1') -ExpectedIp $SmartIp -Label 'main connect.ps1'
     Test-NoUtf8Bom -Path (Join-Path $main.FullName 'windows\connect.ps1') -Label 'main'
     $bat = Get-Content (Join-Path $main.FullName 'windows\connect.bat') -Raw
-    Assert ($bat -match 'cursor-auth-laptop\.ps1') 'connect.bat requires cursor-auth-laptop.ps1'
+    Assert ($bat -match 'connect-version\.txt') 'connect.bat requires connect-version.txt'
 } else {
     Assert $false 'main publish folder found (run publish.ps1)'
 }

@@ -40,7 +40,7 @@ Assert ($safe -like '*editor.conf') 'Path.Combine safe with pipeline context'
 
 foreach ($rel in @('windows\connect.ps1')) {
     $src = Get-Content (Get-ClientFile $rel) -Raw
-    Assert ($src -match '@\(Choose-Project -Mounts \$mounts\)\[-1\]') "$rel uses safe Choose-Project capture"
+    Assert ($src -match '@\(Choose-Project -Mounts \$allMounts\)\[-1\]') "$rel uses safe Choose-Project capture"
     Assert ($src -notmatch 'script: \$PSCommandPath') "$rel omits script path in header (v12)"
 }
 
