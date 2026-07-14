@@ -171,6 +171,16 @@ if [ -f "$SERVER_DIR/laptop-exec.sh" ]; then
             /usr/local/lib/claude-server/cursor-rules/laptop-exec.mdc
         ok "laptop-exec cursor rule -> /usr/local/lib/claude-server/cursor-rules/"
     fi
+    if [ -d "$SERVER_DIR/cursor-hooks" ]; then
+        mkdir -p /usr/local/lib/claude-server/cursor-hooks
+        install -m 755 "$SERVER_DIR/cursor-hooks/laptop-exec-guard.sh" \
+            /usr/local/lib/claude-server/cursor-hooks/laptop-exec-guard.sh
+        install -m 644 "$SERVER_DIR/cursor-hooks/hooks-user.json" \
+            /usr/local/lib/claude-server/cursor-hooks/hooks-user.json
+        install -m 644 "$SERVER_DIR/cursor-hooks/hooks-project.json" \
+            /usr/local/lib/claude-server/cursor-hooks/hooks-project.json
+        ok "laptop-exec cursor hooks -> /usr/local/lib/claude-server/cursor-hooks/"
+    fi
     for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
         [ -d "/home/$u" ] || continue
         mkdir -p "/home/$u/.local/bin"
@@ -200,8 +210,9 @@ if [ -f "$SERVER_DIR/laptop-exec-setup.sh" ]; then
     for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
         [ -d "/home/$u" ] || continue
         sudo -u "$u" /usr/local/bin/laptop-exec-setup --user 2>/dev/null || true
+        sudo -u "$u" /usr/local/bin/laptop-exec-setup --all-projects 2>/dev/null || true
     done
-    ok "laptop-exec-setup --user -> all users"
+    ok "laptop-exec-setup --user + --all-projects -> all users"
 fi
 if [ -f "$SERVER_DIR/claude-watchdog.sh" ]; then
     install -m 755 "$SERVER_DIR/designer-start.sh" /usr/local/bin/designer-start

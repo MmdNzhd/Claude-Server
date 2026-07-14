@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/laptop-exec-guard.sh"
+      }
+    ],
+    "preToolUse": [
+      {
+        "command": ".cursor/hooks/laptop-exec-guard.sh",
+        "matcher": "Grep|Glob|Shell"
+      }
+    ]
+  }
+}

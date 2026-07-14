@@ -1,9 +1,10 @@
 ---
 name: laptop-exec
 description: >-
-  Use laptop-exec for scan, git, build, and bulk I/O on SSHFS-mounted projects.
-  Use when grep/find/git/dotnet/npm over ~/mounts/ is slow or when the user
-  asks to build, test, or run git on their laptop.
+  MANDATORY for any project under ~/mounts/ (SSHFS). Use laptop-exec instead of
+  Grep, git, find, rg, dotnet build, npm test, or Shell on /mounts/ paths.
+  Triggers: search files, grep, rg, find, git status/diff/commit, build, test,
+  dotnet, npm, yarn, run tests, scan codebase. Always run laptop-exec status first.
 ---
 
 # Laptop Exec — Fast Path for SSHFS Projects

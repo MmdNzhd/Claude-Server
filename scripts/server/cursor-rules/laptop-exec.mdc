@@ -16,8 +16,9 @@ Apply this rule when **any** of these is true:
 - You would run bulk I/O: `find`, `rg`/`grep -r`, `git status/diff`, `dotnet build`, `npm test`
 - A `find` over the project is taking more than a few seconds
 
-**STOP:** If you are about to run `find`, `rg`, or `git` on a path under `/mounts/`,
-use `laptop-exec` instead. No exceptions.
+**STOP:** If you are about to run `find`, `rg`, `git`, `dotnet build`, `npm test`,
+or use the **Grep/Glob tool** on a path under `/mounts/`, use `laptop-exec` instead.
+No exceptions. A Cursor hook blocks violations — do not retry direct commands.
 
 Check session: `laptop-exec status` (requires connect.bat/sh on laptop).
 
