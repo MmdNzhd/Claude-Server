@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-mac-laptop-ssh.sh — static checks for Mac self-healing reverse-SSH helpers
+# test-mac-laptop-ssh.sh - static checks for Mac self-healing reverse-SSH helpers
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"

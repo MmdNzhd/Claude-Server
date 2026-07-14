@@ -1,8 +1,8 @@
-# Designer Connect ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Quick Start
+# Designer Connect
 
 SSHFS mount of laptop design folder + noVNC browser desktop. No Cursor/VS Code.
 
-Client scripts: **v20260705.4** (Windows developer package uses same git-mode modules).
+Client scripts: **v20260714.2** (Windows developer package uses same git-mode modules).
 
 ## Windows
 
@@ -26,7 +26,7 @@ Required files (same folder):
 | `R` | Reconnect |
 | `Q` | Disconnect |
 
-Default: **hide** ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â `.git` hidden on laptop (fast). Use `G` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ On only if you need git over SSHFS on server.
+Default: **hide**
 
 **Reconfigure path:** `connect.bat -Setup`
 
@@ -47,9 +47,9 @@ Same hotkeys (`G`, `R`, `Q`).
 
 ## What This Does
 
-- Reverse SSH tunnel: server ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ laptop OpenSSH
-- SSHFS: server `/home/designer/mounts/laptop` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Ãƒâ€šÃ‚Â your laptop folder
-- SSH local forward: laptop `127.0.0.1:27015` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ server noVNC
+- Reverse SSH tunnel: server
+- SSHFS: server `/home/designer/mounts/laptop`
+- SSH local forward: laptop `127.0.0.1:27015`
 - Chrome on server downloads to mounted laptop folder (managed policy)
 
 ---
@@ -71,7 +71,7 @@ Designer Chrome download dir: `/home/designer/mounts/laptop` (via managed policy
 |-------|--------|
 | noVNC not reachable | Admin: `sudo designer-start start` on server |
 | Mount fails | Check laptop path with `-Setup`; ensure OpenSSH Server running |
-| Git hide warning | `G` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ Off; close apps locking `.git` on laptop |
+| Git hide warning | `G` to remount after closing Cursor/git on laptop |
 
 Sepidz package uses the same connect scripts; publish patches only the server IP.
 

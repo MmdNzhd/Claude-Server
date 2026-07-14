@@ -172,7 +172,7 @@ cmd_init() {
     _load_project "$PROJECT_ID" || { _log "no project config"; exit 0; }
 
     if [ "$GIT_MODE" = "server" ]; then
-        _log "GIT_MODE=server — skip local mirror (using SSHFS git)"
+        _log "GIT_MODE=server - skip local mirror (using SSHFS git)"
         exit 0
     fi
 
@@ -390,7 +390,7 @@ cmd_sync() {
     _load_project "$PROJECT_ID" || exit 0
 
     if [ "$GIT_MODE" = "server" ]; then
-        _log "sync: GIT_MODE=server — skip mirror sync"
+        _log "sync: GIT_MODE=server - skip mirror sync"
         exit 0
     fi
 

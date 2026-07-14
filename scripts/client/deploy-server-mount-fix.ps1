@@ -1,6 +1,6 @@
-# deploy-server-mount-fix.ps1 — deploy mount + automount fix to ALL server users (sudo once)
+# deploy-server-mount-fix.ps1 - deploy mount + automount fix to ALL server users (sudo once)
 # Run from repo only:  scripts\client\deploy-server-mount-fix.ps1
-# NOT included in published client ZIPs — reads scripts\server\ from the repo checkout.
+# NOT included in published client ZIPs - reads scripts\server\ from the repo checkout.
 
 param(
     [string]$Server = 'smart@192.168.210.240'
@@ -30,7 +30,7 @@ function Find-DeployFiles {
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $files = Find-DeployFiles -StartDir $scriptDir
 if (-not $files) {
-    Write-Host '  [X] claude-mount.sh not found — run from repo scripts\client\' -ForegroundColor Red
+    Write-Host '  [X] claude-mount.sh not found - run from repo scripts\client\' -ForegroundColor Red
     Write-Host '      (Published client ZIPs do not include server scripts)' -ForegroundColor DarkGray
     exit 1
 }
@@ -57,7 +57,7 @@ if ($files.Watch -and (Test-Path $files.Watch)) {
 }
 
 Write-Host ''
-Write-Host '  Sudo required — enter server password when prompted:' -ForegroundColor Yellow
+Write-Host '  Sudo required - enter server password when prompted:' -ForegroundColor Yellow
 Write-Host ''
 
 ssh -t -o ConnectTimeout=15 $Server "chmod +x ~/$DeployDir/deploy-mount-fix.sh && sudo bash ~/$DeployDir/deploy-mount-fix.sh"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# import-cursor-golden-laptop.sh — import golden Cursor identity from laptop server profile push
+# import-cursor-golden-laptop.sh - import golden Cursor identity from laptop server profile push
 #
 # Usage (root): claude-server import-cursor-golden-laptop /tmp/cursor-laptop-golden-smart
 #
@@ -34,7 +34,7 @@ if [ ! -f "$LIB" ]; then
     unset _cmd_dir _candidate
 fi
 [ -f "$LIB" ] || {
-    echo -e "${RED}cursor-auth-lib.py not found — run: sudo claude-server install${NC}" >&2
+    echo -e "${RED}cursor-auth-lib.py not found - run: sudo claude-server install${NC}" >&2
     exit 1
 }
 

@@ -1,4 +1,4 @@
-# git-mode.ps1 — shared GIT_MODE helpers (dot-sourced by connect.ps1 forks)
+# git-mode.ps1 - shared GIT_MODE helpers (dot-sourced by connect.ps1 forks)
 # Requires: $CfgDir, functions SshX, Test-Tunnel, Warn; $LaptopUser, $Port, $CM at call time
 
 function Get-GitMode {
@@ -15,6 +15,28 @@ function Get-GitModeLabel {
     return 'FAST'
 }
 
+function Write-GitModeLog {
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('INFO', 'WARN', 'ERROR', 'DEBUG', 'TRACE')][string]$Level = 'DEBUG'
+    )
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog "GITMODE: $Message" $Level
+    }
+}
+
+$script:TunnelBannerCacheAt = $null
+$script:TunnelBannerCacheBanner = ''
+$script:TunnelBannerCacheUp = $false
+$script:TunnelBannerCacheInvalidate = $false
+$script:LastForwardProbeAt = $null
+
+function Clear-TunnelBannerCache {
+    $script:TunnelBannerCacheAt = $null
+    $script:TunnelBannerCacheBanner = ''
+    $script:TunnelBannerCacheUp = $false
+    $script:TunnelBannerCacheInvalidate = $true
+}
 
 function Test-LaptopRpathCompatible {
     param(
@@ -135,8 +157,22 @@ function Read-PostDisconnectKey {
 
 function Get-TunnelBanner {
     if (-not $Port) { return '' }
-    $r = SshX "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port 2>/dev/null && timeout 2 nc 127.0.0.1 $Port 2>/dev/null | head -1'" 2>$null
-    return (($r -join '') -replace "`r",'').Trim()
+    if (-not $script:TunnelBannerCacheInvalidate -and $script:TunnelBannerCacheAt) {
+        $ageMs = [int]((Get-Date) - $script:TunnelBannerCacheAt).TotalMilliseconds
+        if ($ageMs -lt 3000) {
+            Write-GitModeLog "TUNNEL_BANNER cache hit age_ms=$ageMs banner=$($script:TunnelBannerCacheBanner)" 'TRACE'
+            return $script:TunnelBannerCacheBanner
+        }
+    }
+    $script:TunnelBannerCacheInvalidate = $false
+    Write-GitModeLog "TUNNEL_BANNER_BEGIN port=$Port" 'TRACE'
+    $r = SshX "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port 2>/dev/null && timeout 2 nc 127.0.0.1 $Port 2>/dev/null | head -1' 2>/dev/null" 2>$null
+    $banner = (($r -join '') -replace "`r",'').Trim()
+    $script:TunnelBannerCacheAt = Get-Date
+    $script:TunnelBannerCacheBanner = $banner
+    $script:TunnelBannerCacheUp = (Test-TunnelBannerIsWindows -Banner $banner)
+    Write-GitModeLog "TUNNEL_BANNER port=$Port banner=$banner" 'DEBUG'
+    return $banner
 }
 
 function Test-TunnelBannerIsWindows {
@@ -190,6 +226,17 @@ function Release-StaleTunnelPort {
     Start-Sleep -Seconds 1
 }
 
+function Remove-LocalOrphanTunnel {
+    param([Parameter(Mandatory)][int]$TargetPort)
+    Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match "-R\s+${TargetPort}:localhost:22" } |
+        ForEach-Object {
+            Write-GitModeLog "ORPHAN_TUNNEL: killing local pid=$($_.ProcessId) port=$TargetPort" 'DEBUG'
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    Clear-TunnelBannerCache
+}
+
 function Acquire-TunnelPort {
     param([string]$UidStr)
     $portBase = 20000
@@ -199,9 +246,14 @@ function Acquire-TunnelPort {
         $slotLine = Get-Content $Cfg -ErrorAction SilentlyContinue | Where-Object { $_ -match '^TUNNEL_SLOT=' } | Select-Object -Last 1
         if ($slotLine -match 'TUNNEL_SLOT=(\d+)') { $preferred = $matches[1] }
     }
+    $preferredInt = $null
+    if ($preferred -match '^\d+$') { $preferredInt = [int]$preferred }
+    if ($null -ne $preferredInt) {
+        Remove-LocalOrphanTunnel -TargetPort ($portBase + [int]$UidStr + $preferredInt)
+    }
     $trySlots = @()
-    if ($preferred -match '^\d+$' -and [int]$preferred -le 9) { $trySlots += [int]$preferred }
-    0..9 | ForEach-Object { if ($_ -ne [int]$preferred) { $trySlots += $_ } }
+    if ($null -ne $preferredInt -and $preferredInt -le 9) { $trySlots += $preferredInt }
+    0..9 | ForEach-Object { if ($_ -ne $preferredInt) { $trySlots += $_ } }
     foreach ($slot in $trySlots) {
         $port = $portBase + [int]$UidStr + $slot
         if ($port -gt 65535) { continue }
@@ -220,12 +272,72 @@ function Acquire-TunnelPort {
 }
 
 function Test-TunnelUp {
+    if (-not $Port) { return $false }
+    if (-not $script:TunnelBannerCacheInvalidate -and $script:TunnelBannerCacheAt) {
+        $ageMs = [int]((Get-Date) - $script:TunnelBannerCacheAt).TotalMilliseconds
+        if ($ageMs -lt 3000) {
+            Write-GitModeLog "TUNNEL_UP port=$Port up=$($script:TunnelBannerCacheUp) banner=$($script:TunnelBannerCacheBanner) cache=1" 'TRACE'
+            return $script:TunnelBannerCacheUp
+        }
+    }
     $banner = Get-TunnelBanner
-    return (Test-TunnelBannerIsWindows -Banner $banner)
+    $up = $script:TunnelBannerCacheUp
+    Write-GitModeLog "TUNNEL_UP port=$Port up=$up banner=$banner" 'TRACE'
+    return $up
 }
 
 function Test-Tunnel {
     return (Test-TunnelUp)
+}
+
+function Get-TunnelSshProcess {
+    if (-not $Port) { return $null }
+    $portPat = [regex]::Escape("$Port")
+    Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match "-R\s+${portPat}:localhost:22" } |
+        Select-Object -First 1
+}
+
+function Sync-SessionTunnelProcess {
+    param([ref]$BgTunnel)
+    if ($BgTunnel.Value -and -not $BgTunnel.Value.HasExited) {
+        $now = Get-Date
+        if (-not $script:LastForwardProbeAt) {
+            $script:LastForwardProbeAt = $now
+        } elseif (((Get-Date) - $script:LastForwardProbeAt).TotalSeconds -ge 30) {
+            $script:LastForwardProbeAt = $now
+            Clear-TunnelBannerCache
+            $probeUp = Test-TunnelUp
+            $probeBanner = $script:TunnelBannerCacheBanner
+            if (-not $probeUp) {
+                Write-GitModeLog "TUNNEL_DROP pid=$($BgTunnel.Value.Id) port=$Port banner=$probeBanner reason=bg_alive_forward_dead" 'WARN'
+                return $false
+            }
+        }
+        Write-GitModeLog "TUNNEL_SYNC: bg_alive pid=$($BgTunnel.Value.Id) port=$Port" 'TRACE'
+        return $true
+    }
+    if (-not (Test-TunnelUp)) {
+        Write-GitModeLog "TUNNEL_SYNC ok=0 reason=tunnel_down port=$Port" 'DEBUG'
+        return $false
+    }
+    $cim = Get-TunnelSshProcess
+    if (-not $cim) {
+        Write-GitModeLog "TUNNEL_SYNC ok=1 reason=tunnel_up_no_ssh_proc port=$Port" 'TRACE'
+        return $true
+    }
+    try {
+        $proc = Get-Process -Id $cim.ProcessId -ErrorAction Stop
+        if (-not $proc.HasExited) {
+            $BgTunnel.Value = $proc
+            $script:SessionBgTunnel = $proc
+            Write-GitModeLog "TUNNEL_SYNC ok=1 reason=reattached pid=$($proc.Id) port=$Port" 'DEBUG'
+            return $true
+        }
+    } catch {
+        Write-GitModeLog "TUNNEL_SYNC ok=0 reason=proc_gone pid=$($cim.ProcessId) err=$($_.Exception.Message)" 'DEBUG'
+    }
+    return $false
 }
 
 function Wait-ForTunnelUp {
@@ -235,11 +347,14 @@ function Wait-ForTunnelUp {
     )
     for ($i = 1; $i -le 12; $i++) {
         if ($TunnelProc -and $TunnelProc.HasExited) {
+            Write-GitModeLog "TUNNEL_WAIT fail=1 attempt=$i reason=ssh_died pid=$($TunnelProc.Id)" 'WARN'
             if (-not $Quiet) { Write-Host '    Tunnel check... SSH process died' -ForegroundColor Red }
             Release-StaleTunnelPort
             return $false
         }
-        if (Test-TunnelUp) {
+        $up = Test-TunnelUp
+        if ($up) {
+            Write-GitModeLog "TUNNEL_WAIT ok=1 attempt=$i port=$Port pid=$($TunnelProc.Id)" 'DEBUG'
             if (-not $Quiet) {
                 $label = if ($i -eq 1) { '    Tunnel check...' } else { "    Tunnel check $i/12..." }
                 Write-Host -NoNewline $label -ForegroundColor DarkGray
@@ -252,8 +367,10 @@ function Wait-ForTunnelUp {
         if (-not $Quiet) {
             Write-Host "    Tunnel check $i/12... port $Port not open yet" -ForegroundColor DarkGray
         }
+        Write-GitModeLog "TUNNEL_WAIT ok=0 attempt=$i port=$Port" 'TRACE'
         Start-Sleep -Seconds $sleepSec
     }
+    Write-GitModeLog "TUNNEL_WAIT fail=1 reason=timeout port=$Port" 'WARN'
     return $false
 }
 
@@ -316,6 +433,7 @@ function Prepare-ServerSessionParallel {
         $remoteHash = ((SshX "sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print `$1}'") -join '').Trim()
         $needScp = -not ($localHash -and $remoteHash -and ($localHash.ToLower() -eq $remoteHash.ToLower()))
         if ($needScp) {
+            Write-GitModeLog "SCP: begin project=$ProjectId alias=$Alias" 'DEBUG'
             $scpJob = Start-Job -ScriptBlock {
                 param($src, $alias)
                 scp -o BatchMode=yes -o ConnectTimeout=20 -q $src "${alias}:~/.local/bin/claude-mount" 2>$null
@@ -325,9 +443,19 @@ function Prepare-ServerSessionParallel {
     }
     Push-ServerConnectConf -ActiveMount $ProjectId
     if ($scpJob) {
-        Wait-Job $scpJob | Out-Null
-        if (($scpJob | Receive-Job) -eq 0) {
-            SshX 'sed -i "s/\r$//" ~/.local/bin/claude-mount 2>/dev/null; chmod +x ~/.local/bin/claude-mount' 2>$null | Out-Null
+        $scpBegin = Get-Date
+        $waited = Wait-Job $scpJob -Timeout 30
+        if (-not $waited) {
+            $scpMs = [int]((Get-Date) - $scpBegin).TotalMilliseconds
+            Write-GitModeLog "SCP: timeout ERROR project=$ProjectId ms=$scpMs" 'ERROR'
+            Stop-Job $scpJob -ErrorAction SilentlyContinue
+        } else {
+            $scpExit = ($scpJob | Receive-Job)
+            $scpMs = [int]((Get-Date) - $scpBegin).TotalMilliseconds
+            Write-GitModeLog "SCP: end project=$ProjectId exit=$scpExit ms=$scpMs" 'DEBUG'
+            if ($scpExit -eq 0) {
+                SshX 'sed -i "s/\r$//" ~/.local/bin/claude-mount 2>/dev/null; chmod +x ~/.local/bin/claude-mount' 2>$null | Out-Null
+            }
         }
         Remove-Job $scpJob -Force
     }
@@ -347,21 +475,31 @@ function Clear-ServerTunnelKnownHost {
 }
 
 function Invoke-LaptopReverseSshProbe {
+    $probeBegin = Get-Date
+    Write-GitModeLog "LAPTOP_SSH: probe begin port=$Port user=$LaptopUser" 'TRACE'
     $script:LastLaptopReverseSshError = ''
     if (-not $Port -or -not $LaptopUser) {
         $script:LastLaptopReverseSshError = 'missing TUNNEL_PORT or LAPTOP_USER'
+        $probeMs = [int]((Get-Date) - $probeBegin).TotalMilliseconds
+        Write-GitModeLog "LAPTOP_SSH: probe end ok=0 ms=$probeMs err=$($script:LastLaptopReverseSshError)" 'DEBUG'
         return $false
     }
     if (-not (Test-TunnelUp)) {
         $script:LastLaptopReverseSshError = "tunnel port $Port not open on server"
+        $probeMs = [int]((Get-Date) - $probeBegin).TotalMilliseconds
+        Write-GitModeLog "LAPTOP_SSH: probe end ok=0 ms=$probeMs err=$($script:LastLaptopReverseSshError)" 'DEBUG'
         return $false
     }
     $kh = '$HOME/.ssh/known_hosts_claude_mount'
     SshX "touch $kh 2>/dev/null; chmod 600 $kh 2>/dev/null" 2>$null | Out-Null
-    # Windows OpenSSH has no `true` — use cmd exit 0 (connect.ps1 always runs on Windows laptops).
+    # Windows OpenSSH has no `true` - use cmd exit 0 (connect.ps1 always runs on Windows laptops).
     for ($attempt = 1; $attempt -le 2; $attempt++) {
         $out = (SshX "timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$kh -i ~/.ssh/claude_laptop -p $Port ${LaptopUser}@127.0.0.1 cmd /c exit 0 2>&1") -join "`n"
-        if ($LASTEXITCODE -eq 0) { return $true }
+        if ($LASTEXITCODE -eq 0) {
+            $probeMs = [int]((Get-Date) - $probeBegin).TotalMilliseconds
+            Write-GitModeLog "LAPTOP_SSH: probe end ok=1 ms=$probeMs attempt=$attempt" 'DEBUG'
+            return $true
+        }
         if ($attempt -eq 1 -and ($out -match 'Host key verification failed|HOST IDENTIFICATION HAS CHANGED|Offending|system administrator')) {
             Clear-ServerTunnelKnownHost
             continue
@@ -376,6 +514,8 @@ function Invoke-LaptopReverseSshProbe {
     }
     if (-not $detail) { $detail = "server ssh exit $LASTEXITCODE" }
     $script:LastLaptopReverseSshError = $detail
+    $probeMs = [int]((Get-Date) - $probeBegin).TotalMilliseconds
+    Write-GitModeLog "LAPTOP_SSH: probe end ok=0 ms=$probeMs err=$detail" 'DEBUG'
     return $false
 }
 
@@ -385,36 +525,70 @@ function Test-LaptopReverseSsh {
 
 function Ensure-LaptopReverseSsh {
     param([string]$PubB = '')
-    if (-not (Ensure-LaptopSshReady -PubB $PubB)) { return 2 }
+    $ensureBegin = Get-Date
+    Write-GitModeLog 'LAPTOP_SSH: ensure_begin' 'DEBUG'
+    if (-not (Ensure-LaptopSshReady -PubB $PubB)) {
+        $ensureMs = [int]((Get-Date) - $ensureBegin).TotalMilliseconds
+        Write-GitModeLog "LAPTOP_SSH: ensure_end rc=2 ms=$ensureMs reason=laptop_ssh_not_ready" 'DEBUG'
+        return 2
+    }
     Clear-ServerTunnelKnownHost
-    if (Test-LaptopReverseSsh) { return 0 }
+    if (Test-LaptopReverseSsh) {
+        $ensureMs = [int]((Get-Date) - $ensureBegin).TotalMilliseconds
+        Write-GitModeLog "LAPTOP_SSH: ensure_end rc=0 ms=$ensureMs" 'DEBUG'
+        return 0
+    }
     $uidStr = ((SshX 'id -u' 2>$null) -join '').Trim() -replace '\D', ''
     if ($uidStr -and (Acquire-TunnelPort -UidStr $uidStr)) {
         Clear-ServerTunnelKnownHost
-        if (Test-LaptopReverseSsh) { return 0 }
+        if (Test-LaptopReverseSsh) {
+            $ensureMs = [int]((Get-Date) - $ensureBegin).TotalMilliseconds
+            Write-GitModeLog "LAPTOP_SSH: ensure_end rc=0 ms=$ensureMs reason=acquired_port" 'DEBUG'
+            return 0
+        }
     }
     Release-StaleTunnelPort
     Clear-ServerTunnelKnownHost
     $sshdSvc = Get-Service sshd -ErrorAction SilentlyContinue
     if ($sshdSvc -and $sshdSvc.Status -eq 'Running') {
+        $restartBegin = Get-Date
+        Write-GitModeLog 'LAPTOP_SSH: restart_sshd begin' 'DEBUG'
         Restart-Service sshd -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
+        $restartMs = [int]((Get-Date) - $restartBegin).TotalMilliseconds
+        Write-GitModeLog "LAPTOP_SSH: restart_sshd end ms=$restartMs" 'DEBUG'
     }
     Clear-ServerTunnelKnownHost
-    if (Test-LaptopReverseSsh) { return 0 }
+    if (Test-LaptopReverseSsh) {
+        $ensureMs = [int]((Get-Date) - $ensureBegin).TotalMilliseconds
+        Write-GitModeLog "LAPTOP_SSH: ensure_end rc=0 ms=$ensureMs reason=after_sshd_restart" 'DEBUG'
+        return 0
+    }
+    $ensureMs = [int]((Get-Date) - $ensureBegin).TotalMilliseconds
+    Write-GitModeLog "LAPTOP_SSH: ensure_end rc=1 ms=$ensureMs err=$($script:LastLaptopReverseSshError)" 'WARN'
     return 1
 }
 
 function Ensure-LaptopReverseSshCached {
     param([string]$PubB = '')
-    if ($script:LaptopSshVerified -and (Test-LaptopReverseSsh)) { return 0 }
+    $cachedBegin = Get-Date
+    Write-GitModeLog "LAPTOP_SSH: ensure_cached begin verified=$($script:LaptopSshVerified)" 'TRACE'
+    if ($script:LaptopSshVerified -and (Test-LaptopReverseSsh)) {
+        $cachedMs = [int]((Get-Date) - $cachedBegin).TotalMilliseconds
+        Write-GitModeLog "LAPTOP_SSH: ensure_cached end rc=0 ms=$cachedMs reason=verified_cache" 'TRACE'
+        return 0
+    }
     if (Test-LaptopReverseSsh) {
         $script:LaptopSshVerified = $true
+        $cachedMs = [int]((Get-Date) - $cachedBegin).TotalMilliseconds
+        Write-GitModeLog "LAPTOP_SSH: ensure_cached end rc=0 ms=$cachedMs reason=probe_ok" 'TRACE'
         return 0
     }
     $rc = Ensure-LaptopReverseSsh -PubB $PubB
     if ($rc -eq 0) { $script:LaptopSshVerified = $true }
     else { $script:LaptopSshVerified = $false }
+    $cachedMs = [int]((Get-Date) - $cachedBegin).TotalMilliseconds
+    Write-GitModeLog "LAPTOP_SSH: ensure_cached end rc=$rc ms=$cachedMs" 'DEBUG'
     return $rc
 }
 
@@ -424,8 +598,13 @@ function Invoke-RecoverIfNeeded {
         [switch]$FreshTunnel
     )
     if (-not $FreshTunnel -and (Test-ProjectMountHealthy -ProjectId $ProjectId)) { return }
+    $recoverBegin = Get-Date
+    Write-GitModeLog "RECOVER: begin project=$ProjectId fresh_tunnel=$FreshTunnel" 'DEBUG'
     Write-Host '      -> recovering stale mounts...' -ForegroundColor DarkGray
-    SshX "timeout 30 $CM recover-if-needed '$ProjectId' 2>/dev/null || timeout 30 $CM recover 2>/dev/null || true" 2>$null | Out-Null
+    Clear-TunnelBannerCache
+    SshX "timeout 30 $CM recover-one '$ProjectId' 2>/dev/null || timeout 30 $CM recover-if-needed '$ProjectId' 2>/dev/null || timeout 30 $CM recover 2>/dev/null || true" 2>$null | Out-Null
+    $recoverMs = [int]((Get-Date) - $recoverBegin).TotalMilliseconds
+    Write-GitModeLog "RECOVER: end project=$ProjectId ms=$recoverMs" 'DEBUG'
 }
 
 function Ensure-SessionTunnel {
@@ -439,24 +618,40 @@ function Ensure-SessionTunnel {
     $TunnelReused.Value = $false
     if ($BgTunnel.Value -and -not $BgTunnel.Value.HasExited -and (Test-TunnelUp)) {
         $TunnelReused.Value = $true
+        Write-GitModeLog "ENSURE_TUNNEL reused=1 pid=$($BgTunnel.Value.Id) port=$Port" 'DEBUG'
         return $true
     }
+    Write-GitModeLog "ENSURE_TUNNEL start port=$Port alias=$Alias had_bg=$([bool]$BgTunnel.Value)" 'DEBUG'
     if ($BgTunnel.Value -and -not $BgTunnel.Value.HasExited) {
+        Write-GitModeLog "ENSURE_TUNNEL killing stale bg pid=$($BgTunnel.Value.Id)" 'DEBUG'
+        Clear-TunnelBannerCache
         Stop-Process -Id $BgTunnel.Value.Id -Force -ErrorAction SilentlyContinue
     }
     Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match "-R\s+${Port}:localhost:22" } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        ForEach-Object {
+            Write-GitModeLog "ENSURE_TUNNEL killing orphan ssh pid=$($_.ProcessId)" 'DEBUG'
+            Clear-TunnelBannerCache
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
     $uidStr = ((SshX 'id -u' 2>$null) -join '').Trim() -replace '\D', ''
     if ($uidStr) { $null = Acquire-TunnelPort -UidStr $uidStr }
     Release-StaleTunnelPort
     if ($SshCfgPath) { Sanitize-SshAliasConfig -CfgPath $SshCfgPath -AliasName $Alias }
+    Clear-TunnelBannerCache
+    $script:LastForwardProbeAt = $null
     $BgTunnel.Value = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList @(
         '-N', '-o', 'ExitOnForwardFailure=yes',
         '-o', 'ServerAliveInterval=20', '-o', 'ServerAliveCountMax=5',
         '-R', "$Port`:localhost:22", $Alias)
-    if (Wait-ForTunnelUp -TunnelProc $BgTunnel.Value -Quiet:$WaitQuiet) { return $true }
+    Write-GitModeLog "ENSURE_TUNNEL spawned pid=$($BgTunnel.Value.Id) port=$Port slot=$($script:TunnelSlot)" 'INFO'
+    if (Wait-ForTunnelUp -TunnelProc $BgTunnel.Value -Quiet:$WaitQuiet) {
+        Write-GitModeLog "ENSURE_TUNNEL ok=1 pid=$($BgTunnel.Value.Id)" 'INFO'
+        return $true
+    }
+    Write-GitModeLog "ENSURE_TUNNEL ok=0 reason=wait_timeout pid=$($BgTunnel.Value.Id)" 'WARN'
     if ($BgTunnel.Value -and -not $BgTunnel.Value.HasExited) {
+        Clear-TunnelBannerCache
         Stop-Process -Id $BgTunnel.Value.Id -Force -ErrorAction SilentlyContinue
     }
     $BgTunnel.Value = $null
@@ -488,12 +683,15 @@ function Push-ServerConnectConf {
         [string]$ActiveMount = ''
     )
     $mode = if ($GitMode -eq 'server') { 'server' } else { 'hide' }
-    $am = ($ActiveMount -replace "'", "'\\''")
+    $am = ($ActiveMount -replace "'", "'\''")
+    Write-GitModeLog "PUSH_CONF laptop_user=$LaptopUser port=$Port git_mode=$mode active_mount=$ActiveMount" 'DEBUG'
     SshX "mkdir -p ~/.local/bin && printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nGIT_MODE=%s\nLAPTOP_OS=windows\nACTIVE_MOUNT=%s\n' '$LaptopUser' '$Port' '$mode' '$am' > ~/.claude-connect.conf && chmod 600 ~/.claude-connect.conf || true" 2>$null | Out-Null
 }
 
 function Read-RetryQuitKey {
     param([int]$TimeoutSec = 30)
+    $interactiveBegin = Get-Date
+    Write-GitModeLog "INTERACTIVE: retry_quit begin timeout_sec=$TimeoutSec" 'DEBUG'
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $rk = ''
     while ($rk -ne 'r' -and $rk -ne 'q') {
@@ -508,6 +706,8 @@ function Read-RetryQuitKey {
             Start-Sleep -Milliseconds 200
         }
     }
+    $elapsedMs = [int]((Get-Date) - $interactiveBegin).TotalMilliseconds
+    Write-GitModeLog "INTERACTIVE: retry_quit end key=$rk elapsed_ms=$elapsedMs" 'DEBUG'
     return $rk
 }
 
@@ -536,14 +736,21 @@ function Clear-SessionMount {
         [string]$RemotePath = '',
         [switch]$SkipEditorStop
     )
+    Write-GitModeLog "CLEAR_MOUNT project=$ProjectId skip_editor=$SkipEditorStop editor=$EditorCmd path=$RemotePath" 'INFO'
     if (-not $SkipEditorStop -and $EditorCmd -and $Alias -and $RemotePath) {
         if (Get-Command Stop-RemoteEditor -ErrorAction SilentlyContinue) {
+            Write-GitModeLog 'CLEAR_MOUNT stopping editor' 'DEBUG'
             Stop-RemoteEditor -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
         }
     }
+    Clear-TunnelBannerCache
     if ($ProjectId) {
         $pidEsc = $ProjectId -replace "'", "'\\''"
-        ssh -n -o BatchMode=yes -o ConnectTimeout=5 $Alias "timeout 8 $CM down '$pidEsc' 2>/dev/null" 2>$null | Out-Null
+        $downBegin = Get-Date
+        Write-GitModeLog "CLEAR_MOUNT: down begin project=$ProjectId" 'DEBUG'
+        SshX "timeout 8 $CM down '$pidEsc' 2>/dev/null" 2>$null | Out-Null
+        $downMs = [int]((Get-Date) - $downBegin).TotalMilliseconds
+        Write-GitModeLog "CLEAR_MOUNT: down end ms=$downMs project=$ProjectId" 'DEBUG'
     }
     if ($Port) { Push-ServerConnectConf -ActiveMount '' }
 }
@@ -604,7 +811,8 @@ function Test-MountSuccess {
         [string]$MountOut,
         [int]$ExitCode = 0
     )
-    if ($MountOut -match 'error:|FAILED|No tunnel|not configured|unbound variable') { return $false }
+    if ($MountOut -match 'error:|No tunnel|not configured|unbound variable') { return $false }
+    if ($MountOut -cmatch 'FAILED') { return $false }
     if ($ExitCode -eq 0) { return $true }
     if ($MountOut -match 'already mounted:') { return $true }
     return $false
@@ -618,9 +826,12 @@ function Invoke-MountProject {
         [switch]$TrustedTunnel
     )
     $trusted = if ($TrustedTunnel) { 'CLAUDE_TRUSTED_TUNNEL=1 ' } else { '' }
+    Write-GitModeLog "MOUNT_UP begin project=$ProjectId trusted=$TrustedTunnel" 'DEBUG'
     $mountOut = (SshX "${trusted}$CM up '$ProjectId' 2>&1") | Out-String
     $exitCode = $LASTEXITCODE
+    Write-GitModeLog "MOUNT_UP first exit=$exitCode out=$($mountOut.Trim() -replace '\s+',' ')" 'DEBUG'
     if (Test-MountSuccess -MountOut $mountOut -ExitCode $exitCode) {
+        Write-GitModeLog "MOUNT_UP ok=1 project=$ProjectId" 'INFO'
         return @{ Ok = $true; Out = $mountOut }
     }
     if ($mountOut -match 'unbound variable|syntax error near unexpected') {
@@ -655,8 +866,9 @@ function Remount-ProjectGit {
         Warn ($mountOut.Trim())
         return $false
     }
-    $cleanOut = ($mountOut.Trim() -replace '^already mounted:\s*', '')
-    if ($cleanOut) { Write-Host "      -> $cleanOut" -ForegroundColor DarkGray }
+    $cleanOut = ($mountOut.Trim() -replace '^already mounted:\s*', '' -replace '^mounted:\s*', '')
+    $cleanOut = (($cleanOut -split '\r?\n')[0]).Trim()
+    if ($cleanOut -and $cleanOut -notmatch '^warn:') { Write-Host "      -> $cleanOut" -ForegroundColor DarkGray }
     Write-Host "    Git mode: $(Get-GitMode) applied." -ForegroundColor Green
     Write-Host ''
     return $true

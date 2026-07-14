@@ -1,5 +1,5 @@
 #!/bin/bash
-# update-server.sh — pull latest repo + redeploy Claude Code Server
+# update-server.sh - pull latest repo + redeploy Claude Code Server
 # Usage: sudo bash update-server.sh
 #        sudo bash update-server.sh --token   (also prompt for new OAuth token)
 
@@ -27,11 +27,11 @@ step() { echo -e "\n${BOLD}=== $1 ===${NC}"; }
 [ "$EUID" -ne 0 ] && fail "must run as root: sudo bash update-server.sh"
 
 echo ""
-echo -e "${BOLD}Claude Code Server — Update + Redeploy${NC}"
+echo -e "${BOLD}Claude Code Server - Update + Redeploy${NC}"
 echo "repo: $REPO_DIR"
 echo ""
 
-# ─── 1. Clone or pull repo ─────────────────────────────────────────────────
+# --- 1. Clone or pull repo -------------------------------------------------
 step "1 - git repo"
 
 if [ -d "$REPO_DIR/.git" ]; then
@@ -46,7 +46,7 @@ if [ -d "$REPO_DIR/.git" ]; then
         ok "updated $before -> $after"
     fi
 elif [ -d "$REPO_DIR" ]; then
-    warn "$REPO_DIR exists but is not a git repo — backing up and cloning fresh"
+    warn "$REPO_DIR exists but is not a git repo - backing up and cloning fresh"
     mv "$REPO_DIR" "${REPO_DIR}.bak.$(date +%Y%m%d%H%M%S)"
     git clone --depth=1 "$REPO_URL" "$REPO_DIR"
     ok "cloned to $REPO_DIR"
@@ -56,17 +56,17 @@ else
     ok "clone complete"
 fi
 
-# Fallback: mounted copy from smart laptop (read-only SSHFS — cannot pull)
+# Fallback: mounted copy from smart laptop (read-only SSHFS - cannot pull)
 MOUNTED="/home/smart/mounts/claude-code-server"
 if [ ! -f "$REPO_DIR/scripts/server/commands/install.sh" ] && [ -f "$MOUNTED/scripts/server/commands/install.sh" ]; then
-    warn "git repo missing install.sh — using mounted copy at $MOUNTED"
+    warn "git repo missing install.sh - using mounted copy at $MOUNTED"
     REPO_DIR="$MOUNTED"
 fi
 
 [ -f "$REPO_DIR/scripts/server/commands/install.sh" ] || \
-    fail "install.sh not found under $REPO_DIR — check network or clone URL"
+    fail "install.sh not found under $REPO_DIR - check network or clone URL"
 
-# ─── 2. Full redeploy (idempotent) ───────────────────────────────────────────
+# --- 2. Full redeploy (idempotent) -------------------------------------------
 step "2 - claude-server install"
 
 export CLAUDE_SERVER_REPO="$REPO_DIR"
@@ -76,7 +76,7 @@ if [ -f /etc/cursor-auth/golden/auth.json ] && [ -x /usr/local/bin/cursor-auth-s
     cursor-auth-sync --all && ok "Cursor golden identity re-synced" || warn "Cursor sync failed (see above)"
 fi
 
-# ─── 3. OAuth token (optional) ───────────────────────────────────────────────
+# --- 3. OAuth token (optional) -----------------------------------------------
 step "3 - OAuth token"
 
 if $REFRESH_TOKEN; then
@@ -86,7 +86,7 @@ if $REFRESH_TOKEN; then
     echo ""
     read -r -s -p "  CLAUDE_CODE_OAUTH_TOKEN: " NEW_TOKEN
     echo ""
-    [ -n "$NEW_TOKEN" ] || fail "empty token — aborted"
+    [ -n "$NEW_TOKEN" ] || fail "empty token - aborted"
     echo "export CLAUDE_CODE_OAUTH_TOKEN=$NEW_TOKEN" > /etc/profile.d/claude-auth.sh
     chmod 644 /etc/profile.d/claude-auth.sh
     grep -v '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment > /tmp/claude-env.$$
@@ -109,26 +109,26 @@ else
         source /etc/profile.d/claude-auth.sh
         if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
             ok "existing token kept (use --token to replace)"
-            warn "if claude still asks to log in, token is expired — re-run: sudo bash update-server.sh --token"
+            warn "if claude still asks to log in, token is expired - re-run: sudo bash update-server.sh --token"
         else
-            warn "no token in claude-auth.sh — run: sudo bash update-server.sh --token"
+            warn "no token in claude-auth.sh - run: sudo bash update-server.sh --token"
         fi
     else
-        warn "no /etc/profile.d/claude-auth.sh — run: sudo bash update-server.sh --token"
+        warn "no /etc/profile.d/claude-auth.sh - run: sudo bash update-server.sh --token"
     fi
 fi
 
-# ─── 4. Fix users stuck on forced password change ────────────────────────────
+# --- 4. Fix users stuck on forced password change ----------------------------
 step "4 - SSH password flags"
 
 for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
     [ -d "/home/$u" ] || continue
     if chage -l "$u" 2>/dev/null | grep -q 'password must be changed'; then
-        warn "$u must change password — run as that user: passwd"
+        warn "$u must change password - run as that user: passwd"
     fi
 done
 
-# ─── 5. Verify + auth probe ─────────────────────────────────────────────────
+# --- 5. Verify + auth probe -------------------------------------------------
 step "5 - verify"
 
 if [ -x /usr/local/bin/claude-server ]; then

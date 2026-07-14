@@ -1,5 +1,5 @@
 #!/bin/bash
-# cursor-auth-refresh — refresh golden Cursor OAuth tokens and re-sync all users
+# cursor-auth-refresh - refresh golden Cursor OAuth tokens and re-sync all users
 #
 # Usage (root): cursor-auth-refresh
 # Installed via cron: /etc/cron.d/cursor-auth-refresh (every 6 hours)
@@ -87,7 +87,7 @@ except urllib.error.URLError as exc:
     raise SystemExit(f"cursor-auth-refresh: network error: {exc}") from exc
 
 if body.get("shouldLogout"):
-    raise SystemExit("cursor-auth-refresh: refresh token invalid — re-export golden auth")
+    raise SystemExit("cursor-auth-refresh: refresh token invalid - re-export golden auth")
 
 access = body.get("access_token") or body.get("accessToken") or ""
 if not access:
@@ -134,12 +134,12 @@ fi
 _log "OK tokens refreshed"
 
 if [ -x "$SYNC_BIN" ]; then
-    if bash "$SYNC_BIN" --all; then
+    if bash "$SYNC_BIN" --all --force; then
         _log "OK synced all users"
     else
         _log "ERROR sync after refresh failed"
         exit 1
     fi
 else
-    _log "WARN cursor-auth-sync not found — tokens updated but users not synced"
+    _log "WARN cursor-auth-sync not found - tokens updated but users not synced"
 fi

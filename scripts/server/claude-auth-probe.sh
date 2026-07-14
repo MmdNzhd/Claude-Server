@@ -1,5 +1,5 @@
 #!/bin/bash
-# claude-auth-probe — test CLAUDE_CODE_OAUTH_TOKEN against Anthropic API; append JSONL log
+# claude-auth-probe - test CLAUDE_CODE_OAUTH_TOKEN against Anthropic API; append JSONL log
 # Usage: sudo claude-auth-probe.sh [source-label]
 
 set -euo pipefail

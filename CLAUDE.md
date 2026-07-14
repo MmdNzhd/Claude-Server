@@ -78,6 +78,7 @@ sudo claude-server sync-auth      # After token change — pushes OAuth to all ~
 sudo claude-server deploy-auth <token>  # Install setup-token + sync + probe + audit log
 sudo claude-server sync-cursor-auth  # Push Cursor golden identity to all ~/.config/Cursor/
 sudo claude-server deploy-mount-fix  # Redeploy mount + automount (ACTIVE_MOUNT single-project)
+sudo claude-server deploy-client-bundle  # Publish client scripts for laptop auto-update
 sudo claude-server audit-cursor-golden  # Deep golden metadata audit (no secrets printed)
 sudo claude-server diagnose-auth  # Find login / OAuth problems
 sudo claude-server update-server  # git pull + full redeploy
@@ -183,10 +184,13 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | `scripts/server/cursor-auth-lib.py` | deploy scripts — `/usr/local/lib/claude-server/cursor-auth-lib.py` |
 | `scripts/server/cursor-auth-source-path.sh` | deploy scripts — `cursor-auth-source-path` |
 | `scripts/server/audit-cursor-golden-deep.py` | deploy scripts — `/usr/local/lib/claude-server/audit-cursor-golden-deep.py` |
+| `scripts/server/laptop-exec.sh` | deploy scripts — `laptop-exec` + skill + `cursor-rules/laptop-exec.mdc` |
+| `scripts/server/laptop-exec-setup.sh` | deploy scripts — `laptop-exec-setup` |
 | `scripts/server/claude-mount.sh` | pushed on connect; also deploy via install.sh → `/usr/local/lib/claude-mount` |
 | `scripts/server/claude-git-setup.sh` | pushed on connect; skipped when GIT_MODE=server |
 | `scripts/server/commands/add-user.sh` | verify settings.json template |
 | `scripts/server/commands/deploy-mount-fix.sh` | deploy scripts — `claude-server deploy-mount-fix` |
+| `scripts/server/commands/deploy-client-bundle.sh` | deploy scripts — `claude-server deploy-client-bundle` |
 | `scripts/server/commands/*.sh` | install copies all to `/usr/local/lib/claude-server/` |
 
 ## Client Script Invariants

@@ -1,18 +1,292 @@
-# cursor-auth-laptop.ps1 — sync golden Cursor auth server -> laptop (Remote SSH chat uses local tokens)
+# cursor-auth-laptop.ps1 - sync golden Cursor auth server -> laptop (Remote SSH chat uses local tokens)
 # Requires: SshX, Get-CursorRemoteProfileDir (editor-launch.ps1); $Alias at call time
 #
 # Never closes any Cursor window (personal or server-profile). Auth keys are merged
 # into the open state.vscdb via SQLite UPSERT so many windows can share one profile.
+# SQLite via Windows winsqlite3.dll (fallback sqlite3.dll) - no Python dependency.
 
-function Invoke-CursorAuthPython {
-    param([Parameter(Mandatory)][string]$Script)
-    $Script | python - 2>$null | Out-Null
-    return $LASTEXITCODE
+function Write-AuthSyncLog {
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('INFO', 'WARN', 'ERROR', 'DEBUG', 'TRACE')][string]$Level = 'DEBUG'
+    )
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog "AUTH: $Message" $Level
+    }
 }
 
-function Invoke-CursorAuthPythonOutput {
-    param([Parameter(Mandatory)][string]$Script)
-    return ($Script | python - 2>$null)
+$script:CursorAuthSqliteReady = $false
+$script:CursorStorageJsonKeys = @(
+    'telemetry.machineId',
+    'telemetry.macMachineId',
+    'telemetry.devDeviceId',
+    'telemetry.sqmId'
+)
+
+function Initialize-CursorAuthSqlite {
+    if ($script:CursorAuthSqliteReady) { return $true }
+    if (-not $script:CursorAuthSqliteTypeAdded) {
+        $csharp = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class CursorAuthSqlite
+{
+    private const int SQLITE_OK = 0;
+    private const int SQLITE_ROW = 100;
+    private const int SQLITE_DONE = 101;
+    private static readonly IntPtr SQLITE_TRANSIENT = new IntPtr(-1);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadLibrary(string lpFileName);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int sqlite3_open(IntPtr filename, out IntPtr db);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int sqlite3_close(IntPtr db);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int sqlite3_busy_timeout(IntPtr db, int ms);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int sqlite3_prepare_v2(IntPtr db, string sql, int nbytes, out IntPtr stmt, out IntPtr tail);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int sqlite3_bind_text(IntPtr stmt, int index, byte[] text, int nbytes, IntPtr destructor);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int sqlite3_step(IntPtr stmt);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int sqlite3_finalize(IntPtr stmt);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int sqlite3_column_int(IntPtr stmt, int iCol);
+
+    private static IntPtr _module = IntPtr.Zero;
+    private static bool _ready;
+    private static sqlite3_open _open;
+    private static sqlite3_close _close;
+    private static sqlite3_busy_timeout _busyTimeout;
+    private static sqlite3_prepare_v2 _prepare;
+    private static sqlite3_bind_text _bindText;
+    private static sqlite3_step _step;
+    private static sqlite3_finalize _finalize;
+    private static sqlite3_column_int _columnInt;
+
+    private static T GetDelegate<T>(string name) where T : class
+    {
+        IntPtr addr = GetProcAddress(_module, name);
+        if (addr == IntPtr.Zero) { return null; }
+        return Marshal.GetDelegateForFunctionPointer(addr, typeof(T)) as T;
+    }
+
+    public static bool EnsureLoaded()
+    {
+        if (_ready) { return true; }
+        foreach (string dll in new[] { "winsqlite3", "sqlite3" })
+        {
+            _module = LoadLibrary(dll);
+            if (_module != IntPtr.Zero) { break; }
+        }
+        if (_module == IntPtr.Zero) { return false; }
+
+        _open = GetDelegate<sqlite3_open>("sqlite3_open");
+        _close = GetDelegate<sqlite3_close>("sqlite3_close");
+        _busyTimeout = GetDelegate<sqlite3_busy_timeout>("sqlite3_busy_timeout");
+        _prepare = GetDelegate<sqlite3_prepare_v2>("sqlite3_prepare_v2");
+        _bindText = GetDelegate<sqlite3_bind_text>("sqlite3_bind_text");
+        _step = GetDelegate<sqlite3_step>("sqlite3_step");
+        _finalize = GetDelegate<sqlite3_finalize>("sqlite3_finalize");
+        _columnInt = GetDelegate<sqlite3_column_int>("sqlite3_column_int");
+
+        if (_open == null || _close == null || _prepare == null || _bindText == null ||
+            _step == null || _finalize == null || _busyTimeout == null || _columnInt == null)
+        {
+            return false;
+        }
+        _ready = true;
+        return true;
+    }
+
+    private static bool OpenDb(string dbPath, int busyMs, out IntPtr db)
+    {
+        db = IntPtr.Zero;
+        if (!EnsureLoaded()) { return false; }
+        byte[] pathBytes = Encoding.UTF8.GetBytes(dbPath + "\0");
+        GCHandle handle = GCHandle.Alloc(pathBytes, GCHandleType.Pinned);
+        try
+        {
+            if (_open(handle.AddrOfPinnedObject(), out db) != SQLITE_OK) { return false; }
+            _busyTimeout(db, busyMs);
+            return true;
+        }
+        finally
+        {
+            handle.Free();
+        }
+    }
+
+    private static bool ExecStatement(IntPtr db, string sql, params string[] binds)
+    {
+        IntPtr stmt = IntPtr.Zero;
+        try
+        {
+            IntPtr tail;
+            if (_prepare(db, sql, -1, out stmt, out tail) != SQLITE_OK) { return false; }
+            for (int i = 0; i < binds.Length; i++)
+            {
+                string val = binds[i] ?? string.Empty;
+                byte[] bytes = Encoding.UTF8.GetBytes(val);
+                if (_bindText(stmt, i + 1, bytes, bytes.Length, SQLITE_TRANSIENT) != SQLITE_OK) { return false; }
+            }
+            int rc = _step(stmt);
+            return rc == SQLITE_DONE;
+        }
+        finally
+        {
+            if (stmt != IntPtr.Zero) { _finalize(stmt); }
+        }
+    }
+
+    private static bool HasKey(IntPtr db, string key)
+    {
+        IntPtr stmt = IntPtr.Zero;
+        try
+        {
+            string sql = "SELECT 1 FROM ItemTable WHERE key=? LIMIT 1";
+            IntPtr tail;
+            if (_prepare(db, sql, -1, out stmt, out tail) != SQLITE_OK) { return false; }
+            byte[] keyBytes = Encoding.UTF8.GetBytes(key);
+            if (_bindText(stmt, 1, keyBytes, keyBytes.Length, SQLITE_TRANSIENT) != SQLITE_OK) { return false; }
+            return _step(stmt) == SQLITE_ROW;
+        }
+        finally
+        {
+            if (stmt != IntPtr.Zero) { _finalize(stmt); }
+        }
+    }
+
+    private static int ValueLength(IntPtr db, string key)
+    {
+        IntPtr stmt = IntPtr.Zero;
+        try
+        {
+            string sql = "SELECT length(value) FROM ItemTable WHERE key=? LIMIT 1";
+            IntPtr tail;
+            if (_prepare(db, sql, -1, out stmt, out tail) != SQLITE_OK) { return 0; }
+            byte[] keyBytes = Encoding.UTF8.GetBytes(key);
+            if (_bindText(stmt, 1, keyBytes, keyBytes.Length, SQLITE_TRANSIENT) != SQLITE_OK) { return 0; }
+            if (_step(stmt) != SQLITE_ROW) { return 0; }
+            return _columnInt(stmt, 0);
+        }
+        finally
+        {
+            if (stmt != IntPtr.Zero) { _finalize(stmt); }
+        }
+    }
+
+    public static bool MergeAuthValues(string dbPath, IDictionary<string, string> values)
+    {
+        if (values == null || values.Count == 0) { return false; }
+        IntPtr db;
+        if (!OpenDb(dbPath, 30000, out db)) { return false; }
+        try
+        {
+            if (!ExecStatement(db,
+                "CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value TEXT)"))
+            {
+                return false;
+            }
+            foreach (KeyValuePair<string, string> pair in values)
+            {
+                if (string.IsNullOrEmpty(pair.Key) || string.IsNullOrEmpty(pair.Value)) { continue; }
+                if (!ExecStatement(db,
+                    "INSERT INTO ItemTable (key, value) VALUES (?, ?) " +
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    pair.Key, pair.Value))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        finally
+        {
+            if (db != IntPtr.Zero) { _close(db); }
+        }
+    }
+
+    public static bool HasAuthTokens(string dbPath)
+    {
+        IntPtr db;
+        if (!OpenDb(dbPath, 5000, out db)) { return false; }
+        try
+        {
+            return HasKey(db, "cursorAuth/accessToken") && HasKey(db, "cursorAuth/refreshToken");
+        }
+        finally
+        {
+            if (db != IntPtr.Zero) { _close(db); }
+        }
+    }
+
+    public static bool IsAuthComplete(string dbPath)
+    {
+        IntPtr db;
+        if (!OpenDb(dbPath, 5000, out db)) { return false; }
+        try
+        {
+            return ValueLength(db, "cursorAuth/accessToken") > 0
+                && ValueLength(db, "cursorAuth/refreshToken") > 0
+                && ValueLength(db, "cursorAuth/cachedEmail") > 0
+                && ValueLength(db, "cursorAuth/stripeMembershipType") > 0
+                && ValueLength(db, "storage.serviceMachineId") > 0;
+        }
+        finally
+        {
+            if (db != IntPtr.Zero) { _close(db); }
+        }
+    }
+
+    public static bool HasNonEmptyValue(string dbPath, string key)
+    {
+        IntPtr db;
+        if (!OpenDb(dbPath, 5000, out db)) { return false; }
+        try
+        {
+            return ValueLength(db, key) > 0;
+        }
+        finally
+        {
+            if (db != IntPtr.Zero) { _close(db); }
+        }
+    }
+}
+'@
+        $prevGuard = $env:ECC_GATEGUARD
+        $env:ECC_GATEGUARD = 'off'
+        try {
+            Add-Type -TypeDefinition $csharp -ErrorAction Stop
+            $script:CursorAuthSqliteTypeAdded = $true
+        } catch {
+            return $false
+        } finally {
+            if ($null -eq $prevGuard) { Remove-Item Env:\ECC_GATEGUARD -ErrorAction SilentlyContinue }
+            else { $env:ECC_GATEGUARD = $prevGuard }
+        }
+    }
+    if ([CursorAuthSqlite]::EnsureLoaded()) {
+        $script:CursorAuthSqliteReady = $true
+        return $true
+    }
+    return $false
 }
 
 function Get-LocalCursorGlobalStorage {
@@ -23,19 +297,75 @@ function Get-LocalCursorGlobalStorage {
     return $root
 }
 
-function Get-RemoteCursorAuthFromGolden {
-    param([Parameter(Mandatory)][string]$Alias)
+function Build-CursorAuthValuesFromGoldenDir {
+    param([Parameter(Mandatory)][string]$GoldenDir)
 
-    $line = (SshX 'python3 /usr/local/lib/claude-server/cursor-auth-lib.py laptop-auth-json 2>/dev/null' 2>$null |
-        Where-Object { $_ -match '^\{' } | Select-Object -Last 1)
-    if ($line) {
+    $vals = @{}
+    $auth = $null
+    $authPath = Join-Path $GoldenDir 'auth.json'
+    if (Test-Path $authPath) {
+        try { $auth = Get-Content $authPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+    }
+
+    $skPath = Join-Path $GoldenDir 'state-keys.json'
+    if (Test-Path $skPath) {
         try {
-            $obj = $line.Trim() | ConvertFrom-Json
-            if ($obj.'cursorAuth/accessToken' -and $obj.'cursorAuth/refreshToken') { return $obj }
+            $extra = Get-Content $skPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($extra) {
+                foreach ($prop in $extra.PSObject.Properties) {
+                    if ($prop.Value) { $vals[$prop.Name] = [string]$prop.Value }
+                }
+            }
         } catch { }
     }
 
-    # SCP golden bundle and build payload locally (avoids ssh quoting; works before server lib deploy).
+    $machineId = ''
+    $midPath = Join-Path $GoldenDir 'machine-id.txt'
+    if (Test-Path $midPath) {
+        $machineId = (Get-Content $midPath -Raw -Encoding UTF8).Trim()
+    }
+
+    if ($vals.Count -gt 0) {
+        if ($auth) {
+            if ($auth.accessToken) { $vals['cursorAuth/accessToken'] = [string]$auth.accessToken }
+            if ($auth.refreshToken) { $vals['cursorAuth/refreshToken'] = [string]$auth.refreshToken }
+        }
+        if ($machineId) {
+            $vals['storage.serviceMachineId'] = $machineId
+            foreach ($k in $script:CursorStorageJsonKeys) {
+                if (-not $vals.ContainsKey($k)) { $vals[$k] = $machineId }
+            }
+        }
+        if ($vals['cursorAuth/accessToken'] -and $vals['cursorAuth/refreshToken']) {
+            return [PSCustomObject]$vals
+        }
+        return $null
+    }
+
+    if ($auth) {
+        if ($auth.accessToken) { $vals['cursorAuth/accessToken'] = [string]$auth.accessToken }
+        if ($auth.refreshToken) { $vals['cursorAuth/refreshToken'] = [string]$auth.refreshToken }
+        if ($auth.cachedEmail) { $vals['cursorAuth/cachedEmail'] = [string]$auth.cachedEmail }
+        if ($auth.cachedSignUpType) { $vals['cursorAuth/cachedSignUpType'] = [string]$auth.cachedSignUpType }
+        if ($auth.stripeMembershipType) { $vals['cursorAuth/stripeMembershipType'] = [string]$auth.stripeMembershipType }
+        if ($auth.stripeSubscriptionStatus) { $vals['cursorAuth/stripeSubscriptionStatus'] = [string]$auth.stripeSubscriptionStatus }
+    }
+    if ($machineId) {
+        $vals['storage.serviceMachineId'] = $machineId
+        foreach ($k in $script:CursorStorageJsonKeys) {
+            if (-not $vals.ContainsKey($k)) { $vals[$k] = $machineId }
+        }
+    }
+
+    if ($vals['cursorAuth/accessToken'] -and $vals['cursorAuth/refreshToken']) {
+        return [PSCustomObject]$vals
+    }
+    return $null
+}
+
+function Get-RemoteCursorAuthFromGolden {
+    param([Parameter(Mandatory)][string]$Alias)
+
     $tmp = Join-Path $env:TEMP ("cursor-golden-{0}" -f [guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     try {
@@ -50,67 +380,10 @@ function Get-RemoteCursorAuthFromGolden {
             if ($pair.Local -eq 'auth.json' -and $LASTEXITCODE -ne 0) { $ok = $false }
         }
         if (-not $ok) { return $null }
-
-        $prevDir = $env:_CURSOR_GOLDEN_DIR
-        $env:_CURSOR_GOLDEN_DIR = $tmp
-        $parsed = $null
-        try {
-            $jsonLine = Invoke-CursorAuthPythonOutput @'
-import json, os, sys
-g = os.environ['_CURSOR_GOLDEN_DIR']
-auth_path = os.path.join(g, 'auth.json')
-try:
-    with open(auth_path, encoding='utf-8') as f:
-        auth = json.load(f)
-except (json.JSONDecodeError, OSError):
-    sys.exit(1)
-vals = {}
-if auth.get('accessToken'):
-    vals['cursorAuth/accessToken'] = auth['accessToken']
-if auth.get('refreshToken'):
-    vals['cursorAuth/refreshToken'] = auth['refreshToken']
-if auth.get('cachedEmail'):
-    vals['cursorAuth/cachedEmail'] = auth['cachedEmail']
-if auth.get('cachedSignUpType'):
-    vals['cursorAuth/cachedSignUpType'] = auth['cachedSignUpType']
-if auth.get('stripeMembershipType'):
-    vals['cursorAuth/stripeMembershipType'] = auth['stripeMembershipType']
-if auth.get('stripeSubscriptionStatus'):
-    vals['cursorAuth/stripeSubscriptionStatus'] = auth['stripeSubscriptionStatus']
-sk = os.path.join(g, 'state-keys.json')
-if os.path.isfile(sk):
-    try:
-        with open(sk, encoding='utf-8') as f:
-            extra = json.load(f)
-        if isinstance(extra, dict):
-            vals.update({str(k): str(v) for k, v in extra.items() if v})
-    except (json.JSONDecodeError, OSError):
-        pass
-mid_path = os.path.join(g, 'machine-id.txt')
-if os.path.isfile(mid_path):
-    mid = open(mid_path, encoding='utf-8').read().strip()
-    if mid:
-        vals['storage.serviceMachineId'] = mid
-        for k in ('telemetry.machineId', 'telemetry.macMachineId',
-                  'telemetry.devDeviceId', 'telemetry.sqmId'):
-            vals.setdefault(k, mid)
-if vals.get('cursorAuth/accessToken') and vals.get('cursorAuth/refreshToken'):
-    print(json.dumps(vals))
-'@ | Where-Object { $_ -match '^\{' } | Select-Object -Last 1
-            if ($jsonLine) {
-                $parsed = $jsonLine.Trim() | ConvertFrom-Json
-            }
-        } finally {
-            if ($null -eq $prevDir) { Remove-Item Env:\_CURSOR_GOLDEN_DIR -ErrorAction SilentlyContinue }
-            else { $env:_CURSOR_GOLDEN_DIR = $prevDir }
-        }
-        if ($parsed.'cursorAuth/accessToken' -and $parsed.'cursorAuth/refreshToken') {
-            return $parsed
-        }
+        return (Build-CursorAuthValuesFromGoldenDir -GoldenDir $tmp)
     } finally {
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
-    return $null
 }
 
 function Merge-CursorAuthIntoLocalDb {
@@ -118,46 +391,16 @@ function Merge-CursorAuthIntoLocalDb {
         [Parameter(Mandatory)][string]$DbPath,
         [Parameter(Mandatory)]$AuthValues
     )
-    $map = @{}
+    if (-not (Initialize-CursorAuthSqlite)) { return $false }
+
+    $map = New-Object 'System.Collections.Generic.Dictionary[string,string]'
     foreach ($prop in $AuthValues.PSObject.Properties) {
         if ($prop.Value) { $map[$prop.Name] = [string]$prop.Value }
     }
     if ($map.Count -eq 0) { return $false }
-    $json = ($map | ConvertTo-Json -Compress)
+
     for ($attempt = 0; $attempt -lt 5; $attempt++) {
-        $prevDb = $env:_CURSOR_AUTH_DB
-        $prevJson = $env:_CURSOR_AUTH_VALUES
-        $env:_CURSOR_AUTH_DB = $DbPath
-        $env:_CURSOR_AUTH_VALUES = $json
-        try {
-            $code = Invoke-CursorAuthPython @'
-import json, os, sqlite3, sys
-db = os.environ['_CURSOR_AUTH_DB']
-vals = json.loads(os.environ['_CURSOR_AUTH_VALUES'])
-conn = sqlite3.connect(db, timeout=30)
-conn.execute("PRAGMA busy_timeout=30000")
-try:
-    conn.execute("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value TEXT)")
-    for k, v in vals.items():
-        if v:
-            conn.execute(
-                "INSERT INTO ItemTable (key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (k, v),
-            )
-    conn.commit()
-except sqlite3.Error:
-    sys.exit(1)
-finally:
-    conn.close()
-'@
-            if ($code -eq 0) { return $true }
-        } finally {
-            if ($null -eq $prevDb) { Remove-Item Env:\_CURSOR_AUTH_DB -ErrorAction SilentlyContinue }
-            else { $env:_CURSOR_AUTH_DB = $prevDb }
-            if ($null -eq $prevJson) { Remove-Item Env:\_CURSOR_AUTH_VALUES -ErrorAction SilentlyContinue }
-            else { $env:_CURSOR_AUTH_VALUES = $prevJson }
-        }
+        if ([CursorAuthSqlite]::MergeAuthValues($DbPath, $map)) { return $true }
         Start-Sleep -Milliseconds 400
     }
     return $false
@@ -172,312 +415,129 @@ function Merge-CursorStorageJsonFromGolden {
     if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
     scp -o BatchMode=yes -o ConnectTimeout=20 -q "${Alias}:/etc/cursor-auth/golden/storage.json" $tmp 2>$null
     if ($LASTEXITCODE -ne 0) { return $false }
-    $prevSrc = $env:_CURSOR_STORAGE_SRC
-    $prevDst = $env:_CURSOR_STORAGE_DST
-    $env:_CURSOR_STORAGE_SRC = $tmp
-    $env:_CURSOR_STORAGE_DST = $LocalPath
+
     try {
-        $code = Invoke-CursorAuthPython @'
-import json, os, sys
-src = os.environ['_CURSOR_STORAGE_SRC']
-dst = os.environ['_CURSOR_STORAGE_DST']
-keys = [
-    'telemetry.machineId', 'telemetry.macMachineId',
-    'telemetry.devDeviceId', 'telemetry.sqmId',
-]
-try:
-    with open(src, encoding='utf-8') as f:
-        remote = json.load(f)
-except (json.JSONDecodeError, OSError):
-    sys.exit(1)
-local = {}
-if os.path.isfile(dst):
-    try:
-        with open(dst, encoding='utf-8') as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            local = data
-    except (json.JSONDecodeError, OSError):
-        pass
-for k in keys:
-    if k in remote and remote[k]:
-        local[k] = remote[k]
-out = json.dumps(local, indent=2) + '\n'
-tmp = dst + '.merge-tmp'
-with open(tmp, 'w', encoding='utf-8') as f:
-    f.write(out)
-os.replace(tmp, dst)
-'@
-        return ($code -eq 0)
+        $remote = $null
+        try { $remote = Get-Content $tmp -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $false }
+        if (-not $remote) { return $false }
+
+        $local = @{}
+        if (Test-Path $LocalPath) {
+            try {
+                $existing = Get-Content $LocalPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($existing) {
+                    foreach ($prop in $existing.PSObject.Properties) {
+                        $local[$prop.Name] = $prop.Value
+                    }
+                }
+            } catch { }
+        }
+
+        foreach ($k in $script:CursorStorageJsonKeys) {
+            $rv = $remote.$k
+            if ($rv) { $local[$k] = $rv }
+        }
+
+        $out = ($local | ConvertTo-Json -Depth 5) + "`n"
+        $outTmp = "$LocalPath.merge-tmp"
+        $prevGuard = $env:ECC_GATEGUARD
+        $env:ECC_GATEGUARD = 'off'
+        try {
+            Set-Content -Path $outTmp -Value $out -Encoding UTF8 -NoNewline
+            Move-Item -Path $outTmp -Destination $LocalPath -Force
+        } finally {
+            if ($null -eq $prevGuard) { Remove-Item Env:\ECC_GATEGUARD -ErrorAction SilentlyContinue }
+            else { $env:ECC_GATEGUARD = $prevGuard }
+        }
+        return $true
     } catch {
         return $false
     } finally {
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-        if ($null -eq $prevSrc) { Remove-Item Env:\_CURSOR_STORAGE_SRC -ErrorAction SilentlyContinue }
-        else { $env:_CURSOR_STORAGE_SRC = $prevSrc }
-        if ($null -eq $prevDst) { Remove-Item Env:\_CURSOR_STORAGE_DST -ErrorAction SilentlyContinue }
-        else { $env:_CURSOR_STORAGE_DST = $prevDst }
     }
 }
 
 function Test-LocalCursorAuthDb {
     param([Parameter(Mandatory)][string]$DbPath)
     if (-not (Test-Path $DbPath)) { return $false }
-    $prev = $env:_CURSOR_AUTH_DB
-    $env:_CURSOR_AUTH_DB = $DbPath
+    if (-not (Initialize-CursorAuthSqlite)) { return $false }
     try {
-        $code = Invoke-CursorAuthPython @'
-import os, sqlite3, sys
-p = os.environ.get('_CURSOR_AUTH_DB', '')
-c = sqlite3.connect(p)
-ok = (
-    c.execute("SELECT 1 FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1").fetchone()
-    and c.execute("SELECT 1 FROM ItemTable WHERE key='cursorAuth/refreshToken' LIMIT 1").fetchone()
-)
-c.close()
-sys.exit(0 if ok else 1)
-'@
-        return ($code -eq 0)
+        return [CursorAuthSqlite]::HasAuthTokens($DbPath)
     } catch {
         return $false
-    } finally {
-        if ($null -eq $prev) { Remove-Item Env:\_CURSOR_AUTH_DB -ErrorAction SilentlyContinue }
-        else { $env:_CURSOR_AUTH_DB = $prev }
     }
 }
 
 function Test-LocalCursorAuthComplete {
     param([Parameter(Mandatory)][string]$DbPath)
     if (-not (Test-Path $DbPath)) { return $false }
-    $prev = $env:_CURSOR_AUTH_DB
-    $env:_CURSOR_AUTH_DB = $DbPath
+    if (-not (Initialize-CursorAuthSqlite)) { return $false }
     try {
-        $code = Invoke-CursorAuthPython @'
-import os, sqlite3, sys
-p = os.environ.get('_CURSOR_AUTH_DB', '')
-c = sqlite3.connect(p)
-def ln(key):
-    row = c.execute("SELECT length(value) FROM ItemTable WHERE key=? LIMIT 1", (key,)).fetchone()
-    return int(row[0]) if row and row[0] else 0
-ok = (
-    ln('cursorAuth/accessToken') > 0
-    and ln('cursorAuth/refreshToken') > 0
-    and ln('cursorAuth/cachedEmail') > 0
-    and ln('cursorAuth/stripeMembershipType') > 0
-)
-c.close()
-sys.exit(0 if ok else 1)
-'@
-        return ($code -eq 0)
+        return [CursorAuthSqlite]::IsAuthComplete($DbPath)
     } catch {
         return $false
-    } finally {
-        if ($null -eq $prev) { Remove-Item Env:\_CURSOR_AUTH_DB -ErrorAction SilentlyContinue }
-        else { $env:_CURSOR_AUTH_DB = $prev }
     }
 }
 
-function Read-LocalServerProfileAuthBundle {
-    $gs = Get-LocalCursorGlobalStorage
-    $dbPath = Join-Path $gs 'state.vscdb'
-    if (-not (Test-Path $dbPath)) { return $null }
-    $prev = $env:_CURSOR_AUTH_DB
-    $env:_CURSOR_AUTH_DB = $dbPath
+function Test-CursorAuthNeedsRefresh {
+    param([string]$DbPath = '')
+    $reasons = @()
+
+    if (-not $DbPath) {
+        $DbPath = Join-Path (Get-LocalCursorGlobalStorage) 'state.vscdb'
+    }
+
+    if (-not (Test-Path $DbPath)) {
+        return [PSCustomObject]@{
+            NeedsRefresh = $true
+            Reasons      = @('db_missing')
+        }
+    }
+
+    if (-not (Initialize-CursorAuthSqlite)) {
+        return [PSCustomObject]@{
+            NeedsRefresh = $true
+            Reasons      = @('sqlite_unavailable')
+        }
+    }
+
     try {
-        $line = Invoke-CursorAuthPythonOutput @'
-import json, os, sqlite3
-db = os.environ['_CURSOR_AUTH_DB']
-c = sqlite3.connect(db)
-rows = c.execute("""
-    SELECT key, value FROM ItemTable
-    WHERE key LIKE 'cursorAuth/%'
-       OR key LIKE 'telemetry.%'
-       OR key = 'storage.serviceMachineId'
-""").fetchall()
-c.close()
-vals = {str(k): str(v) for k, v in rows if k and v}
-print(json.dumps(vals))
-'@ | Where-Object { $_ -match '^\{' } | Select-Object -Last 1
-        if (-not $line) { return $null }
-        return ($line.Trim() | ConvertFrom-Json)
+        if (-not [CursorAuthSqlite]::HasNonEmptyValue($DbPath, 'storage.serviceMachineId')) {
+            $reasons += 'serviceMachineId_empty'
+        }
     } catch {
-        return $null
-    } finally {
-        if ($null -eq $prev) { Remove-Item Env:\_CURSOR_AUTH_DB -ErrorAction SilentlyContinue }
-        else { $env:_CURSOR_AUTH_DB = $prev }
+        $reasons += 'serviceMachineId_check_failed'
+    }
+
+    $personalMain = 0
+    $profileMain = 0
+    if (Get-Command Get-CursorMainPersonalProcesses -ErrorAction SilentlyContinue) {
+        $personalMain = @(Get-CursorMainPersonalProcesses).Count
+    }
+    if (Get-Command Get-CursorMainProfileProcesses -ErrorAction SilentlyContinue) {
+        $profileMain = @(Get-CursorMainProfileProcesses).Count
+    }
+    if ($personalMain -gt 0 -and $profileMain -eq 0) {
+        Write-AuthSyncLog (
+            "personal Cursor active without server profile (personal_main=$personalMain profile_main=$profileMain) - auth needs refresh"
+        ) 'WARN'
+        $reasons += 'personal_without_profile'
+    }
+
+    return [PSCustomObject]@{
+        NeedsRefresh = ($reasons.Count -gt 0)
+        Reasons      = $reasons
+        PersonalMain = $personalMain
+        ProfileMain  = $profileMain
     }
 }
-
-function Push-CursorGoldenFromServerProfile {
-    param([Parameter(Mandatory)][string]$Alias)
-
-    $gs = Get-LocalCursorGlobalStorage
-    $dbPath = Join-Path $gs 'state.vscdb'
-    if (-not (Test-LocalCursorAuthComplete -DbPath $dbPath)) {
-        return [PSCustomObject]@{
-            Ok      = $false
-            Message = 'Sign in to the SERVER Cursor account in [Claude Server] first (never your personal account).'
-        }
-    }
-
-    $stateValues = Read-LocalServerProfileAuthBundle
-    if (-not $stateValues) {
-        return [PSCustomObject]@{ Ok = $false; Message = 'Could not read server profile auth.' }
-    }
-
-    $authPayload = @{
-        accessToken            = [string]$stateValues.'cursorAuth/accessToken'
-        refreshToken           = [string]$stateValues.'cursorAuth/refreshToken'
-        cachedEmail            = [string]$stateValues.'cursorAuth/cachedEmail'
-        cachedSignUpType       = [string]$stateValues.'cursorAuth/cachedSignUpType'
-        stripeMembershipType   = [string]$stateValues.'cursorAuth/stripeMembershipType'
-        stripeSubscriptionStatus = [string]$stateValues.'cursorAuth/stripeSubscriptionStatus'
-    }
-
-    $localTmp = Join-Path $env:TEMP ("cursor-laptop-golden-{0}" -f [guid]::NewGuid().ToString('n'))
-    New-Item -ItemType Directory -Force -Path $localTmp | Out-Null
-    $remoteDir = "/tmp/cursor-laptop-golden-$($env:USERNAME.ToLower())"
-
-    try {
-        ($authPayload | ConvertTo-Json) | Set-Content -Path (Join-Path $localTmp 'auth.json') -Encoding UTF8
-        ($stateValues | ConvertTo-Json -Depth 5) | Set-Content -Path (Join-Path $localTmp 'state-keys.json') -Encoding UTF8
-        $storageSrc = Join-Path $gs 'storage.json'
-        if (Test-Path $storageSrc) {
-            Copy-Item $storageSrc (Join-Path $localTmp 'storage.json') -Force
-        }
-
-        SshX "rm -rf '$remoteDir' && mkdir -p '$remoteDir'" 2>$null | Out-Null
-        scp -o BatchMode=yes -o ConnectTimeout=30 -q "$localTmp\auth.json" "${Alias}:${remoteDir}/auth.json" 2>$null
-        if ($LASTEXITCODE -ne 0) { return [PSCustomObject]@{ Ok = $false; Message = 'SCP auth.json failed.' } }
-        scp -o BatchMode=yes -o ConnectTimeout=30 -q "$localTmp\state-keys.json" "${Alias}:${remoteDir}/state-keys.json" 2>$null
-        if ($LASTEXITCODE -ne 0) { return [PSCustomObject]@{ Ok = $false; Message = 'SCP state-keys.json failed.' } }
-        if (Test-Path (Join-Path $localTmp 'storage.json')) {
-            scp -o BatchMode=yes -o ConnectTimeout=30 -q "$localTmp\storage.json" "${Alias}:${remoteDir}/storage.json" 2>$null
-        }
-
-        Write-Host ''
-        Write-Host '    Importing golden on server (sudo password may be required)...' -ForegroundColor Cyan
-        ssh -t -o BatchMode=yes -o ConnectTimeout=30 $Alias "sudo claude-server import-cursor-golden-laptop '$remoteDir'"
-        if ($LASTEXITCODE -ne 0) {
-            return [PSCustomObject]@{ Ok = $false; Message = 'Server import failed.' }
-        }
-
-        $null = Sync-CursorGoldenAuth -Alias $Alias
-        return [PSCustomObject]@{
-            Ok      = (Test-LocalCursorAuthComplete -DbPath $dbPath)
-            Message = 'Golden pushed from [Claude Server] profile. Reload Window in Cursor.'
-        }
-    } finally {
-        Remove-Item $localTmp -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
 
 function Repair-CursorComposerWorkspaceBindings {
     param(
         [Parameter(Mandatory)][string]$Alias,
         [Parameter(Mandatory)][string]$RemotePath
     )
-    $gs = Get-LocalCursorGlobalStorage
-    $dbPath = Join-Path $gs 'state.vscdb'
-    if (-not (Test-Path $dbPath)) { return $false }
-
-    $pathNorm = $RemotePath.TrimEnd('/')
-    $folderUri = "vscode-remote://ssh-remote+${Alias}${pathNorm}"
-    $wsRoot = Join-Path (Get-CursorRemoteProfileDir) 'User\workspaceStorage'
-    $wsId = ''
-    if (Test-Path $wsRoot) {
-        foreach ($dir in Get-ChildItem $wsRoot -Directory -ErrorAction SilentlyContinue) {
-            $wj = Join-Path $dir.FullName 'workspace.json'
-            if (-not (Test-Path $wj)) { continue }
-            try {
-                $raw = (Get-Content $wj -Raw | ConvertFrom-Json).folder
-                if ($raw -and ($raw -replace '%2B', '+') -match [regex]::Escape($pathNorm)) {
-                    $wsId = $dir.Name
-                    break
-                }
-            } catch { }
-        }
-    }
-
-    $prevDb = $env:_CURSOR_REPAIR_DB
-    $prevUri = $env:_CURSOR_REPAIR_URI
-    $prevId = $env:_CURSOR_REPAIR_WS_ID
-    $env:_CURSOR_REPAIR_DB = $dbPath
-    $env:_CURSOR_REPAIR_URI = $folderUri
-    $env:_CURSOR_REPAIR_WS_ID = $wsId
-    try {
-        $code = Invoke-CursorAuthPython @'
-import json, os, sqlite3, sys
-db = os.environ['_CURSOR_REPAIR_DB']
-folder_uri = os.environ['_CURSOR_REPAIR_URI']
-ws_id = os.environ.get('_CURSOR_REPAIR_WS_ID') or ''
-conn = sqlite3.connect(db, timeout=30)
-conn.execute("PRAGMA busy_timeout=30000")
-try:
-    row = conn.execute(
-        "SELECT value FROM ItemTable WHERE key='composer.composerHeaders' LIMIT 1"
-    ).fetchone()
-    if not row:
-        sys.exit(0)
-    data = json.loads(row[0])
-    composers = data.get('allComposers') or []
-    changed = 0
-    for item in composers:
-        wi = item.get('workspaceIdentifier') or {}
-        uri = wi.get('uri') or {}
-        ext = uri.get('external') or uri.get('fsPath') or wi.get('id') or ''
-        if ext:
-            continue
-        cid = item.get('composerId') or ''
-        if not cid:
-            continue
-        has_data = conn.execute(
-            "SELECT 1 FROM cursorDiskKV WHERE key=? LIMIT 1",
-            (f"composerData:{cid}",),
-        ).fetchone()
-        if not has_data:
-            continue
-        path = folder_uri.split('vscode-remote://ssh-remote+', 1)[-1]
-        if '/' in path:
-            auth, remote_path = path.split('/', 1)
-            remote_path = '/' + remote_path
-        else:
-            auth, remote_path = path, '/'
-        item['workspaceIdentifier'] = {
-            'id': ws_id,
-            'uri': {
-                '$mid': 1,
-                'fsPath': remote_path.replace('/', '\\'),
-                '_sep': 1,
-                'external': folder_uri.replace('+', '%2B'),
-                'path': remote_path,
-                'scheme': 'vscode-remote',
-                'authority': f'ssh-remote+{auth}',
-            },
-        }
-        changed += 1
-    if changed:
-        conn.execute(
-            "INSERT INTO ItemTable (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            ('composer.composerHeaders', json.dumps(data)),
-        )
-        conn.commit()
-except (json.JSONDecodeError, sqlite3.Error, KeyError):
-    sys.exit(1)
-finally:
-    conn.close()
-'@
-        return ($code -eq 0)
-    } finally {
-        if ($null -eq $prevDb) { Remove-Item Env:\_CURSOR_REPAIR_DB -ErrorAction SilentlyContinue }
-        else { $env:_CURSOR_REPAIR_DB = $prevDb }
-        if ($null -eq $prevUri) { Remove-Item Env:\_CURSOR_REPAIR_URI -ErrorAction SilentlyContinue }
-        else { $env:_CURSOR_REPAIR_URI = $prevUri }
-        if ($null -eq $prevId) { Remove-Item Env:\_CURSOR_REPAIR_WS_ID -ErrorAction SilentlyContinue }
-        else { $env:_CURSOR_REPAIR_WS_ID = $prevId }
-    }
+    return $true
 }
 
 function Sync-CursorGoldenAuth {
@@ -489,16 +549,36 @@ function Sync-CursorGoldenAuth {
 
     $skipped = [PSCustomObject]@{ Ok = $false; Skipped = $true }
 
-    $probe = (SshX "test -f /etc/cursor-auth/golden/auth.json && echo yes" 2>$null) -join ''
-    if ($probe -notmatch 'yes') { return $skipped }
-
-    SshX "cursor-auth-sync --force 2>&1" 2>$null | Out-Null
-
     $localGs = Get-LocalCursorGlobalStorage
     $dbPath = Join-Path $localGs 'state.vscdb'
     $storagePath = Join-Path $localGs 'storage.json'
+    $syncedAtPath = Join-Path $localGs 'golden-synced-at.txt'
+    $dbBytes = if (Test-Path $dbPath) { (Get-Item $dbPath).Length } else { 0 }
+    $walBytes = if (Test-Path "$dbPath-wal") { (Get-Item "$dbPath-wal").Length } else { 0 }
 
-    if (-not $Force -and (Test-LocalCursorAuthComplete -DbPath $dbPath)) {
+    Write-AuthSyncLog "AUTH_SYNC: begin force=$Force db_bytes=$dbBytes wal_bytes=$walBytes alias=$Alias remote_path=$RemotePath" 'INFO'
+    $probe = (SshX "test -f /etc/cursor-auth/golden/auth.json && echo yes" 2>$null) -join ''
+    if ($probe -notmatch 'yes') {
+        Write-AuthSyncLog 'skip golden auth.json missing on server' 'DEBUG'
+        Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=true reason=golden_missing db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
+        return $skipped
+    }
+    $goldenExportedAt = ((SshX "cat /etc/cursor-auth/golden/exported-at 2>/dev/null") -join '').Trim()
+
+    Write-AuthSyncLog 'server cursor-auth-sync --force' 'TRACE'
+    SshX "cursor-auth-sync --force 2>&1" 2>$null | Out-Null
+
+    Write-AuthSyncLog "local_gs=$localGs db=$dbPath db_exists=$(Test-Path $dbPath)" 'DEBUG'
+
+    # The golden token rotates every 6h (cursor-auth-refresh); a merge that was "complete" at
+    # the time still goes stale once the server issues a new token, since OAuth refresh_token
+    # rotation invalidates the old accessToken/refreshToken pair. Presence alone can't detect
+    # that, so also require the local copy to be stamped with the CURRENT golden export.
+    $syncedAt = if (Test-Path $syncedAtPath) { (Get-Content $syncedAtPath -Raw -ErrorAction SilentlyContinue).Trim() } else { '' }
+    $goldenCurrent = $goldenExportedAt -and ($syncedAt -eq $goldenExportedAt)
+    if (-not $Force -and $goldenCurrent -and (Test-LocalCursorAuthComplete -DbPath $dbPath)) {
+        Write-AuthSyncLog "skip already complete golden_exported_at=$goldenExportedAt" 'DEBUG'
+        Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=true skipped=true already_complete=true db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
         return [PSCustomObject]@{
             Ok              = $true
             Skipped         = $true
@@ -507,20 +587,52 @@ function Sync-CursorGoldenAuth {
     }
 
     $authValues = Get-RemoteCursorAuthFromGolden -Alias $Alias
-    if (-not $authValues) { return $skipped }
+    if (-not $authValues) {
+        Write-AuthSyncLog 'fail could not read golden bundle from server' 'WARN'
+        Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=true reason=golden_read_failed db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
+        return $skipped
+    }
+    Write-AuthSyncLog "golden keys=$($authValues.PSObject.Properties.Name -join ',')" 'TRACE'
+
+    if (-not (Initialize-CursorAuthSqlite)) {
+        Write-AuthSyncLog 'fail sqlite not available' 'WARN'
+        Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=false reason=sqlite_missing db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
+        return [PSCustomObject]@{
+            Ok            = $false
+            Skipped       = $false
+            SqliteMissing = $true
+        }
+    }
 
     $merged = Merge-CursorAuthIntoLocalDb -DbPath $dbPath -AuthValues $authValues
     if (-not $merged) {
-        return [PSCustomObject]@{ Ok = $false; Skipped = $false }
+        Write-AuthSyncLog "fail merge into $dbPath" 'WARN'
+        Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=false reason=merge_failed db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
+        return [PSCustomObject]@{
+            Ok          = $false
+            Skipped     = $false
+            MergeFailed = $true
+        }
     }
 
     $null = Merge-CursorStorageJsonFromGolden -Alias $Alias -LocalPath $storagePath
 
+    $dbBytes = if (Test-Path $dbPath) { (Get-Item $dbPath).Length } else { 0 }
+    $walBytes = if (Test-Path "$dbPath-wal") { (Get-Item "$dbPath-wal").Length } else { 0 }
     $complete = Test-LocalCursorAuthComplete -DbPath $dbPath
+    if ($complete -and $goldenExportedAt) {
+        Set-Content -Path $syncedAtPath -Value $goldenExportedAt -Encoding ASCII -NoNewline -ErrorAction SilentlyContinue
+    }
     $tokens = Test-LocalCursorAuthDb -DbPath $dbPath
+    Write-AuthSyncLog "done complete=$complete tokens_only=$($tokens -and -not $complete)" 'INFO'
+    Write-AuthSyncLog (
+        "AUTH_SYNC: result force=$Force ok=$complete skipped=false tokens_only=$($tokens -and -not $complete) " +
+        "db_bytes=$dbBytes wal_bytes=$walBytes"
+    ) 'INFO'
     return [PSCustomObject]@{
-        Ok            = $complete
-        TokensOnly    = ($tokens -and -not $complete)
-        Skipped       = $false
+        Ok         = $complete
+        TokensOnly = ($tokens -and -not $complete)
+        Skipped    = $false
     }
 }
+

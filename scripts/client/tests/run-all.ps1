@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# run-all.ps1 — run all client regression / audit scripts
+# run-all.ps1 - run all client regression / audit scripts
 $ErrorActionPreference = 'Stop'
 $TestsDir = $PSScriptRoot
 
@@ -12,6 +12,8 @@ $suites = @(
     @{ Name = 'laptop-ssh-ready';     Script = 'test-laptop-ssh-ready.ps1' }
     @{ Name = 'git-mode-deep';        Script = 'test-git-mode-deep.ps1' }
     @{ Name = 'editor-launch';        Script = 'test-editor-launch.ps1' }
+    @{ Name = 'editor-launch-strategies'; Script = 'test-editor-launch-strategies.ps1' }
+    @{ Name = 'connect-diagnostic';     Script = 'test-connect-diagnostic.ps1' }
     @{ Name = 'cursor-auth-merge';    Script = 'test-cursor-auth-merge.ps1' }
     @{ Name = 'publish';              Script = 'test-publish.ps1' }
 )

@@ -1,4 +1,4 @@
-# test-select-project.ps1 — non-interactive proof that project "1" never hits Join-Path ChildPath
+# test-select-project.ps1 - non-interactive proof that project "1" never hits Join-Path ChildPath
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_paths.ps1')
 $fail = 0

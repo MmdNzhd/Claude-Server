@@ -1,4 +1,4 @@
-# _diag-cursor-launch.ps1 — inspect Cursor remote processes + test launch path
+# _diag-cursor-launch.ps1 - inspect Cursor remote processes + test launch path
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_paths.ps1')
 . (Join-Path (Split-Path (Get-ClientFile 'windows\connect.ps1') -Parent) '..\editor-launch.ps1')

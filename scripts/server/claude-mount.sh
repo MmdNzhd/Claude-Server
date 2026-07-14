@@ -15,6 +15,7 @@ GIT_MODE="hide"   # hide = fast (default), server = keep .git on SSHFS mount
 LAPTOP_OS="windows"  # windows | mac - how to run laptop-side git hide/restore
 ACTIVE_MOUNT=""   # set by connect.bat - only this project may auto-mount
 _MOUNT_SAVED_GIT_MODE="hide"  # GIT_MODE snapshot for _do_mount RETURN trap (must not be local)
+_GIT_HIDE_LAST_FAILED=0       # set by _emit_git_hide_warn; read by _do_mount (must not be local)
 
 _load_global() {
     GIT_MODE="hide"
@@ -45,25 +46,25 @@ _load_global() {
 }
 
 # ---------------------------------------------------------------------------
-# Git hiding — hides .git on Windows by renaming to .git.server-session
+# Git hiding - hides .git on Windows by renaming to .git.server-session
 # so that git tools on the server never stat() files over SSHFS.
 # All operations are best-effort: failures are silently ignored so they
 # never block mount/unmount.
 #
 # Self-healing contract:
-#   _hide_git   : idempotent — skips if .git.server-session already exists
-#   _restore_git: idempotent — skips if .git already exists
+#   _hide_git   : idempotent - skips if .git.server-session already exists
+#   _restore_git: idempotent - skips if .git already exists
 #   cmd_recover : restores all hidden gits for currently-unmounted projects
 #
 # Edge cases handled:
-#   - empty rpath, missing LAPTOP_USER/TUNNEL_PORT → skip silently
-#   - SSH timeout/auth failure → skip silently (git stays as-is)
-#   - single quotes in path → escaped for PowerShell single-quoted string
-#   - .git is a FILE (gitdir pointer for worktrees) → not renamed (-PathType Container)
-#   - both .git and .git.server-session exist → skip (manual state, don't touch)
-#   - .git.server-session exists already → skip (idempotent)
+#   - empty rpath, missing LAPTOP_USER/TUNNEL_PORT -> skip silently
+#   - SSH timeout/auth failure -> skip silently (git stays as-is)
+#   - single quotes in path -> escaped for PowerShell single-quoted string
+#   - .git is a FILE (gitdir pointer for worktrees) -> not renamed (-PathType Container)
+#   - both .git and .git.server-session exist -> skip (manual state, don't touch)
+#   - .git.server-session exists already -> skip (idempotent)
 # ---------------------------------------------------------------------------
-# _laptop_ssh — SSH to laptop via reverse tunnel (no mux — avoids stale ControlSocket errors).
+# _laptop_ssh - SSH to laptop via reverse tunnel (no mux - avoids stale ControlSocket errors).
 _laptop_ssh() {
     if [ -z "$LAPTOP_USER" ] || [ -z "$TUNNEL_PORT" ]; then
         return 0
@@ -76,7 +77,7 @@ _laptop_ssh() {
         "$@"
 }
 
-# _win_ps_encode — run PowerShell via -EncodedCommand (avoids quote nesting over SSH).
+# _win_ps_encode - run PowerShell via -EncodedCommand (avoids quote nesting over SSH).
 _win_ps_encode() {
     local ps_cmd="$1"
     local b64=""
@@ -87,12 +88,12 @@ _win_ps_encode() {
     _laptop_ssh "powershell -NoProfile -EncodedCommand ${b64}" 2>/dev/null || true
 }
 
-# _win_ps — runs a PowerShell snippet on a Windows laptop via reverse tunnel.
+# _win_ps - runs a PowerShell snippet on a Windows laptop via reverse tunnel.
 _win_ps() {
     _win_ps_encode "$1"
 }
 
-# _win_ps_out — like _win_ps but returns stdout (for git-hide status checks).
+# _win_ps_out - like _win_ps but returns stdout (for git-hide status checks).
 _win_ps_out() {
     local ps_cmd="$1"
     if [ -z "$LAPTOP_USER" ] || [ -z "$TUNNEL_PORT" ]; then
@@ -101,7 +102,7 @@ _win_ps_out() {
     _win_ps_encode "$ps_cmd"
 }
 
-# _mac_sh — runs a bash snippet on a Mac laptop via reverse tunnel.
+# _mac_sh - runs a bash snippet on a Mac laptop via reverse tunnel.
 _mac_sh() {
     local sh_cmd="$1"
     if [ -z "$LAPTOP_USER" ] || [ -z "$TUNNEL_PORT" ]; then
@@ -113,7 +114,7 @@ _mac_sh() {
 _hide_git() {
     local rpath="$1"
     [ -z "$rpath" ] && return 0
-    _git_tunnel_ready || { echo "warn: laptop tunnel down — cannot hide .git" >&2; return 0; }
+    _git_tunnel_ready || { echo "warn: laptop tunnel down - cannot hide .git" >&2; return 0; }
     _hide_git_and_create_stubs "$rpath"
 }
 
@@ -159,9 +160,11 @@ _emit_git_hide_warn() {
     local ps_out="$1"
     local hide_status
     hide_status=$(printf '%s\n' "$ps_out" | grep -o 'GIT_HIDE:.*' | tail -1 || true)
+    _GIT_HIDE_LAST_FAILED=0
     case "$hide_status" in
         GIT_HIDE:fail:*)
-            echo "warn: git hide failed — ${hide_status#GIT_HIDE:fail:} (close Cursor/git on laptop, then reconnect)" >&2
+            _GIT_HIDE_LAST_FAILED=1
+            echo "warn: git hide failed - ${hide_status#GIT_HIDE:fail:} (close Cursor/git on laptop, then reconnect)" >&2
             ;;
         GIT_HIDE:skip|GIT_HIDE:already|GIT_HIDE:hidden|GIT_HIDE:restored|GIT_HIDE:visible|"")
             ;;
@@ -210,7 +213,7 @@ _win_hide_git_and_create_stubs() {
     local rpath="$1"
     local safe="${rpath//\'/\'\'}"
     local ps_out=""
-    # Single-line PS (no trailing \\) — backslashes break powershell -Command over SSH.
+    # Single-line PS (no trailing \\) - backslashes break powershell -Command over SSH.
     local hide_try='$n=0; $ok=$false; $err=""; if (-not (Test-Path $p/.git) -and -not (Test-Path $p/.git.server-session)) { Write-Output "GIT_HIDE:skip"; exit }; if ((Test-Path $p/.git) -and -not (Test-Path $p/.git.server-session)) { while ($n -lt 3) { $n++; try { Rename-Item $p/.git .git.server-session -Force -ErrorAction Stop; Write-Output "GIT_HIDE:hidden"; $ok=$true; break } catch { $err=$_.Exception.Message; if ($n -eq 2) { Get-Process git -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1 } else { Start-Sleep -Seconds 2 } } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } elseif (Test-Path $p/.git.server-session) { Write-Output "GIT_HIDE:already" } else { Write-Output "GIT_HIDE:skip" }'
     local restore_try='if (Test-Path $p/.git.server-session) { $n=0; $ok=$false; $err=""; while ($n -lt 3) { $n++; try { if (Test-Path $p/.git) { Remove-Item $p/.git -Force -ErrorAction SilentlyContinue }; Rename-Item $p/.git.server-session .git -Force -ErrorAction Stop; Write-Output "GIT_HIDE:restored"; $ok=$true; break } catch { $err=$_.Exception.Message; Start-Sleep -Seconds 2 } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } elseif (Test-Path $p/.git) { Write-Output "GIT_HIDE:visible" } else { Write-Output "GIT_HIDE:skip" }'
     local stub_ps='; if ($hasGit) { New-Item -ItemType Directory -Force -Path $p/.claude/rules,$p/.claude/commands | Out-Null; if (-not (Test-Path $p/.mcp.json) -or (Get-Item $p/.mcp.json).Length -eq 0) { Set-Content -Path $p/.mcp.json -Value "{}" -Encoding utf8 } }'
@@ -253,14 +256,16 @@ _hide_git_and_create_stubs() {
     fi
 }
 
-# Pre-warm SSHFS directory caches so first 'claude' run is instant.
-# Runs in background — doesn't block mount. Warm by the time user opens VSCode terminal.
 _warm_sshfs_cache() {
     local lpath="$1"
+    if [ -x /usr/local/bin/laptop-exec-setup ]; then
+        /usr/local/bin/laptop-exec-setup --project "$lpath" 2>/dev/null || true
+    fi
     (
         timeout 5 ls "$lpath/.claude/"          >/dev/null 2>&1 || true
         timeout 5 ls "$lpath/.claude/rules/"    >/dev/null 2>&1 || true
         timeout 5 ls "$lpath/.claude/commands/" >/dev/null 2>&1 || true
+        timeout 5 ls "$lpath/.cursor/rules/"    >/dev/null 2>&1 || true
     ) &
 }
 
@@ -434,8 +439,11 @@ _do_mount() {
         else
             echo "already mounted: $lpath"
             _hide_git_and_create_stubs "$rpath"
-            # SSHFS cache may keep stale .git after laptop rename — remount if .git still visible.
-            if [ "$GIT_MODE" = "hide" ] && [ -e "$lpath/.git" ] && [ ! -e "$lpath/.git.server-session" ]; then
+            # SSHFS cache may keep stale .git after laptop rename - remount if .git still visible.
+            # Skip the remount when the hide itself genuinely failed (e.g. access denied) -
+            # a fresh mount won't clear a laptop-side lock, so retrying just doubles the wait
+            # and repeats the same warning for no benefit.
+            if [ "$GIT_MODE" = "hide" ] && [ -e "$lpath/.git" ] && [ ! -e "$lpath/.git.server-session" ] && [ "$_GIT_HIDE_LAST_FAILED" != "1" ]; then
                 _do_unmount "$lpath"
                 sleep 1
             else
@@ -463,7 +471,7 @@ _do_mount() {
         fi
     fi
 
-    # Hide .git and create Claude stubs in one SSH call — from here on, any failure must restore .git
+    # Hide .git and create Claude stubs in one SSH call - from here on, any failure must restore .git
     _hide_git_and_create_stubs "$rpath"
 
     local sshfs_opts="reconnect,ServerAliveInterval=15,ServerAliveCountMax=4,idmap=user,allow_other,StrictHostKeyChecking=accept-new,UserKnownHostsFile=${KNOWN_HOSTS},ConnectTimeout=20,dir_cache=yes,dcache_timeout=60,attr_timeout=30,entry_timeout=30,max_conns=4"
@@ -476,7 +484,7 @@ _do_mount() {
         -p "${TUNNEL_PORT}" 2>&1) || sshfs_exit=$?
 
     if [ "$sshfs_exit" -ne 0 ]; then
-        # sshfs failed — .git was hidden by _hide_git_and_create_stubs, restore it
+        # sshfs failed - .git was hidden by _hide_git_and_create_stubs, restore it
         _restore_git "$rpath"
         local reason="$sshfs_out"
         # Check specific errors FIRST so a timed-out sshfs that printed a real
@@ -500,7 +508,7 @@ _do_mount() {
     fi
 
     if ! timeout 10 ls -A "$lpath" >/dev/null 2>&1; then
-        # mount came up but is not readable — restore .git and clean up
+        # mount came up but is not readable - restore .git and clean up
         _restore_git "$rpath"
         echo "error: mount verification failed for $lpath" >&2
         _do_unmount "$lpath"
@@ -627,7 +635,7 @@ cmd_rm() {
 
     _load_global
 
-    # Read paths before deleting config — once config is gone, rpath is lost forever
+    # Read paths before deleting config - once config is gone, rpath is lost forever
     local rpath="" lpath=""
     while IFS='=' read -r k v; do
         v="${v#\"}" v="${v%\"}"
@@ -653,7 +661,7 @@ cmd_rm() {
 
 # Restore .git for all projects whose mount is NOT currently active.
 # Called at session start (connect.bat, automount) to recover from crashes.
-# Safe to call while other mounts are active — mounted projects are skipped.
+# Safe to call while other mounts are active - mounted projects are skipped.
 cmd_check() {
     _load_global
     local id="$1" conf="" lpath=""
@@ -681,7 +689,43 @@ cmd_recover_if_needed() {
         echo "recover: skip (mount ok)"
         return 0
     fi
-    cmd_recover
+    if [ -n "$id" ]; then
+        cmd_recover_one "$id"
+    else
+        cmd_recover
+    fi
+}
+
+# Restore .git for one project id when its mount is not active.
+# Usage: claude-mount recover-one 'projectid'
+cmd_recover_one() {
+    local id="$1"
+    [ -n "$id" ] || { echo "error: need project id" >&2; return 1; }
+    _load_global
+    local conf="$CONF_DIR/${id}.conf"
+    [ -f "$conf" ] || { echo "error: not found: $id" >&2; return 1; }
+    local rpath="" lpath="" lpath_esc tunnel_ok=0
+    while IFS='=' read -r k v; do
+        v="${v#\"}" v="${v%\"}"
+        case "$k" in
+            rpath|REMOTE_PATH) rpath="$v" ;;
+            lpath|LOCAL_PATH)  lpath="$v" ;;
+        esac
+    done < "$conf"
+    rpath="${rpath//\\//}"
+    lpath="${lpath//\\//}"
+    _rpath_for_this_laptop "$rpath" || return 0
+    [ -n "$lpath" ] && [ -n "$rpath" ] || return 0
+    _tunnel_up && tunnel_ok=1
+    if ! mountpoint -q "$lpath" 2>/dev/null; then
+        [ "$tunnel_ok" -eq 1 ] && _restore_git_body "$rpath"
+    elif ! timeout 2 ls "$lpath" >/dev/null 2>&1; then
+        lpath_esc=$(printf '%s' "$lpath" | sed 's/[[\.*^$(){}+?|]/\\&/g')
+        pkill -u "$USER" -f "sshfs .*${lpath_esc}" 2>/dev/null || true
+        sleep 1
+        _do_unmount "$lpath"
+        [ "$tunnel_ok" -eq 1 ] && _restore_git_body "$rpath"
+    fi
 }
 
 cmd_recover() {
@@ -729,7 +773,7 @@ cmd_up() {
         return 1
     fi
     if ! _tunnel_banner_matches_laptop; then
-        echo "error: port $TUNNEL_PORT is another laptop (stale TUNNEL_PORT?) — reconnect connect from this Mac/PC" >&2
+        echo "error: port $TUNNEL_PORT is another laptop (stale TUNNEL_PORT?) - reconnect connect from this Mac/PC" >&2
         return 1
     fi
     if [ "${CLAUDE_TRUSTED_TUNNEL:-}" != "1" ]; then
@@ -828,7 +872,7 @@ cmd_down() {
             if _is_mounted "$lpath" 2>/dev/null; then
                 _force_unmount_project "$lpath" "$rpath" || true
             else
-                # Not mounted — still restore in case .git was hidden by a crashed session
+                # Not mounted - still restore in case .git was hidden by a crashed session
                 _restore_git "$rpath"
             fi
         done
@@ -851,11 +895,12 @@ case "$cmd" in
     down|umount|unmount) cmd_down "$@" ;;
     down-others)         cmd_down_others "$@" ;;
     recover)             cmd_recover ;;
+    recover-one)         cmd_recover_one "$@" ;;
     recover-if-needed)   cmd_recover_if_needed "$@" ;;
     check)               cmd_check "$@" ;;
     tunnel-status)       cmd_tunnel_status ;;
     *)
-        echo "Usage: claude-mount {list|status|check|tunnel-status|add|edit|rm|up|down|down-others|recover|recover-if-needed} [id]" >&2
+        echo "Usage: claude-mount {list|status|check|tunnel-status|add|edit|rm|up|down|down-others|recover|recover-one|recover-if-needed} [id]" >&2
         exit 1
         ;;
 esac

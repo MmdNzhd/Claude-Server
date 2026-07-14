@@ -1,5 +1,5 @@
 #!/bin/bash
-# claude-auth-sync — sync server OAuth token into ~/.claude for CLI + VS Code extension
+# claude-auth-sync - sync server OAuth token into ~/.claude for CLI + VS Code extension
 #
 # Claude 2.1.x prefers ~/.claude/.credentials.json over CLAUDE_CODE_OAUTH_TOKEN.
 # We keep credentials.json as {} and put the server token in settings.json env

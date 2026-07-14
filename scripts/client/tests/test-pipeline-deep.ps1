@@ -1,4 +1,4 @@
-# test-pipeline-deep.ps1 — validates connect.ps1 pipeline fixes against Microsoft docs
+# test-pipeline-deep.ps1 - validates connect.ps1 pipeline fixes against Microsoft docs
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_paths.ps1')
 $fail = 0

@@ -45,11 +45,11 @@ if [ ! -f "$LOG_FILE" ]; then
 fi
 
 # --- Prompt usage ---
-echo -e "${BOLD}Usage — last ${DAYS} days (prompts)${NC}"
+echo -e "${BOLD}Usage - last ${DAYS} days (prompts)${NC}"
 SINCE=$(date -d "-${DAYS} days" -Iseconds 2>/dev/null || date -v-${DAYS}d -Iseconds 2>/dev/null)
 
 printf "  %-16s %7s  %8s  %s\n" "User" "Prompts" "Sessions" "Last active"
-echo "  ──────────────────────────────────────────────────"
+echo "  --------------------------------------------------"
 
 jq -r --arg s "$SINCE" '
     select(.timestamp >= $s) |
@@ -81,7 +81,7 @@ echo ""
 
 # --- Token stats ---
 if grep -qE '"event":"STATS"|"event": "STATS"' "$LOG_FILE" 2>/dev/null; then
-    echo -e "${BOLD}Token usage (cumulative — from stats cache)${NC}"
+    echo -e "${BOLD}Token usage (cumulative - from stats cache)${NC}"
 
     grep -E '"event":"STATS"|"event": "STATS"' "$LOG_FILE" | python3 -c "
 import json, sys
@@ -106,10 +106,10 @@ for u, d in users.items():
 
 rows.sort(key=lambda r: r[2], reverse=True)
 print(f\"  {'User':<16} {'Output':>7}  {'Cost USD':>9}  {'Messages':>9}\")
-print('  ' + '─'*46)
+print('  ' + '-'*46)
 for u, o, cost, msgs in rows:
     print(f'  {u:<16} {o:>7}  \${cost:>8.2f}  {msgs:>9,}')
-print('  ' + '─'*46)
+print('  ' + '-'*46)
 print(f\"  {'TOTAL':<16} {'':>7}  \${total_cost:>8.2f}\")
 " 2>/dev/null
     echo ""

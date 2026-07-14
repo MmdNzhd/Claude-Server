@@ -505,8 +505,9 @@ try {
 
         StepOk "${mountT}s"
         $script:ActiveProjectId = $MountId
-        $cleanOut = ($mountOut.Trim() -replace '^already mounted:\s*', '')
-        if ($cleanOut) { Write-Host "      -> $cleanOut" -ForegroundColor DarkGray }
+        $cleanOut = ($mountOut.Trim() -replace '^already mounted:\s*', '' -replace '^mounted:\s*', '')
+        $cleanOut = (($cleanOut -split '\r?\n')[0]).Trim()
+        if ($cleanOut -and $cleanOut -notmatch '^warn:') { Write-Host "      -> $cleanOut" -ForegroundColor DarkGray }
 
         if (-not $novncOpened) {
             Step "Opening noVNC"
@@ -551,7 +552,7 @@ try {
             if ([Console]::KeyAvailable) {
                 $ki = [Console]::ReadKey($true)
                 if ($ki.KeyChar.ToString().ToLower() -eq 'r' -or $ki.Key -eq [ConsoleKey]::R) { $action = 'r' }
-                # any other key (Q, Enter, etc.) → action stays 'q'
+                # any other key (Q, Enter, etc.) -> action stays 'q'
             } else {
                 $action = 'r'
                 Write-Host "    Connection dropped - reconnecting..." -ForegroundColor Yellow

@@ -14,6 +14,10 @@ if [ -x /usr/local/bin/cursor-auth-sync ] && [ -f /etc/cursor-auth/golden/auth.j
     /usr/local/bin/cursor-auth-sync
 fi
 
+if [ -x /usr/local/bin/laptop-exec-setup ]; then
+    /usr/local/bin/laptop-exec-setup --user
+fi
+
 MOUNT_BIN="$HOME/.local/bin/claude-mount"
 [ -x "$MOUNT_BIN" ] || MOUNT_BIN="/usr/local/bin/claude-mount"
 [ -x "$MOUNT_BIN" ] || MOUNT_BIN="/usr/local/lib/claude-mount"

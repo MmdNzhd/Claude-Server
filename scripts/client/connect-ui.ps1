@@ -1,5 +1,88 @@
-# connect-ui.ps1 — terminal UI helpers (dot-sourced by connect.ps1)
+# connect-ui.ps1 - terminal UI helpers (dot-sourced by connect.ps1)
 # Requires: Warn, Step helpers may exist in parent scope
+
+$script:ConnectLogWriter = $null
+$script:ConnectLogPath = ''
+$script:LastSessionStatusKey = ''
+
+function Initialize-ConnectLog {
+    param(
+        [Parameter(Mandatory)][string]$ScriptDir,
+        [string]$Version = ''
+    )
+    $script:ConnectLogPath = Join-Path $ScriptDir 'connect.log'
+    if (Test-Path -LiteralPath $script:ConnectLogPath) {
+        try {
+            $fi = Get-Item -LiteralPath $script:ConnectLogPath
+            if ($fi.Length -gt 1572864) {
+                $bak = "$script:ConnectLogPath.1"
+                if (Test-Path -LiteralPath $bak) { Remove-Item -LiteralPath $bak -Force }
+                Move-Item -LiteralPath $script:ConnectLogPath -Destination $bak -Force
+            }
+        } catch { }
+    }
+    try {
+        $script:ConnectLogWriter = [System.IO.StreamWriter]::new(
+            $script:ConnectLogPath, $true, [System.Text.UTF8Encoding]::new($false))
+        $script:ConnectLogWriter.AutoFlush = $true
+    } catch {
+        $script:ConnectLogWriter = $null
+        return
+    }
+    $elev = 'unknown'
+    if (Get-Command Test-IsElevatedShell -ErrorAction SilentlyContinue) {
+        $elev = if (Test-IsElevatedShell) { 'yes' } else { 'no' }
+    }
+    Write-ConnectLog "======== session start v$Version user=$env:USERNAME elevated=$elev pid=$PID ========"
+    Write-ConnectLog "log file: $script:ConnectLogPath"
+    Write-ConnectLog "script_dir: $ScriptDir connect_version: $Version" 'DEBUG'
+}
+
+function Write-ConnectLog {
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('INFO', 'WARN', 'ERROR', 'DEBUG', 'TRACE')][string]$Level = 'INFO'
+    )
+    if (-not $script:ConnectLogWriter) { return }
+    try {
+        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+        $script:ConnectLogWriter.WriteLine("[$ts] [$Level] $Message")
+    } catch { }
+}
+
+function Write-ConnectTrace {
+    param([Parameter(Mandatory)][string]$Message)
+    Write-ConnectLog $Message 'TRACE'
+}
+
+function Write-ConnectPhaseLog {
+    param(
+        [Parameter(Mandatory)][string]$Phase,
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('INFO', 'WARN', 'ERROR', 'DEBUG', 'TRACE')][string]$Level = 'INFO'
+    )
+    Write-ConnectLog "${Phase}: $Message" $Level
+}
+
+function Write-ConnectTimedLog {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][int]$Ms,
+        [string]$Detail = '',
+        [ValidateSet('INFO', 'WARN', 'ERROR', 'DEBUG', 'TRACE')][string]$Level = 'INFO'
+    )
+    $suffix = if ($Detail) { " $Detail" } else { '' }
+    Write-ConnectLog "${Label} ms=$Ms$suffix" $Level
+}
+
+function Close-ConnectLog {
+    if (-not $script:ConnectLogWriter) { return }
+    try {
+        Write-ConnectLog '======== session end ========'
+        $script:ConnectLogWriter.Dispose()
+    } catch { }
+    $script:ConnectLogWriter = $null
+}
 
 function Get-TerminalWidth {
     try {
@@ -178,12 +261,31 @@ function Update-SessionStatusLine {
         [string]$GitLabel,
         [bool]$TunnelOk,
         [bool]$EditorOpen,
-        [string]$EditorName = 'Cursor'
+        [string]$EditorName = 'Cursor',
+        [string]$EditorLabel = '',
+        [string]$EditorCmd = '',
+        [string]$Alias = '',
+        [string]$RemotePath = ''
     )
     $tunnel = if ($TunnelOk) { 'up' } else { 'down' }
-    $ed = if ($EditorOpen) { $EditorName } else { 'closed' }
+    $ed = if ($EditorLabel) { $EditorLabel } elseif ($EditorOpen) { $EditorName } else { 'closed' }
     $line = ('    [{0} | git:{1} | tunnel:{2} | {3}]' -f $ProjectLabel, $GitLabel, $tunnel, $ed)
     Write-Host $line -ForegroundColor DarkCyan
+    $statusKey = "$ProjectLabel|$GitLabel|$tunnel|$ed"
+    if ($statusKey -ne $script:LastSessionStatusKey) {
+        $script:LastSessionStatusKey = $statusKey
+        Write-ConnectLog "STATUS: [$ProjectLabel | git:$GitLabel | tunnel:$tunnel | $ed]"
+    }
+    if ($EditorCmd -and $Alias -and $RemotePath) {
+        if (-not $EditorOpen) {
+            Write-ConnectTrace "STATUS_TICK project=$ProjectLabel tunnel=$tunnel editor=$ed git=$GitLabel"
+            if (Get-Command Get-RemoteEditorStateExplain -ErrorAction SilentlyContinue) {
+                Write-ConnectLog "HEARTBEAT: $(Get-RemoteEditorStateExplain -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)" 'DEBUG'
+            }
+        } else {
+            Write-ConnectTrace "STATUS_OK project=$ProjectLabel tunnel=$tunnel editor=$ed"
+        }
+    }
 }
 
 function Show-ConnectToast {

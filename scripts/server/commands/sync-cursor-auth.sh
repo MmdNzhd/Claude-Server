@@ -1,5 +1,5 @@
 #!/bin/bash
-# sync-cursor-auth.sh — push golden Cursor identity to all developer ~/.config/Cursor trees
+# sync-cursor-auth.sh - push golden Cursor identity to all developer ~/.config/Cursor trees
 # Usage: sudo claude-server sync-cursor-auth [username]
 
 set -euo pipefail
@@ -25,7 +25,7 @@ if [ ! -x "$SYNC_BIN" ]; then
     unset _cmd_dir _candidate
 fi
 [ -x "$SYNC_BIN" ] || {
-    echo -e "${RED}cursor-auth-sync not found — run: sudo claude-server install${NC}" >&2
+    echo -e "${RED}cursor-auth-sync not found - run: sudo claude-server install${NC}" >&2
     exit 1
 }
 

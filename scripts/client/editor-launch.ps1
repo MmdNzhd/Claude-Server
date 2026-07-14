@@ -1,11 +1,11 @@
-# editor-launch.ps1 — shared VS Code/Cursor launch (dot-sourced by connect.ps1)
+# editor-launch.ps1 - shared VS Code/Cursor launch (dot-sourced by connect.ps1)
 # Same pattern as mac/connect.sh:  cursor|code --folder-uri "vscode-remote://..."
 
 function Get-CursorRemoteProfileDir {
     # Isolated Cursor profile for server Remote-SSH sessions. Launching with
     # --user-data-dir here keeps the server's shared golden identity in its
     # own storage, completely separate from the developer's personal Cursor
-    # profile (default %APPDATA%\Cursor) — so the personal login is never
+    # profile (default %APPDATA%\Cursor) - so the personal login is never
     # read, overwritten, or force-closed to make room for the server one.
     return (Join-Path $env:LOCALAPPDATA 'ClaudeServerCursorProfile')
 }
@@ -136,7 +136,7 @@ function Resolve-EditorChoice {
         [Parameter(Mandatory)][string]$CfgDir
     )
 
-    # Path.Combine — Join-Path binds pipeline input and causes ChildPath prompt
+    # Path.Combine - Join-Path binds pipeline input and causes ChildPath prompt
     $EditorPrefFile = [System.IO.Path]::Combine($CfgDir, 'editor.conf')
     Ensure-EditorOnPath 'cursor' | Out-Null
     Ensure-EditorOnPath 'code' | Out-Null
@@ -215,6 +215,8 @@ function Stop-CursorServerProfileTree {
     foreach ($p in $procs) {
         if ($seen[$p.ProcessId]) { continue }
         $seen[$p.ProcessId] = $true
+        $cmd = Format-EditorProcessCommandLine -CommandLine $p.CommandLine -MaxLen 120
+        Write-EditorLaunchLog "LAUNCH_KILL_PROC: pid=$($p.ProcessId) cmd=$cmd" 'DEBUG'
         Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Milliseconds 200
@@ -386,18 +388,27 @@ function Start-ProcessAsInteractiveUser {
         [Parameter(Mandatory)][string]$FilePath,
         [string[]]$ArgumentList = @()
     )
+    $argPreview = Format-ProcessArgumentString -ArgumentList $ArgumentList
     if (-not (Test-IsElevatedShell)) {
+        Write-EditorLaunchLog "PROC_START: mode=non_elevated exe=$FilePath args=$argPreview" 'DEBUG'
         Start-Process -FilePath $FilePath -ArgumentList $ArgumentList | Out-Null
+        Write-EditorLaunchLog 'PROC_START_OK: mode=non_elevated' 'DEBUG'
         return $true
     }
+    Write-EditorLaunchLog "PROC_START: mode=elevated exe=$FilePath args=$argPreview" 'DEBUG'
     Initialize-NonElevatedLauncher
     $argStr = Format-ProcessArgumentString -ArgumentList $ArgumentList
     try {
         if ([NonElevatedLauncher]::Start($FilePath, $argStr)) {
+            Write-EditorLaunchLog 'PROC_START_OK: mode=elevated_non_elevated_launcher' 'DEBUG'
             return $true
         }
-    } catch {}
-    return (Start-ProcessViaLaunchTask -FilePath $FilePath -ArgumentList $ArgumentList)
+    } catch {
+        Write-EditorLaunchLog "PROC_START_WARN: NonElevatedLauncher exception=$($_.Exception.Message)" 'WARN'
+    }
+    $fallback = Start-ProcessViaLaunchTask -FilePath $FilePath -ArgumentList $ArgumentList
+    Write-EditorLaunchLog "PROC_START_OK: mode=elevated_launch_task result=$fallback" 'DEBUG'
+    return $fallback
 }
 
 function Get-CursorProfileProcesses {
@@ -426,15 +437,10 @@ function Get-RemoteEditorProcesses {
             if ($cmd -match [regex]::Escape($uriNeedle) -and $cmd -match [regex]::Escape($pathNeedle)) { return $true }
             if ($profileDir -and ($cmd -match [regex]::Escape($profileDir))) {
                 if ($cmd -match [regex]::Escape($pathNeedle) -or $cmd -match [regex]::Escape($uriNeedle)) { return $true }
-                return $true
             }
             return $false
         })
-    if ($matches.Count -gt 0) { return $matches }
-    if ($EditorCmd -eq 'cursor' -and $profileDir) {
-        return @(Get-CursorProfileProcesses -ProfileDir $profileDir)
-    }
-    return @()
+    return $matches
 }
 
 function Test-RemoteEditorWindowOpen {
@@ -443,21 +449,537 @@ function Test-RemoteEditorWindowOpen {
         [Parameter(Mandatory)][string]$Alias,
         [Parameter(Mandatory)][string]$RemotePath
     )
+    # Auth gate: on correct folder AND a visible process with uri/path match.
+    if (-not (Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)) {
+        return $false
+    }
     foreach ($p in @(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)) {
         try {
             $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
             if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { return $true }
         } catch {}
     }
-    if ($EditorCmd -eq 'cursor') {
-        foreach ($p in @(Get-CursorProfileProcesses)) {
+    return $false
+}
+
+function Get-RemoteFolderUri {
+    param(
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][string]$RemotePath
+    )
+    $path = $RemotePath.TrimEnd('/')
+    return "vscode-remote://ssh-remote+${Alias}${path}"
+}
+
+function Get-CursorMainProfileProcesses {
+    param([string]$ProfileDir = (Get-CursorRemoteProfileDir))
+    return @(Get-CursorProfileProcesses -ProfileDir $ProfileDir |
+        Where-Object { $_.CommandLine -and ($_.CommandLine -notmatch '--type=') })
+}
+
+function Get-CursorMainPersonalProcesses {
+    param([string]$ProfileDir = (Get-CursorRemoteProfileDir))
+    if (-not $ProfileDir) { return @() }
+    $profileEsc = [regex]::Escape($ProfileDir)
+    return @(Get-CimInstance Win32_Process -Filter "Name='Cursor.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.CommandLine -and ($_.CommandLine -notmatch $profileEsc) -and ($_.CommandLine -notmatch '--type=')
+        })
+}
+
+function Test-PersonalCursorDominant {
+    $personalMain = @(Get-CursorMainPersonalProcesses).Count
+    $profileMain = @(Get-CursorMainProfileProcesses).Count
+    return ($personalMain -ge 3 -and $profileMain -eq 0)
+}
+
+function Test-CursorWindowTitleIsAgentHome {
+    param(
+        [string]$Title,
+        [string]$ProjectRootName = ''
+    )
+    if (-not $Title) { return $false }
+    if ($ProjectRootName -and $Title -match '\[Claude Server\]' -and $Title -match [regex]::Escape($ProjectRootName)) {
+        return $false
+    }
+    if ($Title -match '(?i)^cursor agents$|cursor agents\b|agent home') { return $true }
+    return $false
+}
+
+function Test-CursorWindowShowsAgentHome {
+    param(
+        [Parameter(Mandatory)][int]$ProcessId,
+        [string]$RemotePath = ''
+    )
+    $rootName = ''
+    if ($RemotePath) { $rootName = ($RemotePath.TrimEnd('/') -split '/')[-1] }
+    try {
+        $wp = [System.Diagnostics.Process]::GetProcessById($ProcessId)
+        return (Test-CursorWindowTitleIsAgentHome -Title $wp.MainWindowTitle -ProjectRootName $rootName)
+    } catch { }
+    return $false
+}
+
+function Test-RemoteEditorOnCorrectFolder {
+    param(
+        [Parameter(Mandatory)][string]$EditorCmd,
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][string]$RemotePath
+    )
+    if ($EditorCmd -ne 'cursor') {
+        return (Test-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath).Count -gt 0
+    }
+    if (Test-RemoteEditorInAgentHome -RemotePath $RemotePath) { return $false }
+    $uri = Get-RemoteFolderUri -Alias $Alias -RemotePath $RemotePath
+    $pathNeedle = [regex]::Escape($RemotePath.TrimEnd('/'))
+    $aliasNeedle = [regex]::Escape("ssh-remote+${Alias}")
+    $uriNeedle = [regex]::Escape($uri)
+    $rootName = ($RemotePath.TrimEnd('/') -split '/')[-1]
+    $rootNeedle = if ($rootName) { [regex]::Escape($rootName) } else { '' }
+    $aliasOnlyNeedle = [regex]::Escape($Alias)
+    foreach ($p in @(Get-CursorMainProfileProcesses)) {
+        $cmd = $p.CommandLine
+        if ($cmd) {
+            if ($cmd -match $uriNeedle) {
+                if (-not (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath)) {
+                    return $true
+                }
+                continue
+            }
+            if ($cmd -match $aliasNeedle -and $cmd -match $pathNeedle) {
+                if (-not (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath)) {
+                    return $true
+                }
+                continue
+            }
+        }
+        if ($rootNeedle) {
             try {
                 $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
-                if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { return $true }
-            } catch {}
+                $title = $wp.MainWindowTitle
+                # Accept either our custom "[Claude Server] <root>" title template or Cursor's own
+                # default Remote-SSH title "... [SSH: <alias>] - Cursor" - the custom template doesn't
+                # apply while a built-in view (e.g. Settings) is focused, so both must be recognized.
+                if ($title -and $title -match $rootNeedle -and
+                    ($title -match '\[Claude Server\]' -or $title -match "(?i)\[SSH:\s*${aliasOnlyNeedle}\]")) {
+                    return $true
+                }
+            } catch { }
         }
     }
     return $false
+}
+
+function Get-RemoteEditorStateExplain {
+    param(
+        [Parameter(Mandatory)][string]$EditorCmd,
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][string]$RemotePath
+    )
+    $bits = @()
+    $uri = Get-RemoteFolderUri -Alias $Alias -RemotePath $RemotePath
+    $path = $RemotePath.TrimEnd('/')
+    $bits += "target_uri=$uri target_path=$path"
+
+    if ($EditorCmd -ne 'cursor') {
+        $matched = @(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)
+        $bits += "editor=$EditorCmd matched_procs=$($matched.Count) on_folder=$($matched.Count -gt 0)"
+        return ($bits -join ' | ')
+    }
+
+    $profileDir = Get-CursorRemoteProfileDir
+    $mains = @(Get-CursorMainProfileProcesses)
+    $allProfile = @(Get-CursorProfileProcesses)
+    $allCursor = @(Get-CimInstance Win32_Process -Filter "Name='Cursor.exe'" -ErrorAction SilentlyContinue)
+    $personalCount = @($allCursor | Where-Object {
+        $_.CommandLine -and ($_.CommandLine -notmatch [regex]::Escape($profileDir))
+    }).Count
+    $bits += "cursor_total=$($allCursor.Count) profile_total=$($allProfile.Count) profile_main=$($mains.Count) personal_main=$personalCount"
+
+    $agentHome = Test-RemoteEditorInAgentHome -RemotePath $RemotePath
+    $bits += "agent_home=$agentHome"
+    if ($agentHome) {
+        foreach ($p in $mains) {
+            $cmd = $p.CommandLine
+            if (-not $cmd) {
+                $bits += "agent_reason pid=$($p.ProcessId) empty_cmdline"
+                continue
+            }
+            if ($cmd -notmatch 'folder-uri') {
+                $bits += "agent_reason pid=$($p.ProcessId) no_folder_uri_in_cmd"
+            } elseif (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath) {
+                $bits += "agent_reason pid=$($p.ProcessId) folder_uri_ignored_title_agents"
+            }
+        }
+    }
+
+    $pathNeedle = [regex]::Escape($path)
+    $aliasNeedle = [regex]::Escape("ssh-remote+${Alias}")
+    $uriNeedle = [regex]::Escape($uri)
+    $rootName = ($path -split '/')[-1]
+    $rootNeedle = if ($rootName) { [regex]::Escape($rootName) } else { '' }
+    $aliasOnlyNeedle = [regex]::Escape($Alias)
+    $onFolder = $false
+    foreach ($p in $mains) {
+        $cmd = $p.CommandLine
+        if (-not $cmd) {
+            $bits += "main pid=$($p.ProcessId) empty_cmdline"
+            continue
+        }
+        $uriHit = $cmd -match $uriNeedle
+        $aliasPathHit = ($cmd -match $aliasNeedle) -and ($cmd -match $pathNeedle)
+        $titleHit = $false
+        $title = ''
+        try {
+            $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
+            $title = $wp.MainWindowTitle
+            if ($rootNeedle -and $title -and $title -match $rootNeedle -and
+                ($title -match '\[Claude Server\]' -or $title -match "(?i)\[SSH:\s*${aliasOnlyNeedle}\]")) {
+                $titleHit = $true
+            }
+        } catch { }
+        $bits += (
+            "main pid=$($p.ProcessId) uri_hit=$uriHit alias_path_hit=$aliasPathHit title_hit=$titleHit " +
+            "title=$title cmd=$(Format-EditorProcessCommandLine -CommandLine $cmd -MaxLen 180)"
+        )
+        if ($uriHit -or $aliasPathHit) {
+            if (-not (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath)) {
+                $onFolder = $true
+            }
+        }
+        if ($titleHit) { $onFolder = $true }
+    }
+    if ($mains.Count -eq 0) {
+        $bits += 'folder_reason=no_profile_main_process'
+    } elseif (-not $onFolder) {
+        $bits += 'folder_reason=no_main_process_matched_uri_alias_or_title'
+    }
+    $bits += "on_folder=$onFolder window_open=$(Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)"
+    return ($bits -join ' | ')
+}
+
+function Write-EditorLaunchVerboseState {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string]$EditorCmd,
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][string]$RemotePath,
+        [switch]$IncludeSnapshot
+    )
+    Write-EditorLaunchLog "STATE[$Label] $(Get-RemoteEditorStateExplain -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)" 'DEBUG'
+    Write-EditorLaunchLog "DIAG[$Label] $(Get-RemoteEditorLaunchDiag -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)" 'DEBUG'
+    Write-EditorLaunchLog "DETECT[$Label] $(Get-RemoteEditorDetectionDiag -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)" 'DEBUG'
+    if ($EditorCmd -eq 'cursor') {
+        Write-EditorLaunchLog "STORAGE[$Label] $(Get-CursorProfileStorageDiag)" 'DEBUG'
+    }
+    if ($IncludeSnapshot) {
+        Write-EditorLaunchSnapshot -Label $Label -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
+    }
+}
+
+function Test-RemoteEditorInAgentHome {
+    param(
+        [string]$ProfileDir = (Get-CursorRemoteProfileDir),
+        [string]$RemotePath = ''
+    )
+    foreach ($p in @(Get-CursorMainProfileProcesses -ProfileDir $ProfileDir)) {
+        $cmd = $p.CommandLine
+        if (-not $cmd) { continue }
+        if ($cmd -notmatch 'folder-uri') { return $true }
+        # Cursor 3.x: cmdline has folder-uri but UI stuck on Agents (forum #153009)
+        if (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath) { return $true }
+    }
+    return $false
+}
+
+function Write-EditorLaunchLog {
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('INFO', 'WARN', 'ERROR', 'DEBUG', 'TRACE')][string]$Level = 'INFO'
+    )
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog $Message $Level
+    }
+}
+
+function Get-CursorProfileStorageDiag {
+    $profileDir = Get-CursorRemoteProfileDir
+    $gs = Join-Path $profileDir 'User\globalStorage'
+    $ws = Join-Path $profileDir 'User\workspaceStorage'
+    $db = Join-Path $gs 'state.vscdb'
+    $storageJson = Join-Path $gs 'storage.json'
+    $wsCount = 0
+    if (Test-Path $ws) { $wsCount = @(Get-ChildItem -Path $ws -Directory -ErrorAction SilentlyContinue).Count }
+    $dbSize = if (Test-Path $db) { (Get-Item $db).Length } else { 0 }
+    $walSize = if (Test-Path "$db-wal") { (Get-Item "$db-wal").Length } else { 0 }
+    $recent = ''
+    if (Test-Path $storageJson) {
+        try {
+            $sj = Get-Content $storageJson -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($sj.'telemetry.machineId') { $recent += " machineId=set" }
+        } catch { $recent = 'storage_json_read_error' }
+    }
+    return (
+        "profile_dir=$profileDir globalStorage_exists=$(Test-Path $gs) state_vscdb=$dbSize wal=$walSize " +
+        "workspaceStorage_dirs=$wsCount$recent"
+    )
+}
+
+function Get-ForegroundWindowTitle {
+    try {
+        if (-not ('Win32.ForegroundWindow' -as [type])) {
+            Add-Type -Name ForegroundWindow -Namespace Win32 -MemberDefinition @'
+[DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();
+[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(System.IntPtr hWnd, System.Text.StringBuilder text, int count);
+'@ -ErrorAction Stop
+        }
+        $hwnd = [Win32.ForegroundWindow]::GetForegroundWindow()
+        if ($hwnd -eq [IntPtr]::Zero) { return '' }
+        $sb = New-Object System.Text.StringBuilder 512
+        [void][Win32.ForegroundWindow]::GetWindowText($hwnd, $sb, $sb.Capacity)
+        return $sb.ToString()
+    } catch {
+        return ''
+    }
+}
+
+function Get-RemoteEditorLaunchDiag {
+    param(
+        [Parameter(Mandatory)][string]$EditorCmd,
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][string]$RemotePath
+    )
+    $uri = Get-RemoteFolderUri -Alias $Alias -RemotePath $RemotePath
+    $onFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
+    $agentHome = if ($EditorCmd -eq 'cursor') { Test-RemoteEditorInAgentHome -RemotePath $RemotePath } else { $false }
+    $windowOpen = Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
+    $foregroundTitle = Get-ForegroundWindowTitle
+    $mains = if ($EditorCmd -eq 'cursor') { @(Get-CursorMainProfileProcesses) } else { @() }
+    $mainSummaries = @()
+    foreach ($p in $mains) {
+        $cmd = $p.CommandLine
+        if (-not $cmd) { $cmd = '' }
+        $hasUri = $cmd -match 'folder-uri'
+        $hasRemote = $cmd -match '--remote'
+        $hasClassic = $cmd -match '--classic'
+        $hasPath = $cmd -match [regex]::Escape($RemotePath.TrimEnd('/'))
+        if ($cmd.Length -gt 160) { $cmd = $cmd.Substring(0, 160) + '...' }
+        $mainSummaries += "pid=$($p.ProcessId) uri=$hasUri remote=$hasRemote classic=$hasClassic path=$hasPath cmd=$cmd"
+    }
+    $mainText = if ($mainSummaries.Count -gt 0) { ($mainSummaries -join ' | ') } else { 'none' }
+    return (
+        "expected_uri=$uri on_folder=$onFolder agent_home=$agentHome window_open=$windowOpen " +
+        "foreground_title=$foregroundTitle main_count=$($mains.Count) main=[$mainText]"
+    )
+}
+
+function Get-RemoteEditorLaunchStrategies {
+    param(
+        [Parameter(Mandatory)][string]$EditorCmd,
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][string]$RemotePath,
+        [Parameter(Mandatory)][string]$Uri,
+        [switch]$NewWindow
+    )
+    $path = $RemotePath.TrimEnd('/')
+    $remoteArg = "ssh-remote+${Alias}"
+    $strategies = @()
+
+    if ($EditorCmd -eq 'cursor') {
+        $profileDir = Get-CursorRemoteProfileDir
+        $common = @('--user-data-dir', $profileDir)
+        if ($NewWindow) { $common += '--new-window' }
+        $strategies += [PSCustomObject]@{
+            Name = 'folder-uri-classic'
+            Args = $common + @('--classic', '--folder-uri', $Uri)
+        }
+        $strategies += [PSCustomObject]@{
+            Name = 'folder-uri'
+            Args = $common + @('--folder-uri', $Uri)
+        }
+        $strategies += [PSCustomObject]@{
+            Name = 'remote-classic'
+            Args = $common + @('--classic', '--remote', $remoteArg, $path)
+        }
+        $strategies += [PSCustomObject]@{
+            Name = 'remote'
+            Args = $common + @('--remote', $remoteArg, $path)
+        }
+        return $strategies
+    }
+
+    $common = @()
+    if ($NewWindow) { $common += '--new-window' }
+    $strategies += [PSCustomObject]@{
+        Name = 'folder-uri'
+        Args = $common + @('--folder-uri', $Uri)
+    }
+    $strategies += [PSCustomObject]@{
+        Name = 'remote'
+        Args = $common + @('--remote', $remoteArg, $path)
+    }
+    return $strategies
+}
+
+function Format-EditorProcessCommandLine {
+    param(
+        [string]$CommandLine,
+        [int]$MaxLen = 220
+    )
+    if (-not $CommandLine) { return '' }
+    if ($CommandLine.Length -le $MaxLen) { return $CommandLine }
+    return $CommandLine.Substring(0, $MaxLen) + '...'
+}
+
+function Get-RemoteEditorProcessSnapshot {
+    param(
+        [string]$EditorCmd = 'cursor',
+        [string]$Alias = '',
+        [string]$RemotePath = ''
+    )
+    $lines = @()
+    $lines += "snapshot_ts=$(Get-Date -Format 'o')"
+    $lines += "elevated=$(Test-IsElevatedShell) interactive_user=$(Get-InteractiveWindowsUser)"
+    if ($Alias -and $RemotePath) {
+        $lines += "target_alias=$Alias target_path=$RemotePath target_uri=$(Get-RemoteFolderUri -Alias $Alias -RemotePath $RemotePath)"
+        $lines += "detect_on_folder=$(Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)"
+        if ($EditorCmd -eq 'cursor') {
+            $lines += "detect_agent_home=$(Test-RemoteEditorInAgentHome -RemotePath $RemotePath)"
+        }
+        $lines += "detect_window_open=$(Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)"
+    }
+
+    if ($EditorCmd -eq 'cursor') {
+        $profileDir = Get-CursorRemoteProfileDir
+        $lines += "profile_dir=$profileDir profile_exists=$(Test-Path $profileDir)"
+        $settingsPath = Join-Path $profileDir 'User\settings.json'
+        $lines += "profile_settings_exists=$(Test-Path $settingsPath)"
+        $lines += (Get-CursorProfileStorageDiag)
+    }
+
+    $exeName = if ($EditorCmd -eq 'cursor') { 'Cursor.exe' } else { 'Code.exe' }
+    $all = @(Get-CimInstance Win32_Process -Filter "Name='$exeName'" -ErrorAction SilentlyContinue)
+    $lines += "${exeName}_total=$($all.Count)"
+    if ($EditorCmd -eq 'cursor') {
+        $profileDir = Get-CursorRemoteProfileDir
+        $profileCount = @($all | Where-Object { $_.CommandLine -and ($_.CommandLine -match [regex]::Escape($profileDir)) }).Count
+        $personalCount = $all.Count - $profileCount
+        $lines += "cursor_profile_procs=$profileCount cursor_personal_procs=$personalCount"
+    }
+
+    $idx = 0
+    foreach ($p in $all) {
+        $idx++
+        $cmd = $p.CommandLine
+        if (-not $cmd) { $cmd = '' }
+        $procType = 'unknown'
+        if ($cmd -match '--type=renderer') { $procType = 'renderer' }
+        elseif ($cmd -match '--type=gpu-process') { $procType = 'gpu' }
+        elseif ($cmd -match '--type=utility') { $procType = 'utility' }
+        elseif ($cmd -notmatch '--type=') { $procType = 'main' }
+        $isMain = ($procType -eq 'main')
+        $isProfile = $false
+        $hasFolderUri = $false
+        $hasRemote = $false
+        $hasClassic = $false
+        $hasNewWindow = $false
+        $hasUserData = $false
+        $pathMatch = $false
+        $aliasMatch = $false
+        if ($EditorCmd -eq 'cursor') {
+            $profileDir = Get-CursorRemoteProfileDir
+            if ($profileDir -and $cmd -match [regex]::Escape($profileDir)) { $isProfile = $true }
+        }
+        if ($cmd -match '--folder-uri') { $hasFolderUri = $true }
+        if ($cmd -match '--remote') { $hasRemote = $true }
+        if ($cmd -match '--classic') { $hasClassic = $true }
+        if ($cmd -match '--new-window') { $hasNewWindow = $true }
+        if ($cmd -match '--user-data-dir') { $hasUserData = $true }
+        if ($RemotePath -and $cmd -match [regex]::Escape($RemotePath.TrimEnd('/'))) { $pathMatch = $true }
+        if ($Alias -and $cmd -match [regex]::Escape("ssh-remote+${Alias}")) { $aliasMatch = $true }
+        $title = ''
+        $hwnd = 0
+        if ($isMain) {
+            try {
+                $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
+                $title = $wp.MainWindowTitle
+                if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { $hwnd = 1 }
+            } catch { }
+        }
+        $lines += (
+            "${exeName}#$idx pid=$($p.ProcessId) parent=$($p.ParentProcessId) type=$procType main=$isMain profile=$isProfile hwnd=$hwnd " +
+            "folder_uri=$hasFolderUri remote=$hasRemote classic=$hasClassic new_window=$hasNewWindow " +
+            "user_data=$hasUserData alias_match=$aliasMatch path_match=$pathMatch " +
+            "title=$title cmd=$(Format-EditorProcessCommandLine -CommandLine $cmd)"
+        )
+    }
+    return ($lines -join ' | ')
+}
+
+function Write-EditorLaunchSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string]$EditorCmd,
+        [string]$Alias = '',
+        [string]$RemotePath = ''
+    )
+    Write-EditorLaunchLog "SNAPSHOT[$Label] $(Get-RemoteEditorProcessSnapshot -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)" 'DEBUG'
+}
+
+function Stop-CursorServerProfileTreeIfNeeded {
+    param(
+        [Parameter(Mandatory)][string]$Reason,
+        [switch]$Force
+    )
+    $procs = @(Get-CursorProfileProcesses)
+    if ($procs.Count -eq 0) {
+        Write-EditorLaunchLog "LAUNCH_KILL_SKIP: reason=$Reason profile_count=0" 'DEBUG'
+        return 0
+    }
+    if (-not $Force) {
+        Write-EditorLaunchLog "LAUNCH_KILL_SKIP: reason=$Reason profile_count=$($procs.Count) force_not_set" 'DEBUG'
+        return 0
+    }
+    Write-EditorLaunchLog "LAUNCH_KILL: reason=$Reason profile_count=$($procs.Count) elevated=$(Test-IsElevatedShell)" 'INFO'
+    Stop-CursorServerProfileTree
+    Start-Sleep -Milliseconds 400
+    $remaining = @(Get-CursorProfileProcesses).Count
+    Write-EditorLaunchLog "LAUNCH_KILL_DONE: remaining_profile_procs=$remaining" 'INFO'
+    return $procs.Count
+}
+
+function Get-RemoteEditorDetectionDiag {
+    param(
+        [Parameter(Mandatory)][string]$EditorCmd,
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][string]$RemotePath
+    )
+    $matched = @(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)
+    $visible = 0
+    $hwndZero = 0
+    foreach ($p in $matched) {
+        try {
+            $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
+            if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { $visible++ } else { $hwndZero++ }
+        } catch { $hwndZero++ }
+    }
+    $profileCount = 0
+    $profileVisible = 0
+    if ($EditorCmd -eq 'cursor') {
+        foreach ($p in @(Get-CursorProfileProcesses)) {
+            $profileCount++
+            try {
+                $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
+                if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { $profileVisible++ }
+            } catch { }
+        }
+    }
+    $pathTail = $RemotePath.TrimEnd('/')
+    if ($pathTail.Length -gt 48) { $pathTail = '...' + $pathTail.Substring($pathTail.Length - 45) }
+    return (
+        "matched=$($matched.Count) visible=$visible hwnd0=$hwndZero " +
+        "profile=$profileCount profile_visible=$profileVisible path=$pathTail"
+    )
 }
 
 function Stop-RemoteEditor {
@@ -497,19 +1019,102 @@ function Launch-RemoteEditor {
     )
 
     $cli = Get-EditorNativeExe $EditorCmd
-    if (-not $cli) { return $false }
-
-    $uri = "vscode-remote://ssh-remote+${Alias}${RemotePath}"
-    $argList = @('--reuse-window', '--folder-uri', $uri)
-    if ($EditorCmd -eq 'cursor') {
-        Initialize-CursorServerProfile
-        $argList = @('--user-data-dir', (Get-CursorRemoteProfileDir)) + $argList
-        if (Test-IsElevatedShell -and (Get-CursorProfileProcesses).Count -gt 0) {
-            Stop-CursorServerProfileTree
-        }
-    }
-    if (-not (Start-ProcessAsInteractiveUser -FilePath $cli -ArgumentList $argList)) {
+    if (-not $cli) {
+        Write-EditorLaunchLog 'LAUNCH: editor executable not found' 'ERROR'
         return $false
     }
+
+    $uri = Get-RemoteFolderUri -Alias $Alias -RemotePath $RemotePath
+    $onFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
+    $agentHome = if ($EditorCmd -eq 'cursor') { Test-RemoteEditorInAgentHome -RemotePath $RemotePath } else { $false }
+    $hasProfileWindow = if ($EditorCmd -eq 'cursor') { (Get-CursorMainProfileProcesses).Count -gt 0 } else { $false }
+    $profileProcCount = if ($EditorCmd -eq 'cursor') { (Get-CursorProfileProcesses).Count } else { 0 }
+
+    Write-EditorLaunchLog (
+        "LAUNCH_BEGIN: exe=$cli editor=$EditorCmd alias=$Alias path=$RemotePath uri=$uri " +
+        "on_folder=$onFolder agent_home=$agentHome profile_main=$hasProfileWindow profile_all=$profileProcCount " +
+        "elevated=$(Test-IsElevatedShell)"
+    ) 'INFO'
+    Write-EditorLaunchVerboseState -Label 'BEGIN' -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
+
+    if ($onFolder -and -not $agentHome) {
+        Write-EditorLaunchLog (
+            "EDITOR_DECISION: skip_launch reason=already_on_folder on_folder=$onFolder agent_home=$agentHome " +
+            "profile_main=$hasProfileWindow profile_all=$profileProcCount"
+        ) 'INFO'
+        Write-EditorLaunchLog 'LAUNCH_SKIP: already on correct folder - keeping Cursor open' 'INFO'
+        Write-EditorLaunchVerboseState -Label 'SKIP_ALREADY_ON_FOLDER' -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
+        return $true
+    }
+
+    $useNewWindow = ($agentHome -or $hasProfileWindow)
+    Write-EditorLaunchLog "LAUNCH_PLAN: use_new_window=$useNewWindow reason=$(if ($agentHome) { 'agent_home' } elseif ($hasProfileWindow) { 'profile_open' } else { 'cold_start' })" 'INFO'
+
+    if ($EditorCmd -eq 'cursor') {
+        Initialize-CursorServerProfile
+    }
+
+    $needKill = ($EditorCmd -eq 'cursor') -and ($agentHome -or $useNewWindow) -and ($profileProcCount -gt 0)
+    if ($needKill) {
+        $null = Stop-CursorServerProfileTreeIfNeeded -Reason 'pre_launch_agent_or_new_window' -Force
+    }
+
+    $strategies = @(Get-RemoteEditorLaunchStrategies -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -Uri $uri -NewWindow:$useNewWindow)
+    Write-EditorLaunchLog "LAUNCH_STRATEGIES: count=$($strategies.Count) names=$($strategies.Name -join ',')" 'INFO'
+
+    $attempt = 0
+    $anyStarted = $false
+    $script:LastLaunchAttempts = @()
+    foreach ($strategy in $strategies) {
+        $attempt++
+        if ($attempt -gt 1 -and $EditorCmd -eq 'cursor' -and (Get-CursorProfileProcesses).Count -gt 0) {
+            $null = Stop-CursorServerProfileTreeIfNeeded -Reason "retry_before_$($strategy.Name)" -Force
+        }
+
+        Write-EditorLaunchSnapshot -Label "PRE_ATTEMPT_${attempt}_$($strategy.Name)" -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
+        Write-EditorLaunchLog "LAUNCH_ATTEMPT: n=$attempt strategy=$($strategy.Name) args=$(Format-ProcessArgumentString -ArgumentList $strategy.Args)" 'INFO'
+
+        if (-not (Start-ProcessAsInteractiveUser -FilePath $cli -ArgumentList $strategy.Args)) {
+            Write-EditorLaunchLog "LAUNCH_FAIL_START: strategy=$($strategy.Name) Start-ProcessAsInteractiveUser returned false" 'ERROR'
+            continue
+        }
+        $anyStarted = $true
+
+        $afterFolder = $false
+        $afterAgent = $true
+        foreach ($waitSec in @(1, 2, 3)) {
+            Start-Sleep -Seconds 1
+            $afterFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
+            $afterAgent = if ($EditorCmd -eq 'cursor') { Test-RemoteEditorInAgentHome -RemotePath $RemotePath } else { $false }
+            Write-EditorLaunchLog (
+                "LAUNCH_POLL: strategy=$($strategy.Name) elapsed=${waitSec}s on_folder=$afterFolder agent_home=$afterAgent"
+            ) 'DEBUG'
+            Write-EditorLaunchVerboseState -Label "POLL_${waitSec}s_$($strategy.Name)" -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot:($waitSec -eq 3)
+            if ($afterFolder -and -not $afterAgent) { break }
+        }
+
+        Write-EditorLaunchLog (
+            "LAUNCH_ATTEMPT_RESULT: n=$attempt strategy=$($strategy.Name) on_folder=$afterFolder agent_home=$afterAgent " +
+            "$(Get-RemoteEditorLaunchDiag -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)"
+        ) 'INFO'
+        $script:LastLaunchAttempts += "${attempt}:$($strategy.Name):folder=$afterFolder:agent=$afterAgent"
+        Write-EditorLaunchVerboseState -Label "RESULT_$($strategy.Name)" -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
+
+        if ($afterFolder -and -not $afterAgent) {
+            Write-EditorLaunchLog "LAUNCH_OK: strategy=$($strategy.Name) attempt=$attempt" 'INFO'
+            return $true
+        }
+
+        Write-EditorLaunchLog "LAUNCH_RETRY: strategy=$($strategy.Name) did not reach target folder - next strategy" 'WARN'
+    }
+
+    Write-EditorLaunchVerboseState -Label 'EXHAUSTED' -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
+    if (-not $anyStarted) {
+        Write-EditorLaunchLog 'LAUNCH_FAIL: all strategies failed to start process' 'ERROR'
+        return $false
+    }
+
+    Write-EditorLaunchLog 'LAUNCH_WARN: process started but folder workspace not detected - press O to retry' 'WARN'
     return $true
 }
+

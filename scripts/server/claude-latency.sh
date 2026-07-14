@@ -72,7 +72,7 @@ while i < len(events):
         i += 1
 
 if not latencies:
-    print("No data yet — needs at least one PROMPT+IDLE pair after deploy.")
+    print("No data yet - needs at least one PROMPT+IDLE pair after deploy.")
     sys.exit(0)
 
 print(f"{'USER':<15} {'COUNT':>5} {'MIN':>6} {'AVG':>6} {'MAX':>7}   RECENT")
@@ -97,7 +97,7 @@ if [ "$WATCH" = "1" ]; then
         clear
         analyze
         echo ""
-        echo "(refreshing every 15s — Ctrl+C to stop)"
+        echo "(refreshing every 15s - Ctrl+C to stop)"
         sleep 15
     done
 else

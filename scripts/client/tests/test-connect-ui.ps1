@@ -1,4 +1,4 @@
-# test-connect-ui.ps1 — layout helper tests
+# test-connect-ui.ps1 - layout helper tests
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_paths.ps1')
 . (Join-Path $ClientRoot 'git-mode.ps1')

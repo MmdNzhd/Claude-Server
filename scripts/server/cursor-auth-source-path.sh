@@ -1,5 +1,5 @@
 #!/bin/bash
-# cursor-auth-source-path — print ~/relative path to globalStorage with Cursor tokens
+# cursor-auth-source-path - print ~/relative path to globalStorage with Cursor tokens
 set -euo pipefail
 
 LIB="/usr/local/lib/claude-server/cursor-auth-lib.py"

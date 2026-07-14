@@ -30,13 +30,13 @@ fi
 SINCE=$(date -d "-${DAYS} days" -Iseconds 2>/dev/null || date -v-${DAYS}d -Iseconds 2>/dev/null)
 
 echo ""
-echo -e "${BOLD}=== Claude Usage Report — last ${DAYS} days ===${NC}"
+echo -e "${BOLD}=== Claude Usage Report - last ${DAYS} days ===${NC}"
 echo -e "${GRAY}Log: $LOG_FILE${NC}"
 echo ""
 
 # --- Summary table ---
 echo -e "${BOLD}  User             Prompts  Sessions  Last active${NC}"
-echo "  ──────────────────────────────────────────────────────"
+echo "  ------------------------------------------------------"
 
 jq -r --arg since "$SINCE" --arg user "$FILTER_USER" '
     select(.timestamp >= $since) |

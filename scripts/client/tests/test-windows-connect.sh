@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-windows-connect.sh — static checks for Windows connect parity with Mac
+# test-windows-connect.sh - static checks for Windows connect parity with Mac
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"

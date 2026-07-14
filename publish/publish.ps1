@@ -31,13 +31,18 @@ $SepidIp = '192.168.250.70'
 $ClientFiles = @(
     @{ Src = "scripts\client\windows\connect.bat";       Dst = "windows\connect.bat";       PatchIp = $false }
     @{ Src = "scripts\client\windows\connect-version.txt"; Dst = "windows\connect-version.txt"; PatchIp = $false }
+    @{ Src = "scripts\client\windows\connect-update.ps1"; Dst = "windows\connect-update.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\windows\connect.ps1";       Dst = "windows\connect.ps1";       PatchIp = $true  }
     @{ Src = "scripts\client\windows\connect-rider.bat"; Dst = "windows\connect-rider.bat"; PatchIp = $false }
     @{ Src = "scripts\client\editor-launch.ps1";         Dst = "windows\editor-launch.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\git-mode.ps1";              Dst = "windows\git-mode.ps1";      PatchIp = $false }
     @{ Src = "scripts\client\cursor-auth-laptop.ps1";    Dst = "windows\cursor-auth-laptop.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\connect-ui.ps1";            Dst = "windows\connect-ui.ps1";            PatchIp = $false }
+    # connect-diagnostic.ps1: dot-sourced by connect.ps1; user asked for single-run verdict in connect.log
+    @{ Src = "scripts\client\connect-diagnostic.ps1";    Dst = "windows\connect-diagnostic.ps1";  PatchIp = $false }
     @{ Src = "scripts\client\mac\connect.sh";            Dst = "mac\connect.sh";            PatchIp = $true  }
+    @{ Src = "scripts\client\mac\connect-update.sh";     Dst = "mac\connect-update.sh";     PatchIp = $false }
+    @{ Src = "scripts\client\windows\connect-version.txt"; Dst = "mac\connect-version.txt"; PatchIp = $false }
     @{ Src = "scripts\client\git-mode.sh";               Dst = "mac\git-mode.sh";           PatchIp = $false }
     @{ Src = "scripts\client\connect-ui.sh";             Dst = "mac\connect-ui.sh";         PatchIp = $false }
     @{ Src = "scripts\client\editor-launch.sh";          Dst = "mac\editor-launch.sh";      PatchIp = $false }
@@ -104,7 +109,11 @@ function Install-PublishedFile {
         }
         Write-Ok "$(Split-Path $DstAbs -Leaf)  [IP: $FromIp -> $ToIp]"
     } else {
-        Copy-Item $src $DstAbs -Force
+        $bytes = [System.IO.File]::ReadAllBytes($src)
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            $bytes = $bytes[3..($bytes.Length - 1)]
+        }
+        [System.IO.File]::WriteAllBytes($DstAbs, $bytes)
         Write-Ok (Split-Path $DstAbs -Leaf)
     }
 }

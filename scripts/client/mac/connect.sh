@@ -5,7 +5,16 @@
 
 set -uo pipefail
 
-CONNECT_VERSION='20260705.4'
+_update_script="$(cd "$(dirname "$0")" && pwd)/connect-update.sh"
+if [ -f "$_update_script" ]; then
+    bash "$_update_script"
+    _urc=$?
+    if [ "$_urc" -eq 2 ]; then
+        exec bash "$0" "$@"
+    fi
+fi
+
+CONNECT_VERSION='20260714.2'
 CONNECT_PORT_BASE=20000
 
 SERVER_IP="192.168.210.240"
@@ -15,16 +24,65 @@ CFG="$CFG_DIR/connect.conf"
 CM='$HOME/.local/bin/claude-mount'
 
 die()       { echo ""; echo "  [X] $*"; echo ""; exit 1; }
-warn()      { printf '  [!] %s\n' "$*"; }
+warn()      { printf '  [!] %s\n' "$*"; if declare -F connect_log >/dev/null 2>&1; then connect_log "WARN: $*" 'WARN'; fi; }
 step() {
     local s="    $*"
+    CURRENT_STEP_NAME="$*"
+    CURRENT_STEP_START=$SECONDS
+    if declare -F connect_log >/dev/null 2>&1; then connect_log "STEP begin: $*"; fi
     printf '%s' "$s"
     local i; for ((i=${#s}; i<46; i++)); do printf '.'; done
 }
-step_ok()   { if [ -n "${1:-}" ]; then printf ' %s\n' "$*"; else printf ' ok\n'; fi; }
-step_fail() { printf ' failed\n'; [ -n "${1:-}" ] && printf '      -> %s\n' "$*"; }
+step_ok()   {
+    local ms=0 detail="${1:-ok}"
+    [ -n "${CURRENT_STEP_START:-}" ] && ms=$(( SECONDS - CURRENT_STEP_START ))
+    if declare -F connect_log >/dev/null 2>&1 && [ -n "${CURRENT_STEP_NAME:-}" ]; then
+        connect_log "STEP end: $CURRENT_STEP_NAME ok ms=$ms detail=$detail"
+    fi
+    if [ -n "${1:-}" ]; then printf ' %s\n' "$*"; else printf ' ok\n'; fi
+}
+step_fail() {
+    local ms=0 detail="${1:-failed}"
+    [ -n "${CURRENT_STEP_START:-}" ] && ms=$(( SECONDS - CURRENT_STEP_START ))
+    if declare -F connect_log >/dev/null 2>&1 && [ -n "${CURRENT_STEP_NAME:-}" ]; then
+        connect_log "STEP end: $CURRENT_STEP_NAME failed ms=$ms detail=$detail" 'WARN'
+    fi
+    printf ' failed\n'; [ -n "${1:-}" ] && printf '      -> %s\n' "$*"
+}
 
-sshx() { ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "$ALIAS" "$@"; }
+sshx() {
+    local orig_cmd="$*" remote_cmd="$*" ec=0 ms=0 trunc_cmd out esc
+    if ! printf '%s' "$remote_cmd" | grep -qE '^[[:space:]]*timeout[[:space:]]'; then
+        esc="${remote_cmd//\'/\'\\\'\'}"
+        remote_cmd="timeout 45 bash -lc '$esc'"
+    fi
+    if [ "${#orig_cmd}" -gt 200 ]; then trunc_cmd="${orig_cmd:0:200}..."; else trunc_cmd="$orig_cmd"; fi
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "SSH_BEGIN cmd=$trunc_cmd"
+    fi
+    local sw_start="$SECONDS"
+    out="$(ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=30 \
+        -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "$ALIAS" "$remote_cmd" 2>&1)" || ec=$?
+    ms=$(( (SECONDS - sw_start) * 1000 ))
+    if [ "$ec" -eq 124 ]; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "SSH_TIMEOUT exit=124 cmd=$trunc_cmd - retrying once" 'ERROR'
+        fi
+        sw_start="$SECONDS"
+        out="$(ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=30 \
+            -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "$ALIAS" "$remote_cmd" 2>&1)" || ec=$?
+        ms=$(( (SECONDS - sw_start) * 1000 ))
+    fi
+    local trunc_out
+    trunc_out="$(printf '%s' "$out" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -z "$trunc_out" ] && trunc_out='(empty)'
+    [ "${#trunc_out}" -gt 300 ] && trunc_out="${trunc_out:0:300}..."
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "SSH_END exit=$ec ms=$ms out=$trunc_out"
+    fi
+    printf '%s' "$out"
+    return "$ec"
+}
 
 _tunnel_alive() { kill -0 "$1" 2>/dev/null && ps -p "$1" -o state= 2>/dev/null | grep -qv 'Z'; }
 
@@ -90,6 +148,7 @@ _EDITOR_SH="$SCRIPT_DIR/editor-launch.sh"
 . "$_EDITOR_SH"
 
 clear
+init_connect_log "$SCRIPT_DIR" "$CONNECT_VERSION"
 ui_connect_header "$ALIAS" "$SERVER_IP" "$CONNECT_VERSION"
 ui_bootstrap_hint "$CFG_DIR"
 ui_set_title "Claude Connect"
@@ -135,7 +194,7 @@ EOF
 sanitize_ssh_alias_config
 step_ok "$REMOTE_USER"
 
-# connect ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â retry until reachable, 5s between attempts
+# connect - retry until reachable, 5s between attempts
 connected=""
 needs_key=""
 for attempt in $(seq 1 10); do
@@ -213,7 +272,7 @@ printf '    \033[0;32mReady\033[0m\n'
 echo ""
 ui_mark_bootstrap_done "$CFG_DIR"
 
-# helpers ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â use 'list' not 'status' (status is slow/hangs on stale mounts)
+# helpers (dot-source connect-ui.sh, git-mode.sh)
 load_mounts() {
     sshx "$CM list 2>/dev/null" 2>/dev/null || true
 }
@@ -400,6 +459,9 @@ while [ "$exit_requested" -eq 0 ]; do
     fi
 
     _editor_opened=0
+    RECOVERY_GENERATION=0
+    POST_TUNNEL_RECOVERY=0
+    SESSION_LOOP_ITER=0
     CURSOR_AUTH_NEEDS_BOOTSTRAP=0
     main_continue=1
 
@@ -422,6 +484,10 @@ while [ "$exit_requested" -eq 0 ]; do
         session_done=0
         while [ "$session_done" -eq 0 ]; do
             already_down=0
+            SESSION_LOOP_ITER=$(( SESSION_LOOP_ITER + 1 ))
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "SESSION_LOOP begin iter=$SESSION_LOOP_ITER recovery_gen=${RECOVERY_GENERATION:-0} post_recovery=${POST_TUNNEL_RECOVERY:-0} force_auth=${CURSOR_AUTH_FORCE:-0}"
+            fi
 
             step "Checking SSH service"
             if laptop_ssh_ready; then
@@ -543,6 +609,9 @@ while [ "$exit_requested" -eq 0 ]; do
 
             if [ $mount_ok -eq 0 ]; then
                 step_fail "$mount_out"
+                if declare -F complete_post_tunnel_recovery >/dev/null 2>&1; then
+                    complete_post_tunnel_recovery 0 'mount_failed'
+                fi
                 if echo "$mount_out" | grep -qi "path not found\|no such file"; then
                     warn "Fix the project path: press e then edit the project"
                 elif echo "$mount_out" | grep -qi "not running\|refused"; then
@@ -575,32 +644,55 @@ while [ "$exit_requested" -eq 0 ]; do
             fi
             ACTIVE_PROJECT_ID="$go_id"
             CURSOR_AUTH_NEEDS_BOOTSTRAP=0
-            _cursor_auth_ok=0
+            _last_auth_detail='n/a'
             if [ "$EDITOR_CMD" = "cursor" ] && declare -F sync_cursor_golden_auth_status >/dev/null 2>&1; then
                 _cursor_gs="$(get_cursor_remote_profile_dir)/User/globalStorage/state.vscdb"
-                if [ -f "$_cursor_gs" ] && local_cursor_auth_complete "$_cursor_gs"; then
-                    _cursor_auth_ok=1
+                _auth_needs_refresh=0
+                if declare -F cursor_auth_needs_refresh >/dev/null 2>&1; then
+                    cursor_auth_needs_refresh "$_cursor_gs" && _auth_needs_refresh=1
                 fi
-            fi
-
-            if [ "$_editor_opened" -eq 0 ]; then
-                if [ "$_cursor_auth_ok" -eq 0 ] && [ "$EDITOR_CMD" = "cursor" ] && declare -F sync_cursor_golden_auth_status >/dev/null 2>&1; then
+                if declare -F test_personal_cursor_dominant >/dev/null 2>&1 && test_personal_cursor_dominant; then
+                    warn 'Personal Cursor is open - close it or use [Claude Server] profile windows'
+                    declare -F connect_log >/dev/null 2>&1 && connect_log 'AUTH_WARN personal_cursor_dominant' 'WARN'
+                fi
+                _skip_auth=0
+                if [ "${CURSOR_AUTH_FORCE:-0}" != "1" ] && [ "${POST_TUNNEL_RECOVERY:-0}" != "1" ] && [ "$_auth_needs_refresh" -eq 0 ]; then
+                    if [ "$_editor_opened" -eq 1 ] && [ -f "$_cursor_gs" ] && local_cursor_auth_complete "$_cursor_gs"; then
+                        _skip_auth=1
+                    fi
+                fi
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "AUTH_DECISION skip=$_skip_auth force=${CURSOR_AUTH_FORCE:-0} post_recovery=${POST_TUNNEL_RECOVERY:-0} editor_opened=$_editor_opened needs_refresh=$_auth_needs_refresh"
+                fi
+                if [ "$_skip_auth" -eq 0 ]; then
                     step "Syncing Cursor auth"
                     sync_cursor_golden_auth_status
                     case "$CURSOR_AUTH_SYNC_RESULT" in
-                        ok) step_ok; date -u +%Y-%m-%dT%H:%M:%SZ > "$CFG_DIR/cursor-auth.ok" 2>/dev/null || true ;;
+                        ok) step_ok; _last_auth_detail='ok'; date -u +%Y-%m-%dT%H:%M:%SZ > "$CFG_DIR/cursor-auth.ok" 2>/dev/null || true ;;
                         tokens_only)
                             step_ok "tokens only"
-                            CURSOR_AUTH_NEEDS_BOOTSTRAP=1
-                            warn 'Chat needs server account profile - sign in inside [Claude Server] only, then press P'
+                            _last_auth_detail='tokens only'
+                            warn 'Partial auth on laptop - reconnect; server auth is managed on server only'
                             ;;
-                        skipped) step_ok "skipped" ;;
-                        *) step_fail "could not merge server auth"; CURSOR_AUTH_NEEDS_BOOTSTRAP=1 ;;
+                        skipped) step_ok "skipped"; _last_auth_detail='skipped' ;;
+                        *) step_fail "could not merge server auth"
+                            _last_auth_detail='merge failed'
+                            warn 'Server auth OK - laptop could not save locally (sqlite3 required or reconnect)' ;;
                     esac
                     repair_cursor_composer_workspace_bindings "$ALIAS" "$go_path" || true
-                elif [ "$EDITOR_CMD" = "cursor" ] && declare -F repair_cursor_composer_workspace_bindings >/dev/null 2>&1; then
-                    repair_cursor_composer_workspace_bindings "$ALIAS" "$go_path" &
+                elif [ "$_editor_opened" -eq 1 ]; then
+                    step "Syncing Cursor auth"
+                    step_ok "skipped (editor open)"
+                    _last_auth_detail='skipped editor open'
                 fi
+            fi
+
+            if [ "${POST_TUNNEL_RECOVERY:-0}" = "1" ]; then
+                warn 'Recovery complete - press O if Cursor is not on the project folder'
+                declare -F connect_log >/dev/null 2>&1 && connect_log 'RECOVERY: user_warn press_o_if_cursor_not_on_folder'
+            fi
+
+            if [ "$_editor_opened" -eq 0 ]; then
                 step "Opening $EDITOR_NAME"
                 if [ "$EDITOR_CMD" = "cursor" ]; then
                     init_cursor_server_profile
@@ -623,15 +715,14 @@ while [ "$exit_requested" -eq 0 ]; do
                     _ec=$?
                     step_fail "$EDITOR_NAME failed to launch (exit $_ec)"
                 fi
-                if [ "$_cursor_auth_ok" -eq 1 ] && [ "$EDITOR_CMD" = "cursor" ]; then
-                    step "Syncing Cursor auth"
-                    step_ok "already ok"
-                fi
                 echo ""
                 printf "    \033[0;90mRun 'claude' in the %s terminal.\033[0m\n" "$EDITOR_NAME"
             fi
+
+            if declare -F complete_post_tunnel_recovery >/dev/null 2>&1; then
+                complete_post_tunnel_recovery 1 "$_last_auth_detail"
+            fi
             _session_extras=()
-            [ "$CURSOR_AUTH_NEEDS_BOOTSTRAP" -eq 1 ] && _session_extras+=('P = push server login to golden (after sign-in in [Claude Server] only)')
             if [ "$EDITOR_CMD" = "cursor" ]; then
                 _session_extras+=('Before Q: File > Exit Cursor so Agent chat history saves')
             else
@@ -650,6 +741,9 @@ while [ "$exit_requested" -eq 0 ]; do
             _got_key=0
             _status_at=0
             while _tunnel_alive "$bg_pid"; do
+                if declare -F sync_session_tunnel_forward >/dev/null 2>&1; then
+                    sync_session_tunnel_forward "$bg_pid" || break
+                fi
                 if [ "$_editor_opened" -eq 1 ] && declare -F remote_editor_running >/dev/null 2>&1; then
                     if remote_editor_running "$EDITOR_CMD" "$ALIAS" "$go_path"; then
                         _editor_opened=1
@@ -670,7 +764,6 @@ while [ "$exit_requested" -eq 0 ]; do
                     [ "$_key_lower" = "r" ] && _action="r"
                     [ "$_key_lower" = "g" ] && _action="g"
                     [ "$_key_lower" = "o" ] && _action="o"
-                    [ "$_key_lower" = "p" ] && [ "$CURSOR_AUTH_NEEDS_BOOTSTRAP" -eq 1 ] && _action="p"
                     _got_key=1; break
                 fi
             done
@@ -700,29 +793,28 @@ while [ "$exit_requested" -eq 0 ]; do
                 continue
             fi
 
-            if [ "$_action" = "p" ]; then
-                echo ""
-                printf '    \033[0;36mPushing golden from [Claude Server] profile...\033[0m\n'
-                _pmsg="$(push_cursor_golden_from_server_profile)"
-                if [ $? -eq 0 ]; then
-                    printf '    \033[0;32m%s\033[0m\n' "$_pmsg"
-                    CURSOR_AUTH_NEEDS_BOOTSTRAP=0
-                else
-                    printf '    \033[0;33m%s\033[0m\n' "$_pmsg"
-                fi
-                echo ""
-                continue
-            fi
-
             if [ "$_action" = "r" ]; then
                 if [ "$_got_key" -eq 1 ]; then
+                    if declare -F begin_connect_recovery >/dev/null 2>&1; then
+                        begin_connect_recovery manual "$go_id" "$_editor_opened"
+                    fi
+                    _editor_opened=0
+                    LAPTOP_SSH_VERIFIED=0
                     already_down=0
                     echo ""
                     printf '    Reconnecting...\n'
                     echo ""
                     continue
                 fi
+                if declare -F begin_connect_recovery >/dev/null 2>&1; then
+                    begin_connect_recovery auto "$go_id" "$_editor_opened"
+                fi
+                _editor_opened=0
+                export CURSOR_AUTH_FORCE=1
                 printf '    Connection dropped - recovering...\n'
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log 'TUNNEL: recovering session (down mount, restart tunnel)' 'WARN'
+                fi
                 clear_session_mount "$go_id" "" "$ALIAS" "$go_path" 1
                 [ -n "$bg_pid" ] && kill "$bg_pid" 2>/dev/null || true
                 bg_pid=""

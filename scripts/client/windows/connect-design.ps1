@@ -336,7 +336,7 @@ try {
             Start-Sleep -Milliseconds 500
         }
 
-        # Tunnel died on its own — always check kick regardless of whether a key was pressed
+        # Tunnel died on its own - always check kick regardless of whether a key was pressed
         if ($bgTunnel.HasExited -and -not ($gotKey -and $action -eq 'q')) {
             $kickCheck = (SshX "designer-start check-kicked 2>&1") -join ""
             if ($kickCheck -match 'KICKED') {
@@ -356,12 +356,12 @@ try {
                 }
                 if ($rk -eq 'q') { $keepRunning = $false; $action = 'q' }
                 else { $action = 'r' }
-                # noVNC inside the existing browser auto-reconnects — do NOT open a new window
+                # noVNC inside the existing browser auto-reconnects - do NOT open a new window
             } elseif (-not $gotKey) {
-                # Unexpected drop (not kicked, no key pressed) — auto-reconnect silently
+                # Unexpected drop (not kicked, no key pressed) - auto-reconnect silently
                 Write-Host "    Connection dropped - reconnecting..." -ForegroundColor Yellow
                 $action = 'r'
-                # noVNC auto-reconnects — do NOT open a new browser window
+                # noVNC auto-reconnects - do NOT open a new browser window
             }
         }
 
@@ -370,7 +370,7 @@ try {
         }
 
         if ($action -ne 'r') { $keepRunning = $false; continue }
-        # $browserOpened is never reset — Chrome opens once and stays open.
+        # $browserOpened is never reset - Chrome opens once and stays open.
         # noVNC inside it auto-reconnects on every tunnel re-establishment.
 
         Write-Host ""

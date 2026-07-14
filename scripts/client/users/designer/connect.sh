@@ -357,7 +357,7 @@ while true; do
 
     sshx "$CM recover" 2>/dev/null || true
     if ! _git_mode_tunnel_ok; then
-        warn "Tunnel dropped during recover — reconnecting..."
+        warn "Tunnel dropped during recover - reconnecting..."
         continue
     fi
 
@@ -429,7 +429,9 @@ while true; do
     step_ok "${mount_t}s"
     ACTIVE_PROJECT_ID="$MOUNT_ID"
     clean_out="$(printf '%s' "$mount_out" | sed 's/^already mounted: //')"
-    [ -n "$clean_out" ] && printf '      -> \033[0;90m%s\033[0m\n' "$clean_out"
+    if [ -n "$clean_out" ] && ! echo "$clean_out" | grep -q '^warn:'; then
+        printf '      -> \033[0;90m%s\033[0m\n' "$clean_out"
+    fi
 
     if [ "$_novnc_opened" -eq 0 ]; then
         step "Opening noVNC"

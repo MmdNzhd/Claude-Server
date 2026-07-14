@@ -39,7 +39,7 @@ _user_grep() {
 }
 
 echo ""
-echo -e "${BOLD}=== Claude Code Server — Verify ===${NC}"
+echo -e "${BOLD}=== Claude Code Server - Verify ===${NC}"
 echo ""
 
 # --- System binaries ---
@@ -49,7 +49,7 @@ CLAUDE_VER=$(claude --version 2>/dev/null | head -1)
 [ -n "$CLAUDE_VER" ] && ok "claude: $CLAUDE_VER" || fail "claude: not in PATH"
 
 [ -L /usr/local/bin/claude-real ] && \
-    ok "claude-real → $(readlink /usr/local/bin/claude-real)" || \
+    ok "claude-real -> $(readlink /usr/local/bin/claude-real)" || \
     fail "claude-real: symlink missing"
 
 [ -f /usr/local/bin/claude ] && ok "claude wrapper: exists" || fail "claude wrapper: missing"
@@ -64,7 +64,7 @@ done
 
 [ -f /usr/local/lib/claude-mount ] && ok "claude-mount: installed" || warn "claude-mount: missing"
 if [ -f /usr/local/lib/claude-mount ]; then
-    grep -q 'GIT_MODE' /usr/local/lib/claude-mount && ok "claude-mount: GIT_MODE support" || warn "claude-mount: outdated (no GIT_MODE — run claude-server install)"
+    grep -q 'GIT_MODE' /usr/local/lib/claude-mount && ok "claude-mount: GIT_MODE support" || warn "claude-mount: outdated (no GIT_MODE - run claude-server install)"
 fi
 [ -f /etc/claude-limits.conf ] && ok "claude-limits.conf: exists" || warn "claude-limits.conf: missing (default limit=2)"
 [ -d /var/run/claude-active ] && ok "/var/run/claude-active: exists" || fail "/var/run/claude-active: missing"

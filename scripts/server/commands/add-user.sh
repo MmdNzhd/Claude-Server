@@ -58,7 +58,7 @@ if [ -f /usr/local/lib/claude-mount ]; then
     chown "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin/claude-mount"
     ok "~/.local/bin/claude-mount installed"
 else
-    warn "/usr/local/lib/claude-mount not found — run: sudo claude-server install"
+    warn "/usr/local/lib/claude-mount not found - run: sudo claude-server install"
 fi
 
 if [ -x /usr/local/bin/claude-git-setup ]; then
@@ -70,6 +70,39 @@ if [ -x /usr/local/bin/claude-automount ]; then
     install -m 755 /usr/local/bin/claude-automount "/home/$USERNAME/.local/bin/claude-automount"
     chown "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin/claude-automount"
     ok "~/.local/bin/claude-automount installed"
+fi
+if [ -x /usr/local/bin/laptop-exec ]; then
+    install -m 755 /usr/local/bin/laptop-exec "/home/$USERNAME/.local/bin/laptop-exec"
+    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin/laptop-exec"
+    ok "~/.local/bin/laptop-exec installed"
+fi
+SKILL_SRC="/usr/local/lib/claude-server/skills/laptop-exec/SKILL.md"
+if [ ! -f "$SKILL_SRC" ]; then
+    REPO_SKILL="$(cd "$(dirname "$0")/.." && pwd)/skills/laptop-exec/SKILL.md"
+    [ -f "$REPO_SKILL" ] && SKILL_SRC="$REPO_SKILL"
+fi
+if [ -f "$SKILL_SRC" ]; then
+    mkdir -p "/home/$USERNAME/.cursor/skills/laptop-exec"
+    install -m 644 "$SKILL_SRC" "/home/$USERNAME/.cursor/skills/laptop-exec/SKILL.md"
+    chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor/skills/laptop-exec"
+    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor/skills" 2>/dev/null || true
+    ok "~/.cursor/skills/laptop-exec installed"
+fi
+RULE_SRC="/usr/local/lib/claude-server/cursor-rules/laptop-exec.mdc"
+if [ ! -f "$RULE_SRC" ]; then
+    REPO_RULE="$(cd "$(dirname "$0")/.." && pwd)/cursor-rules/laptop-exec.mdc"
+    [ -f "$REPO_RULE" ] && RULE_SRC="$REPO_RULE"
+fi
+if [ -f "$RULE_SRC" ]; then
+    mkdir -p "/home/$USERNAME/.cursor/rules"
+    install -m 644 "$RULE_SRC" "/home/$USERNAME/.cursor/rules/laptop-exec.mdc"
+    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor/rules/laptop-exec.mdc"
+    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor/rules" 2>/dev/null || true
+    ok "~/.cursor/rules/laptop-exec.mdc installed (alwaysApply)"
+fi
+if [ -x /usr/local/bin/laptop-exec-setup ]; then
+    sudo -u "$USERNAME" /usr/local/bin/laptop-exec-setup --user 2>/dev/null || true
+    ok "laptop-exec-setup --user"
 fi
 
 chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin"
@@ -86,7 +119,7 @@ if [ -d "$PLUGIN_SRC/superpowers" ]; then
         ok "superpowers plugin copied"
     fi
 else
-    warn "superpowers not found in smart's cache — user must install manually"
+    warn "superpowers not found in smart's cache - user must install manually"
 fi
 ECC_SRC="/home/smart/.claude/plugins/cache/ecc/latest"
 if [ -d "$ECC_SRC" ]; then
@@ -98,12 +131,12 @@ if [ -d "$ECC_SRC" ]; then
         ok "ECC plugin copied"
     fi
 else
-    warn "ECC not found — run: git clone --depth=1 https://github.com/affaan-m/ECC /home/smart/.claude/plugins/cache/ecc/latest"
+    warn "ECC not found - run: git clone --depth=1 https://github.com/affaan-m/ECC /home/smart/.claude/plugins/cache/ecc/latest"
 fi
 chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.claude/plugins"
 
 step "4 - Claude settings + hooks"
-# NOTE: if hooks change, update this settings.json template too — see CLAUDE.md
+# NOTE: if hooks change, update this settings.json template too - see CLAUDE.md
 mkdir -p "/home/$USERNAME/.claude"
 cat > "/home/$USERNAME/.claude/settings.json" << 'SETTINGS'
 {
@@ -164,16 +197,16 @@ if [ -x /usr/local/bin/claude-auth-sync ]; then
         warn "set token then run: sudo claude-server sync-auth $USERNAME"
     fi
 else
-    warn "claude-auth-sync not installed — run: sudo claude-server install"
+    warn "claude-auth-sync not installed - run: sudo claude-server install"
 fi
 
 if [ -x /usr/local/bin/cursor-auth-sync ] && [ -f /etc/cursor-auth/golden/auth.json ]; then
     cursor-auth-sync "$USERNAME"
     ok "Cursor golden identity synced (~/.config/Cursor/)"
 elif [ -f /etc/cursor-auth/golden/auth.json ]; then
-    warn "cursor-auth-sync not installed — run: sudo claude-server install"
+    warn "cursor-auth-sync not installed - run: sudo claude-server install"
 else
-    warn "no Cursor golden auth yet — after first login run: sudo cursor-auth-export --from-user $USERNAME"
+    warn "no Cursor golden auth yet - after first login run: sudo cursor-auth-export --from-user $USERNAME"
     warn "then: sudo claude-server sync-cursor-auth $USERNAME"
 fi
 

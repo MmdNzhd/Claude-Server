@@ -1,11 +1,13 @@
-# bump-connect-version.ps1 — bump yyyyMMdd.N on each publish (dot-source from publish.ps1)
+# bump-connect-version.ps1 - bump yyyyMMdd.N on each publish (dot-source from publish.ps1)
 Set-StrictMode -Version Latest
+
+$script:MaxBumpFileBytes = 2MB
 
 function Get-RepoConnectVersion {
     param([string]$ProjectRoot)
     $ps1 = Join-Path $ProjectRoot 'scripts\client\windows\connect.ps1'
     if (-not (Test-Path $ps1)) { return '' }
-    $raw = Get-Content $ps1 -Raw
+    $raw = Get-Content $ps1 -Raw -Encoding UTF8
     if ($raw -match "ConnectVersion = '([^']+)'") { return $Matches[1] }
     return ''
 }
@@ -24,6 +26,49 @@ function Get-NextConnectVersion {
     return "${today}.1"
 }
 
+function Set-VersionInText {
+    param(
+        [string]$Text,
+        [string]$Pattern,
+        [string]$Replace
+    )
+    return [regex]::Replace($Text, $Pattern, $Replace)
+}
+
+function Write-BumpedFile {
+    param(
+        [string]$Path,
+        [string]$NewText,
+        [switch]$Utf8Bom
+    )
+    if ($Utf8Bom) {
+        $enc = New-Object System.Text.UTF8Encoding $true
+    } else {
+        $enc = New-Object System.Text.UTF8Encoding $false
+    }
+    [System.IO.File]::WriteAllText($Path, $NewText, $enc)
+}
+
+function Invoke-BumpFileReplacement {
+    param(
+        [string]$Path,
+        [string]$Pattern,
+        [string]$Replace,
+        [switch]$Utf8Bom
+    )
+    if (-not (Test-Path $Path)) { return }
+    $info = Get-Item -LiteralPath $Path
+    if ($info.Length -gt $script:MaxBumpFileBytes) {
+        Write-Warning "skip bump (file too large: $($info.Length) bytes): $Path"
+        return
+    }
+    $raw = [System.IO.File]::ReadAllText($Path)
+    $new = Set-VersionInText -Text $raw -Pattern $Pattern -Replace $Replace
+    if ($new -ne $raw) {
+        Write-BumpedFile -Path $Path -NewText $new -Utf8Bom:$Utf8Bom
+    }
+}
+
 function Set-ConnectVersionInRepo {
     param(
         [string]$ProjectRoot,
@@ -34,6 +79,7 @@ function Set-ConnectVersionInRepo {
             Path    = Join-Path $ProjectRoot 'scripts\client\windows\connect.ps1'
             Pattern = "ConnectVersion = '[^']+'"
             Replace = "ConnectVersion = '$Version'"
+            Utf8Bom = $true
         },
         @{
             Path    = Join-Path $ProjectRoot 'scripts\client\mac\connect.sh'
@@ -68,18 +114,19 @@ function Set-ConnectVersionInRepo {
     )
 
     foreach ($item in $replacements) {
-        if (-not (Test-Path $item.Path)) { continue }
-        $raw = Get-Content $item.Path -Raw
-        $new = [regex]::Replace($raw, $item.Pattern, $item.Replace)
-        if ($new -ne $raw) {
-            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-            [System.IO.File]::WriteAllText($item.Path, $new, $utf8NoBom)
+        $params = @{
+            Path    = $item.Path
+            Pattern = $item.Pattern
+            Replace = $item.Replace
         }
+        if ($item.ContainsKey('Utf8Bom') -and $item.Utf8Bom) {
+            $params.Utf8Bom = $true
+        }
+        Invoke-BumpFileReplacement @params
     }
 
     $verFile = Join-Path $ProjectRoot 'scripts\client\windows\connect-version.txt'
-    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    [System.IO.File]::WriteAllText($verFile, $Version, $utf8NoBom)
+    Write-BumpedFile -Path $verFile -NewText $Version
 }
 
 function Invoke-BumpConnectVersion {

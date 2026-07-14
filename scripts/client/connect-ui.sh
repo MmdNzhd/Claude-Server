@@ -1,4 +1,4 @@
-# connect-ui.sh — terminal UI helpers (sourced by connect.sh)
+# connect-ui.sh - terminal UI helpers (sourced by connect.sh)
 
 ui_terminal_width() {
     local c
@@ -59,7 +59,7 @@ ui_git_mode_banner() {
     label="$(ui_git_mode_label "$mode")"
     if [ "$label" = "FAST" ]; then desc='hide .git on laptop'
     else desc='full git over SSHFS'; fi
-    printf '    \033[0;90mGit mode: %s (%s) — press g to change\033[0m\n\n' "$label" "$desc"
+    printf '    \033[0;90mGit mode: %s (%s) - press g to change\033[0m\n\n' "$label" "$desc"
 }
 
 ui_trunc_label() {
@@ -197,3 +197,18 @@ ui_mark_bootstrap_done() {
     local cfg_dir="$1"
     date -u +%Y-%m-%dT%H:%M:%SZ > "$cfg_dir/bootstrap.done" 2>/dev/null || true
 }
+# Optional session log (no-op when CONNECT_LOG_PATH unset).
+connect_log() {
+    local msg="$1" level="${2:-INFO}"
+    [ -n "${CONNECT_LOG_PATH:-}" ] || return 0
+    mkdir -p "$(dirname "$CONNECT_LOG_PATH")" 2>/dev/null || true
+    printf '[%s] [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$msg" >> "$CONNECT_LOG_PATH" 2>/dev/null || true
+}
+
+init_connect_log() {
+    local script_dir="$1" version="$2"
+    CONNECT_LOG_PATH="${CONNECT_LOG_PATH:-$HOME/.config/claude-connect/logs/connect-$(date +%Y%m%d).log}"
+    connect_log "======== session start v$version user=$USER pid=$$ ========"
+    connect_log "script_dir: $script_dir connect_version: $version" 'DEBUG'
+}
+

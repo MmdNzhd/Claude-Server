@@ -1,4 +1,4 @@
-# editor-launch.sh — shared VS Code/Cursor launch (sourced by connect.sh)
+# editor-launch.sh - shared VS Code/Cursor launch (sourced by connect.sh)
 
 get_editor_pref() {
     local cfg="$1" f="$cfg/editor.conf" saved
@@ -19,9 +19,9 @@ configure_editor_pref() {
     echo ""
     printf '    \033[1;37mIDE preference\033[0m\n\n'
     printf '    \033[0;90mCurrent: %s\033[0m\n\n' "$cur"
-    printf '    \033[0;90m1  cursor — always open Cursor\033[0m\n'
-    printf '    \033[0;90m2  code   — always open VS Code\033[0m\n'
-    printf '    \033[0;90m3  ask    — pick each connect\033[0m\n\n'
+    printf '    \033[0;90m1  cursor - always open Cursor\033[0m\n'
+    printf '    \033[0;90m2  code   - always open VS Code\033[0m\n'
+    printf '    \033[0;90m3  ask    - pick each connect\033[0m\n\n'
     read -rp '    > ' choice
     case "$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')" in
         1|cursor|c) val=cursor ;;
@@ -121,4 +121,22 @@ launch_remote_editor() {
         mkdir -p "$profile/User" 2>/dev/null || true
         code --user-data-dir "$profile" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
     fi
+}
+
+test_personal_cursor_dominant() {
+    local profile_dir personal_main profile_main line cmd
+    profile_dir="$(get_cursor_server_profile_dir)"
+    personal_main=0
+    profile_main=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        cmd="${line#* }"
+        case "$cmd" in *--type=*) continue ;; esac
+        case "$cmd" in *Cursor*|*cursor*)
+            case "$cmd" in *"$profile_dir"*) profile_main=$(( profile_main + 1 )) ;;
+            *) personal_main=$(( personal_main + 1 )) ;;
+            esac
+        ;; esac
+    done < <(ps ax -o command= 2>/dev/null || true)
+    [ "$personal_main" -ge 3 ] && [ "$profile_main" -eq 0 ]
 }

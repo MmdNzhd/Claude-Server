@@ -1,5 +1,5 @@
 #!/bin/bash
-# deploy-auth.sh — install a new claude setup-token on the server (env + profile + sync + probe)
+# deploy-auth.sh - install a new claude setup-token on the server (env + profile + sync + probe)
 # Usage: sudo claude-server deploy-auth <sk-ant-oat01-...>
 #        echo 'sk-ant-oat01-...' | sudo claude-server deploy-auth
 
@@ -31,7 +31,7 @@ TOKEN="$(printf '%s' "$TOKEN" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space
 }
 
 [ -f "$LIB" ] || {
-    echo -e "${RED}claude-auth-lib.py missing — run: sudo claude-server install${NC}" >&2
+    echo -e "${RED}claude-auth-lib.py missing - run: sudo claude-server install${NC}" >&2
     exit 1
 }
 
@@ -59,7 +59,7 @@ m.log_event('SYNC_USER', detail=sys.argv[1])
         echo "  $line"
     done < <(bash "$SYNC_BIN" --all)
 else
-    echo -e "${RED}claude-auth-sync missing — run: sudo claude-server install${NC}" >&2
+    echo -e "${RED}claude-auth-sync missing - run: sudo claude-server install${NC}" >&2
     exit 1
 fi
 
@@ -68,7 +68,7 @@ echo -e "${BOLD}=== API probe (must be HTTP 2xx) ===${NC}"
 if python3 "$LIB" probe "post_deploy"; then
     echo -e "${GREEN}OK${NC}    token accepted by api.anthropic.com"
 else
-    echo -e "${RED}FAIL${NC}  token rejected by API — check /var/log/claude-auth.log" >&2
+    echo -e "${RED}FAIL${NC}  token rejected by API - check /var/log/claude-auth.log" >&2
     exit 1
 fi
 

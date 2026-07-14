@@ -1,4 +1,4 @@
-# audit-ps5-deep.ps1 — deep PS 5.1 safety audit for client scripts
+# audit-ps5-deep.ps1 - deep PS 5.1 safety audit for client scripts
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_paths.ps1')
 

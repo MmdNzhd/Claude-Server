@@ -1,0 +1,53 @@
+---
+description: SSHFS mount projects — use laptop-exec for scan/git/build; never slow find/rg on ~/mounts
+alwaysApply: true
+---
+
+# Laptop Exec — SSHFS Fast Path (auto)
+
+Code on this server often lives under `~/mounts/<project>/` — SSHFS over a reverse
+tunnel from the developer laptop. **Do not ask the user to mention laptop-exec.**
+
+## Detect SSHFS workspace
+
+Apply this rule when **any** of these is true:
+
+- Workspace or file path contains `/mounts/`
+- You would run bulk I/O: `find`, `rg`/`grep -r`, `git status/diff`, `dotnet build`, `npm test`
+- A `find` over the project is taking more than a few seconds
+
+**STOP:** If you are about to run `find`, `rg`, or `git` on a path under `/mounts/`,
+use `laptop-exec` instead. No exceptions.
+
+Check session: `laptop-exec status` (requires connect.bat/sh on laptop).
+
+## Mandatory split
+
+| Task | Use | Never |
+|------|-----|-------|
+| Read/edit one file | Normal Read/Write on workspace path | — |
+| **File count** | `laptop-exec run -- powershell -NoProfile -Command "(Get-ChildItem -Recurse -File -EA SilentlyContinue \| Measure-Object).Count"` | `find ... \| wc -l` on `/mounts/` |
+| git status/diff/commit/push | `laptop-exec git -- …` | `git` in `~/mounts/...` |
+| build / test / run | `laptop-exec run -- dotnet build` etc. | build on `~/mounts/...` |
+| Read file from laptop | `laptop-exec read path/to/file` | — |
+
+## Commands (default project = active connect session)
+
+```bash
+laptop-exec status
+laptop-exec test                    # 7 self-tests; run if unsure
+laptop-exec git -- status
+laptop-exec git -- diff --stat
+laptop-exec rg PATTERN
+laptop-exec read scripts/foo.sh
+laptop-exec run -- dotnet build
+laptop-exec run -p OTHER_ID -- …    # other registered project
+```
+
+## If tunnel is DOWN
+
+Tell user to run connect.bat/sh. Until then: single-file read/edit only; no bulk find/build.
+
+## Why
+
+Benchmarked on this infra: SSHFS `find` 23s+ cold; laptop-exec ~0.2s. SSHFS build often hangs.

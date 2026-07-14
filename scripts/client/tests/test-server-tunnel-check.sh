@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-server-tunnel-check.sh — static checks for server-side tunnel verification
+# test-server-tunnel-check.sh - static checks for server-side tunnel verification
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"

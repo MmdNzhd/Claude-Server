@@ -1,4 +1,4 @@
-# test-publish.ps1 — publish output must be client-only; Smart/Sepidz differ only by IP
+# test-publish.ps1 - publish output must be client-only; Smart/Sepidz differ only by IP
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_paths.ps1')
 $fail = 0
@@ -139,7 +139,11 @@ if ($main) {
     Assert ($mainFiles -contains 'mac\editor-launch.sh') 'main has editor-launch.sh'
     Assert ($mainFiles -contains 'mac\claude-mount.sh') 'main has mac/claude-mount.sh bootstrap copy'
     Assert ($mainFiles -contains 'windows\connect-version.txt') 'main has connect-version.txt'
-    Assert ($mainFiles.Count -eq 14) "main has exactly 14 client files (got $($mainFiles.Count))"
+    Assert ($mainFiles -contains 'mac\connect-version.txt') 'main has mac/connect-version.txt'
+    Assert ($mainFiles -contains 'windows\connect-update.ps1') 'main has windows\connect-update.ps1'
+    Assert ($mainFiles -contains 'mac\connect-update.sh') 'main has mac\connect-update.sh'
+    Assert ($mainFiles -contains 'windows\connect-diagnostic.ps1') 'main has windows\connect-diagnostic.ps1'
+    Assert ($mainFiles.Count -eq 18) "main has exactly 18 client files (got $($mainFiles.Count))"
     $smartPs1 = Get-Content (Join-Path $main.FullName 'windows\connect.ps1') -Raw
     Assert ($smartPs1 -match 'claude-server') 'main connect.ps1 alias claude-server'
     Assert ($smartPs1 -match 'claude-connect') 'main connect.ps1 cfg claude-connect'
@@ -148,6 +152,7 @@ if ($main) {
     Test-NoUtf8Bom -Path (Join-Path $main.FullName 'windows\connect.ps1') -Label 'main'
     $bat = Get-Content (Join-Path $main.FullName 'windows\connect.bat') -Raw
     Assert ($bat -match 'connect-version\.txt') 'connect.bat requires connect-version.txt'
+    Assert ($bat -match 'connect-update\.ps1') 'connect.bat references connect-update.ps1'
 } else {
     Assert $false 'main publish folder found (run publish.ps1)'
 }

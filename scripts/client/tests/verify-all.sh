@@ -1,5 +1,5 @@
 #!/bin/bash
-# verify-all.sh — run every static + live connect verification (Mac)
+# verify-all.sh - run every static + live connect verification (Mac)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"

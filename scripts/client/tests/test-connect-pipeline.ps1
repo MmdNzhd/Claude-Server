@@ -1,4 +1,4 @@
-# test-connect-pipeline.ps1 — regression tests for project-select pipeline bug
+# test-connect-pipeline.ps1 - regression tests for project-select pipeline bug
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_paths.ps1')
 $fail = 0
@@ -93,6 +93,15 @@ Assert ($mount -match 'warn: laptop tunnel down') "claude-mount warns when tunne
 Assert ($mount -match '\$n -lt 3') "claude-mount retries git rename 3x"
 Assert ($mount -match '_mount_restore_git_mode') "claude-mount restores GIT_MODE explicitly"
 Assert ($mount -notmatch "trap 'GIT_MODE") "claude-mount has no RETURN trap on GIT_MODE"
+
+
+$winConnect = Get-Content (Get-ClientFile 'windows\connect.ps1') -Raw
+Assert ($winConnect -match 'function Begin-ConnectRecovery') 'connect.ps1 has Begin-ConnectRecovery'
+Assert ($winConnect -match 'RECOVERY_BEGIN trigger=') 'connect.ps1 logs RECOVERY_BEGIN'
+Assert ($winConnect -match 'STEP begin:') 'connect.ps1 logs STEP begin'
+Assert ($winConnect -match 'function SshX') 'connect.ps1 has SshX wrapper'
+Assert ($winConnect -match 'SSH_TIMEOUT exit=124') 'connect.ps1 retries SshX on timeout'
+Assert ($winConnect -match 'timeout 45 bash -lc') 'connect.ps1 wraps SshX with timeout'
 
 $gitMode = Get-Content (Get-ClientFile 'git-mode.ps1') -Raw
 Assert ($gitMode -match 'function Invoke-MountProject') 'git-mode.ps1 auto-retries mount after script push'

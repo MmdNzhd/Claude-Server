@@ -1,4 +1,4 @@
-# connect.ps1 - Claude Code launcher for Windows.
+﻿# connect.ps1 - Claude Code launcher for Windows.
 # connect.bat invariant: g git (menu footer lives in connect-ui.ps1)
 # Usage:  double-click connect.bat
 #         connect.bat -Setup   (reconfigure username)
@@ -42,6 +42,18 @@ if (-not $AdminFix) {
     }
 }
 
+trap {
+    Write-Host ''
+    Write-Host "  [X] Unexpected error: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "      $($_.InvocationInfo.PositionMessage)" -ForegroundColor DarkGray
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog "UNHANDLED: $($_.Exception.Message) at $($_.InvocationInfo.PositionMessage)" 'ERROR'
+    }
+    Write-Host ''
+    Read-Host '    Press Enter to close' | Out-Null
+    exit 1
+}
+
 if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
     Write-Host "  [X] OpenSSH client (ssh.exe) not found." -ForegroundColor Red
     Write-Host "      Install it via: Settings -> Apps -> Optional Features -> OpenSSH Client" -ForegroundColor DarkGray
@@ -49,28 +61,64 @@ if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
 }
 $ServerIP = "192.168.210.240"
 $Alias    = "claude-server"
-$script:ConnectVersion = '20260705.4'
+$script:ConnectVersion = '20260714.2'
 $CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
 $CM       = '$HOME/.local/bin/claude-mount'
 
-function Die($m)   { Write-Host ""; Write-Host "  [X] $m" -ForegroundColor Red; Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
-function Warn($m)  { Write-Host "  [!] $m" -ForegroundColor DarkYellow }
-function Step($m)  { Write-Host ("    " + $m).PadRight(46, '.') -NoNewline -ForegroundColor DarkCyan }
+function Die($m) {
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog "ERROR: $m" 'ERROR'
+        Close-ConnectLog
+    }
+    Write-Host ""; Write-Host "  [X] $m" -ForegroundColor Red; Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
+}
+function Warn($m) {
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) { Write-ConnectLog "WARN: $m" 'WARN' }
+    Write-Host "  [!] $m" -ForegroundColor DarkYellow
+}
+function Step($m) {
+    $script:currentStepName = $m
+    $script:currentStepStartedAt = Get-Date
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog "STEP begin: $m"
+    }
+    Write-Host ("    " + $m).PadRight(46, '.') -NoNewline -ForegroundColor DarkCyan
+}
 function StepOk  {
     param([string]$d='')
+    $ms = 0
+    if ($script:currentStepStartedAt) {
+        $ms = [int]((Get-Date) - $script:currentStepStartedAt).TotalMilliseconds
+    }
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        $detail = if ($d) { $d } else { 'ok' }
+        Write-ConnectLog "STEP end: $($script:currentStepName) ok ms=$ms detail=$detail"
+    }
     if ($d) { Write-Host " $d" -ForegroundColor Green } else { Write-Host " ok" -ForegroundColor Green }
     foreach ($fx in $script:pendingFixes) { Write-Host "      -> fixed: $fx" -ForegroundColor DarkGray }
     $script:pendingFixes = @()
+    $script:currentStepStartedAt = $null
 }
 function StepFail {
     param([string]$d='')
+    $ms = 0
+    if ($script:currentStepStartedAt) {
+        $ms = [int]((Get-Date) - $script:currentStepStartedAt).TotalMilliseconds
+    }
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        $detail = if ($d) { $d } else { 'failed' }
+        Write-ConnectLog "STEP end: $($script:currentStepName) failed ms=$ms detail=$detail" 'WARN'
+    }
     Write-Host " failed" -ForegroundColor Red
     if ($d) { Write-Host "      -> $d" -ForegroundColor DarkGray }
     $script:pendingFixes = @()
+    $script:currentStepStartedAt = $null
 }
 $script:pendingFixes = @()
+$script:currentStepName = ''
+$script:currentStepStartedAt = $null
 
 $script:ConnectScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 
@@ -109,9 +157,20 @@ if (-not (Test-Path $_cursorAuth)) {
 }
 if (Test-Path $_cursorAuth) { . $_cursorAuth }
 
+$_connectDiag = Dot-SourceSibling 'connect-diagnostic.ps1'
+if (-not $_connectDiag) {
+    $_connectDiag = Join-Path $script:ConnectScriptDir 'connect-diagnostic.ps1'
+    if (-not (Test-Path $_connectDiag)) {
+        $_connectDiag = Join-Path (Split-Path $script:ConnectScriptDir -Parent) 'connect-diagnostic.ps1'
+    }
+}
+if (Test-Path $_connectDiag) { . $_connectDiag }
+
 $_connectUi = Dot-SourceSibling 'connect-ui.ps1'
 if (-not $_connectUi) { Die 'connect-ui.ps1 not found - re-copy the full windows package' }
 . $_connectUi
+Initialize-ConnectLog -ScriptDir $script:ConnectScriptDir -Version $script:ConnectVersion
+$null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action { Close-ConnectLog }
 
 function Repair-SshPerm([string]$path, [string]$label) {
     if (-not (Test-Path $path)) { return }
@@ -236,6 +295,9 @@ function Invoke-LaptopAdminOps {
     }
     Write-Host ''
     Write-Host '    Administrator access is required to fix laptop SSH.' -ForegroundColor Yellow
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog 'LAPTOP_SSH: waiting_admin_prompt'
+    }
     $yn = (Read-Host '    Allow administrator access? [Y/n]').Trim()
     if ($yn -match '^[Nn]') { return $false }
     @(
@@ -245,6 +307,9 @@ function Invoke-LaptopAdminOps {
         "FORCE_RESTART=$(if ($ForceRestart) { '1' } else { '0' })"
     ) | Set-Content -Path (Join-Path $CfgDir 'adminfix.pending') -Encoding ASCII
     $elevArgs = @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-AdminFix')
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog 'LAPTOP_SSH: waiting_uac'
+    }
     $proc = Start-Process powershell.exe -Verb RunAs -ArgumentList $elevArgs -Wait -PassThru
     $script:adminFixAttempted = $true
     return ($proc.ExitCode -eq 0)
@@ -436,9 +501,149 @@ Host $Alias
     return @{ Ok = $pushOk; PubB = $pubB; Error = '' }
 }
 
+function Escape-BashSingleQuoted([string]$Text) {
+    return $Text -replace "'", "'\''"
+}
+
+function Add-SshRecentLog([string]$Line) {
+    if (-not $script:SshRecentLog) {
+        $script:SshRecentLog = [System.Collections.Generic.List[string]]::new()
+    }
+    $script:SshRecentLog.Add($Line)
+    while ($script:SshRecentLog.Count -gt 24) { $script:SshRecentLog.RemoveAt(0) }
+}
+
+function Invoke-SshXCore {
+    param([Parameter(Mandatory)][string]$RemoteCmd)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lines = @(& ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=30 `
+        -o ServerAliveInterval=10 -o ServerAliveCountMax=3 $Alias $RemoteCmd 2>&1)
+    $sw.Stop()
+    if ($null -eq $lines) { $lines = @() }
+    return [PSCustomObject]@{
+        Exit = $LASTEXITCODE
+        Ms   = [int]$sw.ElapsedMilliseconds
+        Out  = ($lines -join "`n")
+        Lines = $lines
+    }
+}
+
 function SshX([string]$Cmd) {
-    # ConnectTimeout=30: handles slow VPN/internet (was 10, too short)
-    ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 $Alias $Cmd
+    $origCmd = $Cmd
+    $remoteCmd = $Cmd
+    if ($remoteCmd -notmatch '^\s*timeout\s') {
+        $escaped = Escape-BashSingleQuoted $remoteCmd
+        $remoteCmd = "timeout 45 bash -lc '$escaped'"
+    }
+    $truncCmd = if ($origCmd.Length -gt 200) { $origCmd.Substring(0, 200) + '...' } else { $origCmd }
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog "SSH_BEGIN cmd=$truncCmd"
+    }
+    $result = Invoke-SshXCore -RemoteCmd $remoteCmd
+    if ($result.Exit -eq 124) {
+        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+            Write-ConnectLog "SSH_TIMEOUT exit=124 cmd=$truncCmd - retrying once" 'ERROR'
+        }
+        $result = Invoke-SshXCore -RemoteCmd $remoteCmd
+    }
+    $truncOut = ($result.Out.Trim() -replace '\s+', ' ')
+    if ($truncOut.Length -gt 300) { $truncOut = $truncOut.Substring(0, 300) + '...' }
+    if (-not $truncOut) { $truncOut = '(empty)' }
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog "SSH_END exit=$($result.Exit) ms=$($result.Ms) out=$truncOut"
+    }
+    Add-SshRecentLog "exit=$($result.Exit) ms=$($result.Ms) cmd=$truncCmd"
+    if ($result.Exit -ne 0 -and $result.Exit -ne 124) {
+        $script:LastSshExit = $result.Exit
+    }
+    $global:LASTEXITCODE = $result.Exit
+    return $result.Lines
+}
+
+function Begin-ConnectRecovery {
+    param(
+        [Parameter(Mandatory)][ValidateSet('manual', 'auto')][string]$Trigger,
+        [Parameter(Mandatory)][string]$ProjectId,
+        [bool]$EditorWasOpen
+    )
+    $script:RecoveryGeneration++
+    $script:RecoveryStartedAt = Get-Date
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog "RECOVERY_BEGIN trigger=$Trigger project=$ProjectId editor_opened=$EditorWasOpen gen=$($script:RecoveryGeneration)"
+    }
+    $script:ForceCursorAuthSync = $true
+    $script:PostTunnelRecovery = $true
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog 'RECOVERY_STATE_RESET editor_opened=False force_auth=True post_recovery=True'
+    }
+}
+
+function Complete-PostTunnelRecovery {
+    param(
+        [bool]$MountOk,
+        [string]$AuthDetail = '',
+        [string]$ProjectId = '',
+        [string]$RemotePath = '',
+        [string]$EditorCmd = '',
+        [string]$EditorName = '',
+        [bool]$OnFolder = $false,
+        [bool]$DidLaunch = $false
+    )
+    if (-not $script:PostTunnelRecovery) { return }
+    $elapsed = 0
+    if ($script:RecoveryStartedAt) {
+        $elapsed = [int]((Get-Date) - $script:RecoveryStartedAt).TotalMilliseconds
+    }
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog "RECOVERY_END elapsed_ms=$elapsed mount_ok=$MountOk gen=$($script:RecoveryGeneration) auth=$AuthDetail"
+    }
+    if (Get-Command Write-ConnectDiagnosticReport -ErrorAction SilentlyContinue) {
+        $authOk = ($AuthDetail -match 'ok|already|skipped' -and $AuthDetail -notmatch 'fail|incomplete|missing')
+        $null = Write-ConnectDiagnosticReport -Phase 'RECOVERY' `
+            -EditorCmd $EditorCmd -EditorName $EditorName -Alias $Alias `
+            -ProjectId $ProjectId -RemotePath $RemotePath `
+            -TunnelUp (Test-TunnelUp) -MountOk $MountOk -OnFolder $OnFolder `
+            -DidLaunch $DidLaunch -AuthOk $authOk -AuthDetail $AuthDetail `
+            -ServerIP $ServerIP -Port $Port `
+            -SshRecent @($script:SshRecentLog)
+    }
+    $script:PostTunnelRecovery = $false
+    $script:RecoveryStartedAt = $null
+}
+
+function Write-SessionDiagnosticReport {
+    param(
+        [Parameter(Mandatory)][string]$Phase,
+        [bool]$MountOk = $true,
+        [string]$MountOut = '',
+        [bool]$OnFolder = $false,
+        [bool]$DidLaunch = $false,
+        [bool]$AuthOk = $true,
+        [string]$AuthDetail = '',
+        [Parameter(Mandatory)][string]$ProjectId,
+        [Parameter(Mandatory)][string]$RemotePath,
+        [Parameter(Mandatory)][string]$EditorCmd,
+        [Parameter(Mandatory)][string]$EditorName
+    )
+    if (-not (Get-Command Write-ConnectDiagnosticReport -ErrorAction SilentlyContinue)) { return $null }
+    $agentHome = $false
+    $windowOpen = $false
+    if ($EditorCmd -eq 'cursor') {
+        if (Get-Command Test-RemoteEditorInAgentHome -ErrorAction SilentlyContinue) {
+            $agentHome = Test-RemoteEditorInAgentHome
+        }
+        if (Get-Command Test-RemoteEditorWindowOpen -ErrorAction SilentlyContinue) {
+            $windowOpen = Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
+        }
+    }
+    return Write-ConnectDiagnosticReport -Phase $Phase `
+        -EditorCmd $EditorCmd -EditorName $EditorName -Alias $Alias `
+        -ProjectId $ProjectId -RemotePath $RemotePath `
+        -TunnelUp (Test-TunnelUp) -MountOk $MountOk -MountOut $MountOut `
+        -OnFolder $OnFolder -AgentHome $agentHome -WindowOpen $windowOpen `
+        -DidLaunch $DidLaunch -AuthOk $AuthOk -AuthDetail $AuthDetail `
+        -ServerIP $ServerIP -Port $Port `
+        -SshRecent @($script:SshRecentLog)
 }
 
 function PortOpen($ip, $port) {
@@ -551,7 +756,7 @@ function Choose-Project {
             $null = ($m = Select-Mount $mounts $c)
             if (-not $m) { Warn "Not found."; continue }
             if (-not (Warn-InvalidProjectRpath -Rpath $m.Rpath -Num $c -Os 'windows')) { continue }
-            return ,([PSCustomObject]@{ Id = $m.Id; Path = $m.Path })
+            return ,([PSCustomObject]@{ Id = $m.Id; Path = $m.Path; Rpath = $m.Rpath })
         }
 
         switch ($c) {
@@ -779,6 +984,7 @@ $exitRequested = $false
     StepOk (Get-MountListStepLabel -Os 'windows' -Mounts $allMounts)
     $go = @(Choose-Project -Mounts $allMounts)[-1]
     if (-not $go) { break }
+    Write-ConnectLog "PROJECT: id=$($go.Id) server_path=$($go.Path) laptop_path=$($go.Rpath)"
     $script:tunnelAuthAdminFixAttempted = $false
     $script:tunnelAuthRetryCount = 0
 
@@ -889,6 +1095,13 @@ $exitRequested = $false
 
     $editorOpened = $false
     $script:CursorAuthNeedsBootstrap = $false
+    $script:RecoveryGeneration = 0
+    $script:SessionLoopIter = 0
+    $script:ForceCursorAuthSync = $false
+    $script:PostTunnelRecovery = $false
+    $script:RecoveryStartedAt = $null
+    $script:SshRecentLog = [System.Collections.Generic.List[string]]::new()
+    $script:LastAuthDetail = ''
 
     :mainLoop while ($true) {
     $alreadyDown  = $false
@@ -896,6 +1109,10 @@ $exitRequested = $false
 
     try {
         :sessionLoop while ($true) {
+            $script:SessionLoopIter++
+            if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                Write-ConnectLog "SESSION_LOOP begin iter=$($script:SessionLoopIter) recovery_gen=$($script:RecoveryGeneration) post_recovery=$($script:PostTunnelRecovery) force_auth=$($script:ForceCursorAuthSync)"
+            }
             $tunnelReused = $false
             if (-not (Ensure-SessionTunnel -Alias $Alias -SshCfgPath $sshCfg -BgTunnel ([ref]$bgTunnel) -TunnelReused ([ref]$tunnelReused))) {
                 Step 'Starting SSH tunnel'
@@ -924,6 +1141,8 @@ $exitRequested = $false
 
             $mountSrc = Get-ClaudeMountSrc -ConnectScriptDir $script:ConnectScriptDir
             Prepare-ServerSessionParallel -ProjectId $go.Id -MountSrc $mountSrc -Alias $Alias
+            $activeOnServer = ((SshX "grep -E '^ACTIVE_MOUNT=' ~/.claude-connect.conf 2>/dev/null") -join '').Trim()
+            Write-ConnectLog "ACTIVE_MOUNT server_conf=$activeOnServer pushed_id=$($go.Id)"
 
             Invoke-RecoverIfNeeded -ProjectId $go.Id -FreshTunnel:(-not $tunnelReused)
 
@@ -1029,6 +1248,8 @@ $exitRequested = $false
                 if ($mountOut -match 'No such file|not found|cannot find') {
                     Warn "Path not found on laptop. Use 'e edit' to correct the project path."
                 }
+                Complete-PostTunnelRecovery -MountOk $false -AuthDetail 'mount_failed' `
+                    -ProjectId $go.Id -RemotePath $go.Path -EditorCmd $EditorCmd -EditorName $EditorName
                 Write-Host ""
                 Write-Host "    R = retry   Q = quit" -ForegroundColor DarkGray
                 $rk = Read-RetryQuitKey
@@ -1039,51 +1260,110 @@ $exitRequested = $false
 
             StepOk "${mountT}s"
             Show-MountGitWarn $mountOut
-            $cleanOut = ($mountOut.Trim() -replace '^already mounted:\s*', '')
-            if ($cleanOut -and $cleanOut -notmatch '^warn:') { Write-Host "      -> mounted: $cleanOut" -ForegroundColor Green }
+            Write-ConnectLog "MOUNT_RAW: $($mountOut.Trim() -replace '\s+', ' ')"
+            $cleanOut = ($mountOut.Trim() -replace '^already mounted:\s*', '' -replace '^mounted:\s*', '')
+            $cleanOut = (($cleanOut -split '\r?\n')[0]).Trim()
+            if ($cleanOut -and $cleanOut -notmatch '^warn:') {
+                Write-Host "      -> $cleanOut" -ForegroundColor Green
+                Write-ConnectLog "MOUNT: $cleanOut"
+            }
+            if ($script:PostTunnelRecovery) {
+                Warn 'Recovery complete - press O if Cursor is not on the project folder'
+                Write-ConnectLog 'RECOVERY: user_warn press_o_if_cursor_not_on_folder'
+            }
 
             $script:ActiveProjectId = $go.Id
 
             $script:CursorAuthNeedsBootstrap = $false
+            $script:LastAuthDetail = if ($EditorCmd -eq 'cursor') { 'pending' } else { 'n/a' }
             if ($EditorCmd -eq 'cursor' -and (Get-Command Sync-CursorGoldenAuth -ErrorAction SilentlyContinue)) {
                 $gsPath = Join-Path (Get-LocalCursorGlobalStorage) 'state.vscdb'
                 $cursorRunning = Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
+                $onCorrectFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
+                $agentHome = if ($EditorCmd -eq 'cursor') { Test-RemoteEditorInAgentHome } else { $false }
+                if (Get-Command Get-RemoteEditorLaunchDiag -ErrorAction SilentlyContinue) {
+                    Write-ConnectLog "FOLDER_CHECK: on_folder=$onCorrectFolder agent_home=$agentHome window_open=$cursorRunning" 'DEBUG'
+                    Write-ConnectLog (Get-RemoteEditorLaunchDiag -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path) 'DEBUG'
+                } elseif (Get-Command Get-RemoteEditorDetectionDiag -ErrorAction SilentlyContinue) {
+                    Write-ConnectLog "AUTH_CHECK: cursor_running=$cursorRunning diag=$(Get-RemoteEditorDetectionDiag -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)" 'DEBUG'
+                }
                 Step "Syncing Cursor auth"
-                if ($cursorRunning -and (Test-LocalCursorAuthComplete -DbPath $gsPath)) {
+                $authComplete = Test-LocalCursorAuthComplete -DbPath $gsPath
+                $authNeedsRefresh = $false
+                if (Get-Command Test-CursorAuthNeedsRefresh -ErrorAction SilentlyContinue) {
+                    $refreshCheck = Test-CursorAuthNeedsRefresh -DbPath $gsPath
+                    $authNeedsRefresh = [bool]$refreshCheck.NeedsRefresh
+                    if ($authNeedsRefresh -and $refreshCheck.Reasons.Count -gt 0) {
+                        Write-ConnectLog "AUTH_DECISION needs_refresh reason=$($refreshCheck.Reasons -join ',')" 'DEBUG'
+                    }
+                }
+                if (Get-Command Test-PersonalCursorDominant -ErrorAction SilentlyContinue) {
+                    if (Test-PersonalCursorDominant) {
+                        Warn 'Personal Cursor is open - close it or use [Claude Server] profile windows'
+                        Write-ConnectLog 'AUTH_WARN personal_cursor_dominant' 'WARN'
+                    }
+                }
+                $skipAuth = $false
+                if (-not $script:ForceCursorAuthSync -and -not $script:PostTunnelRecovery -and -not $authNeedsRefresh) {
+                    if ($cursorRunning -and $authComplete) { $skipAuth = $true }
+                }
+                Write-ConnectLog "AUTH_DECISION skip=$skipAuth force=$($script:ForceCursorAuthSync) post_recovery=$($script:PostTunnelRecovery) cursor_running=$cursorRunning auth_complete=$authComplete"
+                if ($skipAuth) {
                     StepOk 'skipped (editor open)'
+                    $script:LastAuthDetail = 'skipped editor open'
                 } else {
-                    $authSync = Sync-CursorGoldenAuth -Alias $Alias
+                    $authSync = Sync-CursorGoldenAuth -Alias $Alias -Force:$script:ForceCursorAuthSync
                     if ($authSync.Skipped) {
-                        if ($authSync.AlreadyComplete) { StepOk 'already ok' }
-                        else { StepOk 'skipped' }
+                        if ($authSync.AlreadyComplete) {
+                            StepOk 'already ok'
+                            $script:LastAuthDetail = 'already ok'
+                            if ($script:ForceCursorAuthSync) { $script:ForceCursorAuthSync = $false }
+                        }
+                        else {
+                            StepOk 'skipped'
+                            $script:LastAuthDetail = 'skipped'
+                        }
                     }
                     elseif ($authSync.Ok) {
                         StepOk
+                        $script:LastAuthDetail = 'ok'
+                        $script:ForceCursorAuthSync = $false
                         Set-Content -Path ([System.IO.Path]::Combine($CfgDir, 'cursor-auth.ok')) -Value (Get-Date -Format 'o') -Encoding ASCII | Out-Null
                     }
                     elseif ($authSync.TokensOnly) {
                         StepOk 'tokens only'
-                        $script:CursorAuthNeedsBootstrap = $true
-                        Warn 'Chat needs server account profile - sign in inside [Claude Server] only, then press P'
+                        $script:LastAuthDetail = 'tokens only'
+                        Warn 'Partial auth on laptop - reconnect, or ask admin to run: sudo claude-server sync-cursor-auth'
+                    }
+                    elseif ($authSync.SqliteMissing) {
+                        StepFail 'sqlite not available on laptop'
+                        $script:LastAuthDetail = 'sqlite missing'
+                        Warn 'Windows winsqlite3.dll or sqlite3.dll is required for auth merge'
+                    }
+                    elseif ($authSync.MergeFailed) {
+                        StepFail 'could not merge server auth'
+                        $script:LastAuthDetail = 'merge failed'
+                        Warn 'Close all [Claude Server] Cursor windows and reconnect'
                     }
                     else {
                         StepFail 'could not merge server auth'
-                        $script:CursorAuthNeedsBootstrap = $true
-                        Warn 'Sign in to SERVER account in [Claude Server] window - personal Cursor is never touched'
+                        $script:LastAuthDetail = 'merge failed'
+                        Warn 'Server auth is OK - laptop could not save it locally (reconnect or close Cursor windows)'
                     }
                 }
-                if (-not $cursorRunning -and (Get-Command Repair-CursorComposerWorkspaceBindings -ErrorAction SilentlyContinue)) {
+                if (-not $onCorrectFolder -and (Get-Command Repair-CursorComposerWorkspaceBindings -ErrorAction SilentlyContinue)) {
                     $null = Repair-CursorComposerWorkspaceBindings -Alias $Alias -RemotePath $go.Path
                 }
             }
 
+            $didLaunch = $false
             if (-not $editorOpened) {
                 Step "Opening $EditorName"
                 if (-not (Launch-RemoteEditor -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)) {
                     StepFail "$EditorName not found (install Cursor or VS Code + Remote-SSH)"
                 } else {
                     StepOk $($go.Path)
-                    $editorOpened = $true
+                    $didLaunch = $true
                     if ($EditorCmd -eq 'cursor') {
                         Write-Host '      -> Server profile [Claude Server] - personal Cursor is separate' -ForegroundColor DarkGray
                     }
@@ -1091,13 +1371,33 @@ $exitRequested = $false
                 Write-Host ""
                 Write-Host "    Run 'claude' in the $EditorName terminal." -ForegroundColor DarkGray
             }
+            $onFolderNow = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
+            if (-not $onFolderNow -and ($didLaunch -or (Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path))) {
+                Write-ConnectLog 'SESSION: cursor not on target folder - relaunching with new-window' 'WARN'
+                if (-not $didLaunch) {
+                    Warn 'Cursor is on Agent/home - reopening project folder...'
+                }
+                if (Launch-RemoteEditor -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path) {
+                    $onFolderNow = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
+                }
+            }
+            $editorOpened = $onFolderNow
 
             $sessionExtras = @()
-            if ($script:CursorAuthNeedsBootstrap) {
-                $sessionExtras += 'P = push server login to golden (after sign-in in [Claude Server] only)'
+            if ($script:ConnectLogPath) {
+                $sessionExtras += "Log: $(Split-Path -Leaf $script:ConnectLogPath) (same folder as connect.bat)"
             }
             Write-SessionBox -ExtraLines $sessionExtras
             Set-ConnectTitle ('Claude Connect | {0} | {1}' -f $go.Id, (Get-GitModeLabel))
+
+            $authOkForDiag = ($script:LastAuthDetail -match '^(ok|already ok|skipped|tokens only|n/a)$')
+            $null = Write-SessionDiagnosticReport -Phase 'SESSION_OPEN' -MountOk $true -MountOut $mountOut `
+                -OnFolder $onFolderNow -DidLaunch $didLaunch -AuthOk $authOkForDiag `
+                -AuthDetail $script:LastAuthDetail -ProjectId $go.Id -RemotePath $go.Path `
+                -EditorCmd $EditorCmd -EditorName $EditorName
+            Complete-PostTunnelRecovery -MountOk $true -AuthDetail $script:LastAuthDetail `
+                -ProjectId $go.Id -RemotePath $go.Path -EditorCmd $EditorCmd -EditorName $EditorName `
+                -OnFolder $onFolderNow -DidLaunch $didLaunch
 
             while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
 
@@ -1105,12 +1405,22 @@ $exitRequested = $false
             $gotKey = $false
             $lastStatusAt = [DateTime]::MinValue
             $script:lastToastAt = $null
-            while (-not $bgTunnel.HasExited) {
-                if ($editorOpened -and $EditorCmd -eq 'cursor') {
-                    $editorOpened = Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
+            while ($true) {
+                $null = Sync-SessionTunnelProcess -BgTunnel ([ref]$bgTunnel)
+                if (-not (Test-TunnelUp)) { break }
+                if ($EditorCmd -eq 'cursor') {
+                    $onFolderNow = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
+                    $windowOpen = Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
+                    $editorOpened = $onFolderNow
+                    $editorLabel = if ($onFolderNow) { $EditorName } elseif ($windowOpen) { 'agent' } else { 'closed' }
+                } else {
+                    $onFolderNow = $editorOpened
+                    $editorLabel = ''
                 }
                 if ((Get-Date) - $lastStatusAt -gt [TimeSpan]::FromSeconds(30)) {
-                    Update-SessionStatusLine -ProjectLabel $go.Id -GitLabel (Get-GitModeLabel) -TunnelOk $true -EditorOpen $editorOpened -EditorName $EditorName
+                    Update-SessionStatusLine -ProjectLabel $go.Id -GitLabel (Get-GitModeLabel) -TunnelOk (Test-TunnelUp) `
+                        -EditorOpen $onFolderNow -EditorName $EditorName -EditorLabel $editorLabel `
+                        -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
                     $lastStatusAt = Get-Date
                 }
                 if ([Console]::KeyAvailable) {
@@ -1119,14 +1429,13 @@ $exitRequested = $false
                     elseif ($ki.KeyChar.ToString().ToLower() -eq 'g' -or $ki.Key -eq [ConsoleKey]::G) { $action = 'g' }
                     elseif ($ki.KeyChar.ToString().ToLower() -eq 'o' -or $ki.Key -eq [ConsoleKey]::O) { $action = 'o' }
                     elseif ($ki.Key -eq [ConsoleKey]::Enter) { $action = 'q' }
-                    elseif ($script:CursorAuthNeedsBootstrap -and (
-                        $ki.KeyChar.ToString().ToLower() -eq 'p' -or $ki.Key -eq [ConsoleKey]::P)) { $action = 'p' }
+
                     $gotKey = $true
                     break
                 }
                 Start-Sleep -Milliseconds 200
             }
-            if (-not $gotKey -and $bgTunnel.HasExited) {
+            if (-not $gotKey -and -not (Test-TunnelUp)) {
                 if (-not $script:lastToastAt -or ((Get-Date) - $script:lastToastAt).TotalSeconds -gt 60) {
                     Set-ConnectTitle 'Claude Connect - reconnecting...'
                     Show-ConnectToast 'Tunnel dropped - reconnecting...'
@@ -1139,6 +1448,7 @@ $exitRequested = $false
                         $ki.Key -eq [ConsoleKey]::Enter) { $action = 'q' }
                 } else {
                     $action = 'r'
+                    Write-ConnectLog 'TUNNEL: connection dropped - auto reconnect' 'WARN'
                     Write-Host "    Connection dropped - reconnecting..." -ForegroundColor Yellow
                 }
             }
@@ -1149,12 +1459,13 @@ $exitRequested = $false
             }
 
             if ($action -eq 'o') {
-                if (-not $editorOpened) {
+                $onFolderNow = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
+                if (-not $onFolderNow) {
                     Write-Host ''
                     Step "Reopening $EditorName"
                     if (Launch-RemoteEditor -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path) {
                         StepOk $go.Path
-                        $editorOpened = $true
+                        $editorOpened = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
                     } else {
                         StepFail "$EditorName not found"
                     }
@@ -1163,31 +1474,21 @@ $exitRequested = $false
                 continue sessionLoop
             }
 
-            if ($action -eq 'p') {
-                if (Get-Command Push-CursorGoldenFromServerProfile -ErrorAction SilentlyContinue) {
-                    Write-Host ''
-                    Write-Host '    Pushing golden from [Claude Server] profile...' -ForegroundColor Cyan
-                    $push = Push-CursorGoldenFromServerProfile -Alias $Alias
-                    if ($push.Ok) {
-                        Write-Host "    $($push.Message)" -ForegroundColor Green
-                        $script:CursorAuthNeedsBootstrap = $false
-                    } else {
-                        Write-Host "    $($push.Message)" -ForegroundColor Yellow
-                    }
-                    Write-Host ''
-                }
-                continue sessionLoop
-            }
-
             if ($action -eq 'r') {
                 if ($gotKey) {
+                    Begin-ConnectRecovery -Trigger 'manual' -ProjectId $go.Id -EditorWasOpen $editorOpened
+                    $editorOpened = $false
+                    $script:LaptopSshVerified = $false
                     $alreadyDown = $false
                     Write-Host ''
                     Write-Host '    Reconnecting...' -ForegroundColor Cyan
                     Write-Host ''
                     continue sessionLoop
                 }
+                Begin-ConnectRecovery -Trigger 'auto' -ProjectId $go.Id -EditorWasOpen $editorOpened
+                $editorOpened = $false
                 Write-Host '    Connection dropped - recovering...' -ForegroundColor Yellow
+                Write-ConnectLog 'TUNNEL: recovering session (down mount, restart tunnel)' 'WARN'
                 Clear-SessionMount -ProjectId $go.Id -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -SkipEditorStop
                 if ($bgTunnel -and -not $bgTunnel.HasExited) {
                     Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
@@ -1202,6 +1503,7 @@ $exitRequested = $false
             # Disconnect (Q)
             Write-Host ""
             Write-Host "    Disconnecting..." -ForegroundColor DarkGray
+            Write-ConnectLog "SESSION: disconnect project=$($go.Id)"
             Clear-SessionMount -ProjectId $go.Id -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
             if ($bgTunnel -and -not $bgTunnel.HasExited) {
                 Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
@@ -1255,3 +1557,4 @@ $exitRequested = $false
     } # end :mainLoop
 } # end :menuLoop
 Write-Host ''
+Close-ConnectLog

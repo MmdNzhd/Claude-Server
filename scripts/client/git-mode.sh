@@ -1,4 +1,4 @@
-# git-mode.sh — shared GIT_MODE helpers (sourced by connect.sh forks)
+# git-mode.sh - shared GIT_MODE helpers (sourced by connect.sh forks)
 # Requires: CFG_DIR, CM, PORT, LAPTOP_USER; functions sshx, warn; optional bg_pid + _tunnel_alive
 
 if ! declare -f warn >/dev/null 2>&1; then
@@ -32,6 +32,38 @@ get_git_mode_label() {
         server|slow) printf 'SLOW' ;;
         *) printf 'FAST' ;;
     esac
+}
+
+_TUNNEL_BANNER_CACHE_AT=0
+_TUNNEL_BANNER_CACHE_BANNER=''
+_TUNNEL_BANNER_CACHE_UP=0
+_TUNNEL_BANNER_CACHE_INVALID=0
+_LAST_FORWARD_PROBE_AT=0
+
+clear_tunnel_banner_cache() {
+    _TUNNEL_BANNER_CACHE_AT=0
+    _TUNNEL_BANNER_CACHE_BANNER=''
+    _TUNNEL_BANNER_CACHE_UP=0
+    _TUNNEL_BANNER_CACHE_INVALID=1
+}
+
+wait_pid_timeout() {
+    local pid="$1" label="${2:-job}" timeout_sec="${3:-30}" waited=0 rc=0
+    [ -n "$pid" ] || return 0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$timeout_sec" ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "SCP: timeout ERROR label=$label sec=$timeout_sec" 'ERROR'
+        fi
+        return 1
+    fi
+    wait "$pid" 2>/dev/null || rc=$?
+    return "$rc"
 }
 
 push_server_connect_conf() {
@@ -157,11 +189,21 @@ _stop_code_server_profile() {
 
 clear_session_mount() {
     local project_id="$1" editor_cmd="${2:-}" alias_name="${3:-}" remote_path="${4:-}" skip_editor="${5:-0}"
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "CLEAR_MOUNT project=$project_id skip_editor=$skip_editor editor=$editor_cmd path=$remote_path" 'INFO'
+    fi
     if [ "$skip_editor" != "1" ] && [ -n "$editor_cmd" ] && [ -n "$alias_name" ] && [ -n "$remote_path" ]; then
         stop_remote_editor "$editor_cmd" "$alias_name" "$remote_path"
     fi
+    clear_tunnel_banner_cache
     if [ -n "$project_id" ]; then
-        timeout 8 ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$ALIAS" "$CM down '$project_id'" 2>/dev/null || true
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "CLEAR_MOUNT: down begin project=$project_id" 'DEBUG'
+        fi
+        sshx "timeout 8 $CM down '$project_id' 2>/dev/null" 2>/dev/null || true
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "CLEAR_MOUNT: down end project=$project_id" 'DEBUG'
+        fi
     fi
     ACTIVE_MOUNT_ID=""
     push_server_connect_conf
@@ -294,9 +336,35 @@ fetch_tunnel_banner() {
 }
 
 # One sshx RTT: TCP open + SSH banner (replaces separate port_open + banner calls).
-tunnel_fetch_banner() {
+tunnel_fetch_banner_raw() {
     [ -n "${PORT:-}" ] || return 1
-    sshx "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${PORT} 2>/dev/null && timeout 2 nc 127.0.0.1 ${PORT} 2>/dev/null | head -1'" 2>/dev/null | tr -d '\r\n'
+    sshx "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${PORT} 2>/dev/null && timeout 2 nc 127.0.0.1 ${PORT} 2>/dev/null | head -1' 2>/dev/null" 2>/dev/null | tr -d '\r\n'
+}
+
+tunnel_fetch_banner() {
+    local now age_ms banner
+    [ -n "${PORT:-}" ] || return 1
+    if [ "$_TUNNEL_BANNER_CACHE_INVALID" -eq 0 ] && [ "$_TUNNEL_BANNER_CACHE_AT" -gt 0 ]; then
+        now="$(date +%s 2>/dev/null || printf '0')"
+        age_ms=$(( (now - _TUNNEL_BANNER_CACHE_AT) * 1000 ))
+        if [ "$age_ms" -lt 3000 ]; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_BANNER cache hit age_ms=$age_ms banner=$_TUNNEL_BANNER_CACHE_BANNER" 'TRACE'
+            fi
+            printf '%s' "$_TUNNEL_BANNER_CACHE_BANNER"
+            return 0
+        fi
+    fi
+    _TUNNEL_BANNER_CACHE_INVALID=0
+    banner="$(tunnel_fetch_banner_raw 2>/dev/null || true)"
+    _TUNNEL_BANNER_CACHE_AT="$(date +%s 2>/dev/null || printf '0')"
+    _TUNNEL_BANNER_CACHE_BANNER="$banner"
+    if [ -n "$banner" ] && tunnel_banner_is_this_laptop "$banner"; then
+        _TUNNEL_BANNER_CACHE_UP=1
+    else
+        _TUNNEL_BANNER_CACHE_UP=0
+    fi
+    printf '%s' "$banner"
 }
 
 tunnel_banner_is_this_laptop() {
@@ -320,10 +388,59 @@ tunnel_port_open() {
 }
 
 tunnel_up() {
-    local banner
+    local banner age_ms now
+    if [ "$_TUNNEL_BANNER_CACHE_INVALID" -eq 0 ] && [ "$_TUNNEL_BANNER_CACHE_AT" -gt 0 ]; then
+        now="$(date +%s 2>/dev/null || printf '0')"
+        age_ms=$(( (now - _TUNNEL_BANNER_CACHE_AT) * 1000 ))
+        if [ "$age_ms" -lt 3000 ]; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_UP port=$PORT up=$_TUNNEL_BANNER_CACHE_UP cache=1" 'TRACE'
+            fi
+            [ "$_TUNNEL_BANNER_CACHE_UP" -eq 1 ]
+            return
+        fi
+    fi
     banner="$(tunnel_fetch_banner 2>/dev/null || true)"
     [ -n "$banner" ] || return 1
     tunnel_banner_is_this_laptop "$banner"
+}
+
+# When bg tunnel process is alive, probe forward every 30s (zombie forward detection).
+sync_session_tunnel_forward() {
+    local bg_pid="${1:-}" now probe_up
+    [ -n "$bg_pid" ] || return 1
+    kill -0 "$bg_pid" 2>/dev/null || return 1
+    now="$(date +%s 2>/dev/null || printf '0')"
+    if [ "$_LAST_FORWARD_PROBE_AT" -eq 0 ]; then
+        _LAST_FORWARD_PROBE_AT="$now"
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "TUNNEL_SYNC: bg_alive pid=$bg_pid port=$PORT" 'TRACE'
+        fi
+        return 0
+    fi
+    if [ $(( now - _LAST_FORWARD_PROBE_AT )) -lt 30 ]; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "TUNNEL_SYNC: bg_alive pid=$bg_pid port=$PORT" 'TRACE'
+        fi
+        return 0
+    fi
+    _LAST_FORWARD_PROBE_AT="$now"
+    clear_tunnel_banner_cache
+    if tunnel_up; then
+        probe_up=1
+    else
+        probe_up=0
+    fi
+    if [ "$probe_up" -eq 0 ]; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "TUNNEL_DROP pid=$bg_pid port=$PORT reason=bg_alive_forward_dead" 'WARN'
+        fi
+        return 1
+    fi
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "TUNNEL_SYNC: bg_alive pid=$bg_pid port=$PORT forward_ok=1" 'TRACE'
+    fi
+    return 0
 }
 
 wait_for_tunnel_up() {
@@ -407,11 +524,19 @@ prepare_server_session_parallel() {
     push_server_connect_conf &
     pp=$!
     if [ -n "$mount_src" ]; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "SCP: begin project=$go_id" 'DEBUG'
+        fi
         push_claude_mount_if_changed "$mount_src" &
         sp=$!
     fi
-    wait "$pp" 2>/dev/null || true
-    [ -n "$sp" ] && wait "$sp" 2>/dev/null || true
+    wait_pid_timeout "$pp" push_conf 30 || true
+    if [ -n "$sp" ]; then
+        wait_pid_timeout "$sp" claude_mount 30 || true
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "SCP: end project=$go_id" 'DEBUG'
+        fi
+    fi
 }
 
 project_mount_healthy() {
@@ -426,8 +551,46 @@ recover_mounts_if_needed() {
         return 0
     fi
     printf '    \033[0;90mRecovering stale mounts...\033[0m\n'
-    timeout 30 sshx "$CM recover-if-needed '$id'" 2>/dev/null || timeout 30 sshx "$CM recover" 2>/dev/null || true
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "RECOVER: begin project=$id fresh_tunnel=$fresh_tunnel" 'DEBUG'
+    fi
+    clear_tunnel_banner_cache
+    timeout 30 sshx "$CM recover-one '$id' 2>/dev/null || timeout 30 sshx "$CM recover-if-needed '$id' 2>/dev/null || timeout 30 sshx "$CM recover" 2>/dev/null || true
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "RECOVER: end project=$id" 'DEBUG'
+    fi
     printf '    \033[0;90mRecover done\033[0m\n'
+}
+
+# Reset session state after tunnel drop (manual R or auto recovery).
+begin_connect_recovery() {
+    local trigger="$1" project_id="$2" editor_was_open="${3:-0}"
+    RECOVERY_GENERATION="${RECOVERY_GENERATION:-0}"
+    RECOVERY_GENERATION=$(( RECOVERY_GENERATION + 1 ))
+    POST_TUNNEL_RECOVERY=1
+    export CURSOR_AUTH_FORCE=1
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "RECOVERY_BEGIN trigger=$trigger project=$project_id editor_opened=$editor_was_open gen=$RECOVERY_GENERATION"
+        connect_log 'RECOVERY_STATE_RESET editor_opened=0 force_auth=1 post_recovery=1'
+    fi
+}
+
+complete_post_tunnel_recovery() {
+    local mount_ok="${1:-0}" auth_detail="${2:-}"
+    [ "${POST_TUNNEL_RECOVERY:-0}" = "1" ] || return 0
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "RECOVERY_END mount_ok=$mount_ok gen=${RECOVERY_GENERATION:-0} auth=$auth_detail"
+    fi
+    POST_TUNNEL_RECOVERY=0
+}
+
+cursor_auth_needs_refresh() {
+    local db="${1:-}"
+    [ -n "$db" ] || return 1
+    [ -f "$db" ] || return 0
+    cursor_sqlite3_available || return 0
+    cursor_db_value_length "$db" 'storage.serviceMachineId' || return 0
+    return 1
 }
 
 invoke_mount_project() {
@@ -482,6 +645,8 @@ ensure_session_tunnel() {
     fi
     release_stale_tunnel_port || true
     sanitize_ssh_alias_config
+    clear_tunnel_banner_cache
+    _LAST_FORWARD_PROBE_AT=0
     ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=5 \
         -R "${PORT}:localhost:22" "$ALIAS" 2>/dev/null &
     bg_pid=$!
@@ -645,7 +810,7 @@ invoke_laptop_admin_ops() {
         unset LAPTOP_ADMIN_PW
         return 0
     fi
-    warn "Remote Login still failing — check Mac password prompt or Sharing settings."
+    warn "Remote Login still failing - check Mac password prompt or Sharing settings."
     unset LAPTOP_ADMIN_PW
     return 1
 }
@@ -743,7 +908,7 @@ EOF
 
     for pid in $scp_pids; do
         [ -z "$pid" ] && continue
-        wait "$pid" 2>/dev/null || push_ok=0
+        wait_pid_timeout "$pid" server_scripts 30 || push_ok=0
     done
     if [ -n "$server_dir" ] && { [ -n "$src" ] || [ -n "$git_src" ]; }; then
         _chmod=""
@@ -883,9 +1048,9 @@ remount_project_git() {
     return 0
 }
 
-# Remote SSH Chat reads laptop Cursor globalStorage — pull golden tokens from server each connect.
+# Remote SSH Chat reads laptop Cursor globalStorage - pull golden tokens from server each connect.
 get_cursor_remote_profile_dir() {
-    # Isolated profile — separate from the developer's personal Cursor login (same as Windows).
+    # Isolated profile - separate from the developer's personal Cursor login (same as Windows).
     echo "$HOME/Library/Application Support/ClaudeServerCursorProfile"
 }
 
@@ -1050,25 +1215,209 @@ for rel in (\".config/Cursor/User/globalStorage\", \".config/cursor/User/globalS
     return 1
 }
 
+cursor_sqlite3_available() {
+    command -v sqlite3 >/dev/null 2>&1
+}
+
+cursor_sql_escape() {
+    printf '%s' "$1" | sed "s/'/''/g"
+}
+
+cursor_db_has_key() {
+    local db="$1" key="$2" row
+    [ -f "$db" ] || return 1
+    cursor_sqlite3_available || return 1
+    row="$(sqlite3 "$db" "SELECT 1 FROM ItemTable WHERE key='$(cursor_sql_escape "$key")' LIMIT 1;" 2>/dev/null || true)"
+    [ -n "$row" ]
+}
+
+cursor_db_value_length() {
+    local db="$1" key="$2" len
+    [ -f "$db" ] || return 1
+    cursor_sqlite3_available || return 1
+    len="$(sqlite3 "$db" "SELECT length(value) FROM ItemTable WHERE key='$(cursor_sql_escape "$key")' LIMIT 1;" 2>/dev/null || true)"
+    [ -n "$len" ] && [ "$len" -gt 0 ]
+}
+
+cursor_json_get_string() {
+    local json="$1" key="$2" line
+    line="$(printf '%s' "$json" | grep -o "\"${key}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" 2>/dev/null | head -1 || true)"
+    [ -n "$line" ] || return 1
+    printf '%s' "$line" | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/'
+}
+
+cursor_json_get_string_file() {
+    local file="$1" key="$2"
+    [ -f "$file" ] || return 1
+    cursor_json_get_string "$(cat "$file")" "$key"
+}
+
+cursor_json_set_string_key_file() {
+    local file="$1" key="$2" val="$3" tmp escaped content
+    escaped="$(printf '%s' "$val" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+    tmp="${file}.merge-tmp"
+    if [ ! -f "$file" ]; then
+        printf '{\n  "%s": "%s"\n}\n' "$key" "$escaped" > "$tmp"
+    else
+        content="$(tr -d '\n' <"$file" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        if printf '%s' "$content" | grep -q "\"$key\""; then
+            content="$(printf '%s' "$content" | sed "s/\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"$key\": \"$escaped\"/")"
+        else
+            content="${content%\}}"
+            content="${content},\"$key\":\"$escaped\"}"
+        fi
+        printf '%s\n' "$content" > "$tmp"
+    fi
+    mv "$tmp" "$file"
+}
+
+cursor_auth_payload_to_pairs() {
+    local payload="$1" out="$2" key val
+    : >"$out"
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "$payload" | jq -r 'to_entries[] | select(.value != null and (.value | tostring) != "") | [.key, .value] | @tsv' >"$out" 2>/dev/null || return 1
+        [ -s "$out" ]
+        return
+    fi
+    for key in \
+        cursorAuth/accessToken cursorAuth/refreshToken cursorAuth/cachedEmail \
+        cursorAuth/cachedSignUpType cursorAuth/stripeMembershipType cursorAuth/stripeSubscriptionStatus \
+        storage.serviceMachineId telemetry.machineId telemetry.macMachineId \
+        telemetry.devDeviceId telemetry.sqmId; do
+        val="$(cursor_json_get_string "$payload" "$key" || true)"
+        [ -n "$val" ] && printf '%s\t%s\n' "$key" "$val" >>"$out"
+    done
+    [ -s "$out" ]
+}
+
+cursor_sqlite_merge_pairs() {
+    local db="$1" pairs_file="$2" pair_key pair_val esc_key esc_val
+    [ -f "$pairs_file" ] || return 1
+    cursor_sqlite3_available || return 1
+    sqlite3 "$db" "PRAGMA busy_timeout=30000; CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value TEXT);" >/dev/null 2>&1 || return 1
+    while IFS=$'\t' read -r pair_key pair_val || [ -n "$pair_key" ]; do
+        [ -n "$pair_key" ] && [ -n "$pair_val" ] || continue
+        esc_key="$(cursor_sql_escape "$pair_key")"
+        esc_val="$(cursor_sql_escape "$pair_val")"
+        sqlite3 "$db" "INSERT INTO ItemTable (key, value) VALUES ('${esc_key}', '${esc_val}') ON CONFLICT(key) DO UPDATE SET value = excluded.value;" >/dev/null 2>&1 || return 1
+    done <"$pairs_file"
+    return 0
+}
+
+fetch_golden_auth_dir() {
+    local tmp auth_ok
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/cursor-golden.XXXXXX")" || return 1
+    auth_ok=0
+    scp -o BatchMode=yes -o ConnectTimeout=20 -q \
+        "$ALIAS:/etc/cursor-auth/golden/auth.json" \
+        "$tmp/auth.json" 2>/dev/null && auth_ok=1
+    scp -o BatchMode=yes -o ConnectTimeout=20 -q \
+        "$ALIAS:/etc/cursor-auth/golden/state-keys.json" \
+        "$tmp/state-keys.json" 2>/dev/null || true
+    scp -o BatchMode=yes -o ConnectTimeout=20 -q \
+        "$ALIAS:/etc/cursor-auth/golden/machine-id.txt" \
+        "$tmp/machine-id.txt" 2>/dev/null || true
+    if [ "$auth_ok" -eq 1 ]; then
+        printf '%s' "$tmp"
+        return 0
+    fi
+    rm -rf "$tmp"
+    return 1
+}
+
+build_cursor_auth_payload_from_golden_dir() {
+    local dir="$1" auth="$dir/auth.json" sk="$dir/state-keys.json" mid="$dir/machine-id.txt"
+    local machine_id payload
+    [ -f "$auth" ] || return 1
+
+    if [ -f "$sk" ] && command -v jq >/dev/null 2>&1; then
+        machine_id=""
+        [ -f "$mid" ] && machine_id="$(tr -d '[:space:]' <"$mid")"
+        payload="$(jq -n \
+            --slurpfile sk "$sk" \
+            --slurpfile auth "$auth" \
+            --arg mid "$machine_id" \
+            '($sk[0] // {}) as $vals
+            | ($auth[0] // {}) as $a
+            | $vals
+            | if $a.accessToken then .["cursorAuth/accessToken"] = $a.accessToken else . end
+            | if $a.refreshToken then .["cursorAuth/refreshToken"] = $a.refreshToken else . end
+            | if $a.cachedEmail then .["cursorAuth/cachedEmail"] = $a.cachedEmail else . end
+            | if $a.cachedSignUpType then .["cursorAuth/cachedSignUpType"] = $a.cachedSignUpType else . end
+            | if $a.stripeMembershipType then .["cursorAuth/stripeMembershipType"] = $a.stripeMembershipType else . end
+            | if $a.stripeSubscriptionStatus then .["cursorAuth/stripeSubscriptionStatus"] = $a.stripeSubscriptionStatus else . end
+            | if ($mid | length) > 0 then
+                .["storage.serviceMachineId"] = $mid
+                | .["telemetry.machineId"] = (.["telemetry.machineId"] // $mid)
+                | .["telemetry.macMachineId"] = (.["telemetry.macMachineId"] // $mid)
+                | .["telemetry.devDeviceId"] = (.["telemetry.devDeviceId"] // $mid)
+                | .["telemetry.sqmId"] = (.["telemetry.sqmId"] // $mid)
+              else . end
+            | with_entries(select(.value != null and (.value | tostring) != ""))' 2>/dev/null || true)"
+        if [ -n "$payload" ] && printf '%s' "$payload" | grep -q 'cursorAuth/accessToken'; then
+            printf '%s' "$payload"
+            return 0
+        fi
+    fi
+
+    if [ -f "$sk" ] && grep -q 'cursorAuth/accessToken' "$sk" 2>/dev/null; then
+        payload="$(tr -d '\n' <"$sk")"
+        machine_id=""
+        [ -f "$mid" ] && machine_id="$(tr -d '[:space:]' <"$mid")"
+        if [ -n "$machine_id" ]; then
+            for key in storage.serviceMachineId telemetry.machineId telemetry.macMachineId telemetry.devDeviceId telemetry.sqmId; do
+                if ! printf '%s' "$payload" | grep -q "\"$key\""; then
+                    payload="${payload%\}}"
+                    payload="${payload}, \"$key\": \"$machine_id\"}"
+                fi
+            done
+        fi
+        printf '%s' "$payload"
+        return 0
+    fi
+
+    payload='{'
+    local first=1 tok
+    for tok in accessToken:cursorAuth/accessToken refreshToken:cursorAuth/refreshToken \
+        cachedEmail:cursorAuth/cachedEmail cachedSignUpType:cursorAuth/cachedSignUpType \
+        stripeMembershipType:cursorAuth/stripeMembershipType stripeSubscriptionStatus:cursorAuth/stripeSubscriptionStatus; do
+        local src="${tok%%:*}" dst="${tok#*:}" val
+        val="$(cursor_json_get_string_file "$auth" "$src" || true)"
+        [ -n "$val" ] || continue
+        [ "$first" -eq 1 ] || payload="${payload},"
+        first=0
+        payload="${payload}\"${dst}\":\"${val}\""
+    done
+    machine_id=""
+    [ -f "$mid" ] && machine_id="$(tr -d '[:space:]' <"$mid")"
+    if [ -n "$machine_id" ]; then
+        for key in storage.serviceMachineId telemetry.machineId telemetry.macMachineId telemetry.devDeviceId telemetry.sqmId; do
+            [ "$first" -eq 1 ] || payload="${payload},"
+            first=0
+            payload="${payload}\"${key}\":\"${machine_id}\""
+        done
+    fi
+    payload="${payload}}"
+    printf '%s' "$payload" | grep -q 'cursorAuth/accessToken' || return 1
+    printf '%s' "$payload"
+}
+
 local_cursor_auth_db_ok() {
     local db="$1"
     [ -f "$db" ] || return 1
-    python3 - "$db" <<'PY'
-import sqlite3, sys
-db = sys.argv[1]
-try:
-    c = sqlite3.connect(db)
-    access = c.execute("SELECT 1 FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1").fetchone()
-    refresh = c.execute("SELECT 1 FROM ItemTable WHERE key='cursorAuth/refreshToken' LIMIT 1").fetchone()
-    c.close()
-    sys.exit(0 if access and refresh else 1)
-except sqlite3.Error:
-    sys.exit(1)
-PY
+    cursor_db_has_key "$db" 'cursorAuth/accessToken' && cursor_db_has_key "$db" 'cursorAuth/refreshToken'
 }
 
 fetch_golden_auth_payload() {
-    local payload cmd
+    local payload dir cmd tmp
+    if dir="$(fetch_golden_auth_dir 2>/dev/null)"; then
+        payload="$(build_cursor_auth_payload_from_golden_dir "$dir" 2>/dev/null || true)"
+        rm -rf "$dir"
+        if [ -n "$payload" ] && printf '%s' "$payload" | grep -q 'cursorAuth/accessToken'; then
+            printf '%s' "$payload"
+            return 0
+        fi
+    fi
     for cmd in \
         'python3 /usr/local/lib/claude-server/cursor-auth-lib.py laptop-auth-json 2>/dev/null' \
         'python3 -c "
@@ -1102,81 +1451,55 @@ print(json.dumps(vals))
 }
 
 merge_cursor_auth_into_local_db() {
-    local gs="$1" payload="$2" attempt db="${1}/state.vscdb"
+    local gs="$1" payload="$2" attempt db="${1}/state.vscdb" pairs_file
     [ -n "$payload" ] || return 1
-    export _CURSOR_AUTH_DB="$db"
-    export _CURSOR_AUTH_VALUES="$payload"
+    cursor_sqlite3_available || return 1
+    pairs_file="$(mktemp "${TMPDIR:-/tmp}/cursor-auth-pairs.XXXXXX")"
+    cursor_auth_payload_to_pairs "$payload" "$pairs_file" || { rm -f "$pairs_file"; return 1; }
     for attempt in 1 2 3 4 5; do
-        if python3 <<'PY'
-import json, os, sqlite3, sys
-db = os.environ.get('_CURSOR_AUTH_DB', '')
-raw = os.environ.get('_CURSOR_AUTH_VALUES', '')
-if not db or not raw:
-    sys.exit(1)
-try:
-    vals = json.loads(raw)
-except json.JSONDecodeError:
-    sys.exit(1)
-conn = sqlite3.connect(db, timeout=30)
-conn.execute("PRAGMA busy_timeout=30000")
-try:
-    conn.execute("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value TEXT)")
-    for k, v in vals.items():
-        if v:
-            conn.execute(
-                "INSERT INTO ItemTable (key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (k, v),
-            )
-    conn.commit()
-except sqlite3.Error:
-    sys.exit(1)
-finally:
-    conn.close()
-PY
-        then
-            unset _CURSOR_AUTH_DB _CURSOR_AUTH_VALUES
+        if cursor_sqlite_merge_pairs "$db" "$pairs_file"; then
+            rm -f "$pairs_file"
             return 0
         fi
         sleep 0.4
     done
-    unset _CURSOR_AUTH_DB _CURSOR_AUTH_VALUES
+    rm -f "$pairs_file"
     return 1
 }
 
 merge_cursor_storage_json_from_golden() {
-    local gs="$1" dst="$gs/storage.json" src="$gs/storage.json.merge-src"
+    local gs="$1" dst="$gs/storage.json" src="$gs/storage.json.merge-src" key val
     scp -o BatchMode=yes -o ConnectTimeout=20 -q "$ALIAS:/etc/cursor-auth/golden/storage.json" "$src" 2>/dev/null || return 1
-    python3 - "$src" "$dst" <<'PY'
-import json, os, sys
-src, dst = sys.argv[1], sys.argv[2]
-keys = [
-    'telemetry.machineId', 'telemetry.macMachineId',
-    'telemetry.devDeviceId', 'telemetry.sqmId',
-]
-try:
-    with open(src, encoding='utf-8') as f:
-        remote = json.load(f)
-except (json.JSONDecodeError, OSError):
-    sys.exit(1)
-local = {}
-if os.path.isfile(dst):
-    try:
-        with open(dst, encoding='utf-8') as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            local = data
-    except (json.JSONDecodeError, OSError):
-        pass
-for k in keys:
-    if k in remote and remote[k]:
-        local[k] = remote[k]
-out = json.dumps(local, indent=2) + '\n'
-tmp = dst + '.merge-tmp'
-with open(tmp, 'w', encoding='utf-8') as f:
-    f.write(out)
-os.replace(tmp, dst)
-PY
+    if command -v jq >/dev/null 2>&1; then
+        local tmp_out="${dst}.merge-tmp"
+        if [ -f "$dst" ]; then
+            jq -s '
+                .[0] as $local
+                | .[1] as $remote
+                | $local
+                | .["telemetry.machineId"] = ($remote["telemetry.machineId"] // .["telemetry.machineId"])
+                | .["telemetry.macMachineId"] = ($remote["telemetry.macMachineId"] // .["telemetry.macMachineId"])
+                | .["telemetry.devDeviceId"] = ($remote["telemetry.devDeviceId"] // .["telemetry.devDeviceId"])
+                | .["telemetry.sqmId"] = ($remote["telemetry.sqmId"] // .["telemetry.sqmId"])
+            ' "$dst" "$src" >"$tmp_out" 2>/dev/null || { rm -f "$src" "$tmp_out"; return 1; }
+        else
+            jq '{
+                "telemetry.machineId": .["telemetry.machineId"],
+                "telemetry.macMachineId": .["telemetry.macMachineId"],
+                "telemetry.devDeviceId": .["telemetry.devDeviceId"],
+                "telemetry.sqmId": .["telemetry.sqmId"]
+            } | with_entries(select(.value != null and (.value | tostring) != ""))' "$src" >"$tmp_out" 2>/dev/null || { rm -f "$src" "$tmp_out"; return 1; }
+        fi
+        printf '\n' >>"$tmp_out"
+        mv "$tmp_out" "$dst"
+        rm -f "$src"
+        return 0
+    fi
+    [ -f "$dst" ] || printf '{}\n' >"$dst"
+    for key in telemetry.machineId telemetry.macMachineId telemetry.devDeviceId telemetry.sqmId; do
+        val="$(cursor_json_get_string_file "$src" "$key" || true)"
+        [ -n "$val" ] && cursor_json_set_string_key_file "$dst" "$key" "$val"
+    done
     rm -f "$src"
 }
 
@@ -1194,28 +1517,21 @@ sync_cursor_golden_auth() {
 
 local_cursor_auth_complete() {
     local db="$1"
-    python3 - "$db" <<'PY'
-import sqlite3, sys
-db = sys.argv[1]
-try:
-    c = sqlite3.connect(db)
-    a = c.execute("SELECT 1 FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1").fetchone()
-    r = c.execute("SELECT 1 FROM ItemTable WHERE key='cursorAuth/refreshToken' LIMIT 1").fetchone()
-    e = c.execute("SELECT 1 FROM ItemTable WHERE key='cursorAuth/cachedEmail' LIMIT 1").fetchone()
-    c.close()
-    sys.exit(0 if a and r and e else 1)
-except sqlite3.Error:
-    sys.exit(1)
-PY
+    [ -f "$db" ] || return 1
+    cursor_db_value_length "$db" 'cursorAuth/accessToken' \
+        && cursor_db_value_length "$db" 'cursorAuth/refreshToken' \
+        && cursor_db_value_length "$db" 'cursorAuth/cachedEmail' \
+        && cursor_db_value_length "$db" 'cursorAuth/stripeMembershipType' \
+        && cursor_db_value_length "$db" 'storage.serviceMachineId'
 }
 
 sync_cursor_golden_auth_status() {
     CURSOR_AUTH_SYNC_RESULT=fail
-    local gs payload db
+    local gs payload db force="${CURSOR_AUTH_FORCE:-0}"
     gs="$(get_cursor_remote_profile_dir)/User/globalStorage"
     mkdir -p "$gs"
     db="$gs/state.vscdb"
-    if [ -f "$db" ] && local_cursor_auth_complete "$db"; then
+    if [ "$force" != "1" ] && [ -f "$db" ] && local_cursor_auth_complete "$db"; then
         CURSOR_AUTH_SYNC_RESULT=ok
         return 0
     fi
@@ -1227,6 +1543,7 @@ sync_cursor_golden_auth_status() {
     db="$gs/state.vscdb"
     if local_cursor_auth_complete "$db"; then
         CURSOR_AUTH_SYNC_RESULT=ok
+        [ "$force" = "1" ] && unset CURSOR_AUTH_FORCE
         return 0
     fi
     if local_cursor_auth_db_ok "$db"; then
@@ -1238,31 +1555,8 @@ sync_cursor_golden_auth_status() {
 }
 
 push_cursor_golden_from_server_profile() {
-    local gs db remote_dir msg
-    gs="$(get_cursor_remote_profile_dir)/User/globalStorage"
-    db="$gs/state.vscdb"
-    if ! local_cursor_auth_complete "$db"; then
-        printf 'Sign in inside [Claude Server] window first, then press P again'
-        return 1
-    fi
-    remote_dir="/tmp/cursor-laptop-golden-$(whoami)-$$"
-    sshx "mkdir -p '$remote_dir'" 2>/dev/null || return 1
-    scp -o BatchMode=yes -o ConnectTimeout=20 -q \
-        "$gs/auth.json" "$gs/state-keys.json" "$gs/storage.json" \
-        "$ALIAS:$remote_dir/" 2>/dev/null || {
-        sshx "rm -rf '$remote_dir'" 2>/dev/null || true
-        printf 'Could not copy profile files to server'
-        return 1
-    }
-    if ! ssh -t "$ALIAS" "sudo claude-server import-cursor-golden-laptop '$remote_dir'" 2>/dev/null; then
-        sshx "rm -rf '$remote_dir'" 2>/dev/null || true
-        printf 'Server import failed - run: sudo claude-server install'
-        return 1
-    fi
-    sshx "rm -rf '$remote_dir'" 2>/dev/null || true
-    sync_cursor_golden_auth_status || true
-    printf 'Golden updated from [Claude Server] profile'
-    return 0
+    printf 'P-key push removed - server auth is managed on server only'
+    return 1
 }
 
 
@@ -1310,14 +1604,14 @@ warn_invalid_project_rpath() {
     local rpath="$1" num="${2:-}" os="${3:-${GIT_MODE_LAPTOP_OS:-mac}}"
     if ! laptop_rpath_compatible "$rpath" "$os"; then
         if [ "$os" = "mac" ]; then
-            warn "Windows path — not usable on Mac.${num:+ Press e to edit project #$num.}"
+            warn "Windows path - not usable on Mac.${num:+ Press e to edit project #$num.}"
         else
-            warn "Mac path — not usable on Windows.${num:+ Press e to edit project #$num.}"
+            warn "Mac path - not usable on Windows.${num:+ Press e to edit project #$num.}"
         fi
         return 1
     fi
     if ! laptop_rpath_exists "$rpath"; then
-        warn "Folder not found on this laptop: $rpath${num:+ — press e to edit project #$num.}"
+        warn "Folder not found on this laptop: $rpath${num:+ - press e to edit project #$num.}"
         return 1
     fi
     return 0

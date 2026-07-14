@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-project-rpath.sh — laptop path validation helpers (Mac client)
+# test-project-rpath.sh - laptop path validation helpers (Mac client)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CFG_DIR="${TMPDIR:-/tmp}/claude-rpath-test-$$"

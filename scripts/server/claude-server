@@ -23,7 +23,7 @@ NC='\033[0m'
 
 usage() {
     echo ""
-    echo -e "${BOLD}claude-server${NC} v${VERSION} — Claude Code Server management"
+    echo -e "${BOLD}claude-server${NC} v${VERSION} - Claude Code Server management"
     echo ""
     echo "Usage: claude-server <command> [options]"
     echo ""
@@ -39,6 +39,8 @@ usage() {
     echo "  import-cursor-golden-laptop <dir>  import golden from laptop server profile"
     echo "  audit-cursor-golden  deep Cursor golden metadata audit (no secrets)"
     echo "  deploy-mount-fix     redeploy claude-mount + automount (single-project fix)"
+    echo "  deploy-client-bundle publish client scripts for laptop auto-update"
+    echo "  fix-all-now [token]  mount redeploy + auth/cursor sync + user repair"
     echo "  update-server        git pull + full redeploy"
     echo ""
     echo "Options:"
@@ -57,7 +59,7 @@ CMD="${1:-}"
 shift 2>/dev/null || true
 
 case "$CMD" in
-    install|add-user|verify|status|diagnose-auth|sync-auth|deploy-auth|sync-cursor-auth|import-cursor-golden-laptop|audit-cursor-golden|deploy-mount-fix|update-server)
+    install|add-user|verify|status|diagnose-auth|sync-auth|deploy-auth|sync-cursor-auth|import-cursor-golden-laptop|audit-cursor-golden|deploy-mount-fix|deploy-client-bundle|fix-all-now|update-server)
         if [ -z "$COMMANDS_DIR" ]; then
             echo -e "${RED}Error:${NC} commands directory not found." >&2
             echo "Run from repo: bash scripts/server/claude-server install" >&2

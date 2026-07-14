@@ -1,5 +1,5 @@
 @echo off
-REM deploy-server-mount-fix.bat — admin only, run from repo scripts\client\
+REM deploy-server-mount-fix.bat - admin only, run from repo scripts\client\
 REM Published client ZIPs do NOT include server scripts.
 setlocal
 cd /d "%~dp0"

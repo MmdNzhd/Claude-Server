@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# test-pipeline-repro.ps1 — demonstrates the exact Join-Path ChildPath failure mode
+# test-pipeline-repro.ps1 - demonstrates the exact Join-Path ChildPath failure mode
 $ErrorActionPreference = 'Stop'
 
 Write-Host ""

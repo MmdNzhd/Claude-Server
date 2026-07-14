@@ -1,5 +1,5 @@
 #!/bin/bash
-# sync-auth.sh — push server OAuth token to all developer ~/.claude/ trees
+# sync-auth.sh - push server OAuth token to all developer ~/.claude/ trees
 # Usage: sudo claude-server sync-auth [username]
 
 set -euo pipefail
@@ -25,7 +25,7 @@ if [ ! -x "$SYNC_BIN" ]; then
     unset _cmd_dir _candidate
 fi
 [ -x "$SYNC_BIN" ] || {
-    echo -e "${RED}claude-auth-sync not found — run: sudo claude-server install${NC}" >&2
+    echo -e "${RED}claude-auth-sync not found - run: sudo claude-server install${NC}" >&2
     exit 1
 }
 

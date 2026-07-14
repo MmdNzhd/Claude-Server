@@ -1,5 +1,5 @@
 #!/bin/bash
-# diagnose-auth.sh — find why Claude / SSH keeps asking to log in
+# diagnose-auth.sh - find why Claude / SSH keeps asking to log in
 # Usage: sudo bash diagnose-auth.sh
 #        (or: sudo claude-server diagnose-auth  after install)
 
@@ -59,10 +59,10 @@ token_fingerprint() {
 }
 
 echo ""
-echo -e "${BOLD}Claude Code Server — Auth / Login Diagnostics${NC}"
+echo -e "${BOLD}Claude Code Server - Auth / Login Diagnostics${NC}"
 echo -e "${GRAY}$(date -Is 2>/dev/null || date)  host=$(hostname -f 2>/dev/null || hostname)${NC}"
 
-# ─── 1. Claude OAuth token (most common "please log in" cause) ───────────────
+# --- 1. Claude OAuth token (most common "please log in" cause) ---------------
 step "Claude OAuth token"
 
 AUTH_FILE="/etc/profile.d/claude-auth.sh"
@@ -92,7 +92,7 @@ if [ -f "$ENV_FILE" ]; then
     else
         fail "CLAUDE_CODE_OAUTH_TOKEN not in $ENV_FILE"
         note_fail
-        info "VS Code / Cursor Remote SSH uses non-login shells — token MUST be in $ENV_FILE"
+        info "VS Code / Cursor Remote SSH uses non-login shells - token MUST be in $ENV_FILE"
         info "Fix: echo 'CLAUDE_CODE_OAUTH_TOKEN=<token>' >> $ENV_FILE"
     fi
 else
@@ -121,14 +121,14 @@ if [ -f "$AUTH_FILE" ]; then
     esac
 fi
 
-[ -x /usr/local/bin/claude-auth-sync ] && ok "claude-auth-sync installed" || warn "claude-auth-sync missing — run: sudo claude-server install"
-[ -x /usr/local/bin/claude-auth-probe ] && ok "claude-auth-probe installed" || warn "claude-auth-probe missing — run: sudo claude-server install"
-[ -f /var/log/claude-auth.log ] && ok "audit log: /var/log/claude-auth.log" || info "audit log not created yet — run: sudo claude-server install"
+[ -x /usr/local/bin/claude-auth-sync ] && ok "claude-auth-sync installed" || warn "claude-auth-sync missing - run: sudo claude-server install"
+[ -x /usr/local/bin/claude-auth-probe ] && ok "claude-auth-probe installed" || warn "claude-auth-probe missing - run: sudo claude-server install"
+[ -f /var/log/claude-auth.log ] && ok "audit log: /var/log/claude-auth.log" || info "audit log not created yet - run: sudo claude-server install"
 
 if [ -f /etc/cron.d/claude-auth-probe ]; then
     ok "probe cron: /etc/cron.d/claude-auth-probe (every 30 min)"
 else
-    warn "probe cron missing — run: sudo claude-server install"
+    warn "probe cron missing - run: sudo claude-server install"
 fi
 
 if [ -f /var/log/claude-auth.log ]; then
@@ -138,7 +138,7 @@ if [ -f /var/log/claude-auth.log ]; then
     fi
 fi
 
-# ─── 2. Live env check (simulates login shell vs VS Code shell) ─────────────
+# --- 2. Live env check (simulates login shell vs VS Code shell) -------------
 step "Environment visibility"
 
 login_token=""
@@ -164,7 +164,7 @@ fi
 if [ -n "$vscode_token" ]; then
     ok "non-login shell (VS Code terminal) would see token"
 else
-    fail "non-login shell would NOT see token — Cursor/VS Code will ask to log in"
+    fail "non-login shell would NOT see token - Cursor/VS Code will ask to log in"
     note_fail
 fi
 
@@ -182,7 +182,7 @@ else
     note_fail
 fi
 
-# ─── 3. SSH first-login password (different "login" prompt) ─────────────────
+# --- 3. SSH first-login password (different "login" prompt) -----------------
 step "SSH password / first-login flags"
 
 SYSTEM_USERS="nobody root daemon bin sys sync games man lp mail news uucp proxy www-data backup list irc gnats _apt designer administrator"
@@ -194,17 +194,17 @@ for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd | sort); do
     echo "$SYSTEM_USERS" | grep -qw "$u" && continue
 
     if chage -l "$u" 2>/dev/null | grep -q 'password must be changed'; then
-        fail "$u — SSH will force password change on every login until you run: passwd $u"
+        fail "$u - SSH will force password change on every login until you run: passwd $u"
         note_fail
         passwd_issues=$((passwd_issues + 1))
     else
-        ok "$u — no forced password change"
+        ok "$u - no forced password change"
     fi
 done
 
 [ "$passwd_issues" -eq 0 ] && info "If SSH asks for password (not Claude), check ~/.ssh/authorized_keys on server + laptop connect script"
 
-# ─── 4. Per-user Claude setup ───────────────────────────────────────────────
+# --- 4. Per-user Claude setup -----------------------------------------------
 step "User Claude setup"
 
 if [ "$EUID" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
@@ -232,7 +232,7 @@ for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd | sort); do
     fi
     if _user_readable "$h/.claude/.credentials.json"; then
         if _user_grep "$h/.claude/.credentials.json" 'oauth\|access_token\|refresh_token\|apiKey'; then
-            warn ".credentials.json has stale OAuth data — run: sudo claude-server sync-auth $u"
+            warn ".credentials.json has stale OAuth data - run: sudo claude-server sync-auth $u"
         else
             ok ".credentials.json empty (will not shadow server token)"
         fi
@@ -242,7 +242,7 @@ for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd | sort); do
     _user_grep "$h/.bashrc" 'claude-automount' && ok "automount in .bashrc" || warn "automount missing in .bashrc"
 done
 
-# ─── 5. Active sessions / mounts ────────────────────────────────────────────
+# --- 5. Active sessions / mounts --------------------------------------------
 step "Active tunnels and mounts"
 
 if [ -d /var/run/claude-active ]; then
@@ -267,7 +267,7 @@ for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
 done
 [ "$mount_count" -eq 0 ] && info "no SSHFS mounts active (normal if nobody is connected)"
 
-# ─── 6. Designer Chrome login (designer-only "log in" prompt) ───────────────
+# --- 6. Designer Chrome login (designer-only "log in" prompt) ---------------
 step "Designer (Chrome / noVNC)"
 
 if id designer &>/dev/null; then
@@ -282,7 +282,7 @@ else
     info "designer user not configured"
 fi
 
-# ─── 7. Quick Claude auth probe ─────────────────────────────────────────────
+# --- 7. Quick Claude auth probe ---------------------------------------------
 step "Claude auth probe"
 
 if command -v claude &>/dev/null && [ -n "$login_token" ]; then
@@ -293,14 +293,14 @@ if command -v claude &>/dev/null && [ -n "$login_token" ]; then
     if [ "$probe_rc" -eq 0 ] && printf '%s' "$probe_out" | grep -q 'AUTH_OK'; then
         ok "Claude accepted the OAuth token (test prompt succeeded)"
     elif printf '%s' "$probe_out" | grep -qiE 'login|authenticate|oauth|unauthorized|invalid.*token|expired'; then
-        fail "Claude rejected the token — token is missing, wrong, or expired"
+        fail "Claude rejected the token - token is missing, wrong, or expired"
         note_fail
         info "Re-run on a laptop: claude setup-token"
         info "Then: sudo claude-server deploy-auth '<token>'"
         info "Probe output (last 5 lines):"
         printf '%s\n' "$probe_out" | tail -5 | while read -r line; do info "  $line"; done
     else
-        warn "auth probe inconclusive (exit $probe_rc) — check manually: claude -p 'hi'"
+        warn "auth probe inconclusive (exit $probe_rc) - check manually: claude -p 'hi'"
         info "Probe output (last 5 lines):"
         printf '%s\n' "$probe_out" | tail -5 | while read -r line; do info "  $line"; done
     fi
@@ -308,7 +308,7 @@ else
     info "skipped (no claude binary or no token)"
 fi
 
-# ─── 8. Cursor golden auth ───────────────────────────────────────────────────
+# --- 8. Cursor golden auth ---------------------------------------------------
 step "Cursor golden auth"
 
 GOLDEN_DIR="/etc/cursor-auth/golden"
@@ -372,21 +372,21 @@ PY
     if [ -f "$GOLDEN_DIR/state-keys.json" ]; then
         ok "golden state-keys.json present"
     else
-        warn "golden state-keys.json missing — re-export: sudo cursor-auth-export --from-user <name>"
+        warn "golden state-keys.json missing - re-export: sudo cursor-auth-export --from-user <name>"
     fi
 else
-    warn "no golden Cursor auth — optional until Cursor IDE is used"
+    warn "no golden Cursor auth - optional until Cursor IDE is used"
     info "Bootstrap: agent login (or Remote SSH once), then sudo cursor-auth-export --from-user <name>"
 fi
 
-[ -x /usr/local/bin/cursor-auth-sync ] && ok "cursor-auth-sync installed" || warn "cursor-auth-sync missing — run: sudo claude-server install"
+[ -x /usr/local/bin/cursor-auth-sync ] && ok "cursor-auth-sync installed" || warn "cursor-auth-sync missing - run: sudo claude-server install"
 [ -x /usr/local/bin/cursor-auth-export ] && ok "cursor-auth-export installed" || warn "cursor-auth-export missing"
 [ -x /usr/local/bin/cursor-auth-refresh ] && ok "cursor-auth-refresh installed" || warn "cursor-auth-refresh missing"
 
 if [ -f /etc/cron.d/cursor-auth-refresh ]; then
     ok "refresh cron: /etc/cron.d/cursor-auth-refresh"
 else
-    warn "refresh cron missing — run: sudo claude-server install"
+    warn "refresh cron missing - run: sudo claude-server install"
 fi
 
 if [ -f /var/log/cursor-auth-refresh.log ]; then
@@ -426,16 +426,16 @@ print("yes" if cal.user_has_tokens(Path(sys.argv[1])) else "no", end="")
 PY
 )"
         if [ "$has_tokens" != "yes" ]; then
-            warn "$u — Cursor tokens not synced (run: sudo claude-server sync-cursor-auth $u)"
+            warn "$u - Cursor tokens not synced (run: sudo claude-server sync-cursor-auth $u)"
             continue
         fi
         if [ -z "$user_mid" ]; then
-            fail "$u — Cursor machineId missing (run: sudo claude-server sync-cursor-auth $u)"
+            fail "$u - Cursor machineId missing (run: sudo claude-server sync-cursor-auth $u)"
             note_fail
         elif [ "$user_mid" = "$golden_mid" ]; then
-            ok "$u — machineId matches golden"
+            ok "$u - machineId matches golden"
         else
-            fail "$u — machineId drift (run: sudo claude-server sync-cursor-auth $u)"
+            fail "$u - machineId drift (run: sudo claude-server sync-cursor-auth $u)"
             note_fail
         fi
     done
@@ -447,20 +447,20 @@ else
     info "cursor-server not installed yet (normal until first Remote SSH connect)"
 fi
 
-# ─── Summary ─────────────────────────────────────────────────────────────────
+# --- Summary -----------------------------------------------------------------
 step "Summary"
 
 if [ "$ISSUES" -eq 0 ]; then
     echo -e "  ${GREEN}${BOLD}No obvious auth problems found.${NC}"
     echo ""
     echo "  If you still see a login prompt, note WHERE it appears:"
-    echo "    - SSH password prompt     → run connect.bat/connect.sh on laptop, or: passwd <user>"
-    echo "    - Cursor/VS Code terminal → token must be in /etc/environment (see above)"
-    echo "    - claude CLI in terminal  → refresh OAuth token (claude setup-token)"
-    echo "    - Designer Chrome/noVNC   → log in to claude.ai once in server Chrome"
-    echo "    - Cursor Chat/Composer    → run: sudo claude-server sync-cursor-auth"
+    echo "    - SSH password prompt     -> run connect.bat/connect.sh on laptop, or: passwd <user>"
+    echo "    - Cursor/VS Code terminal -> token must be in /etc/environment (see above)"
+    echo "    - claude CLI in terminal  -> refresh OAuth token (claude setup-token)"
+    echo "    - Designer Chrome/noVNC   -> log in to claude.ai once in server Chrome"
+    echo "    - Cursor Chat/Composer    -> run: sudo claude-server sync-cursor-auth"
 else
-    echo -e "  ${RED}${BOLD}$ISSUES issue(s) found — see FAIL lines above.${NC}"
+    echo -e "  ${RED}${BOLD}$ISSUES issue(s) found - see FAIL lines above.${NC}"
     echo ""
     echo "  Most common fix for 'claude keeps asking to log in':"
     echo "    1. On laptop:  claude setup-token"

@@ -3,14 +3,14 @@
 # Called via SSH from connect-design.ps1 as the "designer" user.
 # Usage: designer-start [start W H | stop | status]
 #
-# Only one viewer at a time. A new connection kicks the previous one —
+# Only one viewer at a time. A new connection kicks the previous one -
 # the old client sees "Connection dropped" and gets a notification.
 
 SUBCOMMAND="${1:-start}"
 SCREEN_W="${2:-1920}"
 SCREEN_H="${3:-1080}"
 
-# Maximum framebuffer size — Xvfb is always started at this size;
+# Maximum framebuffer size - Xvfb is always started at this size;
 # xrandr is used to switch to the requested resolution at runtime.
 MAX_FB_W=3840
 MAX_FB_H=2160
@@ -21,7 +21,7 @@ if ! [[ "$SCREEN_W" =~ ^[0-9]+$ ]] || ! [[ "$SCREEN_H" =~ ^[0-9]+$ ]]; then
 fi
 if [ "$SCREEN_W" -lt 320 ] || [ "$SCREEN_W" -gt "$MAX_FB_W" ] || \
    [ "$SCREEN_H" -lt 240 ] || [ "$SCREEN_H" -gt "$MAX_FB_H" ]; then
-    echo "ERROR: resolution ${SCREEN_W}x${SCREEN_H} is outside allowed range (320x240 – ${MAX_FB_W}x${MAX_FB_H})"
+    echo "ERROR: resolution ${SCREEN_W}x${SCREEN_H} is outside allowed range (320x240 - ${MAX_FB_W}x${MAX_FB_H})"
     exit 1
 fi
 
@@ -101,7 +101,7 @@ wait_for_port() {
     done
 }
 
-# Stop infrastructure services (Xvfb, x11vnc, websockify) — Chrome is NEVER touched here.
+# Stop infrastructure services (Xvfb, x11vnc, websockify) - Chrome is NEVER touched here.
 stop_services() {
     for pid_file in "$NOVNC_PID" "$VNC_PID" "$WM_PID" "$AUTOCUTSEL_PID" "$AUTOCUTSEL_PRI_PID" "$XVFB_PID"; do
         if [ -f "$pid_file" ]; then
@@ -126,7 +126,7 @@ stop_services() {
     sleep 1
 }
 
-# Stop Chrome — called ONLY from the explicit 'stop' subcommand or Xvfb restart.
+# Stop Chrome - called ONLY from the explicit 'stop' subcommand or Xvfb restart.
 stop_chrome() {
     if [ -f "$CHROME_PID" ]; then
         local _pid
@@ -207,12 +207,12 @@ apply_resolution() {
 
 case "$SUBCOMMAND" in
     start)
-        # Rotate log — keep last 500KB
+        # Rotate log - keep last 500KB
         if [ -f "$LOG" ] && [ "$(wc -c < "$LOG" 2>/dev/null || echo 0)" -gt 512000 ]; then
             tail -c 512000 "$LOG" > "${LOG}.tmp" && [ -s "${LOG}.tmp" ] && mv "${LOG}.tmp" "$LOG" || rm -f "${LOG}.tmp"
         fi
 
-        # If websockify is running, someone is already connected — kick them.
+        # If websockify is running, someone is already connected - kick them.
         if is_running "$NOVNC_PID" "websockify"; then
             kick_viewer
             echo "KICKED_PREVIOUS"
@@ -227,7 +227,7 @@ case "$SUBCOMMAND" in
         WANT_RES="${SCREEN_W}x${SCREEN_H}"
 
         if [ -n "$STORED_RES" ] && [ "$STORED_RES" != "$WANT_RES" ] && is_running "$XVFB_PID" "Xvfb"; then
-            # Attempt live resolution change via xrandr — Chrome stays running.
+            # Attempt live resolution change via xrandr - Chrome stays running.
             if apply_resolution "$SCREEN_W" "$SCREEN_H"; then
                 echo "$WANT_RES" > "$RES_FILE"
                 # Restart only x11vnc so it picks up the new geometry.
@@ -239,7 +239,7 @@ case "$SUBCOMMAND" in
                 pkill -f "x11vnc.*rfbport ${VNC_PORT}" 2>/dev/null || true
                 sleep 1
             else
-                # xrandr failed — restart everything including Chrome
+                # xrandr failed - restart everything including Chrome
                 # because Chrome cannot survive its display being destroyed.
                 stop_chrome
                 stop_services
@@ -257,17 +257,17 @@ case "$SUBCOMMAND" in
             apply_resolution "$SCREEN_W" "$SCREEN_H" || true
             echo "$WANT_RES" > "$RES_FILE"
         else
-            # Xvfb is up — ensure resolution file is current.
+            # Xvfb is up - ensure resolution file is current.
             echo "$WANT_RES" > "$RES_FILE"
         fi
 
-        # Window manager — required for Chrome to receive keyboard/scroll/focus events
+        # Window manager - required for Chrome to receive keyboard/scroll/focus events
         if ! is_running "$WM_PID" "fluxbox"; then
             start_proc "$WM_PID" env DISPLAY="$DISPLAY_VAR" fluxbox -display "$DISPLAY_VAR"
             sleep 1
         fi
 
-        # Clipboard sync — keeps PRIMARY and CLIPBOARD selections in sync
+        # Clipboard sync - keeps PRIMARY and CLIPBOARD selections in sync
         if command -v autocutsel >/dev/null 2>&1; then
             if ! is_running "$AUTOCUTSEL_PID" "autocutsel"; then
                 start_proc "$AUTOCUTSEL_PID" env DISPLAY="$DISPLAY_VAR" autocutsel -fork
@@ -311,7 +311,7 @@ case "$SUBCOMMAND" in
 
         # Release lock now that all services are confirmed running
 
-        # Launch Chrome only if it is not already running — NEVER kill it.
+        # Launch Chrome only if it is not already running - NEVER kill it.
         if ! is_running "$CHROME_PID" "chrome"; then
             mkdir -p "$CHROME_PROFILE"
             rm -f "$CHROME_PROFILE/SingletonLock" \

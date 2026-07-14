@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-mac-laptop-ssh-live.sh — live Mac reverse-SSH self-heal smoke test
+# test-mac-laptop-ssh-live.sh - live Mac reverse-SSH self-heal smoke test
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -66,7 +66,7 @@ if [ -n "${PORT:-}" ]; then
             fail "tunnel banner is another machine (stale Windows/Linux tunnel on port $PORT)"
         fi
     else
-        pass "port $PORT free — will start Mac tunnel for test"
+        pass "port $PORT free - will start Mac tunnel for test"
     fi
 fi
 

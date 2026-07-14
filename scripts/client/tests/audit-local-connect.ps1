@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# audit-local-connect.ps1 — scan laptop for connect.ps1 copies; report safe vs broken
+# audit-local-connect.ps1 - scan laptop for connect.ps1 copies; report safe vs broken
 param(
     [switch]$Json
 )

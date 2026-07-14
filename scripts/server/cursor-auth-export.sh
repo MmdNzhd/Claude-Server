@@ -1,5 +1,5 @@
 #!/bin/bash
-# cursor-auth-export — capture golden Cursor identity from a logged-in user
+# cursor-auth-export - capture golden Cursor identity from a logged-in user
 #
 # Usage (root):
 #   cursor-auth-export --from-user <username>

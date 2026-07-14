@@ -1,11 +1,11 @@
-# test-laptop-ssh-ready.ps1 — Select-String + authorized_keys edge cases (PS 5.1)
+# test-laptop-ssh-ready.ps1 - Select-String + authorized_keys edge cases (PS 5.1)
 $ErrorActionPreference = 'Stop'
 
 function Assert($cond, $msg) {
     if (-not $cond) { throw "FAIL: $msg" }
 }
 
-# SSH key fragments often contain / and + — must not break Select-String -Pattern binding
+# SSH key fragments often contain / and + - must not break Select-String -Pattern binding
 $frag = 'AAAAC3NzaC1lZDI1NTE5AAAAINmE2C08xhilQRior6V9PApnwNh/WL2VYqa7Lk9+8Gpc'
 $tmp = Join-Path $env:TEMP "claude-connect-ak-test-$([Guid]::NewGuid().ToString('N')).txt"
 try {

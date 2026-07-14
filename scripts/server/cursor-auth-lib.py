@@ -399,18 +399,88 @@ def export_from_global_storage(global_dir: Path, source_host: str) -> None:
     write_golden_bundle(state_values, storage_data, source_host)
 
 
-def export_from_user(home: Path, username: str, source_host: str) -> str:
-    """Export golden bundle from a user home. Returns source description."""
+def _newest_agent_auth_mtime(home: Path) -> float:
+    candidates = [
+        home / ".cursor" / "auth.json",
+        home / ".cursor" / "credentials.json",
+        home / ".config" / "cursor" / "auth.json",
+        home / ".local" / "share" / "cursor" / "auth.json",
+    ]
+    mtimes = [p.stat().st_mtime for p in candidates if p.is_file()]
+    return max(mtimes, default=0.0)
+
+
+def _best_global_storage_state(
+    home: Path,
+) -> tuple[Path | None, dict[str, str], float]:
+    best_dir: Path | None = None
+    best_values: dict[str, str] = {}
+    best_mtime = 0.0
     for global_dir in global_storage_dirs(home):
         db_path = global_dir / "state.vscdb"
-        if db_path.is_file():
-            export_from_global_storage(global_dir, source_host)
-            return str(global_dir)
+        if not db_path.is_file():
+            continue
+        mtime = db_path.stat().st_mtime
+        if mtime >= best_mtime:
+            values = read_relevant_state_values(db_path) or read_state_values(
+                db_path, STATE_KEYS
+            )
+            if values:
+                best_dir = global_dir
+                best_values = values
+                best_mtime = mtime
+    return best_dir, best_values, best_mtime
 
-    state_values: dict[str, str] = {}
-    state_values.update(read_agent_keychain(username))
-    if not state_values.get("cursorAuth/accessToken"):
-        state_values.update(read_agent_credential_files(home))
+
+def export_from_user(home: Path, username: str, source_host: str) -> str:
+    """Export golden bundle from a user home. Returns source description."""
+    global_dir, state_values, db_mtime = _best_global_storage_state(home)
+
+    agent_values: dict[str, str] = {}
+    agent_values.update(read_agent_keychain(username))
+    if not agent_values.get("cursorAuth/accessToken"):
+        agent_values.update(read_agent_credential_files(home))
+
+    agent_mtime = _newest_agent_auth_mtime(home)
+    if (
+        agent_values.get("cursorAuth/accessToken")
+        and agent_values.get("cursorAuth/refreshToken")
+        and agent_mtime > db_mtime
+    ):
+        merged = dict(state_values)
+        merged["cursorAuth/accessToken"] = agent_values["cursorAuth/accessToken"]
+        merged["cursorAuth/refreshToken"] = agent_values["cursorAuth/refreshToken"]
+        if agent_values.get("cursorAuth/cachedEmail"):
+            merged["cursorAuth/cachedEmail"] = agent_values["cursorAuth/cachedEmail"]
+        if global_dir:
+            storage_path = global_dir / "storage.json"
+            existing_storage = load_storage_json(storage_path)
+            storage_data = build_storage_json(merged, existing_storage)
+            write_golden_bundle(merged, storage_data, source_host)
+            print(
+                "cursor-auth-export: exported from agent auth "
+                f"(newer than state.vscdb, mtime {agent_mtime:.0f} > {db_mtime:.0f})",
+                file=sys.stderr,
+            )
+            return str(global_dir)
+        machine_id = merged.get("storage.serviceMachineId") or new_golden_machine_id()
+        merged["storage.serviceMachineId"] = machine_id
+        for key in STORAGE_JSON_KEYS:
+            merged.setdefault(key, machine_id)
+        storage_data = build_storage_json(merged, {})
+        write_golden_bundle(merged, storage_data, source_host)
+        print(
+            "cursor-auth-export: exported from agent auth files "
+            f"(new golden machineId={machine_id})",
+            file=sys.stderr,
+        )
+        return "agent-auth-files"
+
+    if global_dir:
+        export_from_global_storage(global_dir, source_host)
+        return str(global_dir)
+
+    state_values = dict(agent_values)
 
     if state_values.get("cursorAuth/accessToken") and state_values.get(
         "cursorAuth/refreshToken"

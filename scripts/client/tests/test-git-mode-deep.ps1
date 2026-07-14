@@ -1,4 +1,4 @@
-# test-git-mode-deep.ps1 — deep static + logic tests for GIT_MODE feature
+# test-git-mode-deep.ps1 - deep static + logic tests for GIT_MODE feature
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_paths.ps1')
 $fail = 0
@@ -15,10 +15,6 @@ function Test-GetGitModeLogic {
     $got = if ($s -match '^(server|on|yes|1|slow)$') { 'server' } else { 'hide' }
     Assert ($got -eq $Expected) "Get-GitMode parse '$Saved' -> $Expected (got $got)"
 }
-
-Write-Host ""
-Write-Host "=== GIT_MODE deep logic tests ===" -ForegroundColor Cyan
-Write-Host ""
 
 Test-GetGitModeLogic '' 'hide'
 Test-GetGitModeLogic 'hide' 'hide'
@@ -47,6 +43,10 @@ Assert ($mount -match 'mount_git_mode') 'claude-mount supports per-project git_m
 Assert ($mount -match 'Get-Process git') 'claude-mount stops git.exe on hide retry'
 
 $gitModePs1 = Get-Content (Get-ClientFile 'git-mode.ps1') -Raw
+Assert ($mount -match 'cmd_recover_one') 'claude-mount has recover-one command'
+Assert ($gitModePs1 -match 'Clear-TunnelBannerCache') 'git-mode.ps1 has tunnel banner cache'
+Assert ($gitModePs1 -match 'SCP: timeout ERROR') 'git-mode.ps1 logs SCP timeout'
+Assert ($gitModePs1 -match 'LAPTOP_SSH: probe begin') 'git-mode.ps1 logs LAPTOP_SSH probe'
 Assert ($gitModePs1 -match "ACTIVE_MOUNT=%s") 'git-mode.ps1 pushes ACTIVE_MOUNT in connect conf'
 Assert ($mount -match 'cmd_down_others') 'claude-mount has down-others command'
 Assert ($mount -match '_force_unmount_project') 'claude-mount has force unmount for hung sshfs'
@@ -89,7 +89,9 @@ foreach ($rel in @('mac\connect.sh')) {
     Assert ($src -match 'ACTIVE_MOUNT_ID') "$rel tracks ACTIVE_MOUNT on server"
     Assert ($bundle -match 'remount_project_git') "$rel has mid-session git remount"
     Assert ($src -match '_editor_opened') "$rel opens editor only once per menu pick"
-    Assert ($src -match 'tunnel_drop_session_action') "$rel honors Q on tunnel drop"
+    Assert ($src -match 'begin_connect_recovery') "$rel calls begin_connect_recovery on reconnect"
+    Assert ($src -match 'CURSOR_AUTH_FORCE') "$rel forces cursor auth after recovery"
+    Assert ($src -match 'begin_connect_recovery|connect_log.*recover') "$rel logs recovery tags"
 }
 
 Assert ($gitModeSh -match 'ACTIVE_MOUNT=%s') 'git-mode.sh pushes ACTIVE_MOUNT in connect conf'
@@ -98,10 +100,13 @@ Assert ($gitModePs1 -match 'function Read-RetryQuitKey') 'git-mode.ps1 has Read-
 Assert ($gitModeSh -match 'read_post_disconnect_key') 'git-mode.sh has post-disconnect helper'
 Assert ($gitModeSh -match 'get_active_mount_id') 'git-mode.sh queries ACTIVE_MOUNT from server'
 Assert ($gitModeSh -match 'get_git_mode_label') 'git-mode.sh has FAST/SLOW label helper'
-Assert ($gitModeSh -match 'push_cursor_golden_from_server_profile') 'git-mode.sh has P-key push'
+Assert ($gitModeSh -match 'cursor_sqlite3_available') 'git-mode.sh uses sqlite3 for cursor auth'
 Assert ($gitModePs1 -match 'Read-PostDisconnectKey') 'git-mode.ps1 has Read-PostDisconnectKey'
 
 Assert ($gitModeSh -match 'tunnel_drop_session_action') 'git-mode.sh honors Q on tunnel drop'
+Assert ($gitModeSh -match 'begin_connect_recovery') 'git-mode.sh has begin_connect_recovery'
+Assert ($gitModeSh -match "storage.serviceMachineId") 'git-mode.sh checks storage.serviceMachineId in local_cursor_auth_complete'
+Assert ($gitModeSh -match 'stripeMembershipType') 'git-mode.sh checks stripeMembershipType in local_cursor_auth_complete'
 Assert ($gitModeSh -match 'test_mount_success') 'git-mode.sh has mount success helper'
 
 $win = Get-Content (Get-ClientFile 'windows\connect.ps1') -Raw

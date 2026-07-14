@@ -1,5 +1,5 @@
 #!/bin/bash
-# deploy-mount-fix.sh ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â redeploy claude-mount + claude-automount (ACTIVE_MOUNT, down-others, EncodedCommand)
+# deploy-mount-fix.sh - redeploy claude-mount + claude-automount (ACTIVE_MOUNT, down-others, EncodedCommand)
 # Usage: sudo claude-server deploy-mount-fix
 # Safe to re-run. Does not touch OAuth/Cursor auth.
 
@@ -21,20 +21,36 @@ fi
 
 SELF="$(readlink -f "$0")"
 DEPLOY_DIR="$(cd "$(dirname "$SELF")" && pwd)"
-COMMANDS_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+COMMANDS_DIR="$DEPLOY_DIR"
 SERVER_DIR="$(cd "$COMMANDS_DIR/.." && pwd)"
 
-if [ -f "$DEPLOY_DIR/claude-mount.sh" ]; then
-    MOUNT_SRC="$DEPLOY_DIR/claude-mount.sh"
-    AUTO_SRC="$DEPLOY_DIR/claude-automount.sh"
-    WATCH_SRC="$DEPLOY_DIR/claude-watchdog.sh"
-elif [ -f "$SERVER_DIR/claude-mount.sh" ]; then
-    MOUNT_SRC="$SERVER_DIR/claude-mount.sh"
-    AUTO_SRC="$SERVER_DIR/claude-automount.sh"
-    WATCH_SRC="$SERVER_DIR/claude-watchdog.sh"
-else
-    fail "claude-mount.sh not found (run from repo or ~/claude-mount-deploy/)"
-fi
+_resolve_mount_sources() {
+    local d
+    for d in \
+        "$DEPLOY_DIR" \
+        "$SERVER_DIR" \
+        "${CLAUDE_SERVER_REPO:-}/scripts/server" \
+        "/home/smart/mounts/claude-code-server/scripts/server" \
+        "/opt/claude-code-server/scripts/server"; do
+        [ -n "$d" ] || continue
+        [ -f "$d/claude-mount.sh" ] || continue
+        MOUNT_SRC="$d/claude-mount.sh"
+        AUTO_SRC="$d/claude-automount.sh"
+        WATCH_SRC="$d/claude-watchdog.sh"
+        return 0
+    done
+    if [ -f /usr/local/lib/claude-mount ] && [ -f /usr/local/bin/claude-automount ]; then
+        warn "repo sources not found - redeploying from /usr/local (already installed)"
+        MOUNT_SRC="/usr/local/lib/claude-mount"
+        AUTO_SRC="/usr/local/bin/claude-automount"
+        WATCH_SRC="/usr/local/bin/claude-watchdog"
+        return 0
+    fi
+    return 1
+}
+
+MOUNT_SRC="" AUTO_SRC="" WATCH_SRC=""
+_resolve_mount_sources || fail "claude-mount.sh not found (set CLAUDE_SERVER_REPO or run from repo)"
 
 _strip_crlf() {
     local f="$1"
@@ -48,18 +64,19 @@ _strip_crlf "$AUTO_SRC"
 
 echo ""
 echo -e "${BOLD}Deploy mount + automount fix${NC}"
+echo -e "  ${BOLD}source${NC}  $MOUNT_SRC"
 echo ""
 
 install -m 755 "$AUTO_SRC" /usr/local/bin/claude-automount
-ok "claude-automount ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ /usr/local/bin/"
+ok "claude-automount -> /usr/local/bin/"
 
 install -m 755 "$MOUNT_SRC" /usr/local/lib/claude-mount
-ok "claude-mount ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ /usr/local/lib/claude-mount"
+ok "claude-mount -> /usr/local/lib/claude-mount"
 ln -sf /usr/local/lib/claude-mount /usr/local/bin/claude-mount 2>/dev/null || true
 
 if [ -f "$WATCH_SRC" ]; then
     install -m 755 "$WATCH_SRC" /usr/local/bin/claude-watchdog
-    ok "claude-watchdog ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ /usr/local/bin/"
+    ok "claude-watchdog -> /usr/local/bin/"
 fi
 
 grep -q 'cmd_down_others' /usr/local/lib/claude-mount || fail "claude-mount missing down-others"
@@ -89,9 +106,9 @@ for home in /home/*/; do
     install -m 755 /usr/local/bin/claude-automount "$home/.local/bin/claude-automount"
     chown "$u:$u" "$home/.local/bin/claude-mount" "$home/.local/bin/claude-automount"
     _patch_bashrc "$home/.bashrc"
-    ok "$u ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ ~/.local/bin/claude-mount + claude-automount"
+    ok "$u ~/.local/bin/claude-mount + claude-automount"
 done
 
 echo ""
-echo -e "${GREEN}Done.${NC} Users should reconnect connect.bat (v20260705.4+)."
+echo -e "${GREEN}Done.${NC} Users should reconnect connect.bat (v20260714.2+)."
 echo ""

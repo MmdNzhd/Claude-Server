@@ -1,4 +1,4 @@
-# verify-cursor-auth-live.ps1 — end-to-end golden -> local merge (no token values printed)
+# verify-cursor-auth-live.ps1 - end-to-end golden -> local merge (no token values printed)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_paths.ps1')
 

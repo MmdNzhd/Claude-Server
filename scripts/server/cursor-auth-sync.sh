@@ -1,5 +1,5 @@
 #!/bin/bash
-# cursor-auth-sync — push golden Cursor identity into ~/.config/Cursor per user
+# cursor-auth-sync - push golden Cursor identity into ~/.config/Cursor per user
 #
 # Usage (root):  cursor-auth-sync <username>
 #                 cursor-auth-sync --all
@@ -67,13 +67,16 @@ spec = importlib.util.spec_from_file_location("cursor_auth_lib", lib_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 if not mod.golden_complete():
-    raise SystemExit("cursor-auth-sync: golden bundle missing — run: sudo cursor-auth-export --from-user <name>")
+    raise SystemExit("cursor-auth-sync: golden bundle missing - run: sudo cursor-auth-export --from-user <name>")
 PY
         for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
             h="/home/$u"
             [ -d "$h" ] || continue
             [ "$u" = "designer" ] && continue
-            _sync_home "$h" "$u:$u"
+            if ! _sync_home "$h" "$u:$u"; then
+                printf 'WARN %s sync failed - continuing\n' "$u" >&2
+                continue
+            fi
             printf 'OK %s\n' "$u"
         done
         ;;

@@ -1,5 +1,5 @@
 #!/bin/bash
-# audit-cursor-golden — deep Cursor golden auth audit (metadata lengths only, no secrets)
+# audit-cursor-golden - deep Cursor golden auth audit (metadata lengths only, no secrets)
 # Usage: sudo claude-server audit-cursor-golden
 
 set -euo pipefail

@@ -1,4 +1,4 @@
-# test-cursor-auth-merge.ps1 — verify auth sync never closes Cursor
+# test-cursor-auth-merge.ps1 - verify auth sync never closes Cursor
 $ErrorActionPreference = 'Continue'
 $fail = 0
 
@@ -10,6 +10,8 @@ function Assert($cond, $msg) {
 $authScript = Join-Path $PSScriptRoot '..\cursor-auth-laptop.ps1'
 $src = Get-Content $authScript -Raw
 Assert ($src -match 'Merge-CursorAuthIntoLocalDb') 'uses SQLite merge'
+Assert ($src -match 'winsqlite3|CursorAuthSqlite') 'uses winsqlite3 via C# P/Invoke'
+Assert ($src -notmatch 'Resolve-CursorAuthPython|Invoke-CursorAuthPython|python3 /usr/local') 'no Python dependency'
 Assert ($src -notmatch 'Stop-Cursor|CloseMainWindow|Stop-Process') 'no close/kill'
 Assert ($src -notmatch 'Remove-Item.*wal|wal.*Remove-Item') 'does not delete WAL files'
 Assert ($src -match 'Get-RemoteCursorAuthFromGolden') 'reads auth from golden bundle'
@@ -23,6 +25,11 @@ Assert ($winConnect -match 'Sync-CursorGoldenAuth -Alias \$Alias') 'auth sync on
 Assert ($winConnect -match 'skipped \(editor open\)') 'auth sync skipped while Cursor open'
 Assert ($winConnect -match "action -eq 'o'") 'session can reopen editor with O'
 Assert ($winConnect -match 'if \(-not \$editorOpened\)') 'editor opens only once'
+Assert ($winConnect -match 'Begin-ConnectRecovery') 'connect.ps1 resets auth on recovery'
+Assert ($winConnect -match 'ForceCursorAuthSync') 'connect.ps1 force auth after recovery'
+Assert ($src -match 'function Test-CursorAuthNeedsRefresh') 'cursor-auth-laptop has Test-CursorAuthNeedsRefresh'
+Assert ($src -match 'serviceMachineId_empty') 'Test-CursorAuthNeedsRefresh checks serviceMachineId'
+
 
 Write-Host ''
 if ($fail -eq 0) { Write-Host 'All cursor-auth merge tests passed.' -ForegroundColor Green; exit 0 }
