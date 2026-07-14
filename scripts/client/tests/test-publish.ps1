@@ -74,6 +74,7 @@ function Test-BinaryIdenticalExceptIp {
     Get-ChildItem $MainRoot -Recurse -File | ForEach-Object {
         $rel = $_.FullName.Substring($MainRoot.Length).TrimStart('\')
         if ($rel -match '(^|\\)README(\.|$)') { return }
+        if ($rel -match '(^|\\)connect\.log(\.\d+)?$') { return }
         $sepidPath = Join-Path $SepidRoot $rel
         if (-not (Test-Path $sepidPath)) {
             Assert $false "sepid missing mirrored file: $rel"
@@ -130,7 +131,9 @@ $sepid = Get-ChildItem (Join-Path $pubBase 'claude-code-sepidz-*') -Directory -E
 if ($main) {
     Test-PackageRoot -Root $main.FullName -Label 'main publish folder'
     Test-NoForbiddenStrings -Root $main.FullName -Label 'main'
-    $mainFiles = @(Get-ChildItem $main.FullName -Recurse -File | ForEach-Object { $_.FullName.Replace($main.FullName, '').TrimStart('\') })
+    $mainFiles = @(Get-ChildItem $main.FullName -Recurse -File |
+        Where-Object { $_.Name -notmatch '^connect\.log(\.\d+)?$' } |
+        ForEach-Object { $_.FullName.Replace($main.FullName, '').TrimStart('\') })
     Assert ($mainFiles -contains 'README.txt') 'main has README.txt'
     Assert ($mainFiles -contains 'windows\connect.ps1') 'main has windows\connect.ps1'
     Assert ($mainFiles -contains 'mac\connect.sh') 'main has mac\connect.sh'

@@ -411,11 +411,75 @@ function Start-ProcessAsInteractiveUser {
     return $fallback
 }
 
+$script:EditorCimCache = @{}
+$script:LaunchCimCallCount = 0
+$script:VerboseLaunch = ($env:CLAUDE_CONNECT_VERBOSE_LAUNCH -eq '1')
+
+function Clear-CursorProcessCache {
+    $script:EditorCimCache = @{}
+}
+
+function Test-LaunchPerfEnabled {
+    if (Get-Command Test-ConnectPerfEnabled -ErrorAction SilentlyContinue) {
+        return Test-ConnectPerfEnabled
+    }
+    return $true
+}
+
+function Write-LaunchPerfLog {
+    param(
+        [Parameter(Mandatory)][string]$Mark,
+        [Parameter(Mandatory)][int]$Ms,
+        [string]$Extra = ''
+    )
+    if (-not (Test-LaunchPerfEnabled)) { return }
+    $cim = if ($null -ne $script:LaunchCimCallCount) { $script:LaunchCimCallCount } else { 0 }
+    $fullExtra = "cim_total=$cim" + $(if ($Extra) { " $Extra" } else { '' })
+    if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
+        Write-ConnectPerfLog -Mark $Mark -Ms $Ms -Extra $fullExtra
+    } else {
+        Write-EditorLaunchLog "PERF[$Mark] ms=$Ms $fullExtra" 'DEBUG'
+    }
+}
+
+function Invoke-CimEditorProcessQuery {
+    param(
+        [Parameter(Mandatory)][string]$ExeName,
+        [string]$Reason = 'unspecified',
+        [switch]$ForceRefresh
+    )
+    if ($null -eq $script:LaunchCimCallCount) { $script:LaunchCimCallCount = 0 }
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    if (-not $ForceRefresh -and $script:EditorCimCache.ContainsKey($ExeName)) {
+        $cached = @($script:EditorCimCache[$ExeName])
+        $sw.Stop()
+        Write-LaunchPerfLog -Mark 'cim_query' -Ms $sw.ElapsedMilliseconds -Extra "reason=$Reason count=$($cached.Count) cache_hit=1 exe=$ExeName"
+        return $cached
+    }
+    $result = @(Get-CimInstance Win32_Process -Filter "Name='$ExeName'" -Property ProcessId,Name,CommandLine -ErrorAction SilentlyContinue)
+    $script:EditorCimCache[$ExeName] = $result
+    $script:LaunchCimCallCount++
+    $sw.Stop()
+    Write-LaunchPerfLog -Mark 'cim_query' -Ms $sw.ElapsedMilliseconds -Extra "reason=$Reason count=$($result.Count) cache_hit=0 exe=$ExeName"
+    return $result
+}
+
+function Invoke-CimCursorProcessQuery {
+    param(
+        [string]$Reason = 'unspecified',
+        [switch]$ForceRefresh
+    )
+    return @(Invoke-CimEditorProcessQuery -ExeName 'Cursor.exe' -Reason $Reason -ForceRefresh:$ForceRefresh)
+}
+
 function Get-CursorProfileProcesses {
-    param([string]$ProfileDir = (Get-CursorRemoteProfileDir))
+    param(
+        [string]$ProfileDir = (Get-CursorRemoteProfileDir),
+        [switch]$ForceRefresh
+    )
     if (-not $ProfileDir) { return @() }
     $needle = [regex]::Escape($ProfileDir)
-    return @(Get-CimInstance Win32_Process -Filter "Name='Cursor.exe'" -ErrorAction SilentlyContinue |
+    return @(Invoke-CimCursorProcessQuery -Reason 'profile_procs' -ForceRefresh:$ForceRefresh |
         Where-Object { $_.CommandLine -and ($_.CommandLine -match $needle) })
 }
 
@@ -423,14 +487,15 @@ function Get-RemoteEditorProcesses {
     param(
         [Parameter(Mandatory)][string]$EditorCmd,
         [Parameter(Mandatory)][string]$Alias,
-        [Parameter(Mandatory)][string]$RemotePath
+        [Parameter(Mandatory)][string]$RemotePath,
+        [switch]$ForceRefresh
     )
     $exe = if ($EditorCmd -eq 'cursor') { 'Cursor.exe' } else { 'Code.exe' }
     $uriNeedle = "ssh-remote+${Alias}"
     $pathNeedle = $RemotePath.TrimEnd('/')
     $profileDir = if ($EditorCmd -eq 'cursor') { Get-CursorRemoteProfileDir } else { $null }
 
-    $matches = @(Get-CimInstance Win32_Process -Filter "Name='$exe'" -ErrorAction SilentlyContinue |
+    $matches = @(Invoke-CimEditorProcessQuery -ExeName $exe -Reason 'remote_editor_procs' -ForceRefresh:$ForceRefresh |
         Where-Object {
             $cmd = $_.CommandLine
             if (-not $cmd) { return $false }
@@ -453,11 +518,28 @@ function Test-RemoteEditorWindowOpen {
     if (-not (Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)) {
         return $false
     }
+    return (Test-RemoteEditorWindowOpenWhenOnFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)
+}
+
+function Test-RemoteEditorWindowOpenWhenOnFolder {
+    param(
+        [Parameter(Mandatory)][string]$EditorCmd,
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][string]$RemotePath
+    )
     foreach ($p in @(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)) {
         try {
             $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
             if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { return $true }
         } catch {}
+    }
+    if ($EditorCmd -eq 'cursor') {
+        foreach ($p in @(Get-CursorMainProfileProcesses)) {
+            try {
+                $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
+                if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { return $true }
+            } catch {}
+        }
     }
     return $false
 }
@@ -478,10 +560,13 @@ function Get-CursorMainProfileProcesses {
 }
 
 function Get-CursorMainPersonalProcesses {
-    param([string]$ProfileDir = (Get-CursorRemoteProfileDir))
+    param(
+        [string]$ProfileDir = (Get-CursorRemoteProfileDir),
+        [switch]$ForceRefresh
+    )
     if (-not $ProfileDir) { return @() }
     $profileEsc = [regex]::Escape($ProfileDir)
-    return @(Get-CimInstance Win32_Process -Filter "Name='Cursor.exe'" -ErrorAction SilentlyContinue |
+    return @(Invoke-CimCursorProcessQuery -Reason 'personal_procs' -ForceRefresh:$ForceRefresh |
         Where-Object {
             $_.CommandLine -and ($_.CommandLine -notmatch $profileEsc) -and ($_.CommandLine -notmatch '--type=')
         })
@@ -590,7 +675,7 @@ function Get-RemoteEditorStateExplain {
     $profileDir = Get-CursorRemoteProfileDir
     $mains = @(Get-CursorMainProfileProcesses)
     $allProfile = @(Get-CursorProfileProcesses)
-    $allCursor = @(Get-CimInstance Win32_Process -Filter "Name='Cursor.exe'" -ErrorAction SilentlyContinue)
+    $allCursor = @(Invoke-CimCursorProcessQuery -Reason 'state_explain_all')
     $personalCount = @($allCursor | Where-Object {
         $_.CommandLine -and ($_.CommandLine -notmatch [regex]::Escape($profileDir))
     }).Count
@@ -664,17 +749,27 @@ function Write-EditorLaunchVerboseState {
         [Parameter(Mandatory)][string]$EditorCmd,
         [Parameter(Mandatory)][string]$Alias,
         [Parameter(Mandatory)][string]$RemotePath,
-        [switch]$IncludeSnapshot
+        [switch]$IncludeSnapshot,
+        [switch]$ForceLog
     )
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $alwaysLog = $ForceLog -or $Label -match '^EXHAUSTED' -or $script:VerboseLaunch
+    if (-not $alwaysLog) {
+        $sw.Stop()
+        Write-LaunchPerfLog -Mark "verbose_$Label" -Ms $sw.ElapsedMilliseconds -Extra 'skipped=gated'
+        return
+    }
     Write-EditorLaunchLog "STATE[$Label] $(Get-RemoteEditorStateExplain -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)" 'DEBUG'
     Write-EditorLaunchLog "DIAG[$Label] $(Get-RemoteEditorLaunchDiag -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)" 'DEBUG'
     Write-EditorLaunchLog "DETECT[$Label] $(Get-RemoteEditorDetectionDiag -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)" 'DEBUG'
     if ($EditorCmd -eq 'cursor') {
         Write-EditorLaunchLog "STORAGE[$Label] $(Get-CursorProfileStorageDiag)" 'DEBUG'
     }
-    if ($IncludeSnapshot) {
+    if ($IncludeSnapshot -and ($script:VerboseLaunch -or $ForceLog)) {
         Write-EditorLaunchSnapshot -Label $Label -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
     }
+    $sw.Stop()
+    Write-LaunchPerfLog -Mark "verbose_$Label" -Ms $sw.ElapsedMilliseconds -Extra "snapshot=$([bool]$IncludeSnapshot)"
 }
 
 function Test-RemoteEditorInAgentHome {
@@ -858,7 +953,7 @@ function Get-RemoteEditorProcessSnapshot {
     }
 
     $exeName = if ($EditorCmd -eq 'cursor') { 'Cursor.exe' } else { 'Code.exe' }
-    $all = @(Get-CimInstance Win32_Process -Filter "Name='$exeName'" -ErrorAction SilentlyContinue)
+    $all = @(Invoke-CimEditorProcessQuery -ExeName $exeName -Reason 'process_snapshot')
     $lines += "${exeName}_total=$($all.Count)"
     if ($EditorCmd -eq 'cursor') {
         $profileDir = Get-CursorRemoteProfileDir
@@ -1015,8 +1110,15 @@ function Launch-RemoteEditor {
     param(
         [Parameter(Mandatory)][string]$EditorCmd,
         [Parameter(Mandatory)][string]$Alias,
-        [Parameter(Mandatory)][string]$RemotePath
+        [Parameter(Mandatory)][string]$RemotePath,
+        [switch]$KnownOnFolder
     )
+
+    $script:LaunchCimCallCount = 0
+    Clear-CursorProcessCache
+    $script:LaunchPerfSw = [System.Diagnostics.Stopwatch]::StartNew()
+    $fixes = if ($script:LaunchPerfFixes) { ($script:LaunchPerfFixes -join ',') } else { 'F1,F2,F3,F5,F4' }
+    Write-EditorLaunchLog "LAUNCH_PERF_BEGIN fixes=$fixes" 'DEBUG'
 
     $cli = Get-EditorNativeExe $EditorCmd
     if (-not $cli) {
@@ -1025,17 +1127,33 @@ function Launch-RemoteEditor {
     }
 
     $uri = Get-RemoteFolderUri -Alias $Alias -RemotePath $RemotePath
-    $onFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
+
+    $swEntry = [System.Diagnostics.Stopwatch]::StartNew()
+    if ($KnownOnFolder) {
+        $onFolder = $true
+        Write-LaunchPerfLog -Mark 'entry_on_folder' -Ms 0 -Extra 'result=True skipped=known_on_folder'
+    } else {
+        $onFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
+        $swEntry.Stop()
+        Write-LaunchPerfLog -Mark 'entry_on_folder' -Ms $swEntry.ElapsedMilliseconds -Extra "result=$onFolder"
+    }
+
+    $swAgent = [System.Diagnostics.Stopwatch]::StartNew()
     $agentHome = if ($EditorCmd -eq 'cursor') { Test-RemoteEditorInAgentHome -RemotePath $RemotePath } else { $false }
+    $swAgent.Stop()
+    Write-LaunchPerfLog -Mark 'entry_agent_home' -Ms $swAgent.ElapsedMilliseconds -Extra "result=$agentHome"
+
+    $swProfile = [System.Diagnostics.Stopwatch]::StartNew()
     $hasProfileWindow = if ($EditorCmd -eq 'cursor') { (Get-CursorMainProfileProcesses).Count -gt 0 } else { $false }
     $profileProcCount = if ($EditorCmd -eq 'cursor') { (Get-CursorProfileProcesses).Count } else { 0 }
+    $swProfile.Stop()
+    Write-LaunchPerfLog -Mark 'entry_profile_counts' -Ms $swProfile.ElapsedMilliseconds -Extra "profile_main=$hasProfileWindow profile_all=$profileProcCount"
 
     Write-EditorLaunchLog (
         "LAUNCH_BEGIN: exe=$cli editor=$EditorCmd alias=$Alias path=$RemotePath uri=$uri " +
         "on_folder=$onFolder agent_home=$agentHome profile_main=$hasProfileWindow profile_all=$profileProcCount " +
-        "elevated=$(Test-IsElevatedShell)"
+        "elevated=$(Test-IsElevatedShell) known_on_folder=$KnownOnFolder"
     ) 'INFO'
-    Write-EditorLaunchVerboseState -Label 'BEGIN' -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
 
     if ($onFolder -and -not $agentHome) {
         Write-EditorLaunchLog (
@@ -1043,23 +1161,37 @@ function Launch-RemoteEditor {
             "profile_main=$hasProfileWindow profile_all=$profileProcCount"
         ) 'INFO'
         Write-EditorLaunchLog 'LAUNCH_SKIP: already on correct folder - keeping Cursor open' 'INFO'
-        Write-EditorLaunchVerboseState -Label 'SKIP_ALREADY_ON_FOLDER' -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
+        $script:LaunchPerfSw.Stop()
+        Write-LaunchPerfLog -Mark 'launch_total' -Ms $script:LaunchPerfSw.ElapsedMilliseconds -Extra 'path=skip'
         return $true
+    }
+
+    if ($script:VerboseLaunch) {
+        Write-EditorLaunchVerboseState -Label 'BEGIN' -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
     }
 
     $useNewWindow = ($agentHome -or $hasProfileWindow)
     Write-EditorLaunchLog "LAUNCH_PLAN: use_new_window=$useNewWindow reason=$(if ($agentHome) { 'agent_home' } elseif ($hasProfileWindow) { 'profile_open' } else { 'cold_start' })" 'INFO'
 
     if ($EditorCmd -eq 'cursor') {
+        $swInit = [System.Diagnostics.Stopwatch]::StartNew()
         Initialize-CursorServerProfile
+        $swInit.Stop()
+        Write-LaunchPerfLog -Mark 'launch_init_profile' -Ms $swInit.ElapsedMilliseconds
     }
 
     $needKill = ($EditorCmd -eq 'cursor') -and ($agentHome -or $useNewWindow) -and ($profileProcCount -gt 0)
     if ($needKill) {
+        $swKill = [System.Diagnostics.Stopwatch]::StartNew()
         $null = Stop-CursorServerProfileTreeIfNeeded -Reason 'pre_launch_agent_or_new_window' -Force
+        $swKill.Stop()
+        Write-LaunchPerfLog -Mark 'launch_kill_profile' -Ms $swKill.ElapsedMilliseconds
     }
 
+    $swPlan = [System.Diagnostics.Stopwatch]::StartNew()
     $strategies = @(Get-RemoteEditorLaunchStrategies -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -Uri $uri -NewWindow:$useNewWindow)
+    $swPlan.Stop()
+    Write-LaunchPerfLog -Mark 'launch_strategies_plan' -Ms $swPlan.ElapsedMilliseconds -Extra "count=$($strategies.Count)"
     Write-EditorLaunchLog "LAUNCH_STRATEGIES: count=$($strategies.Count) names=$($strategies.Name -join ',')" 'INFO'
 
     $attempt = 0
@@ -1071,26 +1203,51 @@ function Launch-RemoteEditor {
             $null = Stop-CursorServerProfileTreeIfNeeded -Reason "retry_before_$($strategy.Name)" -Force
         }
 
-        Write-EditorLaunchSnapshot -Label "PRE_ATTEMPT_${attempt}_$($strategy.Name)" -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
+        if ($script:VerboseLaunch) {
+            Write-EditorLaunchSnapshot -Label "PRE_ATTEMPT_${attempt}_$($strategy.Name)" -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
+        }
+
         Write-EditorLaunchLog "LAUNCH_ATTEMPT: n=$attempt strategy=$($strategy.Name) args=$(Format-ProcessArgumentString -ArgumentList $strategy.Args)" 'INFO'
 
+        $swStart = [System.Diagnostics.Stopwatch]::StartNew()
         if (-not (Start-ProcessAsInteractiveUser -FilePath $cli -ArgumentList $strategy.Args)) {
             Write-EditorLaunchLog "LAUNCH_FAIL_START: strategy=$($strategy.Name) Start-ProcessAsInteractiveUser returned false" 'ERROR'
             continue
         }
+        $swStart.Stop()
+        Write-LaunchPerfLog -Mark 'start_process' -Ms $swStart.ElapsedMilliseconds -Extra "strategy=$($strategy.Name)"
         $anyStarted = $true
 
         $afterFolder = $false
         $afterAgent = $true
         foreach ($waitSec in @(1, 2, 3)) {
             Start-Sleep -Seconds 1
+            Clear-CursorProcessCache
             $afterFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
             $afterAgent = if ($EditorCmd -eq 'cursor') { Test-RemoteEditorInAgentHome -RemotePath $RemotePath } else { $false }
             Write-EditorLaunchLog (
                 "LAUNCH_POLL: strategy=$($strategy.Name) elapsed=${waitSec}s on_folder=$afterFolder agent_home=$afterAgent"
             ) 'DEBUG'
-            Write-EditorLaunchVerboseState -Label "POLL_${waitSec}s_$($strategy.Name)" -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot:($waitSec -eq 3)
-            if ($afterFolder -and -not $afterAgent) { break }
+            Write-LaunchPerfLog -Mark "poll_$waitSec" -Ms ($waitSec * 1000) -Extra "on_folder=$afterFolder strategy=$($strategy.Name)"
+
+            if ($afterFolder -and -not $afterAgent) {
+                if ($waitSec -eq 1) {
+                    Start-Sleep -Seconds 1
+                    Clear-CursorProcessCache
+                    $afterFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
+                    $afterAgent = if ($EditorCmd -eq 'cursor') { Test-RemoteEditorInAgentHome -RemotePath $RemotePath } else { $false }
+                    Write-LaunchPerfLog -Mark 'poll_recheck' -Ms 1000 -Extra "on_folder=$afterFolder strategy=$($strategy.Name)"
+                }
+                Write-EditorLaunchLog "LAUNCH_OK: strategy=$($strategy.Name) attempt=$attempt" 'INFO'
+                $script:LastLaunchAttempts += "${attempt}:$($strategy.Name):folder=$afterFolder:agent=$afterAgent"
+                $script:LaunchPerfSw.Stop()
+                Write-LaunchPerfLog -Mark 'launch_total' -Ms $script:LaunchPerfSw.ElapsedMilliseconds -Extra "path=ok strategy=$($strategy.Name)"
+                return $true
+            }
+
+            if ($script:VerboseLaunch -and $waitSec -eq 3) {
+                Write-EditorLaunchVerboseState -Label "POLL_${waitSec}s_$($strategy.Name)" -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
+            }
         }
 
         Write-EditorLaunchLog (
@@ -1098,23 +1255,23 @@ function Launch-RemoteEditor {
             "$(Get-RemoteEditorLaunchDiag -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)"
         ) 'INFO'
         $script:LastLaunchAttempts += "${attempt}:$($strategy.Name):folder=$afterFolder:agent=$afterAgent"
-        Write-EditorLaunchVerboseState -Label "RESULT_$($strategy.Name)" -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
-
-        if ($afterFolder -and -not $afterAgent) {
-            Write-EditorLaunchLog "LAUNCH_OK: strategy=$($strategy.Name) attempt=$attempt" 'INFO'
-            return $true
+        if ($script:VerboseLaunch) {
+            Write-EditorLaunchVerboseState -Label "RESULT_$($strategy.Name)" -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
         }
 
         Write-EditorLaunchLog "LAUNCH_RETRY: strategy=$($strategy.Name) did not reach target folder - next strategy" 'WARN'
     }
 
-    Write-EditorLaunchVerboseState -Label 'EXHAUSTED' -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
+    Write-EditorLaunchVerboseState -Label 'EXHAUSTED' -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot -ForceLog
+    $script:LaunchPerfSw.Stop()
     if (-not $anyStarted) {
         Write-EditorLaunchLog 'LAUNCH_FAIL: all strategies failed to start process' 'ERROR'
+        Write-LaunchPerfLog -Mark 'launch_total' -Ms $script:LaunchPerfSw.ElapsedMilliseconds -Extra 'path=fail'
         return $false
     }
 
     Write-EditorLaunchLog 'LAUNCH_WARN: process started but folder workspace not detected - press O to retry' 'WARN'
+    Write-LaunchPerfLog -Mark 'launch_total' -Ms $script:LaunchPerfSw.ElapsedMilliseconds -Extra 'path=warn'
     return $true
 }
 

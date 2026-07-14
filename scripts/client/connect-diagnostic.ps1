@@ -275,8 +275,29 @@ function Write-ConnectDiagnosticReport {
         $lines += "AUTH storage=$(Get-CursorProfileStorageDiag)"
     }
     $lines += "EDITOR on_folder=$OnFolder agent=$AgentHome window=$WindowOpen launch=$DidLaunch"
-    if (Get-Command Get-RemoteEditorStateExplain -ErrorAction SilentlyContinue) {
-        $lines += "EDITOR state=$(Get-RemoteEditorStateExplain -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)"
+    $lightDiag = ($Phase -eq 'SESSION_OPEN' -and $OnFolder -and $MountOk -and ($AuthOk -ne $false))
+    if ($lightDiag) {
+        $lines += "EDITOR summary=on_folder=$OnFolder launch=$DidLaunch (light SESSION_OPEN)"
+        if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
+            Write-ConnectPerfLog -Mark 'diag_process_snapshot' -Ms 0 -Extra 'skipped=light_session_open'
+        }
+    } else {
+        if (Get-Command Get-RemoteEditorStateExplain -ErrorAction SilentlyContinue) {
+            $swState = [System.Diagnostics.Stopwatch]::StartNew()
+            $lines += "EDITOR state=$(Get-RemoteEditorStateExplain -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)"
+            $swState.Stop()
+            if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
+                Write-ConnectPerfLog -Mark 'diag_state_explain' -Ms $swState.ElapsedMilliseconds
+            }
+        }
+        if (Get-Command Get-RemoteEditorProcessSnapshot -ErrorAction SilentlyContinue) {
+            $swSnap = [System.Diagnostics.Stopwatch]::StartNew()
+            $lines += "PROCESSES $(Get-RemoteEditorProcessSnapshot -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)"
+            $swSnap.Stop()
+            if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
+                Write-ConnectPerfLog -Mark 'diag_process_snapshot' -Ms $swSnap.ElapsedMilliseconds
+            }
+        }
     }
     if ($LaunchHistory) { $lines += "LAUNCH_HISTORY=$LaunchHistory" }
     if ($Timeline -and $Timeline.Count -gt 0) {
@@ -288,9 +309,6 @@ function Write-ConnectDiagnosticReport {
         $lines += 'SSH_RECENT begin'
         foreach ($s in $SshRecent) { $lines += "  $s" }
         $lines += 'SSH_RECENT end'
-    }
-    if (Get-Command Get-RemoteEditorProcessSnapshot -ErrorAction SilentlyContinue) {
-        $lines += "PROCESSES $(Get-RemoteEditorProcessSnapshot -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)"
     }
     $lines += '======== END DIAGNOSTIC REPORT ========'
 

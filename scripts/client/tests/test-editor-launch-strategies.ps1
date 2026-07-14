@@ -55,6 +55,16 @@ Assert (Test-CursorWindowTitleIsAgentHome -Title 'Cursor Agents' -ProjectRootNam
 Assert ($explain -match 'target_uri=') 'Get-RemoteEditorStateExplain includes target_uri'
 Assert ($explain -match 'on_folder=') 'Get-RemoteEditorStateExplain includes on_folder'
 
+$launchSrc = Get-Content (Get-ClientFile 'editor-launch.ps1') -Raw
+Assert ($launchSrc -match 'param\([\s\S]*KnownOnFolder') 'Launch-RemoteEditor has KnownOnFolder param'
+Assert ($launchSrc -match 'if \(\$onFolder -and -not \$agentHome\)[\s\S]{0,600}LAUNCH_SKIP') 'F1 early skip before verbose'
+Assert ($launchSrc -notmatch 'SKIP_ALREADY_ON_FOLDER') 'F1 removed SKIP verbose block'
+Assert ($launchSrc -match '\$script:VerboseLaunch') 'F3 VerboseLaunch defined'
+Assert ($launchSrc -match 'Invoke-CimCursorProcessQuery') 'F5 CIM cache wrapper'
+Assert ($launchSrc -match 'Test-RemoteEditorWindowOpenWhenOnFolder') 'single-pass window check helper'
+Assert ($launchSrc -match 'Write-LaunchPerfLog') 'PERF launch logging'
+Assert ($launchSrc -match 'launch_total') 'launch_total perf mark'
+
 Write-Host ""
 if ($fail -eq 0) { Write-Host "All tests passed." -ForegroundColor Green; exit 0 }
 Write-Host "$fail test(s) failed." -ForegroundColor Red; exit 1

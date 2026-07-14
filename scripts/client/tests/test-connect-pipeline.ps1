@@ -74,6 +74,10 @@ foreach ($rel in @('windows\connect.ps1')) {
     $src = Get-Content (Get-ClientFile $rel) -Raw
     Assert ($src -match 'Sync-CursorGoldenAuth -Alias \$Alias') "$rel syncs cursor auth every reconnect"
     Assert ($src -match 'if \(-not \$editorOpened\)') "$rel opens editor only once"
+    Assert ($src -match 'auth_folder_check') "$rel logs auth_folder_check perf mark"
+    Assert ($src -match 'Test-RemoteEditorWindowOpenWhenOnFolder') "$rel uses single-pass window check after on_folder"
+    Assert ($src -match 'Write-ConnectSessionOpenSummary') "$rel emits session_open_summary"
+    Assert ($src -match 'ConnectPerf') "$rel tracks ConnectPerf counters"
 }
 
 function Choose-ProjectMock {
@@ -106,6 +110,9 @@ Assert ($winConnect -match 'timeout 45 bash -lc') 'connect.ps1 wraps SshX with t
 $gitMode = Get-Content (Get-ClientFile 'git-mode.ps1') -Raw
 Assert ($gitMode -match 'function Invoke-MountProject') 'git-mode.ps1 auto-retries mount after script push'
 Assert ($gitMode -match 'function Resolve-ServerScriptDir') 'git-mode.ps1 resolves server scripts for ZIP layout'
+Assert ($authLaptop -match 'Write-AuthPerfLog') 'cursor-auth-laptop emits auth PERF marks'
+Assert ($authLaptop -match 'auth_total') 'cursor-auth-laptop tracks auth_total'
+Assert ($gitMode -match 'mount_ssh_up') 'git-mode emits mount PERF marks'
 
 $publish = Get-Content (Join-Path $script:RepoRoot 'publish\publish.ps1') -Raw
 Assert (-not (Test-Path (Get-ClientFile 'users\sepidz\connect.ps1'))) 'no sepidz connect fork (single codebase)'

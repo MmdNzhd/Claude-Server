@@ -209,6 +209,7 @@ if [ -f "$SERVER_DIR/laptop-exec-setup.sh" ]; then
     ok "laptop-exec-setup -> /usr/local/bin/"
     for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
         [ -d "/home/$u" ] || continue
+        chown -R "$u:$u" "/home/$u/.cursor" 2>/dev/null || true
         sudo -u "$u" /usr/local/bin/laptop-exec-setup --user 2>/dev/null || true
         sudo -u "$u" /usr/local/bin/laptop-exec-setup --all-projects 2>/dev/null || true
     done

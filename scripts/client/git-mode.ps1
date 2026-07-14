@@ -827,22 +827,41 @@ function Invoke-MountProject {
     )
     $trusted = if ($TrustedTunnel) { 'CLAUDE_TRUSTED_TUNNEL=1 ' } else { '' }
     Write-GitModeLog "MOUNT_UP begin project=$ProjectId trusted=$TrustedTunnel" 'DEBUG'
+    $swMount = [System.Diagnostics.Stopwatch]::StartNew()
     $mountOut = (SshX "${trusted}$CM up '$ProjectId' 2>&1") | Out-String
     $exitCode = $LASTEXITCODE
+    $swMount.Stop()
+    if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
+        Write-ConnectPerfLog -Mark 'mount_ssh_up' -Ms $swMount.ElapsedMilliseconds -Extra "attempt=1 exit=$exitCode"
+    }
     Write-GitModeLog "MOUNT_UP first exit=$exitCode out=$($mountOut.Trim() -replace '\s+',' ')" 'DEBUG'
     if (Test-MountSuccess -MountOut $mountOut -ExitCode $exitCode) {
         Write-GitModeLog "MOUNT_UP ok=1 project=$ProjectId" 'INFO'
+        if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
+            Write-ConnectPerfLog -Mark 'mount_total' -Ms $swMount.ElapsedMilliseconds -Extra 'path=ok attempt=1'
+        }
         return @{ Ok = $true; Out = $mountOut }
     }
     if ($mountOut -match 'unbound variable|syntax error near unexpected') {
         Write-Host '      -> server mount script outdated, pushing update...' -ForegroundColor DarkGray
         if (Push-ClaudeServerScripts -ConnectScriptDir $ConnectScriptDir -Alias $Alias) {
+            $swRetry = [System.Diagnostics.Stopwatch]::StartNew()
             $mountOut = (SshX "${trusted}$CM up '$ProjectId' 2>&1") | Out-String
             $exitCode = $LASTEXITCODE
+            $swRetry.Stop()
+            if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
+                Write-ConnectPerfLog -Mark 'mount_ssh_up' -Ms $swRetry.ElapsedMilliseconds -Extra "attempt=2 exit=$exitCode"
+            }
             if (Test-MountSuccess -MountOut $mountOut -ExitCode $exitCode) {
+                if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
+                    Write-ConnectPerfLog -Mark 'mount_total' -Ms ($swMount.ElapsedMilliseconds + $swRetry.ElapsedMilliseconds) -Extra 'path=ok attempt=2'
+                }
                 return @{ Ok = $true; Out = $mountOut }
             }
         }
+    }
+    if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
+        Write-ConnectPerfLog -Mark 'mount_total' -Ms $swMount.ElapsedMilliseconds -Extra 'path=fail'
     }
     return @{ Ok = $false; Out = $mountOut }
 }

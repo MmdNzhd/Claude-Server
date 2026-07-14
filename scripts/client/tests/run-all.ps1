@@ -14,6 +14,9 @@ $suites = @(
     @{ Name = 'editor-launch';        Script = 'test-editor-launch.ps1' }
     @{ Name = 'editor-launch-strategies'; Script = 'test-editor-launch-strategies.ps1' }
     @{ Name = 'connect-diagnostic';     Script = 'test-connect-diagnostic.ps1' }
+    @{ Name = 'parse-connect-perf';     Script = 'test-parse-connect-perf.ps1' }
+    @{ Name = 'verify-perf-gates';      Script = 'test-verify-perf-gates.ps1' }
+    @{ Name = 'launch-perf-live';       Script = 'test-launch-perf-live.ps1' }
     @{ Name = 'cursor-auth-merge';    Script = 'test-cursor-auth-merge.ps1' }
     @{ Name = 'publish';              Script = 'test-publish.ps1' }
 )

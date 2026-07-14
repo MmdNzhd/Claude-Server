@@ -540,6 +540,19 @@ function Repair-CursorComposerWorkspaceBindings {
     return $true
 }
 
+function Write-AuthPerfLog {
+    param(
+        [Parameter(Mandatory)][string]$Mark,
+        [Parameter(Mandatory)][int]$Ms,
+        [string]$Extra = ''
+    )
+    if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
+        Write-ConnectPerfLog -Mark $Mark -Ms $Ms -Extra $Extra
+    } else {
+        Write-AuthSyncLog "PERF[$Mark] ms=$Ms $Extra" 'DEBUG'
+    }
+}
+
 function Sync-CursorGoldenAuth {
     param(
         [Parameter(Mandatory)][string]$Alias,
@@ -547,6 +560,7 @@ function Sync-CursorGoldenAuth {
         [string]$RemotePath = ''
     )
 
+    $authTotalSw = [System.Diagnostics.Stopwatch]::StartNew()
     $skipped = [PSCustomObject]@{ Ok = $false; Skipped = $true }
 
     $localGs = Get-LocalCursorGlobalStorage
@@ -557,16 +571,27 @@ function Sync-CursorGoldenAuth {
     $walBytes = if (Test-Path "$dbPath-wal") { (Get-Item "$dbPath-wal").Length } else { 0 }
 
     Write-AuthSyncLog "AUTH_SYNC: begin force=$Force db_bytes=$dbBytes wal_bytes=$walBytes alias=$Alias remote_path=$RemotePath" 'INFO'
+    $swProbe = [System.Diagnostics.Stopwatch]::StartNew()
     $probe = (SshX "test -f /etc/cursor-auth/golden/auth.json && echo yes" 2>$null) -join ''
+    $swProbe.Stop()
+    Write-AuthPerfLog -Mark 'auth_ssh_probe' -Ms $swProbe.ElapsedMilliseconds -Extra "golden_exists=$($probe -match 'yes')"
     if ($probe -notmatch 'yes') {
         Write-AuthSyncLog 'skip golden auth.json missing on server' 'DEBUG'
         Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=true reason=golden_missing db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
+        $authTotalSw.Stop()
+        Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra 'path=skip_golden_missing'
         return $skipped
     }
+    $swGoldenMeta = [System.Diagnostics.Stopwatch]::StartNew()
     $goldenExportedAt = ((SshX "cat /etc/cursor-auth/golden/exported-at 2>/dev/null") -join '').Trim()
+    $swGoldenMeta.Stop()
+    Write-AuthPerfLog -Mark 'auth_ssh_golden_meta' -Ms $swGoldenMeta.ElapsedMilliseconds
 
     Write-AuthSyncLog 'server cursor-auth-sync --force' 'TRACE'
+    $swServerSync = [System.Diagnostics.Stopwatch]::StartNew()
     SshX "cursor-auth-sync --force 2>&1" 2>$null | Out-Null
+    $swServerSync.Stop()
+    Write-AuthPerfLog -Mark 'auth_ssh_server_sync' -Ms $swServerSync.ElapsedMilliseconds
 
     Write-AuthSyncLog "local_gs=$localGs db=$dbPath db_exists=$(Test-Path $dbPath)" 'DEBUG'
 
@@ -579,6 +604,8 @@ function Sync-CursorGoldenAuth {
     if (-not $Force -and $goldenCurrent -and (Test-LocalCursorAuthComplete -DbPath $dbPath)) {
         Write-AuthSyncLog "skip already complete golden_exported_at=$goldenExportedAt" 'DEBUG'
         Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=true skipped=true already_complete=true db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
+        $authTotalSw.Stop()
+        Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra 'path=skip_already_complete'
         return [PSCustomObject]@{
             Ok              = $true
             Skipped         = $true
@@ -586,10 +613,15 @@ function Sync-CursorGoldenAuth {
         }
     }
 
+    $swGoldenScp = [System.Diagnostics.Stopwatch]::StartNew()
     $authValues = Get-RemoteCursorAuthFromGolden -Alias $Alias
+    $swGoldenScp.Stop()
+    Write-AuthPerfLog -Mark 'auth_golden_scp' -Ms $swGoldenScp.ElapsedMilliseconds -Extra "ok=$([bool]$authValues)"
     if (-not $authValues) {
         Write-AuthSyncLog 'fail could not read golden bundle from server' 'WARN'
         Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=true reason=golden_read_failed db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
+        $authTotalSw.Stop()
+        Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra 'path=golden_read_failed'
         return $skipped
     }
     Write-AuthSyncLog "golden keys=$($authValues.PSObject.Properties.Name -join ',')" 'TRACE'
@@ -597,6 +629,8 @@ function Sync-CursorGoldenAuth {
     if (-not (Initialize-CursorAuthSqlite)) {
         Write-AuthSyncLog 'fail sqlite not available' 'WARN'
         Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=false reason=sqlite_missing db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
+        $authTotalSw.Stop()
+        Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra 'path=sqlite_missing'
         return [PSCustomObject]@{
             Ok            = $false
             Skipped       = $false
@@ -604,10 +638,15 @@ function Sync-CursorGoldenAuth {
         }
     }
 
+    $swMerge = [System.Diagnostics.Stopwatch]::StartNew()
     $merged = Merge-CursorAuthIntoLocalDb -DbPath $dbPath -AuthValues $authValues
+    $swMerge.Stop()
+    Write-AuthPerfLog -Mark 'auth_merge_db' -Ms $swMerge.ElapsedMilliseconds -Extra "ok=$merged"
     if (-not $merged) {
         Write-AuthSyncLog "fail merge into $dbPath" 'WARN'
         Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=false reason=merge_failed db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
+        $authTotalSw.Stop()
+        Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra 'path=merge_failed'
         return [PSCustomObject]@{
             Ok          = $false
             Skipped     = $false
@@ -615,7 +654,10 @@ function Sync-CursorGoldenAuth {
         }
     }
 
+    $swStorage = [System.Diagnostics.Stopwatch]::StartNew()
     $null = Merge-CursorStorageJsonFromGolden -Alias $Alias -LocalPath $storagePath
+    $swStorage.Stop()
+    Write-AuthPerfLog -Mark 'auth_merge_storage' -Ms $swStorage.ElapsedMilliseconds
 
     $dbBytes = if (Test-Path $dbPath) { (Get-Item $dbPath).Length } else { 0 }
     $walBytes = if (Test-Path "$dbPath-wal") { (Get-Item "$dbPath-wal").Length } else { 0 }
@@ -629,6 +671,8 @@ function Sync-CursorGoldenAuth {
         "AUTH_SYNC: result force=$Force ok=$complete skipped=false tokens_only=$($tokens -and -not $complete) " +
         "db_bytes=$dbBytes wal_bytes=$walBytes"
     ) 'INFO'
+    $authTotalSw.Stop()
+    Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra "ok=$complete tokens_only=$($tokens -and -not $complete)"
     return [PSCustomObject]@{
         Ok         = $complete
         TokensOnly = ($tokens -and -not $complete)

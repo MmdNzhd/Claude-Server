@@ -1,7 +1,7 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # publish.ps1 - Client-only distributable packages (windows/ + mac/ + README).
 # Run: double-click publish.bat  (or: powershell -File publish\publish.ps1)
-# Server scripts and deploy tools stay in the repo — NOT shipped in ZIPs.
+# Server scripts and deploy tools stay in the repo â€” NOT shipped in ZIPs.
 
 param(
     [switch]$NoZip,
@@ -137,6 +137,55 @@ function Assert-ClientPackage {
     }
 }
 
+function Test-PublishLogArtifact {
+    param([string]$Name)
+    return ($Name -match '^connect\.log(\.\d+)?$')
+}
+
+function Remove-PublishLogArtifacts {
+    param([string]$Root)
+    Get-ChildItem -Path $Root -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { Test-PublishLogArtifact $_.Name } |
+        ForEach-Object {
+            $logFile = $_
+            try {
+                Remove-Item -LiteralPath $logFile.FullName -Force -ErrorAction Stop
+            } catch {
+                Write-Host "  warn: could not remove $($logFile.FullName) (in use - will skip in ZIP)" -ForegroundColor DarkYellow
+            }
+        }
+}
+
+function New-ClientZipFromDirectory {
+    param(
+        [Parameter(Mandatory)][string]$SourceDir,
+        [Parameter(Mandatory)][string]$ZipPath
+    )
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
+    $zip = [System.IO.Compression.ZipFile]::Open($ZipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        Get-ChildItem -Path $SourceDir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+            if (Test-PublishLogArtifact $_.Name) { return }
+            $rel = $_.FullName.Substring($SourceDir.Length).TrimStart('\')
+            $entry = $zip.CreateEntry($rel.Replace('\', '/'))
+            $stream = $entry.Open()
+            try {
+                $fileStream = [System.IO.File]::Open($_.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                try {
+                    $fileStream.CopyTo($stream)
+                } finally {
+                    $fileStream.Dispose()
+                }
+            } finally {
+                $stream.Dispose()
+            }
+        }
+    } finally {
+        $zip.Dispose()
+    }
+}
 Write-Host ""
 Write-Host "Publishing $PackageName (client only)" -ForegroundColor White
 Write-Host ""
@@ -161,14 +210,14 @@ Copy-Item $readmeSrc (Join-Path $OutDir "README.txt") -Force
 Write-Ok "README.txt"
 
 Assert-ClientPackage -Root $OutDir -Label 'Main package'
+Remove-PublishLogArtifacts -Root $OutDir
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 if (-not $NoZip) {
     Write-Step "Creating main ZIP..."
     $ZipPath = Join-Path $OutBase "$PackageName.zip"
-    if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
-    [System.IO.Compression.ZipFile]::CreateFromDirectory($OutDir, $ZipPath)
+    New-ClientZipFromDirectory -SourceDir $OutDir -ZipPath $ZipPath
     Write-Ok "$PackageName.zip"
 }
 
@@ -219,12 +268,12 @@ if (Test-Path $designerReadme) {
 }
 
 Assert-ClientPackage -Root $SepidDir -Label 'Sepidz package'
+Remove-PublishLogArtifacts -Root $SepidDir
 
 if (-not $NoZip) {
     Write-Step "Creating Sepidz ZIP..."
     $SepidZip = Join-Path $OutBase "$SepidName.zip"
-    if (Test-Path $SepidZip) { Remove-Item $SepidZip -Force }
-    [System.IO.Compression.ZipFile]::CreateFromDirectory($SepidDir, $SepidZip)
+    New-ClientZipFromDirectory -SourceDir $SepidDir -ZipPath $SepidZip
     Write-Ok "$SepidName.zip"
 }
 

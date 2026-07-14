@@ -75,6 +75,51 @@ function Write-ConnectTimedLog {
     Write-ConnectLog "${Label} ms=$Ms$suffix" $Level
 }
 
+function Test-ConnectPerfEnabled {
+    if ($env:CLAUDE_CONNECT_PERF_LOG -eq '0') { return $false }
+    return $true
+}
+
+function Write-ConnectPerfLog {
+    param(
+        [Parameter(Mandatory)][string]$Mark,
+        [Parameter(Mandatory)][int]$Ms,
+        [string]$Extra = '',
+        [ValidateSet('INFO', 'WARN', 'ERROR', 'DEBUG', 'TRACE')][string]$Level = 'DEBUG'
+    )
+    if (-not (Test-ConnectPerfEnabled)) { return }
+    $suffix = if ($Extra) { " $Extra" } else { '' }
+    Write-ConnectLog "PERF[$Mark] ms=$Ms$suffix" $Level
+}
+
+function Invoke-ConnectPerfBlock {
+    param(
+        [Parameter(Mandatory)][string]$Mark,
+        [Parameter(Mandatory)][scriptblock]$Block,
+        [string]$Extra = ''
+    )
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        return & $Block
+    } finally {
+        $sw.Stop()
+        Write-ConnectPerfLog -Mark $Mark -Ms $sw.ElapsedMilliseconds -Extra $Extra
+    }
+}
+
+function Write-ConnectSessionOpenSummary {
+    if (-not (Test-ConnectPerfEnabled)) { return }
+    if (-not $script:ConnectPerf) { return }
+    $p = $script:ConnectPerf
+    $cim = if ($null -ne $script:LaunchCimCallCount) { $script:LaunchCimCallCount } else { 0 }
+    $fixes = if ($script:LaunchPerfFixes) { ($script:LaunchPerfFixes -join ',') } else { 'unknown' }
+    $ver = if ($script:ConnectVersion) { $script:ConnectVersion } else { 'unknown' }
+    Write-ConnectPerfLog -Mark 'session_open_summary' -Ms 0 -Extra (
+        "mount_ms=$($p.MountMs) auth_ms=$($p.AuthMs) open_ms=$($p.OpenMs) diag_ms=$($p.DiagMs) " +
+        "ssh_total_ms=$($p.SshMsTotal) ssh_count=$($p.SshCount) cim_total=$cim fixes=$fixes version=$ver"
+    )
+}
+
 function Close-ConnectLog {
     if (-not $script:ConnectLogWriter) { return }
     try {

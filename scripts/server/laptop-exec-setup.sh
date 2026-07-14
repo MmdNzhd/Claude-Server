@@ -72,8 +72,9 @@ _ensure_project_hooks() {
     mkdir -p "$lpath/.cursor/hooks"
     if [ -f "$GOLDEN_HOOKS/$HOOK_GUARD" ]; then
         if [ ! -f "$lpath/.cursor/hooks/$HOOK_GUARD" ] || [ "$GOLDEN_HOOKS/$HOOK_GUARD" -nt "$lpath/.cursor/hooks/$HOOK_GUARD" ]; then
-            install -m 644 "$GOLDEN_HOOKS/$HOOK_GUARD" "$lpath/.cursor/hooks/$HOOK_GUARD" 2>/dev/null ||             install -m 755 "$GOLDEN_HOOKS/$HOOK_GUARD" "$lpath/.cursor/hooks/$HOOK_GUARD"
+            install -m 755 "$GOLDEN_HOOKS/$HOOK_GUARD" "$lpath/.cursor/hooks/$HOOK_GUARD"
         fi
+        chmod 755 "$lpath/.cursor/hooks/$HOOK_GUARD" 2>/dev/null || true
     fi
     if [ -f "$GOLDEN_HOOKS/hooks-project.json" ]; then
         _merge_hooks_json "$lpath/.cursor/hooks.json" "$GOLDEN_HOOKS/hooks-project.json" "$HOOK_CMD_PROJECT"

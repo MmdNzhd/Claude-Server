@@ -101,6 +101,7 @@ if [ -f "$RULE_SRC" ]; then
     ok "~/.cursor/rules/laptop-exec.mdc installed (alwaysApply)"
 fi
 if [ -x /usr/local/bin/laptop-exec-setup ]; then
+    chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor" 2>/dev/null || true
     sudo -u "$USERNAME" /usr/local/bin/laptop-exec-setup --user 2>/dev/null || true
     ok "laptop-exec-setup --user"
 fi

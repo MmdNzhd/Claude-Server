@@ -1,8 +1,8 @@
-# Client Connect Guide
+﻿# Client Connect Guide
 
 Developer and end-user guide for `connect.bat` / `connect.sh`.
 
-**Current client version:** **`20260714.2`**
+**Current client version:** **`20260714.4`**
 
 See also: [sshfs-performance.md](sshfs-performance.md) (GIT_MODE deep dive), [CLAUDE.md](../CLAUDE.md) (server admin).
 
@@ -76,7 +76,7 @@ If hide fails (Cursor locks `.git`): close Remote SSH / git on laptop, then pres
 - Title bar shows `[Claude Server]` for server profile windows.
 - `cursor-auth-laptop.ps1` merges auth keys into server profile SQLite (never closes Cursor).
 
-If Cursor opens **Agent home** instead of the project folder, check `connect.log` beside `connect.bat`. v20260714.2+ uses `--new-window` when not on the correct `folder-uri`.
+If Cursor opens **Agent home** instead of the project folder, check `connect.log` beside `connect.bat`. v20260714.4+ uses `--new-window` when not on the correct `folder-uri`.
 
 ---
 
@@ -84,13 +84,38 @@ If Cursor opens **Agent home** instead of the project folder, check `connect.log
 
 `connect.log` is written next to `connect.bat`. Rotates at 1.5 MB to `connect.log.1`.
 
+### Performance marks (v20260714.4+)
+
+Cheap `PERF[...]` lines are emitted by default across mount, auth, launch, and diagnostic. Disable with:
+
+```
+set CLAUDE_CONNECT_PERF_LOG=0
+```
+
+Verbose launch diagnostics (WMI snapshots) only when debugging slowness:
+
+```
+set CLAUDE_CONNECT_VERBOSE_LAUNCH=1
+```
+
+Summarize a session log on Windows:
+
+```bat
+powershell -NoProfile -File scripts\client\tests\parse-connect-perf.ps1 -LogPath connect.log
+```
+
+**Expected gates after Tier A fixes:** cold `Opening Cursor` under 8000 ms, skip path under 1500 ms, `SNAPSHOT` count 0 unless verbose mode.
+
 Useful lines:
 
 ```
+[INFO]  STEP end: Opening Cursor ok ms=...
+[DEBUG] PERF[launch_total] ms=... cim_total=...
+[DEBUG] PERF[session_open_summary] ms=0 mount_ms=... auth_ms=... open_ms=... diag_ms=...
+[INFO]  LAUNCH_SKIP: already on correct folder - keeping Cursor open
 [INFO]  PROJECT: id=...
 [INFO]  ACTIVE_MOUNT: ...
 [DEBUG] FOLDER_CHECK: on_folder=... agent_home=...
-[INFO]  LAUNCH_CMD: ... --folder-uri vscode-remote://...
 [INFO]  STATUS: [... | Cursor]
 ```
 
@@ -102,7 +127,7 @@ Useful lines:
 scripts\client\tests\run-all.bat
 ```
 
-Key tests: `test-connect-pipeline.ps1`, `test-git-mode-deep.ps1`, `test-editor-launch.ps1`, `audit-local-connect.ps1`.
+Key tests: `test-connect-pipeline.ps1`, `test-editor-launch-strategies.ps1`, `test-parse-connect-perf.ps1`, `test-git-mode-deep.ps1`, `audit-local-connect.ps1`.
 
 Mac: `scripts/client/tests/verify-all.sh`
 
@@ -112,7 +137,7 @@ Mac: `scripts/client/tests/verify-all.sh`
 
 - Build ZIP on Windows: `publish\publish.bat`
 - Client ZIP must not contain `server/` scripts.
-- Server mount fix: `sudo claude-server deploy-mount-fix` (requires connect.bat v20260714.2+)
+- Server mount fix: `sudo claude-server deploy-mount-fix` (requires connect.bat v20260714.4+)
 
 ---
 
@@ -122,7 +147,7 @@ Mac: `scripts/client/tests/verify-all.sh`
 |---------|-----|
 | Join-Path ChildPath prompt | Old `connect.ps1` - copy full `windows\` folder from latest ZIP |
 | connect.bat OUTDATED | Missing `connect-ui.ps1` or wrong version in header |
-| Cursor Agent home, not project | Update to v20260714.2+, check `connect.log`, press `O` |
+| Cursor Agent home, not project | Update to v20260714.4+, check `connect.log`, press `O` |
 | git hide failed | Close Cursor/git on laptop, press `G` |
 | Tunnel drops | Auto-reconnect; editor not re-opened on reconnect |
 

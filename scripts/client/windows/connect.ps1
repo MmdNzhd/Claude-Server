@@ -61,7 +61,7 @@ if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
 }
 $ServerIP = "192.168.210.240"
 $Alias    = "claude-server"
-$script:ConnectVersion = '20260714.2'
+$script:ConnectVersion = '20260714.5'
 $CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
@@ -91,6 +91,13 @@ function StepOk  {
     $ms = 0
     if ($script:currentStepStartedAt) {
         $ms = [int]((Get-Date) - $script:currentStepStartedAt).TotalMilliseconds
+    }
+    if ($script:ConnectPerf -and $script:currentStepName) {
+        switch -Regex ($script:currentStepName) {
+            'Mounting files' { $script:ConnectPerf.MountMs = $ms }
+            'Syncing Cursor auth' { $script:ConnectPerf.AuthMs = $ms }
+            'Opening' { $script:ConnectPerf.OpenMs = $ms }
+        }
     }
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
         $detail = if ($d) { $d } else { 'ok' }
@@ -170,6 +177,15 @@ $_connectUi = Dot-SourceSibling 'connect-ui.ps1'
 if (-not $_connectUi) { Die 'connect-ui.ps1 not found - re-copy the full windows package' }
 . $_connectUi
 Initialize-ConnectLog -ScriptDir $script:ConnectScriptDir -Version $script:ConnectVersion
+$script:ConnectPerf = @{
+    SshMsTotal = 0
+    SshCount   = 0
+    MountMs    = 0
+    AuthMs     = 0
+    OpenMs     = 0
+    DiagMs     = 0
+}
+$script:LaunchPerfFixes = @('F1', 'F2', 'F3', 'F5', 'F4', 'F7')
 $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action { Close-ConnectLog }
 
 function Repair-SshPerm([string]$path, [string]$label) {
@@ -551,6 +567,10 @@ function SshX([string]$Cmd) {
     if (-not $truncOut) { $truncOut = '(empty)' }
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
         Write-ConnectLog "SSH_END exit=$($result.Exit) ms=$($result.Ms) out=$truncOut"
+    }
+    if ($script:ConnectPerf) {
+        $script:ConnectPerf.SshMsTotal += $result.Ms
+        $script:ConnectPerf.SshCount++
     }
     Add-SshRecentLog "exit=$($result.Exit) ms=$($result.Ms) cmd=$truncCmd"
     if ($result.Exit -ne 0 -and $result.Exit -ne 124) {
@@ -1276,16 +1296,28 @@ $exitRequested = $false
 
             $script:CursorAuthNeedsBootstrap = $false
             $script:LastAuthDetail = if ($EditorCmd -eq 'cursor') { 'pending' } else { 'n/a' }
+            $onCorrectFolder = $false
+            $agentHome = $false
             if ($EditorCmd -eq 'cursor' -and (Get-Command Sync-CursorGoldenAuth -ErrorAction SilentlyContinue)) {
                 $gsPath = Join-Path (Get-LocalCursorGlobalStorage) 'state.vscdb'
-                $cursorRunning = Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
+                $folderSw = [System.Diagnostics.Stopwatch]::StartNew()
                 $onCorrectFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
-                $agentHome = if ($EditorCmd -eq 'cursor') { Test-RemoteEditorInAgentHome } else { $false }
-                if (Get-Command Get-RemoteEditorLaunchDiag -ErrorAction SilentlyContinue) {
-                    Write-ConnectLog "FOLDER_CHECK: on_folder=$onCorrectFolder agent_home=$agentHome window_open=$cursorRunning" 'DEBUG'
+                $agentHome = Test-RemoteEditorInAgentHome -RemotePath $go.Path
+                $cursorRunning = $false
+                if ($onCorrectFolder -and (Get-Command Test-RemoteEditorWindowOpenWhenOnFolder -ErrorAction SilentlyContinue)) {
+                    $cursorRunning = Test-RemoteEditorWindowOpenWhenOnFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
+                }
+                $folderSw.Stop()
+                if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
+                    Write-ConnectPerfLog -Mark 'auth_folder_check' -Ms $folderSw.ElapsedMilliseconds `
+                        -Extra "on_folder=$onCorrectFolder window=$cursorRunning agent_home=$agentHome"
+                }
+                Write-ConnectLog "FOLDER_CHECK: on_folder=$onCorrectFolder agent_home=$agentHome window_open=$cursorRunning" 'DEBUG'
+                $verboseLaunch = ($env:CLAUDE_CONNECT_VERBOSE_LAUNCH -eq '1')
+                if ($verboseLaunch -and (Get-Command Get-RemoteEditorLaunchDiag -ErrorAction SilentlyContinue)) {
                     Write-ConnectLog (Get-RemoteEditorLaunchDiag -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path) 'DEBUG'
-                } elseif (Get-Command Get-RemoteEditorDetectionDiag -ErrorAction SilentlyContinue) {
-                    Write-ConnectLog "AUTH_CHECK: cursor_running=$cursorRunning diag=$(Get-RemoteEditorDetectionDiag -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)" 'DEBUG'
+                } elseif (-not $verboseLaunch -and (Get-Command Get-RemoteEditorDetectionDiag -ErrorAction SilentlyContinue)) {
+                    Write-ConnectLog "AUTH_CHECK: cursor_running=$cursorRunning on_folder=$onCorrectFolder" 'DEBUG'
                 }
                 Step "Syncing Cursor auth"
                 $authComplete = Test-LocalCursorAuthComplete -DbPath $gsPath
@@ -1359,7 +1391,7 @@ $exitRequested = $false
             $didLaunch = $false
             if (-not $editorOpened) {
                 Step "Opening $EditorName"
-                if (-not (Launch-RemoteEditor -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)) {
+                if (-not (Launch-RemoteEditor -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -KnownOnFolder:$onCorrectFolder)) {
                     StepFail "$EditorName not found (install Cursor or VS Code + Remote-SSH)"
                 } else {
                     StepOk $($go.Path)
@@ -1391,10 +1423,16 @@ $exitRequested = $false
             Set-ConnectTitle ('Claude Connect | {0} | {1}' -f $go.Id, (Get-GitModeLabel))
 
             $authOkForDiag = ($script:LastAuthDetail -match '^(ok|already ok|skipped|tokens only|n/a)$')
+            $diagSw = [System.Diagnostics.Stopwatch]::StartNew()
             $null = Write-SessionDiagnosticReport -Phase 'SESSION_OPEN' -MountOk $true -MountOut $mountOut `
                 -OnFolder $onFolderNow -DidLaunch $didLaunch -AuthOk $authOkForDiag `
                 -AuthDetail $script:LastAuthDetail -ProjectId $go.Id -RemotePath $go.Path `
                 -EditorCmd $EditorCmd -EditorName $EditorName
+            $diagSw.Stop()
+            if ($script:ConnectPerf) { $script:ConnectPerf.DiagMs = [int]$diagSw.ElapsedMilliseconds }
+            if (Get-Command Write-ConnectSessionOpenSummary -ErrorAction SilentlyContinue) {
+                Write-ConnectSessionOpenSummary
+            }
             Complete-PostTunnelRecovery -MountOk $true -AuthDetail $script:LastAuthDetail `
                 -ProjectId $go.Id -RemotePath $go.Path -EditorCmd $EditorCmd -EditorName $EditorName `
                 -OnFolder $onFolderNow -DidLaunch $didLaunch

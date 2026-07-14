@@ -49,6 +49,10 @@ $v = Get-ConnectProblemVerdict -Ctx @{
 }
 Assert ($v.Code -eq 'CURSOR_ON_FOLDER_OK') 'detects CURSOR_ON_FOLDER_OK'
 
+$diagSrc = Get-Content (Get-ClientFile 'connect-diagnostic.ps1') -Raw
+Assert ($diagSrc -match 'lightDiag = \(\$Phase -eq ''SESSION_OPEN''') 'F7 light SESSION_OPEN diagnostic gate'
+Assert ($diagSrc -match 'skipped=light_session_open') 'F7 skips expensive process snapshot'
+
 Write-Host ''
 if ($fail -eq 0) { Write-Host 'All tests passed.' -ForegroundColor Green; exit 0 }
 Write-Host "$fail test(s) failed." -ForegroundColor Red; exit 1
