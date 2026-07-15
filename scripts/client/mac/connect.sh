@@ -14,7 +14,7 @@ if [ -f "$_update_script" ]; then
     fi
 fi
 
-CONNECT_VERSION='20260715.3'
+CONNECT_VERSION='20260715.5'
 CONNECT_PORT_BASE=20000
 
 SERVER_IP="192.168.210.240"
@@ -645,6 +645,10 @@ while [ "$exit_requested" -eq 0 ]; do
             ACTIVE_PROJECT_ID="$go_id"
             CURSOR_AUTH_NEEDS_BOOTSTRAP=0
             _last_auth_detail='n/a'
+            if [ "$EDITOR_CMD" = "cursor" ] && declare -F ensure_mac_cursor_prerequisites >/dev/null 2>&1; then
+                ensure_mac_cursor_prerequisites || true
+            fi
+
             if [ "$EDITOR_CMD" = "cursor" ] && declare -F sync_cursor_golden_auth_status >/dev/null 2>&1; then
                 _cursor_gs="$(get_cursor_remote_profile_dir)/User/globalStorage/state.vscdb"
                 _auth_needs_refresh=0
@@ -692,31 +696,52 @@ while [ "$exit_requested" -eq 0 ]; do
                 declare -F connect_log >/dev/null 2>&1 && connect_log 'RECOVERY: user_warn press_o_if_cursor_not_on_folder'
             fi
 
+            _on_folder=0
+            _did_launch=0
+            if [ "$_editor_opened" -eq 1 ] && declare -F remote_editor_on_correct_folder >/dev/null 2>&1; then
+                remote_editor_on_correct_folder "$EDITOR_CMD" "$ALIAS" "$go_path" && _on_folder=1
+            fi
+
             if [ "$_editor_opened" -eq 0 ]; then
                 step "Opening $EDITOR_NAME"
-                if [ "$EDITOR_CMD" = "cursor" ]; then
-                    init_cursor_server_profile
-                    _cursor_profile="$(get_cursor_remote_profile_dir)"
-                    "$EDITOR_CMD" --user-data-dir "$_cursor_profile" --reuse-window \
-                        --folder-uri "vscode-remote://ssh-remote+$ALIAS$go_path" >/dev/null 2>&1 &
-                    step_ok "$go_path"
-                    _editor_opened=1
-                    printf '      -> \033[0;90mServer profile [Claude Server] - personal Cursor is separate\033[0m\n'
-                    printf '      -> \033[0;90mAgent history: clock icon in sidebar (not empty new tab)\033[0m\n'
+                if declare -F launch_remote_editor >/dev/null 2>&1; then
+                    if launch_remote_editor "$EDITOR_CMD" "$ALIAS" "$go_path" "$_on_folder"; then
+                        step_ok "$go_path"
+                        _did_launch=1
+                        if [ "$EDITOR_CMD" = "cursor" ]; then
+                            printf '      -> \033[0;90mServer profile [Claude Server] - personal Cursor is separate\033[0m\n'
+                            printf '      -> \033[0;90mAgent history: clock icon in sidebar (not empty new tab)\033[0m\n'
+                        else
+                            printf '      -> \033[0;90mServer profile [Claude Server Code] - personal VS Code is separate\033[0m\n'
+                        fi
+                    else
+                        step_fail "$EDITOR_NAME not found (install Cursor or VS Code + Remote-SSH)"
+                    fi
                 elif command -v "$EDITOR_CMD" >/dev/null 2>&1; then
-                    _code_profile="$(get_code_server_profile_dir)"
-                    mkdir -p "$_code_profile/User" 2>/dev/null || true
-                    "$EDITOR_CMD" --user-data-dir "$_code_profile" --reuse-window \
-                        --folder-uri "vscode-remote://ssh-remote+$ALIAS$go_path" >/dev/null 2>&1 &
+                    launch_remote_editor "$EDITOR_CMD" "$ALIAS" "$go_path" 0 || true
                     step_ok "$go_path"
-                    _editor_opened=1
-                    printf '      -> \033[0;90mServer profile [Claude Server Code] - personal VS Code is separate\033[0m\n'
+                    _did_launch=1
                 else
-                    _ec=$?
-                    step_fail "$EDITOR_NAME failed to launch (exit $_ec)"
+                    step_fail "$EDITOR_NAME not found (install Cursor or VS Code + Remote-SSH)"
                 fi
                 echo ""
                 printf "    \033[0;90mRun 'claude' in the %s terminal.\033[0m\n" "$EDITOR_NAME"
+            fi
+
+            if declare -F remote_editor_on_correct_folder >/dev/null 2>&1; then
+                if remote_editor_on_correct_folder "$EDITOR_CMD" "$ALIAS" "$go_path"; then
+                    _editor_opened=1
+                elif [ "$_did_launch" -eq 1 ] || remote_editor_window_open "$EDITOR_CMD" "$ALIAS" "$go_path"; then
+                    warn 'Cursor is on Agent/home - reopening project folder...'
+                    declare -F connect_log >/dev/null 2>&1 && connect_log 'SESSION: cursor not on target folder - relaunching' 'WARN'
+                    launch_remote_editor "$EDITOR_CMD" "$ALIAS" "$go_path" 0 || true
+                    sleep 1
+                    remote_editor_on_correct_folder "$EDITOR_CMD" "$ALIAS" "$go_path" && _editor_opened=1
+                else
+                    _editor_opened=0
+                fi
+            elif [ "$_did_launch" -eq 1 ]; then
+                _editor_opened=1
             fi
 
             if declare -F complete_post_tunnel_recovery >/dev/null 2>&1; then
@@ -725,6 +750,11 @@ while [ "$exit_requested" -eq 0 ]; do
             _session_extras=()
             if [ "$EDITOR_CMD" = "cursor" ]; then
                 _session_extras+=('Before Q: File > Exit Cursor so Agent chat history saves')
+                case "${_last_auth_detail:-}" in
+                    ok|tokens_only)
+                        _session_extras+=('Chat: Developer -> Reload Window if messages fail')
+                        ;;
+                esac
             else
                 _session_extras+=('Before Q: File > Exit VS Code to save unsaved work')
             fi

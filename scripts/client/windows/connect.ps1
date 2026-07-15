@@ -61,7 +61,7 @@ if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
 }
 $ServerIP = "192.168.210.240"
 $Alias    = "claude-server"
-$script:ConnectVersion = '20260715.3'
+$script:ConnectVersion = '20260715.5'
 $CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
@@ -1416,6 +1416,11 @@ $exitRequested = $false
             $editorOpened = $onFolderNow
 
             $sessionExtras = @()
+            if ($EditorCmd -eq 'cursor') {
+                if ($script:LastAuthDetail -match '^(ok|tokens only)$') {
+                    $sessionExtras += 'Chat: Developer -> Reload Window if messages fail'
+                }
+            }
             if ($script:ConnectLogPath) {
                 $sessionExtras += "Log: $(Split-Path -Leaf $script:ConnectLogPath) (same folder as connect.bat)"
             }

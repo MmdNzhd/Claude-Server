@@ -1054,18 +1054,52 @@ get_cursor_remote_profile_dir() {
     echo "$HOME/Library/Application Support/ClaudeServerCursorProfile"
 }
 
+patch_cursor_server_profile_settings() {
+    local settings="$1"
+    [ -f "$settings" ] || return 0
+    if ! command -v python3 >/dev/null 2>&1; then
+        grep -q 'remote.SSH.useLocalServer' "$settings" 2>/dev/null && return 0
+        warn 'Install python3 to auto-patch Cursor profile SSH settings'
+        return 1
+    fi
+    python3 - "$settings" <<'PY'
+import json, sys
+path = sys.argv[1]
+defaults = {
+    "remote.SSH.connectTimeout": 120,
+    "remote.SSH.showLoginTerminal": False,
+    "remote.SSH.useLocalServer": False,
+}
+try:
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, json.JSONDecodeError):
+    data = {}
+changed = False
+for key, val in defaults.items():
+    if key not in data:
+        data[key] = val
+        changed = True
+if changed:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+PY
+}
+
 init_cursor_server_profile() {
     local profile user_dir settings
     profile="$(get_cursor_remote_profile_dir)"
     user_dir="$profile/User"
     settings="$user_dir/settings.json"
-    [ -f "$settings" ] && return 0
     mkdir -p "$user_dir"
-    cat > "$settings" <<'JSON'
+    if [ ! -f "$settings" ]; then
+        cat > "$settings" <<'JSON'
 {
   "window.title": "${dirty}${activeEditorShort}${separator}[Claude Server] ${rootName}",
   "remote.SSH.connectTimeout": 120,
   "remote.SSH.showLoginTerminal": false,
+  "remote.SSH.useLocalServer": false,
   "workbench.colorCustomizations": {
     "titleBar.activeBackground": "#1e3a5f",
     "titleBar.activeForeground": "#e8e8e8",
@@ -1074,6 +1108,58 @@ init_cursor_server_profile() {
   }
 }
 JSON
+        return 0
+    fi
+    patch_cursor_server_profile_settings "$settings" || true
+}
+
+# Mac: shorten TMPDIR so Remote SSH askpass socket stays under 104-char sun_path limit.
+ensure_mac_cursor_tmpdir() {
+    [ "$(uname -s 2>/dev/null)" = "Darwin" ] || return 0
+    local tmp="${TMPDIR:-}"
+    case "$tmp" in
+        /tmp|/tmp/) return 0 ;;
+    esac
+    if [ -z "$tmp" ] || [ "${#tmp}" -gt 40 ] || case "$tmp" in /var/folders/*) true ;; *) false ;; esac; then
+        launchctl setenv TMPDIR /tmp 2>/dev/null || true
+        export TMPDIR=/tmp
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log 'MAC_ENV: TMPDIR=/tmp (Remote SSH socket path limit)' 'DEBUG'
+        fi
+    fi
+}
+
+# Cursor officially supports anysphere.remote-ssh, not Microsoft's extension.
+check_mac_cursor_remote_ssh_extension() {
+    [ "$(uname -s 2>/dev/null)" = "Darwin" ] || return 0
+    local ext_dir="$HOME/.cursor/extensions" d has_anysphere=0 has_ms=0
+    [ -d "$ext_dir" ] || return 0
+    for d in "$ext_dir"/anysphere.remote-ssh-*; do
+        [ -d "$d" ] && has_anysphere=1
+    done
+    for d in "$ext_dir"/ms-vscode-remote.remote-ssh-*; do
+        [ -d "$d" ] && has_ms=1
+    done
+    if [ "$has_ms" -eq 1 ]; then
+        warn 'Remove ms-vscode-remote.remote-ssh - use anysphere.remote-ssh in Cursor Extensions'
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log 'MAC_EXT: ms-vscode-remote.remote-ssh installed (unsupported)' 'WARN'
+        fi
+    fi
+    if [ "$has_anysphere" -eq 0 ]; then
+        warn 'Install anysphere.remote-ssh: Cursor Extensions -> @id:anysphere.remote-ssh'
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log 'MAC_EXT: anysphere.remote-ssh missing' 'WARN'
+        fi
+        return 1
+    fi
+    return 0
+}
+
+ensure_mac_cursor_prerequisites() {
+    ensure_mac_cursor_tmpdir || true
+    init_cursor_server_profile
+    check_mac_cursor_remote_ssh_extension || true
 }
 
 repair_cursor_composer_workspace_bindings() {

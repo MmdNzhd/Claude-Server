@@ -91,8 +91,25 @@ foreach ($rel in @('mac\connect.sh')) {
     Assert ($src -match '_editor_opened') "$rel opens editor only once per menu pick"
     Assert ($src -match 'begin_connect_recovery') "$rel calls begin_connect_recovery on reconnect"
     Assert ($src -match 'CURSOR_AUTH_FORCE') "$rel forces cursor auth after recovery"
+    Assert ($src -match 'launch_remote_editor') "$rel uses launch_remote_editor for editor open"
+    Assert ($src -match '_did_launch') "$rel relaunches when cursor not on folder"
+    Assert ($src -match 'ensure_mac_cursor_prerequisites') "$rel calls ensure_mac_cursor_prerequisites before auth"
+    Assert ($src -match 'Reload Window') "$rel shows Reload Window hint after auth sync"
     Assert ($src -match 'begin_connect_recovery|connect_log.*recover') "$rel logs recovery tags"
 }
+
+Assert ($gitModeSh -match 'cursor_auth_needs_refresh') 'git-mode.sh has cursor_auth_needs_refresh'
+Assert ($gitModeSh -match 'golden-synced-at\.txt') 'git-mode.sh stamps golden-synced-at after merge'
+Assert ($gitModeSh -match 'remote\.SSH\.useLocalServer') 'git-mode.sh sets useLocalServer in profile template'
+Assert ($gitModeSh -match 'ensure_mac_cursor_prerequisites') 'git-mode.sh has Mac Cursor prerequisites'
+Assert ($gitModeSh -match 'patch_cursor_server_profile_settings') 'git-mode.sh patches existing profile settings'
+Assert ($gitModeSh -match 'check_mac_cursor_remote_ssh_extension') 'git-mode.sh checks anysphere.remote-ssh'
+
+$editorLaunchSh = Get-Content (Get-ClientFile 'editor-launch.sh') -Raw
+Assert ($editorLaunchSh -match 'remote_editor_on_correct_folder') 'editor-launch.sh detects on-folder'
+Assert ($editorLaunchSh -match 'remote_editor_in_agent_home') 'editor-launch.sh detects agent home'
+Assert ($editorLaunchSh -match '--new-window') 'editor-launch.sh supports new-window relaunch'
+Assert ($editorLaunchSh -notmatch 'folder-uri\*\).*return 0') 'editor-launch.sh does not match any folder-uri'
 
 Assert ($gitModeSh -match 'ACTIVE_MOUNT=%s') 'git-mode.sh pushes ACTIVE_MOUNT in connect conf'
 

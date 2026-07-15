@@ -124,29 +124,29 @@ remote_editor_on_correct_folder() {
         cmd="${line#* }"
         case "$cmd" in *--type=*) continue ;; esac
         case "$cmd" in *"$profile_tag"*) ;; *) continue ;; esac
-        case "$cmd" in *"$uri_needle"*) return 0 ;; esac
         case "$cmd" in *"$path_needle"*) return 0 ;; esac
-        case "$cmd" in *folder-uri*) return 0 ;; esac
+        case "$cmd" in *"$uri_needle"*) return 0 ;; esac
     done < <(ps ax -o pid=,command= 2>/dev/null || true)
     return 1
 }
 
-# Cursor process is on Agents / home UI, not the project folder.
+# Cursor profile open but not on this project (Agent home / wrong workspace).
 remote_editor_in_agent_home() {
     local alias_name="$1" remote_path="$2"
-    local profile_tag="ClaudeServerCursorProfile" cmd line has_profile_main=0 has_folder=0
+    local profile_tag="ClaudeServerCursorProfile" cmd line
+    local has_profile_main=0 on_target=0
+    local path_needle="${remote_path%/}"
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         cmd="${line#* }"
         case "$cmd" in *--type=*) continue ;; esac
         case "$cmd" in *"$profile_tag"*)
             has_profile_main=1
-            case "$cmd" in *folder-uri*) has_folder=1 ;; esac
+            case "$cmd" in *"$path_needle"*) on_target=1 ;; esac
         ;; esac
     done < <(ps ax -o pid=,command= 2>/dev/null || true)
     [ "$has_profile_main" -eq 0 ] && return 1
-    # No folder-uri on any main process => Agent home / empty window
-    [ "$has_folder" -eq 0 ] && return 0
+    [ "$on_target" -eq 0 ] && return 0
     return 1
 }
 
