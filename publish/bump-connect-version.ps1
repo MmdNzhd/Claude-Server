@@ -127,6 +127,8 @@ function Set-ConnectVersionInRepo {
 
     $verFile = Join-Path $ProjectRoot 'scripts\client\windows\connect-version.txt'
     Write-BumpedFile -Path $verFile -NewText $Version
+    $macVerFile = Join-Path $ProjectRoot 'scripts\client\mac\connect-version.txt'
+    Write-BumpedFile -Path $macVerFile -NewText $Version
 }
 
 function Invoke-BumpConnectVersion {

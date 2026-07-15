@@ -83,8 +83,31 @@ get_code_server_profile_dir() {
 
 remote_editor_running() {
     local editor_cmd="$1" alias_name="$2" remote_path="$3"
-    local profile_tag="" uri_needle path_needle cmd line
+    remote_editor_on_correct_folder "$editor_cmd" "$alias_name" "$remote_path" \
+        || remote_editor_window_open "$editor_cmd" "$alias_name" "$remote_path"
+}
 
+remote_editor_window_open() {
+    local editor_cmd="$1" alias_name="$2" remote_path="$3"
+    local profile_tag="" cmd line
+    case "$editor_cmd" in
+        cursor) profile_tag="ClaudeServerCursorProfile" ;;
+        code)   profile_tag="ClaudeServerCodeProfile" ;;
+        *) return 1 ;;
+    esac
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        cmd="${line#* }"
+        case "$cmd" in *--type=*) continue ;; esac
+        case "$cmd" in *"$profile_tag"*) return 0 ;; esac
+    done < <(ps ax -o pid=,command= 2>/dev/null || true)
+    return 1
+}
+
+# True when a profile main process has the correct folder-uri / path.
+remote_editor_on_correct_folder() {
+    local editor_cmd="$1" alias_name="$2" remote_path="$3"
+    local profile_tag="" uri_needle path_needle cmd line
     uri_needle="ssh-remote+${alias_name}"
     path_needle="${remote_path%/}"
     case "$editor_cmd" in
@@ -92,33 +115,126 @@ remote_editor_running() {
         code)   profile_tag="ClaudeServerCodeProfile" ;;
         *) return 1 ;;
     esac
-
+    # Agent home is NOT correct-folder
+    if [ "$editor_cmd" = "cursor" ] && remote_editor_in_agent_home "$alias_name" "$remote_path"; then
+        return 1
+    fi
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         cmd="${line#* }"
+        case "$cmd" in *--type=*) continue ;; esac
         case "$cmd" in *"$profile_tag"*) ;; *) continue ;; esac
         case "$cmd" in *"$uri_needle"*) return 0 ;; esac
         case "$cmd" in *"$path_needle"*) return 0 ;; esac
-    done < <(ps ax -o pid=,command= 2>/dev/null || true)
-
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        cmd="${line#* }"
-        case "$cmd" in *"$profile_tag"*) return 0 ;; esac
+        case "$cmd" in *folder-uri*) return 0 ;; esac
     done < <(ps ax -o pid=,command= 2>/dev/null || true)
     return 1
 }
 
+# Cursor process is on Agents / home UI, not the project folder.
+remote_editor_in_agent_home() {
+    local alias_name="$1" remote_path="$2"
+    local profile_tag="ClaudeServerCursorProfile" cmd line has_profile_main=0 has_folder=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        cmd="${line#* }"
+        case "$cmd" in *--type=*) continue ;; esac
+        case "$cmd" in *"$profile_tag"*)
+            has_profile_main=1
+            case "$cmd" in *folder-uri*) has_folder=1 ;; esac
+        ;; esac
+    done < <(ps ax -o pid=,command= 2>/dev/null || true)
+    [ "$has_profile_main" -eq 0 ] && return 1
+    # No folder-uri on any main process => Agent home / empty window
+    [ "$has_folder" -eq 0 ] && return 0
+    return 1
+}
+
+cursor_profile_main_count() {
+    local profile_tag="ClaudeServerCursorProfile" n=0 cmd line
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        cmd="${line#* }"
+        case "$cmd" in *--type=*) continue ;; esac
+        case "$cmd" in *"$profile_tag"*) n=$(( n + 1 )) ;; esac
+    done < <(ps ax -o pid=,command= 2>/dev/null || true)
+    printf '%s' "$n"
+}
+
+# Soft-stop profile tree (used before --new-window relaunch from Agent home).
+stop_cursor_profile_soft() {
+    local profile_tag="ClaudeServerCursorProfile" line pid cmd
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        pid="${line%% *}"
+        cmd="${line#* }"
+        case "$cmd" in *"$profile_tag"*) kill "$pid" 2>/dev/null || true ;; esac
+    done < <(ps ax -o pid=,command= 2>/dev/null || true)
+    sleep 1
+}
+
 launch_remote_editor() {
-    local cmd="$1" alias="$2" remote_path="$3" uri profile
+    local cmd="$1" alias="$2" remote_path="$3" known_on_folder="${4:-0}"
+    local uri profile use_new=0 agent_home=0 on_folder=0 profile_main=0
     uri="vscode-remote://ssh-remote+${alias}${remote_path}"
+
     if [ "$cmd" = "cursor" ]; then
         profile="$(get_cursor_server_profile_dir)"
         mkdir -p "$profile/User" 2>/dev/null || true
-        cursor --user-data-dir "$profile" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
+        if declare -F init_cursor_server_profile >/dev/null 2>&1; then
+            init_cursor_server_profile
+        fi
+
+        if [ "$known_on_folder" = "1" ]; then
+            on_folder=1
+        else
+            remote_editor_on_correct_folder cursor "$alias" "$remote_path" && on_folder=1
+        fi
+        remote_editor_in_agent_home "$alias" "$remote_path" && agent_home=1
+        profile_main="$(cursor_profile_main_count)"
+
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "LAUNCH_BEGIN editor=cursor on_folder=$on_folder agent_home=$agent_home profile_main=$profile_main"
+        fi
+
+        if [ "$on_folder" -eq 1 ] && [ "$agent_home" -eq 0 ]; then
+            declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_SKIP: already on correct folder'
+            return 0
+        fi
+
+        # Match Windows: new window when agent home or profile already open
+        if [ "$agent_home" -eq 1 ] || [ "$profile_main" -gt 0 ]; then
+            use_new=1
+        fi
+        if [ "$agent_home" -eq 1 ] && [ "$profile_main" -gt 0 ]; then
+            declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_KILL: agent_home soft-stop profile'
+            stop_cursor_profile_soft
+        fi
+
+        if [ "$use_new" -eq 1 ]; then
+            declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_PLAN: --new-window'
+            # Prefer classic+new-window, fall back to folder-uri
+            cursor --user-data-dir "$profile" --new-window --classic --folder-uri "$uri" >/dev/null 2>&1 &
+            sleep 0.8
+            if ! remote_editor_on_correct_folder cursor "$alias" "$remote_path"; then
+                cursor --user-data-dir "$profile" --new-window --folder-uri "$uri" >/dev/null 2>&1 &
+            fi
+        else
+            declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_PLAN: cold --reuse-window'
+            cursor --user-data-dir "$profile" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
+        fi
+        return 0
+    fi
+
+    profile="$(get_code_server_profile_dir)"
+    mkdir -p "$profile/User" 2>/dev/null || true
+    if remote_editor_on_correct_folder code "$alias" "$remote_path"; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_SKIP: VS Code already on folder'
+        return 0
+    fi
+    if remote_editor_window_open code "$alias" "$remote_path"; then
+        code --user-data-dir "$profile" --new-window --folder-uri "$uri" >/dev/null 2>&1 &
     else
-        profile="$(get_code_server_profile_dir)"
-        mkdir -p "$profile/User" 2>/dev/null || true
         code --user-data-dir "$profile" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
     fi
 }

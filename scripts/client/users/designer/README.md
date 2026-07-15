@@ -2,7 +2,7 @@
 
 SSHFS mount of laptop design folder + noVNC browser desktop. No Cursor/VS Code.
 
-Client scripts: **v20260714.2** (Windows developer package uses same git-mode modules).
+Client scripts: **v20260715.3** (Windows developer package uses same git-mode modules).
 
 ## Windows
 

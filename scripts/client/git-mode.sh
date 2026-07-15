@@ -1525,24 +1525,80 @@ local_cursor_auth_complete() {
         && cursor_db_value_length "$db" 'storage.serviceMachineId'
 }
 
+# True when local auth is missing keys, personal Cursor dominates, or golden
+# export stamp is newer than last laptop merge (token rotates every ~6h).
+cursor_auth_needs_refresh() {
+    local db="${1:-}" gs synced_at_path synced_at golden_exported="" reasons=""
+    if [ -z "$db" ]; then
+        db="$(get_cursor_remote_profile_dir)/User/globalStorage/state.vscdb"
+    fi
+    gs="$(dirname "$db")"
+    synced_at_path="$gs/golden-synced-at.txt"
+
+    if [ ! -f "$db" ]; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log 'AUTH_REFRESH: reason=db_missing' 'DEBUG'
+        return 0
+    fi
+    if ! cursor_sqlite3_available; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log 'AUTH_REFRESH: reason=sqlite_unavailable' 'DEBUG'
+        return 0
+    fi
+    if ! cursor_db_value_length "$db" 'storage.serviceMachineId'; then
+        reasons="${reasons}serviceMachineId_empty "
+    fi
+    if declare -F test_personal_cursor_dominant >/dev/null 2>&1 && test_personal_cursor_dominant; then
+        reasons="${reasons}personal_without_profile "
+    fi
+    golden_exported="$(sshx 'cat /etc/cursor-auth/golden/exported-at 2>/dev/null' 2>/dev/null | tr -d '\r\n' || true)"
+    synced_at=""
+    [ -f "$synced_at_path" ] && synced_at="$(tr -d '\r\n' < "$synced_at_path")"
+    if [ -n "$golden_exported" ] && [ "$synced_at" != "$golden_exported" ]; then
+        reasons="${reasons}golden_stale "
+    fi
+    if [ -n "$reasons" ]; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log "AUTH_REFRESH: needs_refresh reasons=$reasons" 'DEBUG'
+        return 0
+    fi
+    return 1
+}
+
 sync_cursor_golden_auth_status() {
     CURSOR_AUTH_SYNC_RESULT=fail
     local gs payload db force="${CURSOR_AUTH_FORCE:-0}"
+    local synced_at_path synced_at golden_exported="" golden_current=0
     gs="$(get_cursor_remote_profile_dir)/User/globalStorage"
     mkdir -p "$gs"
     db="$gs/state.vscdb"
-    if [ "$force" != "1" ] && [ -f "$db" ] && local_cursor_auth_complete "$db"; then
+    synced_at_path="$gs/golden-synced-at.txt"
+
+    golden_exported="$(sshx 'cat /etc/cursor-auth/golden/exported-at 2>/dev/null' 2>/dev/null | tr -d '\r\n' || true)"
+    synced_at=""
+    [ -f "$synced_at_path" ] && synced_at="$(tr -d '\r\n' < "$synced_at_path")"
+    if [ -n "$golden_exported" ] && [ "$synced_at" = "$golden_exported" ]; then
+        golden_current=1
+    fi
+
+    # Skip only when auth is complete AND stamped with the CURRENT golden export.
+    # Presence alone is not enough: OAuth rotate every 6h invalidates old pairs.
+    if [ "$force" != "1" ] && [ "$golden_current" -eq 1 ] && [ -f "$db" ] && local_cursor_auth_complete "$db"; then
         CURSOR_AUTH_SYNC_RESULT=ok
+        declare -F connect_log >/dev/null 2>&1 && connect_log "AUTH_SYNC: skip already_complete golden_exported_at=$golden_exported" 'DEBUG'
         return 0
     fi
+
     sshx "test -f /etc/cursor-auth/golden/auth.json" 2>/dev/null || { CURSOR_AUTH_SYNC_RESULT=skipped; return 1; }
     sshx "cursor-auth-sync --force 2>&1" 2>/dev/null || true
+    # Re-read export stamp after server sync (refresh may have updated it)
+    golden_exported="$(sshx 'cat /etc/cursor-auth/golden/exported-at 2>/dev/null' 2>/dev/null | tr -d '\r\n' || true)"
     payload="$(fetch_golden_auth_payload)" || { CURSOR_AUTH_SYNC_RESULT=skipped; return 1; }
     merge_cursor_auth_into_local_db "$gs" "$payload" || { CURSOR_AUTH_SYNC_RESULT=fail; return 1; }
     merge_cursor_storage_json_from_golden "$gs" || true
     db="$gs/state.vscdb"
     if local_cursor_auth_complete "$db"; then
         CURSOR_AUTH_SYNC_RESULT=ok
+        if [ -n "$golden_exported" ]; then
+            printf '%s' "$golden_exported" > "$synced_at_path" 2>/dev/null || true
+        fi
         [ "$force" = "1" ] && unset CURSOR_AUTH_FORCE
         return 0
     fi

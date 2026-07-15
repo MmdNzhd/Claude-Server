@@ -1,7 +1,7 @@
 Claude Code Server - Client Package
 =====================================
 
-Current connect scripts: v20260714.4
+Current connect scripts: v20260715.3
 
 WINDOWS
 -------
@@ -26,7 +26,7 @@ WINDOWS
    optionally set git mode (g) or IDE (c), Cursor or VS Code opens via Remote SSH.
 
    Header must show:
-     claude-server  |  <server-ip>  |  v20260714.4
+     claude-server  |  <server-ip>  |  v20260715.3
 
    Project menu must include:  g git
 
@@ -48,7 +48,7 @@ MAC
 3. Same flow as Windows (project table, git banner, session keys).
 
    Header must show:
-     claude-server  |  <server-ip>  |  v20260714.4
+     claude-server  |  <server-ip>  |  v20260715.3
 
    After disconnect: 10s countdown, default M = project menu.
 
@@ -68,7 +68,7 @@ Preference saved in:
 
 SINGLE PROJECT (important)
 --------------------------
-  Only ONE project is mounted per session. Requires connect scripts v20260714.4+
+  Only ONE project is mounted per session. Requires connect scripts v20260715.3+
   and server-side mount fix (admin deploys from repo - not included in this ZIP).
 
 SESSION KEYS
@@ -90,7 +90,7 @@ If selecting a project shows "Join-Path ChildPath" prompt:
   - connect.bat blocks outdated folders automatically
 
 If connect.bat says OUTDATED:
-  - Missing connect-ui.ps1 or version is not v20260714.4
+  - Missing connect-ui.ps1 or version is not v20260715.3
 
 Do NOT use old folders from previous ZIP dates or stale Desktop copies.
 

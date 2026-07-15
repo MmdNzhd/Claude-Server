@@ -184,7 +184,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | `scripts/server/cursor-auth-lib.py` | deploy scripts — `/usr/local/lib/claude-server/cursor-auth-lib.py` |
 | `scripts/server/cursor-auth-source-path.sh` | deploy scripts — `cursor-auth-source-path` |
 | `scripts/server/audit-cursor-golden-deep.py` | deploy scripts — `/usr/local/lib/claude-server/audit-cursor-golden-deep.py` |
-| `scripts/server/laptop-exec.sh` | deploy scripts — `laptop-exec` + skill + `cursor-rules/laptop-exec.mdc` |
+| `scripts/server/laptop-exec.sh` | deploy scripts — `laptop-exec` + skill + `cursor-rules/laptop-exec.mdc` + `cursor-hooks/` |
 | `scripts/server/laptop-exec-setup.sh` | deploy scripts — `laptop-exec-setup` |
 | `scripts/server/claude-mount.sh` | pushed on connect; also deploy via install.sh → `/usr/local/lib/claude-mount` |
 | `scripts/server/claude-git-setup.sh` | pushed on connect; skipped when GIT_MODE=server |
