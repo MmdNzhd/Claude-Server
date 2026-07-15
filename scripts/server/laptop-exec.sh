@@ -1,36 +1,35 @@
 #!/usr/bin/env bash
-# laptop-exec - run commands on the developer laptop via reverse SSH tunnel.
-# Faster than SSHFS for scan, git, build, and bulk I/O.
-#
-# Usage:
-#   laptop-exec status
-#   laptop-exec path [-p PROJECT]
-#   laptop-exec count [-p PROJECT]
-#   laptop-exec run  [-p PROJECT] -- <command...>
-#   laptop-exec git  [-p PROJECT] -- <git-args...>
-#   laptop-exec rg   [-p PROJECT] <pattern>
-#   laptop-exec test
-#
-# Requires connect.bat/sh session (reverse tunnel alive).
-
+# laptop-exec - SSH-first: fast + accurate project ops on laptop via reverse tunnel.
 set -euo pipefail
 
 CONNECT_CONF="$HOME/.claude-connect.conf"
 CONF_DIR="$HOME/.claude-mounts.d"
 KEY="$HOME/.ssh/claude_laptop"
 KNOWN_HOSTS="$HOME/.ssh/known_hosts_claude_mount"
+CACHE_DIR="$HOME/.cache/laptop-exec"
+CONTROL_PATH="$CACHE_DIR/cm-%C"
+SSHFS_CACHE="$CACHE_DIR/sshfs-cache.tsv"
+GIT_DIR_CACHE="$CACHE_DIR/git-dir-cache.tsv"
+SSHFS_CACHE_TTL=45
 
-LAPTOP_USER=""
-TUNNEL_PORT=""
-LAPTOP_OS="windows"
-ACTIVE_MOUNT=""
-GIT_MODE="hide"
+LAPTOP_USER="" TUNNEL_PORT="" LAPTOP_OS="windows" ACTIVE_MOUNT="" GIT_MODE="off"
+PROJECT_ID="" WORKSPACE_PATH="" REMOTE_PATH="" LOCAL_PATH=""
 
 _die() { echo "laptop-exec: $*" >&2; exit 1; }
 
+_expand_home() {
+    local p="$1"
+    case "$p" in
+        "~/"*) printf '%s' "${HOME}/${p#~/}" ;;
+        "~") printf '%s' "$HOME" ;;
+        *) printf '%s' "$p" ;;
+    esac
+}
+
+_ensure_cache_dir() { mkdir -p "$CACHE_DIR" 2>/dev/null || true; }
+
 _load_global() {
-    GIT_MODE="hide"
-    LAPTOP_OS="windows"
+    GIT_MODE="off"; LAPTOP_OS="windows"
     if [ -f "$CONNECT_CONF" ]; then
         while IFS='=' read -r k v; do
             v="${v#\"}"; v="${v%\"}"
@@ -46,20 +45,18 @@ _load_global() {
     [ -n "$TUNNEL_PORT" ] || TUNNEL_PORT=$((20000 + $(id -u)))
     case "${GIT_MODE,,}" in
         server|on|yes|1|slow) GIT_MODE="server" ;;
-        *) GIT_MODE="hide" ;;
+        hide|fast) GIT_MODE="hide" ;;
+        *) GIT_MODE="off" ;;
     esac
-    case "${LAPTOP_OS,,}" in
-        mac|darwin|osx) LAPTOP_OS="mac" ;;
-        *) LAPTOP_OS="windows" ;;
-    esac
+    case "${LAPTOP_OS,,}" in mac|darwin|osx) LAPTOP_OS="mac" ;; *) LAPTOP_OS="windows" ;; esac
+    _ensure_cache_dir
 }
 
 _load_project() {
     local project_id="$1"
     local conf="$CONF_DIR/${project_id}.conf"
     [ -f "$conf" ] || _die "unknown project '$project_id' (no $conf)"
-    REMOTE_PATH=""
-    LOCAL_PATH=""
+    REMOTE_PATH=""; LOCAL_PATH=""
     while IFS='=' read -r k v; do
         v="${v#\"}"; v="${v%\"}"
         case "$k" in
@@ -68,52 +65,166 @@ _load_project() {
         esac
     done < "$conf"
     REMOTE_PATH="${REMOTE_PATH//\\//}"
+    LOCAL_PATH="$(_expand_home "$LOCAL_PATH")"
     [ -n "$REMOTE_PATH" ] || _die "no remote path in $conf"
 }
 
+_mount_path_for_project() {
+    local pid="$1" mp="" conf lp="" k v
+    conf="$CONF_DIR/${pid}.conf"
+    if [ -f "$conf" ]; then
+        while IFS='=' read -r k v; do
+            v="${v#\"}"; v="${v%\"}"
+            case "$k" in lpath|LOCAL_PATH) lp="$(_expand_home "$v")" ;; esac
+        done < "$conf"
+    fi
+    mp="${lp:-$HOME/mounts/$pid}"
+    printf '%s' "$mp"
+}
+
+_project_id_from_path() {
+    local path="$1"
+    path="${path//\\//}"
+    if [[ "$path" =~ /mounts/([^/]+) ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    return 1
+}
+
+_guess_workspace_path() {
+    local p=""
+    for p in "$WORKSPACE_PATH" "${LAPTOP_EXEC_WORKSPACE:-}" "${CURSOR_WORKSPACE:-}" "${CURSOR_PROJECT_DIR:-}" "${PWD:-}"; do
+        [ -n "$p" ] || continue
+        p="${p//\\//}"
+        if [[ "$p" == *"/mounts/"* ]]; then
+            printf '%s' "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_sshfs_state_uncached() {
+    local mp="$1" out="" rc=0
+    [ -n "$mp" ] || { echo "UNKNOWN"; return; }
+    mp="$(_expand_home "$mp")"
+    if ! timeout 1 stat "$mp" >/dev/null 2>&1; then echo "NOT_MOUNTED"; return; fi
+    if ! mountpoint -q "$mp" 2>/dev/null; then echo "NOT_MOUNTED"; return; fi
+    out=$(timeout 2 ls "$mp" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ] || [[ "$out" == *"Input/output error"* ]] || [[ "$out" == *"Transport endpoint"* ]]; then
+        echo "STALE"; return
+    fi
+    echo "MOUNTED"
+}
+
+_sshfs_state() {
+    local mp="$1" now="" cached="" ts="" state=""
+    [ -n "$mp" ] || { echo "UNKNOWN"; return; }
+    mp="$(_expand_home "$mp")"
+    now=$(date +%s)
+    _ensure_cache_dir
+    if [ -f "$SSHFS_CACHE" ]; then
+        cached=$(grep -F "$mp|" "$SSHFS_CACHE" 2>/dev/null | tail -1 || true)
+        if [ -n "$cached" ]; then
+            ts="${cached##*|}"
+            state="${cached#*|}"; state="${state%%|*}"
+            if [ $((now - ts)) -le "$SSHFS_CACHE_TTL" ]; then
+                echo "$state"; return
+            fi
+        fi
+    fi
+    state="$(_sshfs_state_uncached "$mp")"
+    grep -v -F "$mp|" "$SSHFS_CACHE" 2>/dev/null > "${SSHFS_CACHE}.tmp" || true
+    printf '%s|%s|%s\n' "$mp" "$state" "$now" >> "${SSHFS_CACHE}.tmp"
+    mv "${SSHFS_CACHE}.tmp" "$SSHFS_CACHE"
+    echo "$state"
+}
+
+_ssh_common_opts() {
+    printf '%s\n' \
+        -o BatchMode=yes \
+        -o ConnectTimeout=8 \
+        -o ServerAliveInterval=15 \
+        -o ServerAliveCountMax=3 \
+        -o StrictHostKeyChecking=accept-new \
+        -o UserKnownHostsFile="$KNOWN_HOSTS" \
+        -o ControlMaster=auto \
+        -o "ControlPath=$CONTROL_PATH" \
+        -o ControlPersist=300
+}
+
 _laptop_ssh() {
-    ssh -n -o BatchMode=yes -o ConnectTimeout=10 \
-        -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
-        -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$KNOWN_HOSTS" \
-        -o ControlMaster=no -o ControlPath=none \
-        -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" \
-        "$@"
+    local opts
+    mapfile -t opts < <(_ssh_common_opts)
+    ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" "$@"
 }
 
-# Windows accepts forward slashes; normalize so backslashes are not eaten by SSH.
-_normalize_arg() {
-    printf '%s' "${1//\\//}"
+_laptop_scp_to() {
+    local local_file="$1" rpath="$2" rel_file="$3"
+    local opts
+    mapfile -t opts < <(_ssh_common_opts)
+    rel_file="${rel_file#./}"; rel_file="${rel_file//\\//}"
+    scp -q "${opts[@]}" -i "$KEY" -P "$TUNNEL_PORT" \
+        "$local_file" "${LAPTOP_USER}@127.0.0.1:${rpath}/${rel_file}"
 }
 
-# Detect .git.server-session vs .git per project (hide mode only applies to active mount).
+_ensure_remote_parent_dir() {
+    local rpath="$1" file="$2" dir="${file%/*}"
+    [ "$dir" = "$file" ] && return 0
+    if [ "$LAPTOP_OS" = "mac" ]; then _run_in_project "$rpath" mkdir -p "$dir"; return; fi
+    local win_path="${rpath//\//\\}" win_dir="${dir//\//\\}"
+    _laptop_ssh "cmd /c \"if not exist ${win_path}\\${win_dir} mkdir ${win_path}\\${win_dir}\""
+}
+
+_normalize_arg() { printf '%s' "${1//\\//}"; }
+
 _detect_git_dir() {
-    local rpath="$1"
-    local win_path="${rpath//\//\\}"
-    local out=""
+    local rpath="$1" win_path="${rpath//\//\\}" out=""
+    if [ "$LAPTOP_OS" = "mac" ]; then
+        if _run_in_project "$rpath" test -d .git.server-session 2>/dev/null; then echo .git.server-session; return; fi
+        if _run_in_project "$rpath" test -d .git 2>/dev/null; then echo .git; return; fi
+        echo none; return
+    fi
     out=$(_laptop_ssh "cmd /c \"if exist ${win_path}\\.git.server-session\\HEAD (echo .git.server-session) else if exist ${win_path}\\.git\\HEAD (echo .git) else (echo none)\"" 2>/dev/null | tr -d '\r' | head -1)
     printf '%s' "$out"
 }
 
-_run_in_project() {
-    local rpath="$1"
-    shift
-    if [ "$LAPTOP_OS" = "mac" ]; then
-        local cmd=""
-        printf -v cmd '%q ' "$@"
-        _laptop_ssh "bash -lc 'cd $(printf '%q' "$rpath") && $cmd'"
-        return
+_detect_git_dir_cached() {
+    local rpath="$1" pid="${PROJECT_ID:-$ACTIVE_MOUNT}" now="" line="" ts="" dir=""
+    [ -n "$pid" ] || return 1
+    now=$(date +%s)
+    _ensure_cache_dir
+    if [ -f "$GIT_DIR_CACHE" ]; then
+        line=$(grep -F "${pid}|" "$GIT_DIR_CACHE" 2>/dev/null | tail -1 || true)
+        if [ -n "$line" ]; then
+            ts="${line##*|}"
+            dir="${line#*|}"; dir="${dir%%|*}"
+            if [ "$dir" != "none" ] && [ $((now - ts)) -le 300 ]; then
+                printf '%s' "$dir"; return 0
+            fi
+        fi
     fi
-    local win_path="${rpath//\//\\}"
-    local cmdline="" arg norm
+    dir="$(_detect_git_dir "$rpath")"
+    grep -v -F "${pid}|" "$GIT_DIR_CACHE" 2>/dev/null > "${GIT_DIR_CACHE}.tmp" || true
+    printf '%s|%s|%s\n' "$pid" "$dir" "$now" >> "${GIT_DIR_CACHE}.tmp"
+    mv "${GIT_DIR_CACHE}.tmp" "$GIT_DIR_CACHE"
+    [ "$dir" != "none" ] || return 1
+    printf '%s' "$dir"
+}
+
+_run_in_project() {
+    local rpath="$1"; shift
+    if [ "$LAPTOP_OS" = "mac" ]; then
+        local cmd=""; printf -v cmd '%q ' "$@"
+        _laptop_ssh "bash -lc 'cd $(printf '%q' "$rpath") && $cmd'"; return
+    fi
+    local win_path="${rpath//\//\\}" cmdline="" arg norm
     for arg in "$@"; do
         norm="$(_normalize_arg "$arg")"
         case "$norm" in
-            *[\"^\&\|\<\>\(\)]*|*\ *|*\'*|*/*)
-                cmdline="${cmdline} \"${norm//\"/\\\"}\""
-                ;;
-            *)
-                cmdline="${cmdline} ${norm}"
-                ;;
+            *[\"^\&\|\<\>\(\)]*|*\ *|*\'*|*/*) cmdline="${cmdline} \"${norm//\"/\\\"}\"" ;;
+            *) cmdline="${cmdline} ${norm}" ;;
         esac
     done
     cmdline="${cmdline# }"
@@ -121,43 +232,26 @@ _run_in_project() {
 }
 
 _git_invoke() {
-    local rpath="$1"
-    shift
+    local rpath="$1"; shift
     local git_dir
-    if [ "$GIT_MODE" = "server" ]; then
-        _run_in_project "$rpath" git "$@"
-        return
-    fi
-    git_dir="$(_detect_git_dir "$rpath")"
-    case "$git_dir" in
-        .git.server-session|.git)
-            _run_in_project "$rpath" git --git-dir="$git_dir" --work-tree=. "$@"
-            ;;
-        none)
-            _die "no git repository on laptop for $rpath"
-            ;;
-        *)
-            _die "unexpected git dir state: $git_dir"
-            ;;
-    esac
+    if [ "$GIT_MODE" = "server" ]; then _run_in_project "$rpath" git "$@"; return; fi
+    git_dir="$(_detect_git_dir_cached "$rpath")" || _die "no git repository on laptop for $rpath"
+    _run_in_project "$rpath" git --git-dir="$git_dir" --work-tree=. "$@"
 }
 
 _parse_project_flag() {
     PROJECT_ID=""
+    WORKSPACE_PATH=""
     while [ $# -gt 0 ]; do
         case "$1" in
             -p|--project)
                 [ $# -ge 2 ] || _die "missing value for $1"
-                PROJECT_ID="$2"
-                shift 2
-                ;;
-            --)
-                shift
-                break
-                ;;
-            *)
-                break
-                ;;
+                PROJECT_ID="$2"; shift 2 ;;
+            -w|--workspace)
+                [ $# -ge 2 ] || _die "missing value for $1"
+                WORKSPACE_PATH="$2"; shift 2 ;;
+            --) shift; break ;;
+            *) break ;;
         esac
     done
     REMAINING=("$@")
@@ -168,9 +262,18 @@ _require_session() {
     [ -n "$LAPTOP_USER" ] || _die "no connect session - run connect.bat/sh first"
 }
 
+_tunnel_up() {
+    if [ "$LAPTOP_OS" = "mac" ]; then _laptop_ssh true >/dev/null 2>&1; else _laptop_ssh cmd /c exit 0 >/dev/null 2>&1; fi
+}
+
 _resolve_project() {
-    local pid="${PROJECT_ID:-$ACTIVE_MOUNT}"
-    [ -n "$pid" ] || _die "no project (use -p or connect with a project)"
+    local pid="${PROJECT_ID:-}" ws=""
+    if [ -z "$pid" ]; then
+        ws="$(_guess_workspace_path 2>/dev/null || true)"
+        [ -n "$ws" ] && pid="$(_project_id_from_path "$ws" 2>/dev/null || true)"
+    fi
+    pid="${pid:-$ACTIVE_MOUNT}"
+    [ -n "$pid" ] || _die "no project (-p ID, -w ~/mounts/ID/..., cd ~/mounts/ID, or connect session)"
     _load_project "$pid"
 }
 
@@ -183,155 +286,246 @@ _cmd_status() {
     echo "git_mode:     ${GIT_MODE}"
     if [ -z "$LAPTOP_USER" ]; then
         echo "tunnel:       DOWN (no connect session)"
+        echo "sshfs:        n/a"
+        echo "prefer:       run connect.bat/sh"
         exit 1
     fi
-    if [ "$LAPTOP_OS" = "mac" ]; then
-        _laptop_ssh true >/dev/null 2>&1 && echo "tunnel:       UP" || { echo "tunnel:       DOWN"; exit 1; }
-    else
-        _laptop_ssh cmd /c exit 0 >/dev/null 2>&1 && echo "tunnel:       UP" || { echo "tunnel:       DOWN"; exit 1; }
+    if _tunnel_up; then echo "tunnel:       UP"; else
+        echo "tunnel:       DOWN"; echo "prefer:       run connect.bat/sh"; exit 1
     fi
+    if [ -n "$ACTIVE_MOUNT" ] && [ -f "$CONF_DIR/${ACTIVE_MOUNT}.conf" ]; then
+        local mp="$(_mount_path_for_project "$ACTIVE_MOUNT")"
+        echo "sshfs:        $(_sshfs_state "$mp") ($mp)"
+    else
+        echo "sshfs:        n/a (no active_mount)"
+    fi
+    echo "prefer:       laptop-exec (SSH-first; mount optional)"
 }
 
-_cmd_path() {
+_cmd_health() {
+    _parse_project_flag "$@"
+    _cmd_status || true
+    echo ""
+    echo "projects:"
+    LIST_FAST=1 _cmd_list
+}
+
+_cmd_list() {
+    _load_global
+    local conf pid mp state mark fast="${LIST_FAST:-0}" k v
+    shopt -s nullglob
+    for conf in "$CONF_DIR"/*.conf; do
+        pid="$(basename "$conf" .conf)"
+        REMOTE_PATH=""
+        while IFS='=' read -r k v; do
+            v="${v#\"}"; v="${v%\"}"
+            case "$k" in rpath|REMOTE_PATH) REMOTE_PATH="${v//\\//}" ;; esac
+        done < "$conf"
+        if [ "$fast" = "1" ]; then
+            state="(list --full)"
+        else
+            mp="$(_mount_path_for_project "$pid")"
+            state="$(_sshfs_state "$mp")"
+        fi
+        mark=""; [ "$pid" = "$ACTIVE_MOUNT" ] && mark=" *"
+        printf "  %-20s sshfs=%-22s laptop=%s%s\n" "$pid" "$state" "${REMOTE_PATH:-?}" "$mark"
+    done
+    shopt -u nullglob
+}
+
+_cmd_resolve() {
+    local path="${1:-}" pid=""
+    if [ -z "$path" ]; then
+        path="$(_guess_workspace_path 2>/dev/null || true)"
+        [ -n "$path" ] || _die "usage: laptop-exec resolve [PATH] (or -w / cd ~/mounts/ID)"
+    fi
+    path="${path//\\//}"
+    if pid="$(_project_id_from_path "$path" 2>/dev/null)"; then
+        echo "$pid"
+        return 0
+    fi
+    _die "cannot resolve project from: $path"
+}
+
+_cmd_mount_status() {
     _parse_project_flag "$@"
     _require_session
     _resolve_project
-    echo "$REMOTE_PATH"
+    local pid="${PROJECT_ID:-$ACTIVE_MOUNT}" mp="" state=""
+    mp="$(_mount_path_for_project "$pid")"
+    state="$(_sshfs_state "$mp")"
+    echo "project:      $pid"
+    echo "local_path:   $mp"
+    echo "laptop_path:  $REMOTE_PATH"
+    echo "sshfs:        $state"
+    if _tunnel_up; then echo "tunnel:       UP"; else echo "tunnel:       DOWN"; fi
+    case "$state" in
+        MOUNTED) echo "recommend:    laptop-exec for agent work; SSHFS for manual IDE edits" ;;
+        *) echo "recommend:    laptop-exec ONLY (read/write/git/rg/run)" ;;
+    esac
 }
+
+_cmd_path() { _parse_project_flag "$@"; _require_session; _resolve_project; echo "$REMOTE_PATH"; }
 
 _cmd_count() {
-    _parse_project_flag "$@"
-    _require_session
-    _resolve_project
-    if [ "$LAPTOP_OS" = "mac" ]; then
-        _run_in_project "$REMOTE_PATH" find . -type f | wc -l
-    else
-        local win_path="${REMOTE_PATH//\//\\}"
-        _laptop_ssh "cmd /c \"cd /d ${win_path} && dir /s /b /a-d 2>nul\"" | wc -l
-    fi
+    _parse_project_flag "$@"; _require_session; _resolve_project
+    if [ "$LAPTOP_OS" = "mac" ]; then _run_in_project "$REMOTE_PATH" find . -type f | wc -l
+    else _run_in_project "$REMOTE_PATH" powershell -NoProfile -Command "(Get-ChildItem -Recurse -File -EA SilentlyContinue | Measure-Object).Count"; fi
 }
 
 _cmd_read() {
     _parse_project_flag "$@"
-    [ "${#REMAINING[@]}" -eq 1 ] || _die "usage: laptop-exec read [-p PROJECT] <file>"
-    _require_session
-    _resolve_project
-    local file="${REMAINING[0]}"
-    file="${file//\\//}"
-    if [ "$LAPTOP_OS" = "mac" ]; then
-        _run_in_project "$REMOTE_PATH" cat "$file"
-    else
-        local win_path="${REMOTE_PATH//\//\\}"
-        local win_file="${file//\//\\}"
-        _laptop_ssh "cmd /c \"cd /d ${win_path} && type ${win_file}\""
-    fi
+    [ "${#REMAINING[@]}" -eq 1 ] || _die "usage: laptop-exec read [-p PROJECT] [-w PATH] <file>"
+    _require_session; _resolve_project
+    local file="${REMAINING[0]}"; file="${file//\\//}"
+    if [ "$LAPTOP_OS" = "mac" ]; then _run_in_project "$REMOTE_PATH" cat "$file"
+    else _run_in_project "$REMOTE_PATH" powershell -NoProfile -Command "Get-Content -LiteralPath '${file//\'/''}' -Raw"; fi
+}
+
+_cmd_write() {
+    _parse_project_flag "$@"
+    [ "${#REMAINING[@]}" -eq 1 ] || _die "usage: laptop-exec write [-p PROJECT] <file>  (stdin)"
+    _require_session; _resolve_project
+    local file="${REMAINING[0]}" tmp; file="${file//\\//}"
+    tmp=$(mktemp); cat >"$tmp" || _die "write: no stdin"
+    _ensure_remote_parent_dir "$REMOTE_PATH" "$file"
+    _laptop_scp_to "$tmp" "$REMOTE_PATH" "$file"
+    rm -f "$tmp"
 }
 
 _cmd_run() {
-    _parse_project_flag "$@"
-    [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec run [-p PROJECT] -- <command...>"
-    _require_session
-    _resolve_project
-    _run_in_project "$REMOTE_PATH" "${REMAINING[@]}"
+    _parse_project_flag "$@"; [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec run [-p PROJECT] -- <cmd...>"
+    _require_session; _resolve_project; _run_in_project "$REMOTE_PATH" "${REMAINING[@]}"
 }
 
 _cmd_git() {
-    _parse_project_flag "$@"
-    [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec git [-p PROJECT] -- <git-args...>"
-    _require_session
-    _resolve_project
-    _git_invoke "$REMOTE_PATH" "${REMAINING[@]}"
+    _parse_project_flag "$@"; [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec git [-p PROJECT] -- <args...>"
+    _require_session; _resolve_project; _git_invoke "$REMOTE_PATH" "${REMAINING[@]}"
+}
+
+_rg_is_regex() {
+    local p="$1"
+    [[ "$p" =~ [\[\]\(\)\|\+\?] ]] && return 0
+    return 1
+}
+
+_ps_search_encoded() {
+    local pattern="$1" regex="$2"
+    python3 - "$pattern" "$regex" <<'PY'
+import base64, sys
+pat = sys.argv[1]
+regex = sys.argv[2] == "1"
+pat_esc = pat.replace("'", "''")
+if regex:
+    ps = (
+        "Get-ChildItem -Recurse -File -EA SilentlyContinue | "
+        f"Select-String -Pattern '{pat_esc}' | "
+        "ForEach-Object { $_.Path + ':' + $_.LineNumber + ':' + $_.Line.Trim() }"
+    )
+else:
+    ps = (
+        "Get-ChildItem -Recurse -File -EA SilentlyContinue | "
+        f"Select-String -SimpleMatch -Pattern '{pat_esc}' | "
+        "ForEach-Object { $_.Path + ':' + $_.LineNumber + ':' + $_.Line.Trim() }"
+    )
+print(base64.b64encode(ps.encode("utf-16-le")).decode())
+PY
 }
 
 _cmd_rg() {
-    _parse_project_flag "$@"
-    [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec rg [-p PROJECT] <pattern>"
-    _require_session
-    _resolve_project
-    local pattern="${REMAINING[0]}"
-    if [ "$LAPTOP_OS" = "mac" ]; then
-        _run_in_project "$REMOTE_PATH" rg "$pattern" "${REMAINING[@]:1}"
-        return
+    _parse_project_flag "$@"; [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec rg [-p PROJECT] <pattern>"
+    _require_session; _resolve_project
+    local pattern="${REMAINING[0]}" git_dir="" extra=("${REMAINING[@]:1}") rc=0
+    if git_dir="$(_detect_git_dir_cached "$REMOTE_PATH" 2>/dev/null || true)" && [ -n "$git_dir" ]; then
+        if _rg_is_regex "$pattern"; then
+            _run_in_project "$REMOTE_PATH" git --git-dir="$git_dir" --work-tree=. grep -n -E "$pattern" -- "${extra[@]}" && return 0
+        else
+            _run_in_project "$REMOTE_PATH" git --git-dir="$git_dir" --work-tree=. grep -n -F "$pattern" -- "${extra[@]}" && return 0
+        fi
+        rc=$?
+        [ "$rc" -eq 1 ] && return 1
     fi
-    _run_in_project "$REMOTE_PATH" findstr /s /m /c:"${pattern}" "*.*"
+    if [ "$LAPTOP_OS" = "mac" ]; then
+        if command -v rg >/dev/null 2>&1; then _run_in_project "$REMOTE_PATH" rg "$pattern" "${extra[@]}"; return; fi
+        _run_in_project "$REMOTE_PATH" grep -R -n -E "$pattern" . "${extra[@]}"; return
+    fi
+    local enc=""
+    if _rg_is_regex "$pattern"; then enc="$(_ps_search_encoded "$pattern" 1)"
+    else enc="$(_ps_search_encoded "$pattern" 0)"; fi
+    _run_in_project "$REMOTE_PATH" powershell -NoProfile -EncodedCommand "$enc"
 }
 
 _cmd_test() {
     local pass=0 fail=0
     _check() {
-        local name="$1"
-        shift
-        local out rc
-        out=$("$@" 2>&1) || true
-        rc=$?
-        if [ "$rc" -ne 0 ]; then
-            echo "FAIL  $name (exit $rc)"
-            fail=$((fail + 1))
-            return
+        local name="$1"; shift; local out rc
+        out=$("$@" 2>&1) || true; rc=$?
+        if [ "$rc" -ne 0 ]; then echo "FAIL  $name (exit $rc)"; fail=$((fail+1)); return; fi
+        if grep -qiE '^(fatal:|FAIL |cannot find the path|not recognized|syntax of the command)' <<<"$out"; then
+            echo "FAIL  $name"; fail=$((fail+1)); return
         fi
-        if grep -qiE '^(fatal:|FAIL |cannot find the path|not recognized as|syntax of the command)' <<<"$out"; then
-            echo "FAIL  $name"
-            fail=$((fail + 1))
-            return
-        fi
-        if [ -z "$out" ] && [[ "$name" == rg* ]]; then
-            echo "FAIL  $name (empty)"
-            fail=$((fail + 1))
-            return
-        fi
-        echo "PASS  $name"
-        pass=$((pass + 1))
+        if [ -z "$out" ] && [ "$name" = "rg" ]; then echo "FAIL  $name (empty)"; fail=$((fail+1)); return; fi
+        echo "PASS  $name"; pass=$((pass+1))
     }
     echo "laptop-exec self-test"
-    _check "status" laptop-exec status
-    _check "git status (active)" laptop-exec git -- status
+    _check status laptop-exec status
+    _check health laptop-exec health
+    _check list laptop-exec list
+    _check resolve laptop-exec resolve "$HOME/mounts/${ACTIVE_MOUNT:-ai-gap-summay}"
+    _check resolve-w laptop-exec resolve -w "$HOME/mounts/claude-code-server"
+    _check mount-status laptop-exec mount-status
+    _check "git status" laptop-exec git -- status
     _check "read CLAUDE.md" laptop-exec read CLAUDE.md
-    _check "read backslash path" laptop-exec read "scripts/server/laptop-exec.sh"
-    _check "rg pattern" laptop-exec rg laptop-exec
-    _check "run dotnet" laptop-exec run -- dotnet --version
-    if [ -f "$CONF_DIR/review.conf" ]; then
-        _check "git review project" laptop-exec git -p review -- status
-    fi
-    echo "----"
-    echo "pass=$pass fail=$fail"
-    [ "$fail" -eq 0 ]
+    _check "read nested" laptop-exec read scripts/server/laptop-exec.sh
+    _check "write roundtrip" bash -c 'printf test-%s .$$ | laptop-exec write .laptop-exec-write-test.tmp && laptop-exec read .laptop-exec-write-test.tmp | grep -q test-'
+    laptop-exec run -- powershell -NoProfile -Command "Remove-Item -Force -EA SilentlyContinue .laptop-exec-write-test.tmp" >/dev/null 2>&1 || true
+    _check rg laptop-exec rg laptop-exec
+    _check "rg git-accuracy" bash -c 'laptop-exec rg -p claude-code-server "ControlPersist" scripts/server/laptop-exec.sh | grep -q ControlPersist'
+    _check dotnet laptop-exec run -- dotnet --version
+    _check "multiplex warm read" bash -c 'laptop-exec read CLAUDE.md >/dev/null && laptop-exec read CLAUDE.md >/dev/null'
+    echo "----"; echo "pass=$pass fail=$fail"; [ "$fail" -eq 0 ]
 }
 
 _usage() {
     cat <<'EOF'
-laptop-exec - run commands on laptop (fast path for scan/git/build)
+laptop-exec - SSH-first (fast multiplex SSH + accurate git-grep search)
 
 Commands:
-  status                     tunnel + session info
-  path  [-p PROJECT]         print laptop path for project
-  count [-p PROJECT]           file count on laptop (fast)
-  read  [-p PROJECT] FILE    print file contents from laptop
-  run   [-p PROJECT] -- CMD    run shell command in project dir
-  git   [-p PROJECT] -- ARGS   run git in project dir on laptop
-  rg    [-p PROJECT] PATTERN   search files on laptop (all files)
-  test                       run self-test suite
+  status / health / list [--full]
+  resolve [PATH]              use -w PATH when cwd is not under ~/mounts/
+  mount-status / path / count / read / write / run / git / rg / test
 
-Default project: ACTIVE_MOUNT from connect session.
-Requires connect.bat/sh running (reverse tunnel).
+Project selection (first match):
+  1. -p PROJECT
+  2. -w PATH  (workspace under ~/mounts/ID/...)
+  3. LAPTOP_EXEC_WORKSPACE / CURSOR workspace env / cwd
+
+Speed: SSH ControlMaster reuse (ControlPersist 300s)
+Search: git grep (tracked) -> PowerShell Select-String (all files)
 EOF
 }
 
 main() {
-    local cmd="${1:-}"
-    [ -n "$cmd" ] || { _usage; exit 1; }
-    shift
+    local cmd="${1:-}"; [ -n "$cmd" ] || { _usage; exit 1; }; shift
     case "$cmd" in
         status) _cmd_status "$@" ;;
-        path)   _cmd_path "$@" ;;
-        count)  _cmd_count "$@" ;;
-        read)   _cmd_read "$@" ;;
-        run)    _cmd_run "$@" ;;
-        git)    _cmd_git "$@" ;;
-        rg)     _cmd_rg "$@" ;;
-        test)   _cmd_test "$@" ;;
+        health) _cmd_health "$@" ;;
+        list)
+            if [ "${1:-}" = "--full" ]; then shift; LIST_FAST=0 _cmd_list "$@"; else LIST_FAST=1 _cmd_list "$@"; fi ;;
+        resolve) _parse_project_flag "$@"; _cmd_resolve "${REMAINING[@]}" ;;
+        mount-status) _cmd_mount_status "$@" ;;
+        path) _cmd_path "$@" ;;
+        count) _cmd_count "$@" ;;
+        read) _cmd_read "$@" ;;
+        write) _cmd_write "$@" ;;
+        run) _cmd_run "$@" ;;
+        git) _cmd_git "$@" ;;
+        rg) _cmd_rg "$@" ;;
+        test) _cmd_test "$@" ;;
         -h|--help|help) _usage ;;
         *) _die "unknown command '$cmd' (try: laptop-exec --help)" ;;
     esac
 }
-
 main "$@"
+
+

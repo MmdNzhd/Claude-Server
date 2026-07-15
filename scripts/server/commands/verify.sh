@@ -66,6 +66,19 @@ done
 if [ -f /usr/local/lib/claude-mount ]; then
     grep -q 'GIT_MODE' /usr/local/lib/claude-mount && ok "claude-mount: GIT_MODE support" || warn "claude-mount: outdated (no GIT_MODE - run claude-server install)"
 fi
+if [ -f /usr/local/share/claude-client/git-mode.ps1 ]; then
+    grep -q 'Clear-ServerStaleTunnelForward' /usr/local/share/claude-client/git-mode.ps1 \
+        && ok "client bundle: stale tunnel self-healing (Windows)" \
+        || warn "client bundle: outdated git-mode.ps1 (run: sudo claude-server deploy-client-bundle)"
+    grep -q 'stop_session_tunnel_cleanup' /usr/local/share/claude-client/mac/git-mode.sh 2>/dev/null \
+        && ok "client bundle: stale tunnel self-healing (Mac)" \
+        || warn "client bundle: outdated mac/git-mode.sh"
+else
+    warn "client bundle: missing (/usr/local/share/claude-client/)"
+fi
+[ -x /usr/local/bin/claude-server ] && grep -q 'deploy-client-bundle' /usr/local/bin/claude-server \
+    && ok "claude-server CLI: deploy-client-bundle" \
+    || warn "claude-server CLI outdated (run: sudo claude-server install)"
 [ -f /etc/claude-limits.conf ] && ok "claude-limits.conf: exists" || warn "claude-limits.conf: missing (default limit=2)"
 [ -d /var/run/claude-active ] && ok "/var/run/claude-active: exists" || fail "/var/run/claude-active: missing"
 [ -f /var/log/claude-activity.jsonl ] && ok "activity log: exists" || warn "activity log: missing (created on first use)"
@@ -98,6 +111,22 @@ command -v google-chrome-stable &>/dev/null && \
 id designer &>/dev/null && ok "designer user: exists" || warn "designer user: missing"
 [ -x /usr/local/bin/designer-start ] && ok "designer-start: installed" || warn "designer-start: missing"
 
+echo ""
+
+
+# --- Laptop exec (SSH-first) ---
+echo -e "${BOLD}Laptop Exec (SSH-first)${NC}"
+[ -x /usr/local/bin/laptop-exec ] && ok "laptop-exec: installed" || fail "laptop-exec: missing"
+if [ -x /usr/local/bin/laptop-exec ]; then
+    grep -q 'mount-status' /usr/local/bin/laptop-exec && ok "laptop-exec: mount-status/write/health" || fail "laptop-exec: outdated (run: sudo claude-server deploy-laptop-exec)"
+    grep -q 'ControlPersist' /usr/local/bin/laptop-exec && ok "laptop-exec: multiplex SSH (fast)" || warn "laptop-exec: old (no ControlPersist)"
+    grep -q 'git grep' /usr/local/bin/laptop-exec && ok "laptop-exec: git-grep search (accurate)" || warn "laptop-exec: old rg (findstr)"
+    grep -q 'SSH-first' /usr/local/lib/claude-server/cursor-rules/laptop-exec.mdc 2>/dev/null && ok "cursor rule: SSH-first" || warn "cursor rule outdated"
+    grep -q '\-w' /usr/local/lib/claude-server/cursor-rules/laptop-exec.mdc 2>/dev/null && ok "cursor rule: -w workspace" || warn "cursor rule: missing -w flag docs"
+    grep -q 'Read|Write' /usr/local/lib/claude-server/cursor-hooks/laptop-exec-guard.sh 2>/dev/null && ok "cursor hook: blocks Read/Write on /mounts/" || warn "cursor hook outdated"
+    [ -x /usr/local/bin/laptop-exec-setup ] && ok "laptop-exec-setup: installed" || warn "laptop-exec-setup missing"
+    [ -x /usr/local/lib/claude-server/tests/test-laptop-exec.sh ] && ok "test-laptop-exec.sh: installed" || warn "test-laptop-exec.sh missing"
+fi
 echo ""
 
 # --- Users ---
@@ -184,6 +213,13 @@ PY
         $has_cursor && ok "Cursor auth in state.vscdb" || fail "Cursor auth missing (run: sudo claude-server sync-cursor-auth $u)"
         $has_cursor_machine && ok "Cursor machineId matches golden" || warn "Cursor machineId mismatch (run: sudo claude-server sync-cursor-auth $u)"
     fi
+    has_le=false; has_le_rule=false; has_le_hook=false
+    _user_readable "$h/.local/bin/laptop-exec" && has_le=true
+    _user_readable "$h/.cursor/rules/laptop-exec.mdc" && has_le_rule=true
+    _user_readable "$h/.cursor/hooks/laptop-exec-guard.sh" && has_le_hook=true
+    $has_le && ok "laptop-exec CLI" || warn "laptop-exec missing (~/.local/bin)"
+    $has_le_rule && ok "SSH-first rule" || warn "laptop-exec.mdc missing"
+    $has_le_hook && ok "SSH-first hook" || warn "laptop-exec-guard.sh missing"
     $has_bashrc  && ok "automount .bashrc" || fail "automount missing in .bashrc"
     echo ""
 done
@@ -196,3 +232,4 @@ else
     exit 1
 fi
 echo ""
+

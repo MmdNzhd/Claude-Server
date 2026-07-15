@@ -8,13 +8,14 @@ fi
 GIT_CONF="$CFG_DIR/git.conf"
 
 get_git_mode() {
-    local saved="hide"
+    local saved="off"
     if [ -f "$GIT_CONF" ]; then
         saved="$(tr '[:upper:]' '[:lower:]' < "$GIT_CONF" | tr -d '[:space:]')"
     fi
     case "$saved" in
         server|on|yes|1|slow) echo server ;;
-        *) echo hide ;;
+        hide|fast) echo hide ;;
+        *) echo off ;;
     esac
 }
 
@@ -28,9 +29,10 @@ get_active_mount_id() {
 }
 
 get_git_mode_label() {
-    case "${1:-hide}" in
+    case "${1:-off}" in
         server|slow) printf 'SLOW' ;;
-        *) printf 'FAST' ;;
+        hide|fast) printf 'HIDE' ;;
+        *) printf 'OFF' ;;
     esac
 }
 
@@ -78,8 +80,39 @@ unmount_other_projects() {
     sshx "$CM down-others '$keep'" 2>/dev/null || true
 }
 
+
+push_remote_file_if_changed() {
+    local src="$1" remote="$2" local_h="" remote_h=""
+    [ -f "$src" ] || return 0
+    local_h="$(local_file_sha256 "$src" 2>/dev/null || true)"
+    remote_h="$(sshx "sha256sum '$remote' 2>/dev/null | awk '{print \$1}'" 2>/dev/null | tr -d '\r\n')"
+    [ -n "$local_h" ] && [ "$local_h" = "$remote_h" ] && return 0
+    sshx "mkdir -p \"\$(dirname '$remote')\"" 2>/dev/null || true
+    scp -o BatchMode=yes -o ConnectTimeout=20 -q "$src" "$ALIAS:$remote" 2>/dev/null || return 1
+    case "$remote" in
+        */laptop-exec|*/laptop-exec-setup|*/laptop-exec-guard.sh)
+            sshx "chmod +x '$remote'" 2>/dev/null || true ;;
+    esac
+}
+
+push_laptop_exec_bundle() {
+    local server_dir="$1"
+    [ -n "$server_dir" ] || return 0
+    push_remote_file_if_changed "$server_dir/laptop-exec.sh" '~/.local/bin/laptop-exec' || true
+    push_remote_file_if_changed "$server_dir/laptop-exec-setup.sh" '~/.local/bin/laptop-exec-setup' || true
+    push_remote_file_if_changed "$server_dir/cursor-rules/laptop-exec.mdc" '~/.cursor/rules/laptop-exec.mdc' || true
+    push_remote_file_if_changed "$server_dir/skills/laptop-exec/SKILL.md" '~/.cursor/skills/laptop-exec/SKILL.md' || true
+    push_remote_file_if_changed "$server_dir/cursor-hooks/laptop-exec-guard.sh" '~/.cursor/hooks/laptop-exec-guard.sh' || true
+    sshx '~/.local/bin/laptop-exec-setup --user 2>/dev/null; /usr/local/bin/laptop-exec-setup --user 2>/dev/null; true' 2>/dev/null || true
+}
+
 resolve_server_script_dir() {
     local script_dir="$1" _rel _candidate d i
+    _candidate="$script_dir/server"
+    if [ -f "$_candidate/laptop-exec.sh" ] || [ -f "$_candidate/claude-mount.sh" ]; then
+        printf '%s' "$_candidate"
+        return 0
+    fi
     for _rel in "../server" "../../server" "../../../server"; do
         _candidate="$(cd "$script_dir/$_rel" 2>/dev/null && pwd)" || continue
         if [ -f "$_candidate/claude-mount.sh" ]; then
@@ -435,6 +468,7 @@ sync_session_tunnel_forward() {
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "TUNNEL_DROP pid=$bg_pid port=$PORT reason=bg_alive_forward_dead" 'WARN'
         fi
+        release_stale_tunnel_port || true
         return 1
     fi
     if declare -F connect_log >/dev/null 2>&1; then
@@ -447,6 +481,8 @@ wait_for_tunnel_up() {
     local pid="${1:-}" i sleep_s
     for i in $(seq 1 12); do
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            printf '    Tunnel check... SSH process died\n'
+            release_stale_tunnel_port || true
             return 1
         fi
         if tunnel_up; then
@@ -455,6 +491,7 @@ wait_for_tunnel_up() {
         sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
         sleep "$sleep_s"
     done
+    release_stale_tunnel_port || true
     return 1
 }
 
@@ -481,6 +518,7 @@ poll_tunnel_with_progress() {
         printf '    Tunnel check %d/12... port %d not open yet\n' "$i" "$PORT"
         sleep "$sleep_s"
     done
+    release_stale_tunnel_port || true
     return 1
 }
 
@@ -548,6 +586,9 @@ project_mount_healthy() {
 recover_mounts_if_needed() {
     local id="$1" fresh_tunnel="${2:-0}"
     if [ "$fresh_tunnel" = "0" ] && project_mount_healthy "$id"; then
+        if [ "$(get_git_mode)" = "off" ]; then
+            sshx "timeout 15 $CM recover-if-needed '$id' 2>/dev/null" 2>/dev/null || true
+        fi
         return 0
     fi
     printf '    \033[0;90mRecovering stale mounts...\033[0m\n'
@@ -594,7 +635,12 @@ cursor_auth_needs_refresh() {
 }
 
 invoke_mount_project() {
-    local id="$1" script_dir="${2:-${CONNECT_SCRIPT_DIR:-}}" mount_out="" ec=0 src=""
+    local id="$1" script_dir="${2:-${CONNECT_SCRIPT_DIR:-}}" mount_out="" ec=0 src="" mode=""
+    mode="$(get_git_mode)"
+    if project_mount_healthy "$id" && [ "$mode" != "off" ]; then
+        printf 'already mounted (check ok)'
+        return 0
+    fi
     mount_out="$(sshx "CLAUDE_TRUSTED_TUNNEL=1 $CM up '$id' 2>&1")"
     ec=$?
     if test_mount_success "$mount_out" "$ec"; then
@@ -636,8 +682,9 @@ ensure_session_tunnel() {
         return 0
     fi
     [ -n "${bg_pid:-}" ] && kill "$bg_pid" 2>/dev/null || true
+    [ -n "${bg_pid:-}" ] && [ -n "${PORT:-}" ] && clear_server_stale_tunnel_forward "$PORT" || true
     bg_pid=""
-    pkill -f "ssh.*-R ${PORT}:localhost:22" 2>/dev/null || true
+    pkill -f "ssh.*-R ${PORT}:localhost:22" 2>/dev/null && clear_server_stale_tunnel_forward "$PORT" || true
     local uid_str=""
     uid_str="$(sshx 'id -u' 2>/dev/null | tr -d '\r' | grep -E '^[0-9]+$' | head -1 | tr -dc '0-9')"
     if [ -n "$uid_str" ]; then
@@ -658,14 +705,90 @@ ensure_session_tunnel() {
     return 1
 }
 
+tunnel_port_tcp_open() {
+    local port="${1:-${PORT:-}}"
+    local out=""
+    [ -n "$port" ] || return 1
+    out="$(sshx "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${port} 2>/dev/null' && echo open || echo closed" 2>/dev/null | tr -d '\r\n')"
+    [ "$out" = open ]
+}
+
+clear_server_stale_tunnel_forward() {
+    local port="${1:-${PORT:-}}" i=0
+    [ -n "$port" ] || return 0
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "STALE_FORWARD: clearing server port=$port" 'DEBUG'
+    fi
+    sshx "fuser -k ${port}/tcp 2>/dev/null || true; pkill -u \\\$USER -f '127\\.0\\.0\\.1:${port}' 2>/dev/null || true; pkill -u \\\$USER -f ' -p ${port} ' 2>/dev/null || true" 2>/dev/null || true
+    clear_tunnel_banner_cache
+    while [ "$i" -lt 8 ]; do
+        i=$(( i + 1 ))
+        sleep 0.5
+        clear_tunnel_banner_cache
+        if ! tunnel_port_tcp_open "$port"; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "STALE_FORWARD: port released port=$port wait=$i" 'DEBUG'
+            fi
+            return 0
+        fi
+    done
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "STALE_FORWARD: port still busy port=$port after wait" 'WARN'
+    fi
+    return 1
+}
+
+remove_local_orphan_tunnel() {
+    local target_port="$1" killed=0
+    [ -n "$target_port" ] || return 0
+    if pkill -f "ssh.*-R ${target_port}:localhost:22" 2>/dev/null; then
+        killed=1
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "ORPHAN_TUNNEL: killed local ssh port=$target_port" 'DEBUG'
+        fi
+    fi
+    clear_tunnel_banner_cache
+    if [ "$killed" -eq 1 ]; then
+        clear_server_stale_tunnel_forward "$target_port" || true
+    fi
+}
+
+stop_session_tunnel_cleanup() {
+    local clear_server="${1:-1}"
+    if [ -n "${bg_pid:-}" ]; then
+        kill "$bg_pid" 2>/dev/null || true
+        bg_pid=""
+    fi
+    if [ -n "${PORT:-}" ]; then
+        pkill -f "ssh.*-R ${PORT}:localhost:22" 2>/dev/null || true
+        if [ "$clear_server" = "1" ]; then
+            clear_server_stale_tunnel_forward "$PORT" || true
+        fi
+    fi
+    clear_tunnel_banner_cache
+}
+
 release_stale_tunnel_port() {
     local banner=""
     [ -n "${PORT:-}" ] || return 0
+    clear_tunnel_banner_cache
     banner="$(fetch_tunnel_banner 2>/dev/null || true)"
-    [ -n "$banner" ] || return 0
-    tunnel_banner_is_this_laptop "$banner" && return 0
-    sshx "pkill -u \\\$USER -f ' -p ${PORT} ' 2>/dev/null || true" 2>/dev/null || true
-    sleep 1
+    if [ -n "$banner" ] && tunnel_banner_is_this_laptop "$banner"; then
+        return 0
+    fi
+    if [ -n "$banner" ] && ! tunnel_banner_is_this_laptop "$banner"; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "STALE_FORWARD: foreign banner port=$PORT banner=$banner" 'DEBUG'
+        fi
+        clear_server_stale_tunnel_forward "$PORT" || true
+        return 0
+    fi
+    if tunnel_port_tcp_open "$PORT"; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "STALE_FORWARD: zombie port=$PORT tcp=open banner=(empty)" 'WARN'
+        fi
+        clear_server_stale_tunnel_forward "$PORT" || true
+    fi
 }
 
 save_tunnel_slot() {
@@ -699,14 +822,27 @@ acquire_tunnel_port() {
     if [ -n "$preferred" ] && [ "$preferred" -le 9 ] 2>/dev/null; then
         slot=$preferred
         port=$(( port_base + uid_str + slot ))
+        remove_local_orphan_tunnel "$port" || true
         if [ "$port" -le 65535 ]; then
             PORT=$port
+            clear_tunnel_banner_cache
             banner="$(fetch_tunnel_banner 2>/dev/null || true)"
+            if [ -n "$banner" ] && ! tunnel_banner_is_this_laptop "$banner"; then
+                banner=""
+            elif [ -z "$banner" ] && tunnel_port_tcp_open "$port"; then
+                clear_server_stale_tunnel_forward "$port" || true
+                clear_tunnel_banner_cache
+                banner="$(fetch_tunnel_banner 2>/dev/null || true)"
+            fi
             if [ -z "$banner" ] || tunnel_banner_is_this_laptop "$banner"; then
-                TUNNEL_SLOT=$slot
-                save_tunnel_slot
-                push_server_connect_conf
-                return 0
+                if [ -z "$banner" ] && tunnel_port_tcp_open "$port"; then
+                    :
+                else
+                    TUNNEL_SLOT=$slot
+                    save_tunnel_slot
+                    push_server_connect_conf
+                    return 0
+                fi
             fi
         fi
     fi
@@ -715,7 +851,22 @@ acquire_tunnel_port() {
         port=$(( port_base + uid_str + slot ))
         [ "$port" -gt 65535 ] && continue
         PORT=$port
+        clear_tunnel_banner_cache
         banner="$(fetch_tunnel_banner 2>/dev/null || true)"
+        if [ -n "$banner" ] && ! tunnel_banner_is_this_laptop "$banner"; then
+            continue
+        fi
+        if [ -z "$banner" ] && tunnel_port_tcp_open "$port"; then
+            clear_server_stale_tunnel_forward "$port" || true
+            clear_tunnel_banner_cache
+            banner="$(fetch_tunnel_banner 2>/dev/null || true)"
+            if [ -n "$banner" ] && ! tunnel_banner_is_this_laptop "$banner"; then
+                continue
+            fi
+            if [ -z "$banner" ] && tunnel_port_tcp_open "$port"; then
+                continue
+            fi
+        fi
         if [ -z "$banner" ] || tunnel_banner_is_this_laptop "$banner"; then
             TUNNEL_SLOT=$slot
             save_tunnel_slot
@@ -885,6 +1036,7 @@ initialize_server_session() {
                 scp_pids="$scp_pids $!"
             fi
         fi
+        push_laptop_exec_bundle "$server_dir"
     fi
 
     install_laptop_server_pubkey "$pub_b" || return 1
@@ -926,18 +1078,20 @@ configure_git_mode() {
     cur_label="$(get_git_mode_label "$cur")"
     echo ""
     printf '    \033[1;37mGit on server (SSHFS)\033[0m\n\n'
-    if [ "$cur" = "server" ]; then
-        printf '    \033[0;90mCurrent: %s (full git over SSHFS)\033[0m\n\n' "$cur_label"
-    else
-        printf '    \033[0;90mCurrent: %s (.git hidden on laptop)\033[0m\n\n' "$cur_label"
-    fi
-    printf '    \033[0;90m1  FAST - hide .git on laptop [default]\033[0m\n'
-    printf '    \033[0;90m2  SLOW - keep .git on mount for git on server\033[0m\n\n'
+    case "$cur" in
+        server) printf '    \033[0;90mCurrent: %s (full git over SSHFS)\033[0m\n\n' "$cur_label" ;;
+        hide)   printf '    \033[0;90mCurrent: %s (.git hidden on laptop)\033[0m\n\n' "$cur_label" ;;
+        *)      printf '    \033[0;90mCurrent: %s (no .git rename; use laptop-exec git)\033[0m\n\n' "$cur_label" ;;
+    esac
+    printf '    \033[0;90m1  OFF  - no .git rename [default]\033[0m\n'
+    printf '    \033[0;90m2  HIDE - hide .git on laptop (faster SSHFS)\033[0m\n'
+    printf '    \033[0;90m3  SLOW - full .git on SSHFS mount\033[0m\n\n'
     read -rp "    > " choice
     choice="$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')"
     case "$choice" in
-        1|off|hide|fast|"") printf 'hide\n' > "$GIT_CONF" ;;
-        2|on|server|slow) printf 'server\n' > "$GIT_CONF" ;;
+        1|off|"") printf 'off\n' > "$GIT_CONF" ;;
+        2|hide|fast) printf 'hide\n' > "$GIT_CONF" ;;
+        3|on|server|slow) printf 'server\n' > "$GIT_CONF" ;;
         *) warn "Invalid choice."; return ;;
     esac
     push_server_connect_conf
@@ -1818,3 +1972,7 @@ read_post_disconnect_key() {
     printf '\n    Default %s\n' "$default"
     printf '%s' "$default"
 }
+
+
+
+

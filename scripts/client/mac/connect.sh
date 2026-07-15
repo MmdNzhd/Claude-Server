@@ -14,7 +14,7 @@ if [ -f "$_update_script" ]; then
     fi
 fi
 
-CONNECT_VERSION='20260715.5'
+CONNECT_VERSION='20260715.12'
 CONNECT_PORT_BASE=20000
 
 SERVER_IP="192.168.210.240"
@@ -470,12 +470,13 @@ while [ "$exit_requested" -eq 0 ]; do
         bg_pid=""
 
         cleanup_session() {
-            [ "$already_down" -eq 1 ] && return 0
-            already_down=1
-            printf '\n    Disconnecting...\n'
-            clear_session_mount "$go_id" "$EDITOR_CMD" "$ALIAS" "$go_path"
-            printf '    Laptop folder restored.\n'
-            [ -n "$bg_pid" ] && kill "$bg_pid" 2>/dev/null || true
+            if [ "$already_down" -eq 0 ]; then
+                already_down=1
+                printf '\n    Disconnecting...\n'
+                clear_session_mount "$go_id" "$EDITOR_CMD" "$ALIAS" "$go_path"
+                printf '    Laptop folder restored.\n'
+            fi
+            stop_session_tunnel_cleanup 1
         }
         trap cleanup_session EXIT
         trap 'cleanup_session; exit 143' SIGTERM
@@ -846,8 +847,7 @@ while [ "$exit_requested" -eq 0 ]; do
                     connect_log 'TUNNEL: recovering session (down mount, restart tunnel)' 'WARN'
                 fi
                 clear_session_mount "$go_id" "" "$ALIAS" "$go_path" 1
-                [ -n "$bg_pid" ] && kill "$bg_pid" 2>/dev/null || true
-                bg_pid=""
+                stop_session_tunnel_cleanup 1
                 already_down=1
                 LAPTOP_SSH_VERIFIED=0
                 echo ""
@@ -856,18 +856,14 @@ while [ "$exit_requested" -eq 0 ]; do
 
             printf '    Disconnecting...\n'
             clear_session_mount "$go_id" "$EDITOR_CMD" "$ALIAS" "$go_path"
-            [ -n "$bg_pid" ] && kill "$bg_pid" 2>/dev/null || true
+            stop_session_tunnel_cleanup 1
             already_down=1
             printf '    Laptop folder restored.\n'
 
             session_done=1
         done
 
-        if [ -n "$bg_pid" ] && _tunnel_alive "$bg_pid"; then
-            :
-        elif [ -n "$bg_pid" ] && [ "$already_down" -eq 0 ]; then
-            kill "$bg_pid" 2>/dev/null || true
-        fi
+        stop_session_tunnel_cleanup 1
 
         trap - EXIT SIGTERM SIGHUP
 
@@ -898,3 +894,8 @@ while [ "$exit_requested" -eq 0 ]; do
 done
 
 echo ""
+
+
+
+
+

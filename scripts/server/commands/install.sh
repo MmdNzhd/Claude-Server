@@ -203,6 +203,12 @@ if [ -f "$SERVER_DIR/laptop-exec.sh" ]; then
         fi
     done
     ok "laptop-exec + skill + rule -> all users ~/.local/bin/ + ~/.cursor/"
+    install -m 755 "$SERVER_DIR/laptop-exec.sh" /usr/local/lib/claude-server/laptop-exec.sh 2>/dev/null || true
+    if [ -f "$SERVER_DIR/tests/test-laptop-exec.sh" ]; then
+        mkdir -p /usr/local/lib/claude-server/tests
+        install -m 755 "$SERVER_DIR/tests/test-laptop-exec.sh" /usr/local/lib/claude-server/tests/test-laptop-exec.sh
+        ok "test-laptop-exec.sh -> /usr/local/lib/claude-server/tests/"
+    fi
 fi
 if [ -f "$SERVER_DIR/laptop-exec-setup.sh" ]; then
     install -m 755 "$SERVER_DIR/laptop-exec-setup.sh" /usr/local/bin/laptop-exec-setup
@@ -452,8 +458,12 @@ if [ -f /etc/cursor-auth/golden/auth.json ] && [ -x /usr/local/bin/cursor-auth-s
     ok "Cursor golden identity synced to all users"
 fi
 
-if [ -f "$SERVER_DIR/commands/deploy-client-bundle.sh" ]; then
-    bash "$SERVER_DIR/commands/deploy-client-bundle.sh"
+DEPLOY_BUNDLE=""
+for _dcb in "$SERVER_DIR/deploy-client-bundle.sh" "$SERVER_DIR/commands/deploy-client-bundle.sh"; do
+    [ -f "$_dcb" ] && DEPLOY_BUNDLE="$_dcb" && break
+done
+if [ -n "$DEPLOY_BUNDLE" ]; then
+    bash "$DEPLOY_BUNDLE"
     ok "client bundle deployed for laptop auto-update"
 fi
 
@@ -486,3 +496,5 @@ echo "       agent login   # or connect once via Remote SSH to populate ~/.confi
 echo "       sudo cursor-auth-export --from-user smart"
 echo "       sudo claude-server sync-cursor-auth"
 echo ""
+
+

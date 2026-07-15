@@ -48,6 +48,10 @@ echo -e "${BOLD}1. Mount scripts${NC}"
 bash "$COMMANDS_DIR/deploy-mount-fix.sh"
 echo ""
 
+echo -e "${BOLD}1b. Client bundle (laptop auto-update)${NC}"
+bash "$COMMANDS_DIR/deploy-client-bundle.sh"
+echo ""
+
 echo -e "${BOLD}2. Claude OAuth${NC}"
 if [ -n "$TOKEN" ]; then
     bash "$COMMANDS_DIR/deploy-auth.sh" "$TOKEN"
@@ -78,7 +82,20 @@ for u in smart amir amirhossein aria danial fateme hamed hamed.kh kiana mahdie m
 done
 echo ""
 
-echo -e "${BOLD}5. aria / mehrdad${NC}"
+echo -e "${BOLD}5. Laptop-exec SSH-first${NC}"
+if [ -f "$COMMANDS_DIR/deploy-laptop-exec.sh" ]; then
+    bash "$COMMANDS_DIR/deploy-laptop-exec.sh"
+else
+    warn "deploy-laptop-exec.sh missing"
+fi
+if [ -f "$COMMANDS_DIR/deploy-client-bundle.sh" ]; then
+    bash "$COMMANDS_DIR/deploy-client-bundle.sh"
+else
+    warn "deploy-client-bundle.sh missing"
+fi
+echo ""
+
+echo -e "${BOLD}6. aria / mehrdad${NC}"
 for u in aria mehrdad; do
     id "$u" >/dev/null 2>&1 || continue
     nproj="$(ls "/home/$u/.claude-mounts.d/"*.conf 2>/dev/null | wc -l | tr -d ' ')"
@@ -95,3 +112,4 @@ echo -e "${GREEN}Done.${NC}"
 echo "  OAuth still broken?  claude setup-token  then  sudo claude-server deploy-auth <token>"
 echo "  aria/mehrdad: run connect.bat on laptop (not only Cursor Remote SSH)"
 echo ""
+

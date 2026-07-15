@@ -12,23 +12,27 @@ function Assert($cond, $msg) {
 function Test-GetGitModeLogic {
     param([string]$Saved, [string]$Expected)
     $s = $Saved.Trim().ToLower()
-    $got = if ($s -match '^(server|on|yes|1|slow)$') { 'server' } else { 'hide' }
+    $got = if ($s -match '^(server|on|yes|1|slow)$') { 'server' } elseif ($s -match '^(hide|fast)$') { 'hide' } else { 'off' }
     Assert ($got -eq $Expected) "Get-GitMode parse '$Saved' -> $Expected (got $got)"
 }
 
-Test-GetGitModeLogic '' 'hide'
+Test-GetGitModeLogic '' 'off'
 Test-GetGitModeLogic 'hide' 'hide'
+Test-GetGitModeLogic 'fast' 'hide'
 Test-GetGitModeLogic 'server' 'server'
 Test-GetGitModeLogic 'on' 'server'
 Test-GetGitModeLogic '1' 'server'
 Test-GetGitModeLogic 'slow' 'server'
 Test-GetGitModeLogic 'SERVER' 'server'
-Test-GetGitModeLogic 'garbage' 'hide'
-Test-GetGitModeLogic 'off' 'hide'
+Test-GetGitModeLogic 'garbage' 'off'
+Test-GetGitModeLogic 'off' 'off'
 
 $mount = Get-Content (Get-ServerFile 'server\claude-mount.sh') -Raw
 
 Assert ($mount -match 'server\|on\|yes\|1\|slow\) GIT_MODE="server"') 'claude-mount normalizes server aliases'
+Assert ($mount -match 'GIT_MODE="off"') 'claude-mount supports GIT_MODE=off'
+Assert ($mount -match '_create_claude_stubs_only') 'claude-mount has off-mode stub path'
+Assert ($mount -match 'if \[ "\$GIT_MODE" = "off" \]; then[\s\S]{0,200}_hide_git_and_create_stubs') 'claude-mount restores on already-mounted off'
 Assert ($mount -match 'mac\|darwin\|osx\) LAPTOP_OS="mac"') 'claude-mount normalizes mac aliases'
 Assert ($mount -match 'cmd_up\(\)[\s\S]*?_load_global') 'cmd_up loads global config'
 Assert ($mount -match 'cmd_down\(\)[\s\S]*?_load_global') 'cmd_down loads global config'
@@ -58,6 +62,7 @@ Assert ($watchdog -match 'local_id.*ACTIVE_MOUNT') 'watchdog remounts only activ
 
 $automount = Get-Content (Get-ServerFile 'server\claude-automount.sh') -Raw
 Assert ($automount -match 'up "\$ACTIVE_MOUNT"') 'automount only mounts ACTIVE_MOUNT project'
+Assert ($automount -match 'OFF mode must still run up') 'automount applies off mode when mount already ok'
 
 foreach ($rel in @('windows\connect.ps1', 'users\designer\connect.ps1')) {
     $src = Get-Content (Get-ClientFile $rel) -Raw
@@ -90,6 +95,7 @@ foreach ($rel in @('mac\connect.sh')) {
     Assert ($bundle -match 'remount_project_git') "$rel has mid-session git remount"
     Assert ($src -match '_editor_opened') "$rel opens editor only once per menu pick"
     Assert ($src -match 'begin_connect_recovery') "$rel calls begin_connect_recovery on reconnect"
+    Assert ($src -match 'stop_session_tunnel_cleanup') "$rel uses stop_session_tunnel_cleanup on disconnect"
     Assert ($src -match 'CURSOR_AUTH_FORCE') "$rel forces cursor auth after recovery"
     Assert ($src -match 'launch_remote_editor') "$rel uses launch_remote_editor for editor open"
     Assert ($src -match '_did_launch') "$rel relaunches when cursor not on folder"
@@ -138,6 +144,21 @@ Assert ($gitModeSh -match 'ensure_session_tunnel') 'git-mode.sh has ensure_sessi
 Assert ($gitModeSh -match 'invoke_mount_project') 'git-mode.sh has invoke_mount_project'
 Assert ($gitModePs1 -match 'Ensure-LaptopReverseSshCached') 'git-mode.ps1 has Ensure-LaptopReverseSshCached'
 Assert ($gitModePs1 -match 'Acquire-TunnelPort') 'git-mode.ps1 has Acquire-TunnelPort'
+Assert ($gitModePs1 -match 'MOUNT_UP skip') 'git-mode.ps1 skips mount when check ok'
+Assert ($gitModePs1 -match "Get-GitMode\) -ne 'off'") 'git-mode.ps1 still runs up when GIT_MODE=off'
+Assert ($gitModePs1 -match 'off_mode_apply')
+ 'git-mode.ps1 applies off mode on healthy mount'
+Assert ($mount -match 'CLAUDE_TRUSTED_TUNNEL') 'claude-mount has trusted-tunnel fast path'
+$automount = Get-Content (Get-ServerFile 'server\claude-automount.sh') -Raw
+Assert ($automount -match 'VSCODE_IPC_HOOK_CLI') 'claude-automount skips IDE shell resolution'
+Assert ($gitModeSh -match 'already mounted \(check ok\)') 'git-mode.sh skips mount when check ok'
+Assert ($gitModeSh -match 'mode.*off') 'git-mode.sh still runs up when GIT_MODE=off'
+Assert ($gitModePs1 -match 'Clear-ServerStaleTunnelForward') 'git-mode.ps1 clears stale server tunnel forward'
+Assert ($gitModePs1 -match 'STALE_FORWARD: zombie') 'git-mode.ps1 detects zombie tunnel port'
+Assert ($gitModePs1 -match 'Stop-SessionTunnelCleanup') 'git-mode.ps1 has Stop-SessionTunnelCleanup'
+Assert ($gitModeSh -match 'clear_server_stale_tunnel_forward') 'git-mode.sh clears stale server tunnel forward'
+Assert ($gitModeSh -match 'stop_session_tunnel_cleanup') 'git-mode.sh has stop_session_tunnel_cleanup'
+Assert ($win -match 'Stop-SessionTunnelCleanup') 'connect.ps1 uses Stop-SessionTunnelCleanup on disconnect'
 Assert ($gitModePs1 -match 'known_hosts_claude_mount') 'git-mode.ps1 uses mount known_hosts for reverse SSH probe'
 Assert ($gitModePs1 -match 'known_hosts_claude_mount.*known_hosts_claude_tunnel|known_hosts_claude_tunnel.*known_hosts_claude_mount') 'Clear-ServerTunnelKnownHost resets mount and tunnel known_hosts'
 Assert ($gitModePs1 -match 'Host key verification failed.*Clear-ServerTunnelKnownHost|Clear-ServerTunnelKnownHost[\s\S]{0,800}Host key verification failed') 'probe retries after host-key clear'
@@ -154,8 +175,35 @@ $gitSetup = Get-Content (Get-ServerFile 'server\claude-git-setup.sh') -Raw
 Assert ($mount -match 'EncodedCommand') 'claude-mount uses EncodedCommand for Windows git hide'
 
 $gitSetup = Get-Content (Get-ServerFile 'server\claude-git-setup.sh') -Raw
-Assert ($gitSetup -match 'GIT_MODE=server') 'git-setup skips mirror when GIT_MODE=server'
+Assert ($gitSetup -match 'GIT_MODE.*skip local mirror') 'git-setup skips mirror when GIT_MODE=server or off'
+Assert ($gitSetup -match 'GIT_MODE.*off') 'git-setup skips mirror when GIT_MODE=off'
+$laptopExec = Get-Content (Get-ServerFile 'server\laptop-exec.sh') -Raw
+Assert ($laptopExec -match 'GIT_MODE="off"') 'laptop-exec defaults GIT_MODE to off'
+Assert ($laptopExec -notmatch 'GIT_MODE="hide"; LAPTOP_OS') 'laptop-exec no hide pre-read default'
+Assert ($mount -match 'cannot restore \.git') 'claude-mount warns when off restore blocked by tunnel'
+Assert ($mount -match 'recover: off restore done') 'claude-mount recover-if-needed applies off restore'
+Assert ($gitModePs1 -match 'off_mode_apply')
+ 'git-mode.ps1 recover applies off when mount ok'
 
 Write-Host ""
 if ($fail -eq 0) { Write-Host "All deep git-mode tests passed." -ForegroundColor Green; exit 0 }
 Write-Host "$fail test(s) failed." -ForegroundColor Red; exit 1
+
+$laptopExec = Get-Content (Get-ServerFile 'server\laptop-exec.sh') -Raw
+Assert ($laptopExec -match 'GIT_MODE="off"') 'laptop-exec defaults GIT_MODE to off'
+Assert ($laptopExec -notmatch 'GIT_MODE="hide"; LAPTOP_OS') 'laptop-exec no hide pre-read default'
+Assert ($mount -match 'cannot restore \.git') 'claude-mount warns when off restore blocked by tunnel'
+Assert ($mount -match 'recover: off restore done') 'claude-mount recover-if-needed applies off restore'
+Assert ($gitModePs1 -match 'off_mode_apply')
+$dle = Get-Content (Get-ServerFile 'server\commands\deploy-laptop-exec.sh') -Raw
+Assert ($dle -match 'CLIENT_BUNDLE/server/laptop-exec') 'deploy-laptop-exec prefers bundle over user home'
+Assert ($dle -match 'GIT_MODE="off".*fail') 'deploy-laptop-exec fails if GIT_MODE not off'
+Assert ($dle -match 'claude-mount.sh') 'deploy-laptop-exec deploys claude-mount'
+$dcb = Get-Content (Get-ServerFile 'server\commands\deploy-client-bundle.sh') -Raw
+Assert ($dcb -notmatch 'mac/connect-ui.sh') 'deploy-client-bundle uses scripts/client/connect-ui.sh'
+ 'git-mode.ps1 recover applies off when mount ok'
+
+
+
+
+

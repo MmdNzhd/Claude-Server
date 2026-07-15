@@ -28,7 +28,7 @@ LOG_DIR="$GIT_REPOS_DIR/logs"
 _log() { mkdir -p "$LOG_DIR"; echo "[$(date -Iseconds)] $*" >> "$LOG_DIR/${PROJECT_ID:-unknown}.log"; }
 
 _load_conn() {
-    LAPTOP_USER="" TUNNEL_PORT="" GIT_MODE="hide" LAPTOP_OS="windows"
+    LAPTOP_USER="" TUNNEL_PORT="" GIT_MODE="off" LAPTOP_OS="windows"
     [ -f "$CONNECT_CONF" ] || return 1
     while IFS='=' read -r k v; do
         v="${v#\"}" v="${v%\"}"
@@ -41,7 +41,8 @@ _load_conn() {
     done < "$CONNECT_CONF"
     case "${GIT_MODE,,}" in
         server|on|yes|1|slow) GIT_MODE="server" ;;
-        *) GIT_MODE="hide" ;;
+        hide|fast) GIT_MODE="hide" ;;
+        *) GIT_MODE="off" ;;
     esac
     case "${LAPTOP_OS,,}" in
         mac|darwin|osx) LAPTOP_OS="mac" ;;
@@ -171,8 +172,8 @@ cmd_init() {
     _load_conn         || { _log "no connection config"; exit 0; }
     _load_project "$PROJECT_ID" || { _log "no project config"; exit 0; }
 
-    if [ "$GIT_MODE" = "server" ]; then
-        _log "GIT_MODE=server - skip local mirror (using SSHFS git)"
+    if [ "$GIT_MODE" = "server" ] || [ "$GIT_MODE" = "off" ]; then
+        _log "GIT_MODE=$GIT_MODE - skip local mirror (use laptop-exec git or SSHFS)"
         exit 0
     fi
 
@@ -389,8 +390,8 @@ cmd_sync() {
     _load_conn         || exit 0
     _load_project "$PROJECT_ID" || exit 0
 
-    if [ "$GIT_MODE" = "server" ]; then
-        _log "sync: GIT_MODE=server - skip mirror sync"
+    if [ "$GIT_MODE" = "server" ] || [ "$GIT_MODE" = "off" ]; then
+        _log "sync: GIT_MODE=$GIT_MODE - skip mirror sync"
         exit 0
     fi
 
@@ -465,3 +466,4 @@ case "$CMD" in
     status) cmd_status ;;
     *) echo "Usage: claude-git-setup {init|sync|status} <project_id>" >&2; exit 1 ;;
 esac
+

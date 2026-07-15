@@ -3,16 +3,20 @@
 
 function Get-GitMode {
     $gitConf = [System.IO.Path]::Combine($CfgDir, 'git.conf')
-    if (-not (Test-Path $gitConf)) { return 'hide' }
+    if (-not (Test-Path $gitConf)) { return 'off' }
     $saved = (Get-Content $gitConf -Raw -ErrorAction SilentlyContinue).Trim().ToLower()
     if ($saved -match '^(server|on|yes|1|slow)$') { return 'server' }
-    return 'hide'
+    if ($saved -match '^(hide|fast)$') { return 'hide' }
+    return 'off'
 }
 
 function Get-GitModeLabel {
     param([string]$Mode = (Get-GitMode))
-    if ($Mode -eq 'server') { return 'SLOW' }
-    return 'FAST'
+    switch ($Mode) {
+        'server' { return 'SLOW' }
+        'hide'   { return 'HIDE' }
+        default  { return 'OFF' }
+    }
 }
 
 function Write-GitModeLog {
@@ -217,24 +221,66 @@ function Sanitize-SshAliasConfig {
     Set-Content -Path $CfgPath -Value $out -Encoding ASCII
 }
 
+function Test-TunnelPortTcpOpen {
+    if (-not $Port) { return $false }
+    $r = SshX "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port 2>/dev/null' && echo open || echo closed" 2>$null
+    $out = (($r -join '') -replace "`r",'').Trim()
+    return ($out -eq 'open')
+}
+
+function Clear-ServerStaleTunnelForward {
+    param([int]$TargetPort = $Port)
+    if (-not $TargetPort) { return }
+    Write-GitModeLog "STALE_FORWARD: clearing server port=$TargetPort" 'DEBUG'
+    SshX "fuser -k ${TargetPort}/tcp 2>/dev/null || true; pkill -u `$USER -f '127\\.0\\.0\\.1:${TargetPort}' 2>/dev/null || true; pkill -u `$USER -f ' -p ${TargetPort} ' 2>/dev/null || true" 2>$null | Out-Null
+    Clear-TunnelBannerCache
+    for ($i = 1; $i -le 8; $i++) {
+        Start-Sleep -Milliseconds 500
+        Clear-TunnelBannerCache
+        $savedPort = $Port
+        $Port = $TargetPort
+        try {
+            if (-not (Test-TunnelPortTcpOpen)) {
+                Write-GitModeLog "STALE_FORWARD: port released port=$TargetPort wait=$i" 'DEBUG'
+                return
+            }
+        } finally {
+            $Port = $savedPort
+        }
+    }
+    Write-GitModeLog "STALE_FORWARD: port still busy port=$TargetPort after wait" 'WARN'
+}
+
 function Release-StaleTunnelPort {
     if (-not $Port) { return }
+    Clear-TunnelBannerCache
     $banner = Get-TunnelBanner
-    if (-not $banner) { return }
-    if (Test-TunnelBannerIsThisLaptop -Banner $banner) { return }
-    SshX "pkill -u `$USER -f ' -p ${Port} ' 2>/dev/null || true" 2>$null | Out-Null
-    Start-Sleep -Seconds 1
+    if ($banner -and (Test-TunnelBannerIsThisLaptop -Banner $banner)) { return }
+    if ($banner -and -not (Test-TunnelBannerIsThisLaptop -Banner $banner)) {
+        Write-GitModeLog "STALE_FORWARD: foreign banner port=$Port banner=$banner" 'DEBUG'
+        Clear-ServerStaleTunnelForward -TargetPort $Port
+        return
+    }
+    if (Test-TunnelPortTcpOpen) {
+        Write-GitModeLog "STALE_FORWARD: zombie port=$Port tcp=open banner=(empty)" 'WARN'
+        Clear-ServerStaleTunnelForward -TargetPort $Port
+    }
 }
 
 function Remove-LocalOrphanTunnel {
     param([Parameter(Mandatory)][int]$TargetPort)
+    $killed = $false
     Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match "-R\s+${TargetPort}:localhost:22" } |
         ForEach-Object {
             Write-GitModeLog "ORPHAN_TUNNEL: killing local pid=$($_.ProcessId) port=$TargetPort" 'DEBUG'
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            $killed = $true
         }
     Clear-TunnelBannerCache
+    if ($killed) {
+        Clear-ServerStaleTunnelForward -TargetPort $TargetPort
+    }
 }
 
 function Acquire-TunnelPort {
@@ -258,7 +304,16 @@ function Acquire-TunnelPort {
         $port = $portBase + [int]$UidStr + $slot
         if ($port -gt 65535) { continue }
         $script:Port = $port
+        Clear-TunnelBannerCache
         $banner = Get-TunnelBanner
+        if ($banner -and -not (Test-TunnelBannerIsThisLaptop -Banner $banner)) { continue }
+        if (-not $banner -and (Test-TunnelPortTcpOpen)) {
+            Clear-ServerStaleTunnelForward -TargetPort $port
+            Clear-TunnelBannerCache
+            $banner = Get-TunnelBanner
+            if ($banner -and -not (Test-TunnelBannerIsThisLaptop -Banner $banner)) { continue }
+            if (-not $banner -and (Test-TunnelPortTcpOpen)) { continue }
+        }
         if (-not $banner -or (Test-TunnelBannerIsThisLaptop -Banner $banner)) {
             $script:TunnelSlot = $slot
             Save-TunnelSlot
@@ -311,6 +366,7 @@ function Sync-SessionTunnelProcess {
             $probeBanner = $script:TunnelBannerCacheBanner
             if (-not $probeUp) {
                 Write-GitModeLog "TUNNEL_DROP pid=$($BgTunnel.Value.Id) port=$Port banner=$probeBanner reason=bg_alive_forward_dead" 'WARN'
+                Release-StaleTunnelPort
                 return $false
             }
         }
@@ -371,7 +427,33 @@ function Wait-ForTunnelUp {
         Start-Sleep -Seconds $sleepSec
     }
     Write-GitModeLog "TUNNEL_WAIT fail=1 reason=timeout port=$Port" 'WARN'
+    Release-StaleTunnelPort
     return $false
+}
+
+function Stop-SessionTunnelCleanup {
+    param(
+        [ref]$BgTunnel,
+        [switch]$ClearServerForward
+    )
+    if ($BgTunnel.Value -and -not $BgTunnel.Value.HasExited) {
+        Write-GitModeLog "TUNNEL_STOP: killing bg pid=$($BgTunnel.Value.Id) port=$Port" 'DEBUG'
+        Stop-Process -Id $BgTunnel.Value.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($Port) {
+        Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -match "-R\s+${Port}:localhost:22" } |
+            ForEach-Object {
+                Write-GitModeLog "TUNNEL_STOP: killing orphan ssh pid=$($_.ProcessId) port=$Port" 'DEBUG'
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+    }
+    if ($ClearServerForward -and $Port) {
+        Clear-ServerStaleTunnelForward -TargetPort $Port
+    }
+    $BgTunnel.Value = $null
+    $script:SessionBgTunnel = $null
+    Clear-TunnelBannerCache
 }
 
 function Get-ClaudeMountSrc {
@@ -597,7 +679,13 @@ function Invoke-RecoverIfNeeded {
         [Parameter(Mandatory)][string]$ProjectId,
         [switch]$FreshTunnel
     )
-    if (-not $FreshTunnel -and (Test-ProjectMountHealthy -ProjectId $ProjectId)) { return }
+    if (-not $FreshTunnel -and (Test-ProjectMountHealthy -ProjectId $ProjectId)) {
+        if ((Get-GitMode) -eq 'off') {
+            Write-GitModeLog "RECOVER: off_mode_apply project=$ProjectId reason=mount_ok" 'DEBUG'
+            SshX "timeout 15 $CM recover-if-needed '$ProjectId' 2>/dev/null || true" 2>$null | Out-Null
+        }
+        return
+    }
     $recoverBegin = Get-Date
     Write-GitModeLog "RECOVER: begin project=$ProjectId fresh_tunnel=$FreshTunnel" 'DEBUG'
     Write-Host '      -> recovering stale mounts...' -ForegroundColor DarkGray
@@ -626,14 +714,21 @@ function Ensure-SessionTunnel {
         Write-GitModeLog "ENSURE_TUNNEL killing stale bg pid=$($BgTunnel.Value.Id)" 'DEBUG'
         Clear-TunnelBannerCache
         Stop-Process -Id $BgTunnel.Value.Id -Force -ErrorAction SilentlyContinue
+        if ($Port) { Clear-ServerStaleTunnelForward -TargetPort $Port }
     }
+    $orphanPort = $Port
+    $killedOrphan = $false
     Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match "-R\s+${Port}:localhost:22" } |
         ForEach-Object {
             Write-GitModeLog "ENSURE_TUNNEL killing orphan ssh pid=$($_.ProcessId)" 'DEBUG'
             Clear-TunnelBannerCache
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            $killedOrphan = $true
         }
+    if ($killedOrphan -and $orphanPort) {
+        Clear-ServerStaleTunnelForward -TargetPort $orphanPort
+    }
     $uidStr = ((SshX 'id -u' 2>$null) -join '').Trim() -replace '\D', ''
     if ($uidStr) { $null = Acquire-TunnelPort -UidStr $uidStr }
     Release-StaleTunnelPort
@@ -682,7 +777,7 @@ function Push-ServerConnectConf {
         [string]$GitMode = (Get-GitMode),
         [string]$ActiveMount = ''
     )
-    $mode = if ($GitMode -eq 'server') { 'server' } else { 'hide' }
+    $mode = $GitMode
     $am = ($ActiveMount -replace "'", "'\''")
     Write-GitModeLog "PUSH_CONF laptop_user=$LaptopUser port=$Port git_mode=$mode active_mount=$ActiveMount" 'DEBUG'
     SshX "mkdir -p ~/.local/bin && printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nGIT_MODE=%s\nLAPTOP_OS=windows\nACTIVE_MOUNT=%s\n' '$LaptopUser' '$Port' '$mode' '$am' > ~/.claude-connect.conf && chmod 600 ~/.claude-connect.conf || true" 2>$null | Out-Null
@@ -757,6 +852,10 @@ function Clear-SessionMount {
 
 function Resolve-ServerScriptDir {
     param([Parameter(Mandatory)][string]$ConnectScriptDir)
+    try {
+        $bundleServer = [System.IO.Path]::Combine($ConnectScriptDir, 'server')
+        if (Test-Path ([System.IO.Path]::Combine($bundleServer, 'laptop-exec.sh'))) { return $bundleServer }
+    } catch { }
     foreach ($rel in @('..\server', '..\..\server', '..\..\..\server')) {
         try {
             $d = [System.IO.Path]::GetFullPath((Join-Path $ConnectScriptDir $rel))
@@ -776,6 +875,51 @@ function Resolve-ServerScriptDir {
         }
     } catch { }
     return $null
+}
+
+
+function Push-RemoteUserFileIfChanged {
+    param(
+        [Parameter(Mandatory)][string]$LocalSrc,
+        [Parameter(Mandatory)][string]$RemotePath,
+        [Parameter(Mandatory)][string]$Alias,
+        [switch]$Executable
+    )
+    if (-not (Test-Path $LocalSrc)) { return }
+    $localHash = (Get-FileHash -Algorithm SHA256 -Path $LocalSrc).Hash
+    $remotePathEsc = $RemotePath -replace "'", "'\\''"
+    $remoteHash = ((SshX "sha256sum '$remotePathEsc' 2>/dev/null | awk '{print `$1}'") -join '').Trim()
+    if ($localHash -and $remoteHash -and ($localHash.ToLower() -eq $remoteHash.ToLower())) { return }
+    $remoteDir = ($RemotePath -replace '/[^/]+$','')
+    if ($remoteDir) {
+        $remoteDirEsc = $remoteDir -replace "'", "'\\''"
+        SshX "mkdir -p '$remoteDirEsc'" 2>$null | Out-Null
+    }
+    scp -o BatchMode=yes -o ConnectTimeout=20 -q $LocalSrc "${Alias}:$RemotePath" 2>$null
+    if ($Executable -and $LASTEXITCODE -eq 0) {
+        SshX "chmod +x '$remotePathEsc'" 2>$null | Out-Null
+    }
+}
+
+function Push-LaptopExecBundleIfChanged {
+    param(
+        [Parameter(Mandatory)][string]$ServerDir,
+        [Parameter(Mandatory)][string]$Alias
+    )
+    $pairs = @(
+        @{ Local = 'laptop-exec.sh'; Remote = '~/.local/bin/laptop-exec'; Exec = $true },
+        @{ Local = 'laptop-exec-setup.sh'; Remote = '~/.local/bin/laptop-exec-setup'; Exec = $true },
+        @{ Local = 'cursor-rules/laptop-exec.mdc'; Remote = '~/.cursor/rules/laptop-exec.mdc'; Exec = $false },
+        @{ Local = 'skills/laptop-exec/SKILL.md'; Remote = '~/.cursor/skills/laptop-exec/SKILL.md'; Exec = $false },
+        @{ Local = 'cursor-hooks/laptop-exec-guard.sh'; Remote = '~/.cursor/hooks/laptop-exec-guard.sh'; Exec = $true }
+    )
+    foreach ($p in $pairs) {
+        $src = [System.IO.Path]::Combine($ServerDir, $p.Local)
+        Push-RemoteUserFileIfChanged -LocalSrc $src -RemotePath $p.Remote -Alias $Alias -Executable:$p.Exec
+    }
+    if (Test-Path ([System.IO.Path]::Combine($ServerDir, 'laptop-exec-setup.sh'))) {
+        SshX '~/.local/bin/laptop-exec-setup --user 2>/dev/null; /usr/local/bin/laptop-exec-setup --user 2>/dev/null; true' 2>$null | Out-Null
+    }
 }
 
 function Push-ClaudeServerScripts {
@@ -803,6 +947,7 @@ function Push-ClaudeServerScripts {
     if (Test-Path $src) { $chmodCmd += "chmod +x ~/.local/bin/claude-mount; grep -q 'CLAUDE_LOCAL_BIN_PATH' ~/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=`$HOME/.local/bin:`$PATH\n' >> ~/.bashrc" }
     if (Test-Path $gitSrc) { $chmodCmd += 'chmod +x ~/.local/bin/claude-git-setup' }
     if ($chmodCmd.Count -gt 0) { SshX ($chmodCmd -join '; ') 2>$null | Out-Null }
+    Push-LaptopExecBundleIfChanged -ServerDir $dir -Alias $Alias
     return $pushOk
 }
 
@@ -827,6 +972,16 @@ function Invoke-MountProject {
     )
     $trusted = if ($TrustedTunnel) { 'CLAUDE_TRUSTED_TUNNEL=1 ' } else { '' }
     Write-GitModeLog "MOUNT_UP begin project=$ProjectId trusted=$TrustedTunnel" 'DEBUG'
+    if ((Get-GitMode) -ne 'off' -and (Test-ProjectMountHealthy -ProjectId $ProjectId)) {
+        Write-GitModeLog "MOUNT_UP skip project=$ProjectId reason=check_ok" 'DEBUG'
+        if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
+            Write-ConnectPerfLog -Mark 'mount_total' -Ms 0 -Extra 'path=skip_check_ok'
+        }
+        return @{ Ok = $true; Out = 'already mounted (check ok)' }
+    }
+    if ((Get-GitMode) -eq 'off' -and (Test-ProjectMountHealthy -ProjectId $ProjectId)) {
+        Write-GitModeLog "MOUNT_UP off_mode_apply project=$ProjectId reason=check_ok_still_up" 'DEBUG'
+    }
     $swMount = [System.Diagnostics.Stopwatch]::StartNew()
     $mountOut = (SshX "${trusted}$CM up '$ProjectId' 2>&1") | Out-String
     $exitCode = $LASTEXITCODE
@@ -899,17 +1054,26 @@ function Configure-GitMode {
     Write-Host ''
     $cur = Get-GitMode
     $curLabel = Get-GitModeLabel -Mode $cur
-    Write-Host "    Current: $curLabel ($(if ($cur -eq 'server') { 'full git over SSHFS' } else { '.git hidden on laptop' }))" -ForegroundColor DarkGray
+    $curDesc = switch ($cur) {
+        'server' { 'full git over SSHFS' }
+        'hide'   { '.git hidden on laptop' }
+        default  { 'no .git rename (use laptop-exec git)' }
+    }
+    Write-Host "    Current: $curLabel ($curDesc)" -ForegroundColor DarkGray
     Write-Host ''
-    Write-Host '    1  FAST - hide .git on laptop [default]' -ForegroundColor DarkGray
-    Write-Host '    2  SLOW - keep .git on mount for git on server' -ForegroundColor DarkGray
+    Write-Host '    1  OFF  - no .git rename [default]' -ForegroundColor DarkGray
+    Write-Host '    2  HIDE - hide .git on laptop (faster SSHFS)' -ForegroundColor DarkGray
+    Write-Host '    3  SLOW - full .git visible on SSHFS mount' -ForegroundColor DarkGray
     Write-Host ''
     $choice = (Read-Host '    >').Trim().ToLower()
     switch ($choice) {
-        { $_ -in '1', 'off', 'hide', 'fast', '' } {
+        { $_ -in '1', 'off', '' } {
+            Set-Content -Path ([System.IO.Path]::Combine($CfgDir, 'git.conf')) -Value 'off' -Encoding ASCII | Out-Null
+        }
+        { $_ -in '2', 'hide', 'fast' } {
             Set-Content -Path ([System.IO.Path]::Combine($CfgDir, 'git.conf')) -Value 'hide' -Encoding ASCII | Out-Null
         }
-        { $_ -in '2', 'on', 'server', 'slow' } {
+        { $_ -in '3', 'on', 'server', 'slow' } {
             Set-Content -Path ([System.IO.Path]::Combine($CfgDir, 'git.conf')) -Value 'server' -Encoding ASCII | Out-Null
         }
         default { Warn 'Invalid choice.'; return }
@@ -929,3 +1093,7 @@ function Configure-GitMode {
     }
     Write-Host ''
 }
+
+
+
+

@@ -11,14 +11,14 @@ KNOWN_HOSTS="$HOME/.ssh/known_hosts_claude_mount"
 # ---------------------------------------------------------------------------
 LAPTOP_USER=""
 TUNNEL_PORT=""
-GIT_MODE="hide"   # hide = fast (default), server = keep .git on SSHFS mount
+GIT_MODE="off"    # off = no rename (default), hide = fast, server = SSHFS git
 LAPTOP_OS="windows"  # windows | mac - how to run laptop-side git hide/restore
 ACTIVE_MOUNT=""   # set by connect.bat - only this project may auto-mount
-_MOUNT_SAVED_GIT_MODE="hide"  # GIT_MODE snapshot for _do_mount RETURN trap (must not be local)
+_MOUNT_SAVED_GIT_MODE="off"  # GIT_MODE snapshot for _do_mount RETURN trap (must not be local)
 _GIT_HIDE_LAST_FAILED=0       # set by _emit_git_hide_warn; read by _do_mount (must not be local)
 
 _load_global() {
-    GIT_MODE="hide"
+    GIT_MODE="off"
     LAPTOP_OS="windows"
     if [ -f "$CONNECT_CONF" ]; then
         while IFS='=' read -r k v; do
@@ -37,7 +37,9 @@ _load_global() {
     fi
     case "${GIT_MODE,,}" in
         server|on|yes|1|slow) GIT_MODE="server" ;;
-        *) GIT_MODE="hide" ;;
+        hide|fast) GIT_MODE="hide" ;;
+        off|no|none|0|disabled|"") GIT_MODE="off" ;;
+        *) GIT_MODE="off" ;;
     esac
     case "${LAPTOP_OS,,}" in
         mac|darwin|osx) LAPTOP_OS="mac" ;;
@@ -233,11 +235,46 @@ _win_hide_git_and_create_stubs() {
 # Stubs prevent Claude Code from doing one SFTP round-trip per missing path (~3s each).
 # Called on every mount (new and already-mounted) so stubs always exist.
 #
-# GIT_MODE=hide  (default): rename .git -> .git.server-session (fast git on server)
+
+_create_claude_stubs_only() {
+    local rpath="$1"
+    [ -z "$rpath" ] && return 0
+    if [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ]; then
+        if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ]; then
+            _tunnel_tcp_open && _tunnel_banner_matches_laptop || return 0
+        elif ! _tunnel_up; then
+            return 0
+        fi
+    fi
+    local safe="${rpath//'/''}"
+    if [ "$LAPTOP_OS" = "mac" ]; then
+        _mac_sh "p='${safe}'; h=0; [ -e "\$p/.git" ] || [ -e "\$p/.git.server-session" ] && h=1; if [ "\$h" = 1 ]; then mkdir -p "\$p/.claude/rules" "\$p/.claude/commands"; [ -s "\$p/.mcp.json" ] || printf '{}' > "\$p/.mcp.json"; fi"
+    else
+        _win_ps_out "\$p='${safe}'; \$hasGit=(Test-Path \$p/.git) -or (Test-Path \$p/.git.server-session); if (\$hasGit) { New-Item -ItemType Directory -Force -Path \$p/.claude/rules,\$p/.claude/commands | Out-Null; if (-not (Test-Path \$p/.mcp.json) -or (Get-Item \$p/.mcp.json).Length -eq 0) { Set-Content -Path \$p/.mcp.json -Value '{}' -Encoding utf8 } }" >/dev/null || true
+    fi
+}
+
+# GIT_MODE=hide: rename .git -> .git.server-session (fast git on server)
 # GIT_MODE=server: keep .git visible on mount (slow SSHFS git; user preference)
 _hide_git_and_create_stubs() {
     local rpath="$1"
     [ -z "$rpath" ] && return 0
+    if [ "$GIT_MODE" = "off" ]; then
+        if [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ]; then
+            if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ]; then
+                _tunnel_tcp_open && _tunnel_banner_matches_laptop || {
+                    echo "warn: laptop tunnel down - cannot restore .git (reconnect connect.bat)" >&2
+                    return 0
+                }
+            elif ! _tunnel_up; then
+                echo "warn: laptop tunnel down - cannot restore .git (reconnect connect.bat)" >&2
+                return 0
+            fi
+        fi
+        _restore_git_body "$rpath"
+        _create_claude_stubs_only "$rpath"
+        return 0
+    fi
     if [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ]; then
         if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ]; then
             _tunnel_tcp_open && _tunnel_banner_matches_laptop || {
@@ -396,7 +433,7 @@ _force_unmount_project() {
 }
 
 _mount_restore_git_mode() {
-    GIT_MODE="${_MOUNT_SAVED_GIT_MODE:-hide}"
+    GIT_MODE="${_MOUNT_SAVED_GIT_MODE:-off}"
 }
 
 # ---------------------------------------------------------------------------
@@ -424,7 +461,8 @@ _do_mount() {
     if [ -n "$mount_git_mode" ]; then
         case "${mount_git_mode,,}" in
             server|on|yes|1|slow) GIT_MODE="server" ;;
-            *) GIT_MODE="hide" ;;
+            hide|fast) GIT_MODE="hide" ;;
+            off|no|none|0|disabled) GIT_MODE="off" ;;
         esac
     fi
 
@@ -432,12 +470,25 @@ _do_mount() {
     rpath="${rpath//\\//}"
 
     if _is_mounted "$lpath"; then
+        if [ "$GIT_MODE" = "off" ]; then
+            echo "already mounted: $lpath"
+            _hide_git_and_create_stubs "$rpath"
+            _warm_sshfs_cache "$lpath"
+            _mount_restore_git_mode
+            return 0
+        fi
         # Server mode needs a fresh mount so SSHFS sees .git after restore on laptop.
         if [ "$GIT_MODE" = "server" ]; then
             _do_unmount "$lpath"
             sleep 1
         else
             echo "already mounted: $lpath"
+            if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ] && \
+               { [ ! -e "$lpath/.git" ] || [ -e "$lpath/.git.server-session" ]; } && \
+               [ "$_GIT_HIDE_LAST_FAILED" != "1" ]; then
+                _mount_restore_git_mode
+                return 0
+            fi
             _hide_git_and_create_stubs "$rpath"
             # SSHFS cache may keep stale .git after laptop rename - remount if .git still visible.
             # Skip the remount when the hide itself genuinely failed (e.g. access denied) -
@@ -484,8 +535,8 @@ _do_mount() {
         -p "${TUNNEL_PORT}" 2>&1) || sshfs_exit=$?
 
     if [ "$sshfs_exit" -ne 0 ]; then
-        # sshfs failed - .git was hidden by _hide_git_and_create_stubs, restore it
-        _restore_git "$rpath"
+        # sshfs failed - restore .git only if we hid it
+        if [ "$GIT_MODE" = "hide" ]; then _restore_git "$rpath"; fi
         local reason="$sshfs_out"
         # Check specific errors FIRST so a timed-out sshfs that printed a real
         # error before being killed (exit 124) still shows the actionable message.
@@ -684,9 +735,25 @@ cmd_check() {
 }
 
 cmd_recover_if_needed() {
+    _load_global
     local id="${1:-}"
     if [ -n "$id" ] && cmd_check "$id" >/dev/null 2>&1; then
-        echo "recover: skip (mount ok)"
+        case "${GIT_MODE,,}" in
+            server|on|yes|1|slow|hide|fast)
+                echo "recover: skip (mount ok)"
+                return 0
+                ;;
+        esac
+        echo "recover: mount ok, applying GIT_MODE=off restore"
+        local conf="$CONF_DIR/${id}.conf" rpath=""
+        [ -f "$conf" ] || { echo "recover: skip (no conf)"; return 0; }
+        while IFS='=' read -r k v; do
+            v="${v#\"}"; v="${v%\"}"
+            case "$k" in rpath|REMOTE_PATH) rpath="$v" ;; esac
+        done < "$conf"
+        rpath="${rpath//\\//}"
+        [ -n "$rpath" ] && _hide_git_and_create_stubs "$rpath"
+        echo "recover: off restore done"
         return 0
     fi
     if [ -n "$id" ]; then
@@ -904,3 +971,8 @@ case "$cmd" in
         exit 1
         ;;
 esac
+
+
+
+
+

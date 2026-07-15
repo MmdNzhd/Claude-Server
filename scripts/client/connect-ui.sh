@@ -48,17 +48,21 @@ ui_connect_header() {
 }
 
 ui_git_mode_label() {
-    case "${1:-hide}" in
+    case "${1:-off}" in
         server|slow) printf 'SLOW' ;;
-        *) printf 'FAST' ;;
+        hide|fast) printf 'HIDE' ;;
+        *) printf 'OFF' ;;
     esac
 }
 
 ui_git_mode_banner() {
     local mode="$1" label desc
     label="$(ui_git_mode_label "$mode")"
-    if [ "$label" = "FAST" ]; then desc='hide .git on laptop'
-    else desc='full git over SSHFS'; fi
+    case "$mode" in
+        server) desc='full git over SSHFS' ;;
+        hide)   desc='hide .git on laptop' ;;
+        *)      desc='no .git rename; laptop-exec git' ;;
+    esac
     printf '    \033[0;90mGit mode: %s (%s) - press g to change\033[0m\n\n' "$label" "$desc"
 }
 
@@ -211,4 +215,5 @@ init_connect_log() {
     connect_log "======== session start v$version user=$USER pid=$$ ========"
     connect_log "script_dir: $script_dir connect_version: $version" 'DEBUG'
 }
+
 

@@ -221,7 +221,11 @@ function Write-GitModeBanner {
     if ((Get-LayoutTier -Width $W) -eq 'tiny') {
         Write-Host "    Git: $label (g to change)" -ForegroundColor DarkGray
     } else {
-        $desc = if ($label -eq 'FAST') { 'hide .git on laptop' } else { 'full git over SSHFS' }
+        $desc = switch ($GitMode) {
+            'server' { 'full git over SSHFS' }
+            'hide'   { 'hide .git on laptop' }
+            default  { 'no .git rename; laptop-exec git' }
+        }
         Write-Host "    Git mode: $label ($desc) - press g to change" -ForegroundColor DarkGray
     }
     Write-Host ''
@@ -379,3 +383,4 @@ function Pick-LaptopFolder {
     } catch { }
     return $null
 }
+

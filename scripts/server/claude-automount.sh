@@ -5,6 +5,12 @@
 
 set -u
 
+# Cursor/VS Code spawn bash -ilc to resolve the shell environment. That must not
+# re-run mount/auth/recover (~20s). connect.bat already mounted and synced auth.
+if [ -n "${VSCODE_IPC_HOOK_CLI:-}" ] || [ -n "${CURSOR_AGENT:-}" ] || [ "${TERM_PROGRAM:-}" = "vscode" ]; then
+    exit 0
+fi
+
 # Server-wide OAuth: keep credentials.json empty and sync token into settings.json.
 if [ -x /usr/local/bin/claude-auth-sync ]; then
     /usr/local/bin/claude-auth-sync
@@ -16,6 +22,7 @@ fi
 
 if [ -x /usr/local/bin/laptop-exec-setup ]; then
     /usr/local/bin/laptop-exec-setup --user
+    /usr/local/bin/laptop-exec-setup --all-projects 2>/dev/null || true
 fi
 
 MOUNT_BIN="$HOME/.local/bin/claude-mount"
@@ -50,12 +57,32 @@ if [ -f "$CONNECT_CONF" ]; then
     fi
 fi
 
+# Throttle full automount on repeated interactive shells (same SSH session).
+STAMP="$HOME/.cache/claude-automount.stamp"
+if [ -n "${ACTIVE_MOUNT:-}" ] && [ -f "$STAMP" ]; then
+    stamp_age=$(( $(date +%s) - $(stat -c %Y "$STAMP" 2>/dev/null || echo 0) ))
+    if [ "$stamp_age" -lt 300 ] && "$MOUNT_BIN" check "$ACTIVE_MOUNT" >/dev/null 2>&1; then
+        # OFF mode must still run up (cheap) so stale hide sessions restore .git on laptop.
+        _am_git=""
+        if [ -f "$HOME/.claude-connect.conf" ]; then
+            _am_git="$(grep -iE '^GIT_MODE=' "$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]' | tr -d '\r\n ')"
+        fi
+        case "${_am_git:-off}" in
+            server|on|yes|1|slow|hide|fast) exit 0 ;;
+        esac
+        "$MOUNT_BIN" up "$ACTIVE_MOUNT" 2>/dev/null || true
+        exit 0
+    fi
+fi
+
 # Restore any .git dirs hidden by a previous crashed session before mounting
 "$MOUNT_BIN" recover 2>/dev/null || true
 
 # Only mount the project connect.bat selected (never mount all projects on login)
 if [ -n "$ACTIVE_MOUNT" ]; then
     "$MOUNT_BIN" up "$ACTIVE_MOUNT" 2>/dev/null || true
+    mkdir -p "$(dirname "$STAMP")" 2>/dev/null || true
+    touch "$STAMP" 2>/dev/null || true
 fi
 
 # Auto-init CodeGraph and Headroom for any newly mounted project.
@@ -86,4 +113,5 @@ WATCHDOG="/usr/local/bin/claude-watchdog"
 if [ -x "$WATCHDOG" ]; then
     nohup "$WATCHDOG" >/dev/null 2>&1 &
 fi
+
 

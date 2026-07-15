@@ -16,6 +16,7 @@ GOLDEN_HOOKS="/usr/local/lib/claude-server/cursor-hooks"
 HOOK_GUARD="laptop-exec-guard.sh"
 HOOK_CMD_USER="./hooks/laptop-exec-guard.sh"
 HOOK_CMD_PROJECT=".cursor/hooks/laptop-exec-guard.sh"
+HOOK_MATCHER="Grep|Glob|Shell|Read|Write|Task"
 
 
 _merge_hooks_json() {
@@ -40,7 +41,7 @@ _merge_hooks_json() {
             .hooks.beforeShellExecution += [{"command": $cmd}]
         else . end |
         if ([.hooks.preToolUse[]? | select(.command == $cmd)] | length) == 0 then
-            .hooks.preToolUse += [{"command": $cmd, "matcher": "Grep|Glob|Shell"}]
+            .hooks.preToolUse += [{"command": $cmd, "matcher": "Grep|Glob|Shell|Read|Write|Task"}]
         else . end
     ' "$target" > "$merged"
     install -m 644 "$merged" "$target"
@@ -100,6 +101,16 @@ _ensure_user() {
     _ensure_user_hooks
 }
 
+_ensure_project_skill() {
+    local lpath="$1"
+    [ -f "$GOLDEN_SKILL" ] || return 0
+    [ -d "$lpath" ] || return 0
+    mkdir -p "$lpath/.cursor/skills/laptop-exec"
+    if [ ! -f "$lpath/.cursor/skills/laptop-exec/SKILL.md" ] || [ "$GOLDEN_SKILL" -nt "$lpath/.cursor/skills/laptop-exec/SKILL.md" ]; then
+        install -m 644 "$GOLDEN_SKILL" "$lpath/.cursor/skills/laptop-exec/SKILL.md"
+    fi
+}
+
 _ensure_project() {
     local lpath="$1"
     [ -n "$lpath" ] || return 0
@@ -109,6 +120,7 @@ _ensure_project() {
     if [ ! -f "$lpath/.cursor/rules/laptop-exec.mdc" ] || [ "$GOLDEN_RULE" -nt "$lpath/.cursor/rules/laptop-exec.mdc" ]; then
         install -m 644 "$GOLDEN_RULE" "$lpath/.cursor/rules/laptop-exec.mdc"
     fi
+    _ensure_project_skill "$lpath"
     _ensure_project_hooks "$lpath"
 }
 

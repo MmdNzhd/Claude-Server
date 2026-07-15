@@ -61,7 +61,7 @@ if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
 }
 $ServerIP = "192.168.210.240"
 $Alias    = "claude-server"
-$script:ConnectVersion = '20260715.5'
+$script:ConnectVersion = '20260715.12'
 $CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
@@ -1533,10 +1533,7 @@ $exitRequested = $false
                 Write-Host '    Connection dropped - recovering...' -ForegroundColor Yellow
                 Write-ConnectLog 'TUNNEL: recovering session (down mount, restart tunnel)' 'WARN'
                 Clear-SessionMount -ProjectId $go.Id -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -SkipEditorStop
-                if ($bgTunnel -and -not $bgTunnel.HasExited) {
-                    Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
-                }
-                $bgTunnel = $null
+                Stop-SessionTunnelCleanup -BgTunnel ([ref]$bgTunnel) -ClearServerForward
                 $alreadyDown = $true
                 $script:LaptopSshVerified = $false
                 Write-Host ''
@@ -1548,9 +1545,7 @@ $exitRequested = $false
             Write-Host "    Disconnecting..." -ForegroundColor DarkGray
             Write-ConnectLog "SESSION: disconnect project=$($go.Id)"
             Clear-SessionMount -ProjectId $go.Id -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
-            if ($bgTunnel -and -not $bgTunnel.HasExited) {
-                Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
-            }
+            Stop-SessionTunnelCleanup -BgTunnel ([ref]$bgTunnel) -ClearServerForward
             $alreadyDown = $true
             Write-Host "    Laptop folder restored." -ForegroundColor Green
             break sessionLoop
@@ -1564,11 +1559,8 @@ $exitRequested = $false
             Write-Host "    Laptop folder restored." -ForegroundColor Green
             Write-Host ""
         }
-        # Always kill tunnel - even if $alreadyDown (e.g. tunnel-fail or mount-fail Q path)
-        if ($bgTunnel -and -not $bgTunnel.HasExited) {
-            Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
-        }
-        $script:SessionBgTunnel = $null
+        # Always kill tunnel + clear server forward (even if $alreadyDown from Q path)
+        Stop-SessionTunnelCleanup -BgTunnel ([ref]$bgTunnel) -ClearServerForward
     }
 
     while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
@@ -1601,3 +1593,8 @@ $exitRequested = $false
 } # end :menuLoop
 Write-Host ''
 Close-ConnectLog
+
+
+
+
+

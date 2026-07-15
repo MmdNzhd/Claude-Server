@@ -24,6 +24,60 @@ COMMANDS_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 REPO_DIR="${CLAUDE_SERVER_REPO:-$(cd "$COMMANDS_DIR/../../.." && pwd 2>/dev/null)}"
 CLIENT_DIR="$REPO_DIR/scripts/client"
 
+
+_stage_repo_from_laptop() {
+    local stage="/var/tmp/claude-code-server-staging" rel dst
+    STAGE_USER="${LAPTOP_EXEC_STAGE_USER:-smart}"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    if ! sudo -u "$STAGE_USER" laptop-exec status >/dev/null 2>&1; then
+        return 1
+    fi
+    _pull() {
+        rel="$1"
+        dst="$stage/$rel"
+        mkdir -p "$(dirname "$dst")"
+        if ! sudo -u "$STAGE_USER" laptop-exec read -p claude-code-server "$rel" > "$dst" 2>/dev/null; then
+            return 1
+        fi
+        [ -s "$dst" ] || { rm -f "$dst"; return 1; }
+    }
+    local paths=(
+        scripts/client/windows/connect.bat
+        scripts/client/windows/connect-version.txt
+        scripts/client/windows/connect.ps1
+        scripts/client/windows/connect-rider.bat
+        scripts/client/windows/connect-update.ps1
+        scripts/client/windows/connect-diagnostic.ps1
+        scripts/client/connect-ui.ps1
+        scripts/client/editor-launch.ps1
+        scripts/client/git-mode.ps1
+        scripts/client/cursor-auth-laptop.ps1
+        scripts/client/mac/connect.sh
+        scripts/client/mac/connect-update.sh
+        scripts/client/connect-ui.sh
+        scripts/client/editor-launch.sh
+        scripts/client/git-mode.sh
+        scripts/server/claude-mount.sh
+        scripts/server/claude-git-setup.sh
+        scripts/server/laptop-exec.sh
+        scripts/server/laptop-exec-setup.sh
+        scripts/server/cursor-rules/laptop-exec.mdc
+        scripts/server/skills/laptop-exec/SKILL.md
+        scripts/server/cursor-hooks/laptop-exec-guard.sh
+        scripts/server/cursor-hooks/hooks-user.json
+    )
+    for rel in "${paths[@]}"; do
+        _pull "$rel" || warn "staging skip $rel"
+    done
+    [ -f "$stage/scripts/client/windows/connect.ps1" ] || return 1
+    REPO_DIR="$stage"
+    CLIENT_DIR="$REPO_DIR/scripts/client"
+    ok "repo staged from laptop -> $stage"
+    return 0
+}
+
+
 _resolve_repo() {
     local d
     for d in \
@@ -33,6 +87,7 @@ _resolve_repo() {
         "/opt/claude-code-server"; do
         [ -n "$d" ] || continue
         [ -f "$d/scripts/client/windows/connect.ps1" ] || continue
+        [ -f "$d/scripts/client/windows/connect-version.txt" ] || continue
         REPO_DIR="$d"
         CLIENT_DIR="$REPO_DIR/scripts/client"
         return 0
@@ -40,7 +95,7 @@ _resolve_repo() {
     return 1
 }
 
-_resolve_repo || fail "client scripts not found (set CLAUDE_SERVER_REPO)"
+_resolve_repo || _stage_repo_from_laptop || fail "client scripts not found (mount repo or run connect on laptop)"
 
 BUNDLE_ROOT="/usr/local/share/claude-client"
 WIN_SRC="$CLIENT_DIR/windows"
@@ -132,6 +187,34 @@ for name in "${mac_files[@]}"; do
     ok "mac/$name"
 done
 
+SERVER_DIR="$REPO_DIR/scripts/server"
+if [ -d "$SERVER_DIR" ]; then
+    mkdir -p "$BUNDLE_ROOT/server/cursor-rules" "$BUNDLE_ROOT/server/skills/laptop-exec" "$BUNDLE_ROOT/server/cursor-hooks"
+    server_files=(
+        laptop-exec.sh
+        laptop-exec-setup.sh
+        claude-mount.sh
+        claude-git-setup.sh
+        cursor-rules/laptop-exec.mdc
+        skills/laptop-exec/SKILL.md
+        cursor-hooks/laptop-exec-guard.sh
+        cursor-hooks/hooks-user.json
+    )
+    for rel in "${server_files[@]}"; do
+        src="$SERVER_DIR/$rel"
+        if [ ! -f "$src" ]; then
+            warn "skip missing server/$rel"
+            continue
+        fi
+        install -m 644 "$src" "$BUNDLE_ROOT/server/$rel"
+        _strip_crlf "$BUNDLE_ROOT/server/$rel"
+        ok "server/$rel"
+    done
+    chmod 755 "$BUNDLE_ROOT/server/laptop-exec.sh" "$BUNDLE_ROOT/server/laptop-exec-setup.sh" \
+        "$BUNDLE_ROOT/server/claude-mount.sh" "$BUNDLE_ROOT/server/claude-git-setup.sh" \
+        "$BUNDLE_ROOT/server/cursor-hooks/laptop-exec-guard.sh" 2>/dev/null || true
+fi
+
 {
     for name in "${win_files[@]}"; do
         [ -f "$BUNDLE_ROOT/$name" ] && printf '%s\n' "$name"
@@ -139,13 +222,20 @@ done
     for name in "${mac_files[@]}"; do
         [ -f "$BUNDLE_ROOT/mac/$name" ] && printf 'mac/%s\n' "$name"
     done
+    if [ -d "$BUNDLE_ROOT/server" ]; then
+        find "$BUNDLE_ROOT/server" -type f | sed "s|^$BUNDLE_ROOT/||" | sort
+    fi
 } > "$BUNDLE_ROOT/manifest.txt"
 chmod 644 "$BUNDLE_ROOT/manifest.txt"
 ok "manifest.txt ($(wc -l < "$BUNDLE_ROOT/manifest.txt") files)"
 
-chmod 755 "$BUNDLE_ROOT" "$BUNDLE_ROOT/mac"
+
+chmod 755 "$BUNDLE_ROOT" "$BUNDLE_ROOT/mac" "$BUNDLE_ROOT/server" 2>/dev/null || chmod 755 "$BUNDLE_ROOT" "$BUNDLE_ROOT/mac"
 VER="$(tr -d '\r\n' < "$BUNDLE_ROOT/connect-version.txt")"
 echo ""
 echo -e "${GREEN}Done.${NC} Client bundle v${VER} at $BUNDLE_ROOT"
 echo "  Laptops auto-update on connect.bat / mac/connect.sh launch."
 echo ""
+
+
+

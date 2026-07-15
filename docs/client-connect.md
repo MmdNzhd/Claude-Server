@@ -36,12 +36,13 @@ Project definitions in `~/.claude-mounts.d/<id>.conf` are never deleted when swi
 
 ---
 
-## GIT_MODE (FAST vs SLOW)
+## GIT_MODE (OFF / HIDE / SLOW)
 
 | Mode | Behavior |
 |------|----------|
-| **hide** (FAST) | Rename `.git` -> `.git.server-session` on laptop before SSHFS; server uses local git mirror |
-| **server** (SLOW) | Keep `.git` on SSHFS mount; full git over network |
+| **off** (default) | No `.git` rename on laptop; use `laptop-exec git` on the server for git commands |
+| **hide** (HIDE) | Rename `.git` -> `.git.server-session` on laptop before SSHFS (faster mount) |
+| **server** (SLOW) | Keep `.git` on SSHFS mount; full git over network (slow) |
 
 | Key | When |
 |-----|------|
@@ -78,7 +79,7 @@ If hide fails (Cursor locks `.git`): close Remote SSH / git on laptop, then pres
 
 If Cursor opens **Agent home** instead of the project folder, check `connect.log` beside `connect.bat`. v20260715.5+ uses `--new-window` when not on the correct `folder-uri`.
 
-After auth sync, if Chat messages fail: **Developer → Reload Window** in the `[Claude Server]` profile window.
+After auth sync, if Chat messages fail: **Developer �+' Reload Window** in the `[Claude Server]` profile window.
 
 ---
 
@@ -89,7 +90,7 @@ After auth sync, if Chat messages fail: **Developer → Reload Window** in the `
 - Title bar shows `[Claude Server]` for server profile windows.
 - `git-mode.sh` merges golden auth into server profile `state.vscdb` on each connect (requires `sqlite3`).
 
-**Remote SSH extension:** install **`anysphere.remote-ssh`** only. Uninstall Microsoft's `ms-vscode-remote.remote-ssh` if present (Extensions → search `@id:anysphere.remote-ssh`).
+**Remote SSH extension:** install **`anysphere.remote-ssh`** only. Uninstall Microsoft's `ms-vscode-remote.remote-ssh` if present (Extensions �+' search `@id:anysphere.remote-ssh`).
 
 **Mac socket bug:** profile template sets `"remote.SSH.useLocalServer": false`. If Remote SSH still fails with `listen EINVAL`, run once in Terminal then fully quit Cursor:
 
@@ -99,7 +100,7 @@ launchctl setenv TMPDIR /tmp
 
 Connect also sets `TMPDIR=/tmp` automatically when needed.
 
-After auth sync, if Chat messages fail: **Developer → Reload Window** in the `[Claude Server]` profile window.
+After auth sync, if Chat messages fail: **Developer �+' Reload Window** in the `[Claude Server]` profile window.
 
 If Cursor opens **Agent home** instead of the project folder, press **`O`** in the connect menu or reconnect with v20260715.5+.
 
@@ -173,10 +174,11 @@ Mac: `scripts/client/tests/verify-all.sh`
 | Join-Path ChildPath prompt | Old `connect.ps1` - copy full `windows\` folder from latest ZIP |
 | connect.bat OUTDATED | Missing `connect-ui.ps1` or wrong version in header |
 | Cursor Agent home, not project | Update to v20260715.5+, check `connect.log`, press `O` |
-| Cursor Chat cannot send (Mac/Win) | Reconnect, then **Developer → Reload Window** in `[Claude Server]` window |
+| Cursor Chat cannot send (Mac/Win) | Reconnect, then **Developer �+' Reload Window** in `[Claude Server]` window |
 | Mac Remote SSH `listen EINVAL` | Update to v20260715.5+; or `launchctl setenv TMPDIR /tmp` + quit Cursor fully |
 | Mac Remote SSH timeout | Use `anysphere.remote-ssh` (not Microsoft extension) |
 | git hide failed | Close Cursor/git on laptop, press `G` |
 | Tunnel drops | Auto-reconnect; editor not re-opened on reconnect |
 
 Questions: contact admin (smart).
+

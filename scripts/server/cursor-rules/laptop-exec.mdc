@@ -1,54 +1,55 @@
 ---
-description: SSHFS mount projects — use laptop-exec for scan/git/build; never slow find/rg on ~/mounts
+description: SSH-first for /mounts/ — laptop-exec for all agent work when tunnel UP; mount optional
 alwaysApply: true
 ---
 
-# Laptop Exec — SSHFS Fast Path (auto)
+# Laptop Exec — SSH-First (auto)
 
-Code on this server often lives under `~/mounts/<project>/` — SSHFS over a reverse
-tunnel from the developer laptop. **Do not ask the user to mention laptop-exec.**
+Projects under `~/mounts/` are SSHFS from the laptop. **Mount may be STALE or NOT_MOUNTED.**
+Tunnel SSH via `laptop-exec` still works. **Do not ask the user to mention laptop-exec.**
 
-## Detect SSHFS workspace
-
-Apply this rule when **any** of these is true:
-
-- Workspace or file path contains `/mounts/`
-- You would run bulk I/O: `find`, `rg`/`grep -r`, `git status/diff`, `dotnet build`, `npm test`
-- A `find` over the project is taking more than a few seconds
-
-**STOP:** If you are about to run `find`, `rg`, `git`, `dotnet build`, `npm test`,
-or use the **Grep/Glob tool** on a path under `/mounts/`, use `laptop-exec` instead.
-No exceptions. A Cursor hook blocks violations — do not retry direct commands.
-
-Check session: `laptop-exec status` (requires connect.bat/sh on laptop).
-
-## Mandatory split
-
-| Task | Use | Never |
-|------|-----|-------|
-| Read/edit one file | Normal Read/Write on workspace path | — |
-| **File count** | `laptop-exec run -- powershell -NoProfile -Command "(Get-ChildItem -Recurse -File -EA SilentlyContinue \| Measure-Object).Count"` | `find ... \| wc -l` on `/mounts/` |
-| git status/diff/commit/push | `laptop-exec git -- …` | `git` in `~/mounts/...` |
-| build / test / run | `laptop-exec run -- dotnet build` etc. | build on `~/mounts/...` |
-| Read file from laptop | `laptop-exec read path/to/file` | — |
-
-## Commands (default project = active connect session)
+## Start every task
 
 ```bash
 laptop-exec status
-laptop-exec test                    # 7 self-tests; run if unsure
-laptop-exec git -- status
-laptop-exec git -- diff --stat
-laptop-exec rg PATTERN
-laptop-exec read scripts/foo.sh
-laptop-exec run -- dotnet build
-laptop-exec run -p OTHER_ID -- …    # other registered project
+laptop-exec health
 ```
 
-## If tunnel is DOWN
+When `tunnel: UP` → **100% agent work through laptop-exec** (read, write, rg, git, run).
 
-Tell user to run connect.bat/sh. Until then: single-file read/edit only; no bulk find/build.
+## BLOCKED on /mounts/ (hook enforced)
 
-## Why
+| Tool / shell | Use instead |
+|--------------|-------------|
+| Read | `laptop-exec read [-p P] file` |
+| Write | `laptop-exec write [-p P] file` (stdin) |
+| Grep / Glob | `laptop-exec rg [-p P] pattern` |
+| git, find, build in shell | `laptop-exec git` / `laptop-exec run` |
 
-Benchmarked on this infra: SSHFS `find` 23s+ cold; laptop-exec ~0.2s. SSHFS build often hangs.
+## Project selection
+
+1. `-p PROJECT`
+2. `-w ~/mounts/PROJECT/...` when Agent cwd is not under mounts (hook blocks Read)
+3. cwd under `~/mounts/PROJECT/` (auto)
+4. `LAPTOP_EXEC_WORKSPACE` env / `laptop-exec resolve [path]`
+5. `ACTIVE_MOUNT` from connect session
+
+When workspace folder name != `active_mount` → **must use `-p`**.
+
+## Quick commands
+
+```bash
+laptop-exec list              # fast; list --full for sshfs per project
+laptop-exec mount-status -p PROJECT
+laptop-exec read scripts/foo.sh
+laptop-exec write scripts/foo.sh <<'EOF'
+...
+EOF
+laptop-exec git -- status
+laptop-exec rg Pattern
+laptop-exec run -- dotnet build
+```
+
+## tunnel DOWN
+
+Tell user to run connect.bat/sh. No project operations until tunnel UP.
