@@ -121,6 +121,12 @@ CRON
     ok "claude-auth-probe cron -> every 30 min"
 fi
 if [ -f "$SERVER_DIR/claude-mount.sh" ]; then
+    if ! bash -n "$SERVER_DIR/claude-mount.sh" 2>/dev/null; then
+        fail "claude-mount.sh syntax error (bash -n failed)"
+    fi
+    mkdir -p /usr/local/lib/claude-server
+    install -m 644 "$SERVER_DIR/claude-mount.sh" /usr/local/lib/claude-server/claude-mount.sh
+    [ -f "$SERVER_DIR/claude-automount.sh" ] && install -m 644 "$SERVER_DIR/claude-automount.sh" /usr/local/lib/claude-server/claude-automount.sh
     install -m 755 "$SERVER_DIR/claude-mount.sh" /usr/local/lib/claude-mount
     ok "claude-mount -> /usr/local/lib/claude-mount"
     ln -sf /usr/local/lib/claude-mount /usr/local/bin/claude-mount 2>/dev/null || true

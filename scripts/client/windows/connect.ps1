@@ -1,4 +1,4 @@
-# connect.ps1 - Claude Code launcher for Windows.
+﻿# connect.ps1 - Claude Code launcher for Windows.
 # connect.bat invariant: g git (menu footer lives in connect-ui.ps1)
 # Usage:  double-click connect.bat
 #         connect.bat -Setup   (reconfigure username)
@@ -61,7 +61,7 @@ if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
 }
 $ServerIP = "192.168.210.240"
 $Alias    = "claude-server"
-$script:ConnectVersion = '20260715.12'
+$script:ConnectVersion = '20260715.15'
 $CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"

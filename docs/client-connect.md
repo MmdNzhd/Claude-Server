@@ -2,7 +2,7 @@
 
 Developer and end-user guide for `connect.bat` / `connect.sh`.
 
-**Current client version:** **`20260715.5`**
+**Current client version:** **`20260715.15`**
 
 See also: [sshfs-performance.md](sshfs-performance.md) (GIT_MODE deep dive), [CLAUDE.md](../CLAUDE.md) (server admin).
 
@@ -77,7 +77,7 @@ If hide fails (Cursor locks `.git`): close Remote SSH / git on laptop, then pres
 - Title bar shows `[Claude Server]` for server profile windows.
 - `cursor-auth-laptop.ps1` merges auth keys into server profile SQLite (never closes Cursor).
 
-If Cursor opens **Agent home** instead of the project folder, check `connect.log` beside `connect.bat`. v20260715.5+ uses `--new-window` when not on the correct `folder-uri`.
+If Cursor opens **Agent home** instead of the project folder, check `connect.log` beside `connect.bat`. v20260715.15+ uses `--new-window` when not on the correct `folder-uri`.
 
 After auth sync, if Chat messages fail: **Developer �+' Reload Window** in the `[Claude Server]` profile window.
 
@@ -102,7 +102,7 @@ Connect also sets `TMPDIR=/tmp` automatically when needed.
 
 After auth sync, if Chat messages fail: **Developer �+' Reload Window** in the `[Claude Server]` profile window.
 
-If Cursor opens **Agent home** instead of the project folder, press **`O`** in the connect menu or reconnect with v20260715.5+.
+If Cursor opens **Agent home** instead of the project folder, press **`O`** in the connect menu or reconnect with v20260715.15+.
 
 ---
 
@@ -110,7 +110,7 @@ If Cursor opens **Agent home** instead of the project folder, press **`O`** in t
 
 `connect.log` is written next to `connect.bat`. Rotates at 1.5 MB to `connect.log.1`.
 
-### Performance marks (v20260715.4+)
+### Performance marks (v20260715.15+)
 
 Cheap `PERF[...]` lines are emitted by default across mount, auth, launch, and diagnostic. Disable with:
 
@@ -163,7 +163,7 @@ Mac: `scripts/client/tests/verify-all.sh`
 
 - Build ZIP on Windows: `publish\publish.bat`
 - Client ZIP must not contain `server/` scripts.
-- Server mount fix: `sudo claude-server deploy-mount-fix` (requires connect.bat v20260715.4+)
+- Server mount fix: `sudo claude-server deploy-mount-fix` (requires connect.bat v20260715.15+)
 
 ---
 
@@ -173,9 +173,9 @@ Mac: `scripts/client/tests/verify-all.sh`
 |---------|-----|
 | Join-Path ChildPath prompt | Old `connect.ps1` - copy full `windows\` folder from latest ZIP |
 | connect.bat OUTDATED | Missing `connect-ui.ps1` or wrong version in header |
-| Cursor Agent home, not project | Update to v20260715.5+, check `connect.log`, press `O` |
+| Cursor Agent home, not project | Update to v20260715.15+, check `connect.log`, press `O` |
 | Cursor Chat cannot send (Mac/Win) | Reconnect, then **Developer �+' Reload Window** in `[Claude Server]` window |
-| Mac Remote SSH `listen EINVAL` | Update to v20260715.5+; or `launchctl setenv TMPDIR /tmp` + quit Cursor fully |
+| Mac Remote SSH `listen EINVAL` | Update to v20260715.15+; or `launchctl setenv TMPDIR /tmp` + quit Cursor fully |
 | Mac Remote SSH timeout | Use `anysphere.remote-ssh` (not Microsoft extension) |
 | git hide failed | Close Cursor/git on laptop, press `G` |
 | Tunnel drops | Auto-reconnect; editor not re-opened on reconnect |

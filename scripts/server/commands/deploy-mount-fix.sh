@@ -31,7 +31,8 @@ _resolve_mount_sources() {
         "$SERVER_DIR" \
         "${CLAUDE_SERVER_REPO:-}/scripts/server" \
         "/home/smart/mounts/claude-code-server/scripts/server" \
-        "/opt/claude-code-server/scripts/server"; do
+        "/opt/claude-code-server/scripts/server" \
+        "/usr/local/lib/claude-server"; do
         [ -n "$d" ] || continue
         [ -f "$d/claude-mount.sh" ] || continue
         MOUNT_SRC="$d/claude-mount.sh"
@@ -60,6 +61,10 @@ _strip_crlf() {
 
 _strip_crlf "$MOUNT_SRC"
 _strip_crlf "$AUTO_SRC"
+
+if ! bash -n "$MOUNT_SRC" 2>/dev/null; then
+    fail "claude-mount.sh syntax error (bash -n failed) - fix repo before deploy"
+fi
 [ -f "$WATCH_SRC" ] && _strip_crlf "$WATCH_SRC"
 
 echo ""
@@ -110,5 +115,5 @@ for home in /home/*/; do
 done
 
 echo ""
-echo -e "${GREEN}Done.${NC} Users should reconnect connect.bat (v20260715.1+)."
+echo -e "${GREEN}Done.${NC} Users should reconnect connect.bat (v20260715.15+)."
 echo ""

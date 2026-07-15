@@ -246,9 +246,13 @@ _create_claude_stubs_only() {
             return 0
         fi
     fi
-    local safe="${rpath//'/''}"
+    local safe="${rpath//\'/\'\'}"
     if [ "$LAPTOP_OS" = "mac" ]; then
-        _mac_sh "p='${safe}'; h=0; [ -e "\$p/.git" ] || [ -e "\$p/.git.server-session" ] && h=1; if [ "\$h" = 1 ]; then mkdir -p "\$p/.claude/rules" "\$p/.claude/commands"; [ -s "\$p/.mcp.json" ] || printf '{}' > "\$p/.mcp.json"; fi"
+        _mac_sh "\
+p='${safe}'; \
+h=0; [ -e \"\$p/.git\" ] || [ -e \"\$p/.git.server-session\" ] && h=1; \
+if [ \"\$h\" = 1 ]; then mkdir -p \"\$p/.claude/rules\" \"\$p/.claude/commands\"; [ -s \"\$p/.mcp.json\" ] || printf '{}' > \"\$p/.mcp.json\"; fi\
+"
     else
         _win_ps_out "\$p='${safe}'; \$hasGit=(Test-Path \$p/.git) -or (Test-Path \$p/.git.server-session); if (\$hasGit) { New-Item -ItemType Directory -Force -Path \$p/.claude/rules,\$p/.claude/commands | Out-Null; if (-not (Test-Path \$p/.mcp.json) -or (Get-Item \$p/.mcp.json).Length -eq 0) { Set-Content -Path \$p/.mcp.json -Value '{}' -Encoding utf8 } }" >/dev/null || true
     fi
