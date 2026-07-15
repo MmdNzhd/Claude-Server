@@ -61,7 +61,7 @@ if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
 }
 $ServerIP = "192.168.210.240"
 $Alias    = "claude-server"
-$script:ConnectVersion = '20260715.15'
+$script:ConnectVersion = '20260715.16'
 $CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
