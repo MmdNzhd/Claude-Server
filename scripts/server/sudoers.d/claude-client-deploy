@@ -1,0 +1,9 @@
+# Allow Smart deploy without interactive password (client auto-update bundle).
+# Used by publish/deploy-client-bundles.ps1 via: sudo -n bash .../install-client-bundle.sh <zip>
+# SECURITY: sepidz must NOT have NOPASSWD here. Developer laptop keys used to be
+# merged into sepidz authorized_keys for legacy auto-update; that combo allowed
+# any developer key to root-install the client bundle. Sepidz deploys use
+# sudo -S with publish/sepidz-deploy.local.ps1 (password), not NOPASSWD.
+Defaults:smart !requiretty
+Cmnd_Alias CLAUDE_CLIENT_BUNDLE = /usr/bin/bash /usr/local/lib/claude-server/commands/install-client-bundle.sh *, /bin/bash /usr/local/lib/claude-server/commands/install-client-bundle.sh *, /usr/bin/bash /home/smart/claude-client-bundle-deploy/install-client-bundle.sh *, /bin/bash /home/smart/claude-client-bundle-deploy/install-client-bundle.sh *
+smart ALL=(root) NOPASSWD: CLAUDE_CLIENT_BUNDLE

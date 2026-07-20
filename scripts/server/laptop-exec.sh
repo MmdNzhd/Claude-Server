@@ -110,7 +110,8 @@ _sshfs_state_uncached() {
     [ -n "$mp" ] || { echo "UNKNOWN"; return; }
     mp="$(_expand_home "$mp")"
     if ! timeout 1 stat "$mp" >/dev/null 2>&1; then echo "NOT_MOUNTED"; return; fi
-    if ! mountpoint -q "$mp" 2>/dev/null; then echo "NOT_MOUNTED"; return; fi
+    # Prefer /proc/mounts over mountpoint -q (hangs on frozen SSHFS).
+    if ! grep -F " $mp " /proc/mounts >/dev/null 2>&1; then echo "NOT_MOUNTED"; return; fi
     out=$(timeout 2 ls "$mp" 2>&1) || rc=$?
     if [ "$rc" -ne 0 ] || [[ "$out" == *"Input/output error"* ]] || [[ "$out" == *"Transport endpoint"* ]]; then
         echo "STALE"; return
@@ -135,9 +136,12 @@ _sshfs_state() {
         fi
     fi
     state="$(_sshfs_state_uncached "$mp")"
-    grep -v -F "$mp|" "$SSHFS_CACHE" 2>/dev/null > "${SSHFS_CACHE}.tmp" || true
-    printf '%s|%s|%s\n' "$mp" "$state" "$now" >> "${SSHFS_CACHE}.tmp"
-    mv "${SSHFS_CACHE}.tmp" "$SSHFS_CACHE"
+    (
+        flock 9 || exit 0
+        grep -v -F "$mp|" "$SSHFS_CACHE" 2>/dev/null > "${SSHFS_CACHE}.tmp" || true
+        printf '%s|%s|%s\n' "$mp" "$state" "$now" >> "${SSHFS_CACHE}.tmp"
+        mv "${SSHFS_CACHE}.tmp" "$SSHFS_CACHE"
+    ) 9>"$CACHE_DIR/cache.lock"
     echo "$state"
 }
 
@@ -155,18 +159,123 @@ _ssh_common_opts() {
 }
 
 _laptop_ssh() {
-    local opts
+    local opts _lock="$CACHE_DIR/cm.lock" _s _attempt=1 _rc=0
+    local _slot_fd="" _i _round
+    mkdir -p "$CACHE_DIR"
+
+    # Cap concurrent mux channels at 8 (under live MaxSessions; connect sets MaxSessions 32 — after reconnect can raise slots).
+    # Without this, agent N+1 fails with 255; old code then killed the shared mux and
+    # cascaded failures across ALL agents ("everyone blocked").
+    for _round in $(seq 1 240); do
+        for _i in 0 1 2 3 4 5 6 7; do
+            exec {_slot_fd}<>"$CACHE_DIR/slot-${_i}.lock"
+            if flock -n "$_slot_fd" 2>/dev/null; then
+                break 2
+            fi
+            eval "exec ${_slot_fd}>&-"
+            _slot_fd=""
+        done
+        sleep 0.2
+    done
+    if [ -z "$_slot_fd" ]; then
+        echo "laptop-exec: session slots full (max 8 concurrent SSH channels). Wait; do NOT open new TCP/mux." >&2
+        return 255
+    fi
+
+    # Cleanup dead sockets only (never delete cm.lock / slot-*.lock).
+    shopt -s nullglob
+    for _s in "$CACHE_DIR"/cm-*; do
+        case "$_s" in *.lock|*/slot-*) continue ;; esac
+        [[ "$_s" == *.lock ]] && continue
+        case "$_s" in */cm.lock) continue ;; esac
+        ssh -O check -o "ControlPath=$_s" -o ControlMaster=no -o BatchMode=yes \
+            -o ConnectTimeout=1 -i "$KEY" -p "${TUNNEL_PORT}" \
+            "${LAPTOP_USER}@127.0.0.1" >/dev/null 2>&1 && continue
+        rm -f "$_s" 2>/dev/null || true
+    done
+    shopt -u nullglob
+
     mapfile -t opts < <(_ssh_common_opts)
-    ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" "$@"
+    while [ "$_attempt" -le 4 ]; do
+        # Brief lock for master bring-up only (ConnectTimeout 3s, not full command).
+        (
+            # If we cannot take cm.lock, do NOT race ssh -fN (multi-agent ControlSocket storm).
+            if ! flock -w 8 9; then
+                exit 0
+            fi
+            if ! ssh -O check -o "ControlPath=$CONTROL_PATH" -o ControlMaster=no \
+                -o BatchMode=yes -o ConnectTimeout=1 -i "$KEY" -p "$TUNNEL_PORT" \
+                "${LAPTOP_USER}@127.0.0.1" >/dev/null 2>&1; then
+                ssh -fN -o BatchMode=yes -o ConnectTimeout=3 \
+                    -o StrictHostKeyChecking=accept-new \
+                    -o UserKnownHostsFile="$KNOWN_HOSTS" \
+                    -o ControlMaster=yes -o "ControlPath=$CONTROL_PATH" \
+                    -o ControlPersist=300 \
+                    -i "$KEY" -p "$TUNNEL_PORT" \
+                    "${LAPTOP_USER}@127.0.0.1" >/dev/null 2>&1 || true
+            fi
+        ) 9>"$_lock"
+
+        set +e
+        ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" "$@"
+        _rc=$?
+        set -e
+        if [ "$_rc" -ne 255 ]; then
+            eval "exec ${_slot_fd}>&-"
+            return "$_rc"
+        fi
+        # Master dead? recreate. If master alive, do NOT ssh -O exit (that cascades).
+        if ! ssh -O check -o "ControlPath=$CONTROL_PATH" -o ControlMaster=no \
+            -o BatchMode=yes -o ConnectTimeout=1 -i "$KEY" -p "$TUNNEL_PORT" \
+            "${LAPTOP_USER}@127.0.0.1" >/dev/null 2>&1; then
+            shopt -s nullglob
+            for _s in "$CACHE_DIR"/cm-*; do
+                case "$_s" in *.lock) continue ;; esac
+                rm -f "$_s" 2>/dev/null || true
+            done
+            shopt -u nullglob
+        fi
+        sleep "0.$((5 + RANDOM % 5))"
+        _attempt=$((_attempt + 1))
+    done
+    eval "exec ${_slot_fd}>&-" 2>/dev/null || true
+    return "$_rc"
 }
 
 _laptop_scp_to() {
     local local_file="$1" rpath="$2" rel_file="$3"
-    local opts
+    local opts _attempt=1 _rc=0
     mapfile -t opts < <(_ssh_common_opts)
     rel_file="${rel_file#./}"; rel_file="${rel_file//\\//}"
-    scp -q "${opts[@]}" -i "$KEY" -P "$TUNNEL_PORT" \
-        "$local_file" "${LAPTOP_USER}@127.0.0.1:${rpath}/${rel_file}"
+    # scp reuses mux via ControlPath; go through _laptop_ssh-equivalent slot via flock file
+    local _slot_fd="" _i _round
+    for _round in $(seq 1 240); do
+        for _i in 0 1 2 3 4 5 6 7; do
+            exec {_slot_fd}<>"$CACHE_DIR/slot-${_i}.lock"
+            if flock -n "$_slot_fd" 2>/dev/null; then
+                break 2
+            fi
+            eval "exec ${_slot_fd}>&-"
+            _slot_fd=""
+        done
+        sleep 0.2
+    done
+    while [ "$_attempt" -le 4 ]; do
+        set +e
+        scp -q "${opts[@]}" -i "$KEY" -P "$TUNNEL_PORT" \
+            "$local_file" "${LAPTOP_USER}@127.0.0.1:${rpath}/${rel_file}"
+        _rc=$?
+        set -e
+        if [ "$_rc" -eq 0 ]; then
+            [ -n "$_slot_fd" ] && eval "exec ${_slot_fd}>&-"
+            return 0
+        fi
+        [ "$_rc" -ne 255 ] && { [ -n "$_slot_fd" ] && eval "exec ${_slot_fd}>&-"; return "$_rc"; }
+        sleep "0.$((5 + RANDOM % 5))"
+        _attempt=$((_attempt + 1))
+    done
+    [ -n "$_slot_fd" ] && eval "exec ${_slot_fd}>&-"
+    return "$_rc"
 }
 
 _ensure_remote_parent_dir() {
@@ -206,9 +315,12 @@ _detect_git_dir_cached() {
         fi
     fi
     dir="$(_detect_git_dir "$rpath")"
-    grep -v -F "${pid}|" "$GIT_DIR_CACHE" 2>/dev/null > "${GIT_DIR_CACHE}.tmp" || true
-    printf '%s|%s|%s\n' "$pid" "$dir" "$now" >> "${GIT_DIR_CACHE}.tmp"
-    mv "${GIT_DIR_CACHE}.tmp" "$GIT_DIR_CACHE"
+    (
+        flock 9 || exit 0
+        grep -v -F "${pid}|" "$GIT_DIR_CACHE" 2>/dev/null > "${GIT_DIR_CACHE}.tmp" || true
+        printf '%s|%s|%s\n' "$pid" "$dir" "$now" >> "${GIT_DIR_CACHE}.tmp"
+        mv "${GIT_DIR_CACHE}.tmp" "$GIT_DIR_CACHE"
+    ) 9>"$CACHE_DIR/cache.lock"
     [ "$dir" != "none" ] || return 1
     printf '%s' "$dir"
 }
@@ -219,17 +331,32 @@ _run_in_project() {
         local cmd=""; printf -v cmd '%q ' "$@"
         _laptop_ssh "bash -lc 'cd $(printf '%q' "$rpath") && $cmd'"; return
     fi
-    local win_path="${rpath//\//\\}" cmdline="" arg norm
-    for arg in "$@"; do
-        norm="$(_normalize_arg "$arg")"
-        case "$norm" in
-            *[\"^\&\|\<\>\(\)]*|*\ *|*\'*|*/*) cmdline="${cmdline} \"${norm//\"/\\\"}\"" ;;
-            *) cmdline="${cmdline} ${norm}" ;;
-        esac
-    done
-    cmdline="${cmdline# }"
-    _laptop_ssh "cmd /c \"cd /d ${win_path} && ${cmdline}\""
+    # Windows: avoid cmd /c nested-quote breakage for | & <> () and paths.
+    # Encode a PowerShell Set-Location + argv splat as -EncodedCommand.
+    local enc
+    enc="$(python3 - "$rpath" "$@" <<'PY'
+import base64, sys
+
+def ps_quote(s: str) -> str:
+    return "'" + s.replace("'", "''") + "'"
+
+rpath = sys.argv[1].replace("/", chr(92))
+args = sys.argv[2:]
+if not args:
+    raise SystemExit("run_in_project: empty argv")
+parts = [
+    "$ProgressPreference='SilentlyContinue'",
+    f"Set-Location -LiteralPath {ps_quote(rpath)}",
+    f"& {ps_quote(args[0])} @({', '.join(ps_quote(a) for a in args[1:])})",
+    "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE } else { exit 0 }",
+]
+ps = "; ".join(parts)
+sys.stdout.write(base64.b64encode(ps.encode("utf-16-le")).decode("ascii"))
+PY
+)"
+    _laptop_ssh "powershell -NoProfile -EncodedCommand ${enc}"
 }
+
 
 _git_invoke() {
     local rpath="$1"; shift
@@ -379,7 +506,7 @@ _cmd_read() {
     _require_session; _resolve_project
     local file="${REMAINING[0]}"; file="${file//\\//}"
     if [ "$LAPTOP_OS" = "mac" ]; then _run_in_project "$REMOTE_PATH" cat "$file"
-    else _run_in_project "$REMOTE_PATH" powershell -NoProfile -Command "Get-Content -LiteralPath '${file//\'/''}' -Raw"; fi
+    else _run_in_project "$REMOTE_PATH" powershell -NoProfile -Command "[Console]::OutputEncoding=[Text.UTF8Encoding]::new(\$false); \$t=[IO.File]::ReadAllText((Resolve-Path -LiteralPath '${file//\'/''}').Path,[Text.UTF8Encoding]::new(\$false)); [Console]::Out.Write(\$t)"; fi
 }
 
 _cmd_write() {
@@ -404,9 +531,9 @@ _cmd_git() {
 }
 
 _rg_is_regex() {
+    # Prefer glob checks: bash [[ =~ ]] character classes are easy to get wrong for | + ?
     local p="$1"
-    [[ "$p" =~ [\[\]\(\)\|\+\?] ]] && return 0
-    return 1
+    [[ "$p" == *"["* || "$p" == *"]"* || "$p" == *"("* || "$p" == *")"*         || "$p" == *"|"* || "$p" == *"+"* || "$p" == *"?"* ]]
 }
 
 _ps_search_encoded() {
@@ -496,17 +623,33 @@ Commands:
   mount-status / path / count / read / write / run / git / rg / test
 
 Project selection (first match):
-  1. -p PROJECT
+  1. -p PROJECT   (before OR after subcommand: laptop-exec -p ID read REL  OR  laptop-exec read -p ID REL)
   2. -w PATH  (workspace under ~/mounts/ID/...)
   3. LAPTOP_EXEC_WORKSPACE / CURSOR workspace env / cwd
 
-Speed: SSH ControlMaster reuse (ControlPersist 300s)
+Speed: shared ControlMaster + 8 session slots (capped for OpenSSH MaxSessions) + flock bring-up
 Search: git grep (tracked) -> PowerShell Select-String (all files)
 EOF
 }
 
 main() {
+    # Accept global -p/-w BEFORE subcommand (agents often write: laptop-exec -p ID read REL)
+    local global_args=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -p|--project|-w|--workspace)
+                [ $# -ge 2 ] || _die "missing value for $1"
+                global_args+=("$1" "$2"); shift 2 ;;
+            -h|--help|help)
+                _usage; return 0 ;;
+            *) break ;;
+        esac
+    done
     local cmd="${1:-}"; [ -n "$cmd" ] || { _usage; exit 1; }; shift
+    # Prepend global flags so existing per-command parsers still work
+    if [ "${#global_args[@]}" -gt 0 ]; then
+        set -- "${global_args[@]}" "$@"
+    fi
     case "$cmd" in
         status) _cmd_status "$@" ;;
         health) _cmd_health "$@" ;;
@@ -527,5 +670,7 @@ main() {
     esac
 }
 main "$@"
+
+
 
 

@@ -83,10 +83,16 @@ fi
 [ -d /var/run/claude-active ] && ok "/var/run/claude-active: exists" || fail "/var/run/claude-active: missing"
 [ -f /var/log/claude-activity.jsonl ] && ok "activity log: exists" || warn "activity log: missing (created on first use)"
 
-if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null; then
-    ok "server OAuth token: /etc/environment"
+if [ -f /etc/claude-code/oauth.env ] && grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/claude-code/oauth.env 2>/dev/null; then
+    perms="$(stat -c '%a' /etc/claude-code/oauth.env 2>/dev/null || echo '?')"
+    ok "server OAuth token: /etc/claude-code/oauth.env (mode $perms)"
+    if [ "$perms" != "600" ] && [ "$perms" != "0600" ]; then
+        warn "oauth.env should be mode 600 (root-only)"
+    fi
+elif grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null; then
+    warn "OAuth token still in world-readable /etc/environment — run: sudo claude-server deploy-auth <token>"
 else
-    fail "server OAuth token missing from /etc/environment"
+    fail "server OAuth token missing from /etc/claude-code/oauth.env"
 fi
 
 if [ -f /etc/cursor-auth/golden/auth.json ]; then

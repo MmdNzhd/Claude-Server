@@ -7,22 +7,39 @@ set -u
 
 # Cursor/VS Code spawn bash -ilc to resolve the shell environment. That must not
 # re-run mount/auth/recover (~20s). connect.bat already mounted and synced auth.
-if [ -n "${VSCODE_IPC_HOOK_CLI:-}" ] || [ -n "${CURSOR_AGENT:-}" ] || [ "${TERM_PROGRAM:-}" = "vscode" ]; then
+# Early resolve often has NONE of VSCODE_IPC_HOOK_CLI / TERM_PROGRAM set yet.
+if [ -n "${VSCODE_IPC_HOOK_CLI:-}" ] || [ -n "${CURSOR_AGENT:-}" ] || [ "${TERM_PROGRAM:-}" = "vscode" ] \
+    || [ -n "${VSCODE_RESOLVING_ENVIRONMENT:-}" ] || [ -n "${VSCODE_PID:-}" ] \
+    || [ -n "${CURSOR_TRACE_ID:-}" ]; then
     exit 0
 fi
+_ppargs=$(ps -o args= -p "${PPID:-0}" 2>/dev/null || true)
+case "$_ppargs" in
+    *cursor-server*|*vscode-server*|*bootstrap-fork*|*server-main.js*|*remote-cli*)
+        exit 0
+        ;;
+esac
 
+# Bound all login-path work so a hung auth/heal cannot break Cursor shell resolve.
 # Server-wide OAuth: keep credentials.json empty and sync token into settings.json.
 if [ -x /usr/local/bin/claude-auth-sync ]; then
-    /usr/local/bin/claude-auth-sync
+    timeout 4 /usr/local/bin/claude-auth-sync >/dev/null 2>&1 || true
 fi
 
 if [ -x /usr/local/bin/cursor-auth-sync ] && [ -f /etc/cursor-auth/golden/auth.json ]; then
-    /usr/local/bin/cursor-auth-sync
+    timeout 4 /usr/local/bin/cursor-auth-sync >/dev/null 2>&1 || true
 fi
 
 if [ -x /usr/local/bin/laptop-exec-setup ]; then
-    /usr/local/bin/laptop-exec-setup --user
-    /usr/local/bin/laptop-exec-setup --all-projects 2>/dev/null || true
+    timeout 5 /usr/local/bin/laptop-exec-setup --user >/dev/null 2>&1 || true
+    timeout 5 /usr/local/bin/laptop-exec-setup --all-projects >/dev/null 2>&1 || true
+fi
+
+# Full self-heal (CRLF, Cursor git-off, conf normalize, stale mounts, shim)
+if [ -x /usr/local/bin/claude-self-heal ]; then
+    timeout 8 /usr/local/bin/claude-self-heal --quiet >/dev/null 2>&1 || true
+elif [ -x "$HOME/.local/bin/claude-self-heal" ]; then
+    timeout 8 "$HOME/.local/bin/claude-self-heal" --quiet >/dev/null 2>&1 || true
 fi
 
 MOUNT_BIN="$HOME/.local/bin/claude-mount"
@@ -45,6 +62,7 @@ if [ -f "$CONNECT_CONF" ]; then
     TUNNEL_PORT=""
     while IFS='=' read -r k v; do
         v="${v#\"}" v="${v%\"}"
+        v="$(printf '%s' "$v" | tr -d '\r')"
         case "$k" in
             TUNNEL_PORT) TUNNEL_PORT="$v" ;;
             ACTIVE_MOUNT|active_mount) ACTIVE_MOUNT="$v" ;;
@@ -52,6 +70,10 @@ if [ -f "$CONNECT_CONF" ]; then
     done < "$CONNECT_CONF"
     if [ -n "$TUNNEL_PORT" ]; then
         if ! timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$TUNNEL_PORT" 2>/dev/null; then
+            # Still self-heal: unmount stale SSHFS so IO cannot hang while offline
+            if [ -x /usr/local/bin/claude-self-heal ]; then
+                /usr/local/bin/claude-self-heal --quiet 2>/dev/null || true
+            fi
             exit 0
         fi
     fi
@@ -78,11 +100,30 @@ fi
 # Restore any .git dirs hidden by a previous crashed session before mounting
 "$MOUNT_BIN" recover 2>/dev/null || true
 
+# Infer ACTIVE_MOUNT from LAST_ACTIVE only (never first alphabetical conf).
+LAST_ACTIVE="$HOME/.cache/claude-last-active-mount"
+if [ -z "${ACTIVE_MOUNT:-}" ]; then
+    if [ -f "$LAST_ACTIVE" ]; then
+        ACTIVE_MOUNT="$(tr -d '\r\n' < "$LAST_ACTIVE" 2>/dev/null || true)"
+    fi
+    # Do NOT write first alphabetical conf as ACTIVE_MOUNT when empty;
+    # leave empty unless LAST_ACTIVE (above) or connect set it explicitly.
+    if [ -n "${ACTIVE_MOUNT:-}" ] && [ -f "$CONNECT_CONF" ]; then
+        if grep -qiE '^ACTIVE_MOUNT=' "$CONNECT_CONF" 2>/dev/null; then
+            sed -i "s/^ACTIVE_MOUNT=.*/ACTIVE_MOUNT=$ACTIVE_MOUNT/I" "$CONNECT_CONF" 2>/dev/null || true
+        else
+            printf '\nACTIVE_MOUNT=%s\n' "$ACTIVE_MOUNT" >> "$CONNECT_CONF"
+        fi
+    fi
+fi
+
 # Only mount the project connect.bat selected (never mount all projects on login)
 if [ -n "$ACTIVE_MOUNT" ]; then
     "$MOUNT_BIN" up "$ACTIVE_MOUNT" 2>/dev/null || true
     mkdir -p "$(dirname "$STAMP")" 2>/dev/null || true
     touch "$STAMP" 2>/dev/null || true
+    mkdir -p "$(dirname "$LAST_ACTIVE")" 2>/dev/null || true
+    printf '%s\n' "$ACTIVE_MOUNT" > "$LAST_ACTIVE" 2>/dev/null || true
 fi
 
 # Auto-init CodeGraph and Headroom for any newly mounted project.

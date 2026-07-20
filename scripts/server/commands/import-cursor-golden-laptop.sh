@@ -52,8 +52,8 @@ echo ""
 echo -e "${BOLD}=== Re-sync all users from updated golden ===${NC}"
 bash "$SYNC_BIN" --all
 
-chmod 755 /etc/cursor-auth/golden 2>/dev/null || true
-chmod 644 /etc/cursor-auth/golden/* 2>/dev/null || true
+chmod 700 /etc/cursor-auth/golden 2>/dev/null || true
+chmod 600 /etc/cursor-auth/golden/* 2>/dev/null || true
 
 echo ""
 echo -e "${GREEN}OK golden imported from laptop server profile.${NC}"

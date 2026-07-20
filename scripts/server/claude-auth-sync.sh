@@ -3,7 +3,7 @@
 #
 # Claude 2.1.x prefers ~/.claude/.credentials.json over CLAUDE_CODE_OAUTH_TOKEN.
 # We keep credentials.json as {} and put the server token in settings.json env
-# (required for the VS Code extension, which does not inherit /etc/environment).
+# (required for the VS Code extension; server token is root-only in /etc/claude-code/oauth.env).
 #
 # Usage (root):  claude-auth-sync <username>
 #                 claude-auth-sync --all
@@ -12,6 +12,11 @@
 set -euo pipefail
 
 _oauth_token() {
+    # Prefer root-only store; fall back to legacy /etc/environment during migration.
+    if [ -r /etc/claude-code/oauth.env ]; then
+        grep -m1 '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/claude-code/oauth.env 2>/dev/null | cut -d= -f2- || true
+        return 0
+    fi
     grep -m1 '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null | cut -d= -f2- || true
 }
 
@@ -71,7 +76,7 @@ case "${1:-}" in
     --all)
         [ "$EUID" -eq 0 ] || { echo "claude-auth-sync: must run as root for --all" >&2; exit 1; }
         [ -n "$(_oauth_token)" ] || {
-            echo "claude-auth-sync: no CLAUDE_CODE_OAUTH_TOKEN in /etc/environment" >&2
+            echo "claude-auth-sync: no CLAUDE_CODE_OAUTH_TOKEN in /etc/claude-code/oauth.env" >&2
             exit 1
         }
         for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
@@ -90,7 +95,7 @@ case "${1:-}" in
         u="$1"
         id "$u" &>/dev/null || { echo "claude-auth-sync: unknown user: $u" >&2; exit 1; }
         [ -n "$(_oauth_token)" ] || {
-            echo "claude-auth-sync: no CLAUDE_CODE_OAUTH_TOKEN in /etc/environment" >&2
+            echo "claude-auth-sync: no CLAUDE_CODE_OAUTH_TOKEN in /etc/claude-code/oauth.env" >&2
             exit 1
         }
         _sync_home "/home/$u" "$u:$u"

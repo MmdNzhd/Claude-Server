@@ -57,7 +57,7 @@ Assert ($mount -match '_force_unmount_project') 'claude-mount has force unmount 
 Assert ($mount -match 'ACTIVE_MOUNT') 'claude-mount reads ACTIVE_MOUNT from connect conf'
 
 $watchdog = Get-Content (Get-ServerFile 'server\claude-watchdog.sh') -Raw
-Assert ($watchdog -match '_load_active_mount') 'watchdog loads ACTIVE_MOUNT before remount'
+Assert ($watchdog -match '_load_conf') 'watchdog loads ACTIVE_MOUNT before remount'
 Assert ($watchdog -match 'local_id.*ACTIVE_MOUNT') 'watchdog remounts only active project'
 
 $automount = Get-Content (Get-ServerFile 'server\claude-automount.sh') -Raw
@@ -78,6 +78,53 @@ foreach ($rel in @('mac\connect.sh', 'users\designer\connect.sh')) {
 $gitModeSh = Get-Content (Get-ClientFile 'git-mode.sh') -Raw
 Assert ($gitModeSh -match 'function clear_session_mount|clear_session_mount\(\)') 'git-mode.sh has clear_session_mount'
 Assert ($gitModeSh -match 'initialize_server_session') 'git-mode.sh has initialize_server_session'
+
+
+# P0 recovery/tunnel safety parity (connect-fix-100 #93-96).
+$macConnect = Get-Content (Get-ClientFile 'mac\connect.sh') -Raw
+$macPushMatch = [regex]::Match($gitModeSh, '(?ms)^push_server_connect_conf\(\)\s*\{.*?^\}')
+$macPushBody = if ($macPushMatch.Success) { $macPushMatch.Value } else { '' }
+Assert ($macConnect -match 'RECOVERY_SKIP_CLEAR_MOUNT') 'mac auto recovery logs RECOVERY_SKIP_CLEAR_MOUNT when editor stays open'
+Assert ($macConnect -match 'FINALLY_KEEP_TUNNEL') 'mac cleanup keeps tunnel alive while editor remains on remote folder'
+Assert ($gitModeSh -match 'TUNNEL_SYNC soft_fail[^\r\n]*(no_ssh_proc|tcp_open_no_process|no_process_tcp_open|no_proc_tcp_open)') 'mac tunnel sync soft-fails when TCP is open without a process handle'
+Assert (($gitModeSh + $macConnect) -match 'TUNNEL_SYNC_FAIL_COUNT|TunnelSyncFailCount') 'mac tunnel sync debounces consecutive failures'
+Assert ($macPushBody -notmatch 'claude-self-heal') 'mac push_server_connect_conf does not invoke claude-self-heal'
+Assert ($gitModeSh -match '_LAST_TUNNEL_TRACE[\s\S]*?-ge 30') 'mac TUNNEL_SYNC TRACE is throttled to at least 30 seconds'
+
+# v20260717.7+: Server setup must not abort on script push; foreign-session guard; clear errors
+Assert ($gitModeSh -match 'INIT_SERVER_SESSION_ERROR') 'git-mode.sh sets INIT_SERVER_SESSION_ERROR'
+Assert ($gitModeSh -match 'warn_foreign_server_session') 'git-mode.sh has warn_foreign_server_session'
+Assert ($gitModeSh -match 'Cleared stale session') 'git-mode.sh self-heals stale foreign session'
+Assert ($gitModeSh -match 'password at most once') 'git-mode.sh Mac admin password once'
+Assert ($gitModeSh -match 'never run remote cmds with quoted') 'git-mode.sh documents tilde chmod fix'
+Assert ($gitModeSh -match '45s timeout') 'git-mode.sh Mac password has timeout'
+$cuiSh = Get-Content (Get-ClientFile 'connect-ui.sh') -Raw -ErrorAction SilentlyContinue
+if ($cuiSh) {
+    Assert ($cuiSh -match 'sync_connect_log_to_server') 'connect-ui.sh syncs logs to server'
+    Assert ($cuiSh -match 'mtime \+1') 'connect-ui.sh deletes server logs older than 1 day'
+    Assert ($cuiSh -match 'config/claude-connect/logs/connect-') 'connect-ui.sh keeps durable local day logs'
+}
+$cuiPs = Get-Content (Get-ClientFile 'connect-ui.ps1') -Raw
+Assert ($cuiPs -match 'Sync-ConnectLogToServer') 'connect-ui.ps1 syncs logs to server'
+Assert ($cuiPs -match 'mtime \+1') 'connect-ui.ps1 deletes server logs older than 1 day'
+Assert ($cuiPs -notmatch "Join-Path \$ScriptDir 'connect.log'") 'connect-ui.ps1 does not write connect.log beside scripts'
+
+Assert ($gitModePs1 -match 'Cleared stale session') 'git-mode.ps1 self-heals stale foreign session'
+Assert ($gitModeSh -match 'script push failure must not abort connect') 'git-mode.sh documents non-fatal script push'
+Assert ($gitModeSh -notmatch '(?s)initialize_server_session\(\) \{.*?\[ "\$push_ok" -eq 1 \]') 'initialize_server_session does not fail on push_ok'
+Assert ($gitModePs1 -match 'function Warn-ForeignServerSession') 'git-mode.ps1 has Warn-ForeignServerSession'
+
+foreach ($rel in @('mac\connect.sh')) {
+    $src = Get-Content (Get-ClientFile $rel) -Raw
+    Assert ($src -match 'warn_foreign_server_session') "$rel calls warn_foreign_server_session"
+    Assert ($src -match 'INIT_SERVER_SESSION_ERROR') "$rel shows INIT_SERVER_SESSION_ERROR"
+    Assert ($src -match 'NOT your Mac login') "$rel setup clarifies server username"
+}
+$winConnect = Get-Content (Get-ClientFile 'windows\connect.ps1') -Raw
+Assert ($winConnect -match 'Warn-ForeignServerSession') 'connect.ps1 calls Warn-ForeignServerSession'
+Assert ($winConnect -match 'NOT your Windows login') 'connect.ps1 setup clarifies server username'
+Assert ($winConnect -match 'server script push failed \(continuing\)') 'connect.ps1 continues after script push fail'
+Assert ($winConnect -match 'PushOk') 'connect.ps1 tracks PushOk for non-fatal script push'
 Assert ($gitModeSh -match 'stop_remote_editor') 'git-mode.sh has stop_remote_editor'
 Assert ($gitModeSh -match '_stop_cursor_server_profile') 'git-mode.sh kills ClaudeServerCursorProfile tree on disconnect'
 
@@ -115,7 +162,7 @@ $editorLaunchSh = Get-Content (Get-ClientFile 'editor-launch.sh') -Raw
 Assert ($editorLaunchSh -match 'remote_editor_on_correct_folder') 'editor-launch.sh detects on-folder'
 Assert ($editorLaunchSh -match 'remote_editor_in_agent_home') 'editor-launch.sh detects agent home'
 Assert ($editorLaunchSh -match '--new-window') 'editor-launch.sh supports new-window relaunch'
-Assert ($editorLaunchSh -notmatch 'folder-uri\*\).*return 0') 'editor-launch.sh does not match any folder-uri'
+Assert ($editorLaunchSh -notmatch 'folder-uri\*\)\s*return 0') 'editor-launch.sh does not match any folder-uri'
 
 Assert ($gitModeSh -match 'ACTIVE_MOUNT=%s') 'git-mode.sh pushes ACTIVE_MOUNT in connect conf'
 
@@ -202,8 +249,3 @@ Assert ($dle -match 'claude-mount.sh') 'deploy-laptop-exec deploys claude-mount'
 $dcb = Get-Content (Get-ServerFile 'server\commands\deploy-client-bundle.sh') -Raw
 Assert ($dcb -notmatch 'mac/connect-ui.sh') 'deploy-client-bundle uses scripts/client/connect-ui.sh'
  'git-mode.ps1 recover applies off when mount ok'
-
-
-
-
-

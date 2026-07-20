@@ -19,6 +19,10 @@ $suites = @(
     @{ Name = 'launch-perf-live';       Script = 'test-launch-perf-live.ps1' }
     @{ Name = 'cursor-auth-merge';    Script = 'test-cursor-auth-merge.ps1' }
     @{ Name = 'publish';              Script = 'test-publish.ps1' }
+    @{ Name = 'pushconf-quoting';     Script = 'test-pushconf-quoting.ps1' }
+    @{ Name = 'connect-update-fail-exit'; Script = 'test-connect-update-fail-exit.ps1' }
+    @{ Name = 'session-log-contracts'; Script = 'test-session-log-contracts.ps1' }
+    @{ Name = 'hard-multi-agent-regressions'; Script = 'test-hard-multi-agent-regressions.ps1' }
 )
 
 $fail = 0

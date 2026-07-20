@@ -42,7 +42,7 @@ echo ""
 python3 "$LIB" snapshot "pre_deploy"
 python3 "$LIB" deploy "$TOKEN" "claude-server-deploy-auth"
 
-echo -e "${GREEN}OK${NC}    /etc/environment + /etc/profile.d/claude-auth.sh updated"
+echo -e "${GREEN}OK${NC}    /etc/claude-code/oauth.env (0600) updated; legacy /etc/environment token stripped"
 
 if [ -x "$SYNC_BIN" ]; then
     while IFS= read -r line; do

@@ -42,7 +42,15 @@ function Get-ServerMountDiagnostic {
 function Get-ConnectProblemVerdict {
     param([Parameter(Mandatory)][hashtable]$Ctx)
 
-    if (-not $Ctx.TunnelUp) {
+    # Banner probe can false-negative (MaxStartups / empty). If other signals say the
+    # reverse forward works, do not emit TUNNEL_DOWN (DROP1: ssh -p worked + mount OK).
+    $tunnelEffectivelyUp = [bool]$Ctx.TunnelUp
+    if (-not $tunnelEffectivelyUp) {
+        if ($Ctx.LocalPortOpen -eq $true) { $tunnelEffectivelyUp = $true }
+        if ($Ctx.BgAlive -eq $true) { $tunnelEffectivelyUp = $true }
+        if ($Ctx.MountOk -eq $true -and $Ctx.OnFolder -eq $true) { $tunnelEffectivelyUp = $true }
+    }
+    if (-not $tunnelEffectivelyUp) {
         return @{
             Code = 'TUNNEL_DOWN'; Severity = 'ERROR'
             Summary = "Reverse SSH tunnel not up on port $($Ctx.Port)."
@@ -101,9 +109,9 @@ function Get-ConnectProblemVerdict {
     }
     if ($Ctx.EditorCmd -eq 'cursor' -and -not $Ctx.CursorExeFound) {
         return @{
-            Code = 'CURSOR_NOT_FOUND'; Severity = 'ERROR'; Summary = 'Cursor not installed.'
-            Cause = 'Cursor.exe missing from PATH.'
-            Fix = 'Install Cursor or switch to VS Code in config.'
+            Code = 'CURSOR_NOT_FOUND'; Severity = 'ERROR'; Summary = 'Cursor not found for this Windows user.'
+            Cause = 'cursor.cmd / Cursor.exe not found under any profile (common when connect runs as Admin but Cursor is installed for another user).'
+            Fix = 'Run connect as the Windows user who owns Cursor, or reinstall Cursor for this account. Or switch to VS Code.'
             NextAction = 'C'
         }
     }
@@ -164,7 +172,7 @@ function Get-ConnectProblemVerdict {
             Code = 'CURSOR_LAUNCH_NO_WINDOW'; Severity = 'WARN'
             Summary = 'Launch ran but no Cursor window detected.'
             Cause = 'Process exited immediately or wrong profile.'
-            Fix = 'Check LAUNCH_HISTORY and PROC_START lines in connect.log.'
+            Fix = 'Check LAUNCH_HISTORY and PROC_START on server ~/.claude/logs/connect-YYYYMMDD.log.'
             NextAction = 'O'
         }
     }
@@ -227,19 +235,30 @@ function Write-ConnectDiagnosticReport {
         $expectedUri = Get-RemoteFolderUri -Alias $Alias -RemotePath $RemotePath
     }
 
+    $bgAlive = $false
+    if ($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) { $bgAlive = $true }
+    if (-not $bgAlive -and (Get-Command Get-TunnelSshProcess -ErrorAction SilentlyContinue)) {
+        try { if (Get-TunnelSshProcess) { $bgAlive = $true } } catch { }
+    }
+    # One fresh probe before verdict (positive-cache-only Get-TunnelBanner).
+    $tunnelUpNow = $TunnelUp
+    if (-not $tunnelUpNow -and (Get-Command Test-TunnelUp -ErrorAction SilentlyContinue)) {
+        try { $tunnelUpNow = [bool](Test-TunnelUp -Retries 1) } catch { }
+    }
     $verdict = Get-ConnectProblemVerdict -Ctx @{
         EditorCmd = $EditorCmd; Port = $Port; ServerIP = $ServerIP
-        TunnelUp = $TunnelUp; MountOk = $MountOk; MountOut = $MountOut
+        TunnelUp = $tunnelUpNow; MountOk = $MountOk; MountOut = $MountOut
         OnFolder = $OnFolder; AgentHome = $AgentHome; WindowOpen = $WindowOpen
         DidLaunch = $DidLaunch; AuthOk = $AuthOk; CursorExeFound = $cursorFound
         ServerReachable = $serverReachable; RemotePath = $RemotePath
         MountPoint = $mountPoint; PathExists = $pathExists
         LaunchHistory = $LaunchHistory
+        LocalPortOpen = $localPortOpen; BgAlive = $bgAlive
     }
 
     $sessionStatus = if ($verdict.Severity -eq 'INFO') { 'OK' } else { 'BROKEN' }
     $elev = if ((Get-Command Test-IsElevatedShell -ErrorAction SilentlyContinue) -and (Test-IsElevatedShell)) { 'yes' } else { 'no' }
-    $logPath = if ($script:ConnectLogPath) { $script:ConnectLogPath } else { 'connect.log' }
+    $logPath = if ($script:ConnectLogPath) { $script:ConnectLogPath } else { '(server ~/.claude/logs)' }
 
     $lines = @(
         "======== DIAGNOSTIC REPORT [$Phase] ========"
@@ -260,7 +279,7 @@ function Write-ConnectDiagnosticReport {
     }
     $lines += "PROJECT id=$ProjectId path=$RemotePath"
     if ($expectedUri) { $lines += "EXPECTED_URI=$expectedUri" }
-    $lines += "TUNNEL up=$TunnelUp local_port_open=$localPortOpen server_reachable=$serverReachable banner=$(if (Get-Command Get-TunnelBanner -ErrorAction SilentlyContinue) { Get-TunnelBanner } else { '?' })"
+    $lines += "TUNNEL up=$tunnelUpNow local_port_open=$localPortOpen server_reachable=$serverReachable bg_alive=$bgAlive banner=$(if (Get-Command Get-TunnelBanner -ErrorAction SilentlyContinue) { Get-TunnelBanner } else { '?' })"
     if ($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) {
         $lines += "TUNNEL pid=$($script:SessionBgTunnel.Id)"
     }

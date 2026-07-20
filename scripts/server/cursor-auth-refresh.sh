@@ -98,7 +98,7 @@ new_refresh = body.get("refresh_token") or body.get("refreshToken")
 if new_refresh:
     auth["refreshToken"] = new_refresh
 
-mod.atomic_write(mod.AUTH_JSON, json.dumps(auth, indent=2) + "\n", mode=0o644)
+mod.atomic_write(mod.AUTH_JSON, json.dumps(auth, indent=2) + "\n", mode=0o600)
 
 if mod.STATE_KEYS_JSON.is_file():
     try:
@@ -111,7 +111,7 @@ if mod.STATE_KEYS_JSON.is_file():
             mod.atomic_write(
                 mod.STATE_KEYS_JSON,
                 json.dumps(state_keys, indent=2) + "\n",
-                mode=0o644,
+                mode=0o600,
             )
     except (json.JSONDecodeError, OSError):
         pass
@@ -119,9 +119,9 @@ if mod.STATE_KEYS_JSON.is_file():
 mod.atomic_write(
     mod.EXPORTED_AT,
     datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n",
-    mode=0o644,
+    mode=0o600,
 )
-os.chmod(mod.GOLDEN_DIR, 0o755)
+os.chmod(mod.GOLDEN_DIR, 0o700)
 print("OK tokens refreshed")
 PY
 

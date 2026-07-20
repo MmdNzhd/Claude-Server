@@ -105,10 +105,11 @@ remote_editor_window_open() {
 }
 
 # True when a profile main process has the correct folder-uri / path.
+# IMPORTANT: require the full remote_path - matching only ssh-remote+ALIAS is wrong when
+# several server users share the same alias (e.g. /home/smart/... vs /home/mohammad/...).
 remote_editor_on_correct_folder() {
     local editor_cmd="$1" alias_name="$2" remote_path="$3"
-    local profile_tag="" uri_needle path_needle cmd line
-    uri_needle="ssh-remote+${alias_name}"
+    local profile_tag="" path_needle cmd line
     path_needle="${remote_path%/}"
     case "$editor_cmd" in
         cursor) profile_tag="ClaudeServerCursorProfile" ;;
@@ -125,28 +126,24 @@ remote_editor_on_correct_folder() {
         case "$cmd" in *--type=*) continue ;; esac
         case "$cmd" in *"$profile_tag"*) ;; *) continue ;; esac
         case "$cmd" in *"$path_needle"*) return 0 ;; esac
-        case "$cmd" in *"$uri_needle"*) return 0 ;; esac
     done < <(ps ax -o pid=,command= 2>/dev/null || true)
     return 1
 }
 
-# Cursor profile open but not on this project (Agent home / wrong workspace).
+# Match Windows Test-RemoteEditorInAgentHome: URI-less profile main only.
+# Wrong-folder (has folder-uri to another path) is NOT agent home - use --new-window, do not soft-kill.
 remote_editor_in_agent_home() {
     local alias_name="$1" remote_path="$2"
     local profile_tag="ClaudeServerCursorProfile" cmd line
-    local has_profile_main=0 on_target=0
-    local path_needle="${remote_path%/}"
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         cmd="${line#* }"
         case "$cmd" in *--type=*) continue ;; esac
         case "$cmd" in *"$profile_tag"*)
-            has_profile_main=1
-            case "$cmd" in *"$path_needle"*) on_target=1 ;; esac
+            # URI-less profile main only.
+            if [[ "$cmd" != *folder-uri* ]]; then return 0; fi
         ;; esac
     done < <(ps ax -o pid=,command= 2>/dev/null || true)
-    [ "$has_profile_main" -eq 0 ] && return 1
-    [ "$on_target" -eq 0 ] && return 0
     return 1
 }
 
@@ -194,21 +191,28 @@ launch_remote_editor() {
         profile_main="$(cursor_profile_main_count)"
 
         if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "LAUNCH_BEGIN editor=cursor on_folder=$on_folder agent_home=$agent_home profile_main=$profile_main"
+            connect_log "LAUNCH_BEGIN editor=cursor on_folder=$on_folder agent_home=$agent_home profile_main=$profile_main auth_relaunch=${CURSOR_AUTH_RELAUNCH:-0}"
         fi
 
-        if [ "$on_folder" -eq 1 ] && [ "$agent_home" -eq 0 ]; then
+        # Auth just written to disk - must not reuse a long-lived logged-out process.
+        _auth_relaunch_done=0
+        if [ "${CURSOR_AUTH_RELAUNCH:-0}" = "1" ] && [ "$profile_main" -gt 0 ]; then
+            declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_KILL: auth_relaunch soft-stop profile'
+            stop_cursor_profile_soft
+            on_folder=0
+            agent_home=0
+            profile_main=0
+            _auth_relaunch_done=1
+        fi
+
+        if [ "$on_folder" -eq 1 ] && [ "$agent_home" -eq 0 ] && [ "$_auth_relaunch_done" -eq 0 ]; then
             declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_SKIP: already on correct folder'
             return 0
         fi
 
-        # Match Windows: new window when agent home or profile already open
-        if [ "$agent_home" -eq 1 ] || [ "$profile_main" -gt 0 ]; then
+        # Match Windows: new window when agent home or profile already open; do NOT soft-kill on agent_home.
+        if [ "$agent_home" -eq 1 ] || [ "$profile_main" -gt 0 ] || [ "$_auth_relaunch_done" -eq 1 ]; then
             use_new=1
-        fi
-        if [ "$agent_home" -eq 1 ] && [ "$profile_main" -gt 0 ]; then
-            declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_KILL: agent_home soft-stop profile'
-            stop_cursor_profile_soft
         fi
 
         if [ "$use_new" -eq 1 ]; then

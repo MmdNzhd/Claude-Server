@@ -1,0 +1,45 @@
+=== TEST-PARSE-ALL-CLIENT ===
+Root: D:\Smart\Claude-Code-Server
+When: 2026-07-20 11:13:05
+
+SKIP (secrets): publish/sepidz-deploy.local.ps1
+SKIP (secrets): publish/smart-deploy.local.ps1
+
+--- PowerShell ParseFile (23 files) ---
+
+OK    publish\bump-connect-version.ps1
+OK    publish\deploy-client-bundles.ps1
+OK    publish\deploy-smart-bundle.ps1
+OK    publish\finish-sepidz-deploy.ps1
+OK    publish\finish-smart-deploy.ps1
+OK    publish\Get-DeployCredentials.ps1
+OK    publish\publish.ps1
+OK    scripts\client\_check-sepidz-auth.ps1
+OK    scripts\client\_deploy-sepidz-lex.ps1
+OK    scripts\client\_install-bundle-now.ps1
+OK    scripts\client\connect-diagnostic.ps1
+OK    scripts\client\connect-ui.ps1
+OK    scripts\client\cursor-auth-laptop.ps1
+OK    scripts\client\deploy-server-mount-fix.ps1
+OK    scripts\client\editor-launch.ps1
+OK    scripts\client\git-mode.ps1
+OK    scripts\client\push-laptop-exec-now.ps1
+OK    scripts\client\sync-desktop.ps1
+OK    scripts\client\verify-push.ps1
+OK    scripts\client\windows\connect.ps1
+OK    scripts\client\windows\connect-design.ps1
+OK    scripts\client\windows\connect-diagnostic.ps1
+OK    scripts\client\windows\connect-update.ps1
+
+--- Bash -n (key scripts) ---
+
+Bash: C:\Program Files\Git\bin\bash.exe
+OK    scripts/client/git-mode.sh
+OK    scripts/client/mac/connect.sh
+OK    scripts/client/mac/connect-update.sh
+
+=== SUMMARY ===
+OK:   26
+FAIL: 0
+SKIP: 2
+Verdict: PASS

@@ -55,6 +55,15 @@ grep -q 'ExitOnForwardFailure=yes' "$GIT" || fail 'tunnel must use ExitOnForward
 ! grep -q 'ClearAllForwardings=yes.*-R' "$MAC" || fail 'tunnel must not use ClearAllForwardings with -R'
 ! grep -q 'RemoteForward \$PORT' "$GIT" || fail 'RemoteForward must not be in ssh config'
 
+# P0 recovery/tunnel safety contract (connect-fix-100 #96).
+grep -q 'RECOVERY_SKIP_CLEAR_MOUNT' "$MAC" || fail 'auto recovery must preserve mount while editor is open'
+grep -q 'FINALLY_KEEP_TUNNEL' "$MAC" || fail 'finally cleanup must preserve tunnel while editor is open'
+grep -Eq 'TUNNEL_SYNC_FAIL_COUNT|TunnelSyncFailCount' "$GIT" "$MAC" || fail 'tunnel sync failures must be debounced'
+grep -Eq 'TUNNEL_SYNC soft_fail.*(no_ssh_proc|tcp_open_no_process|no_process_tcp_open)' "$GIT" || fail 'tcp-open tunnel without process must soft-fail'
+grep -q '_LAST_TUNNEL_TRACE' "$GIT" || fail 'TUNNEL_SYNC TRACE throttle state missing'
+grep -q '\-ge 30' "$GIT" || fail 'TUNNEL_SYNC TRACE throttle must be at least 30 seconds'
+_mac_push_body="$(awk '/^push_server_connect_conf\(\)[[:space:]]*\{/{in_fn=1} in_fn{print} in_fn && /^\}/{exit}' "$GIT")"
+! grep -q 'claude-self-heal' <<<"$_mac_push_body" || fail 'push_server_connect_conf must not invoke claude-self-heal'
 bash -n "$GIT" || fail "bash -n git-mode.sh"
 bash -n "$MAC" || fail "bash -n mac/connect.sh"
 

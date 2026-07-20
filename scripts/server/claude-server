@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 # claude-server - Claude Code Server management CLI
 # Usage: sudo bash scripts/server/claude-server install
 #        claude-server <command> [options]
@@ -39,9 +39,10 @@ usage() {
     echo "  import-cursor-golden-laptop <dir>  import golden from laptop server profile"
     echo "  audit-cursor-golden  deep Cursor golden metadata audit (no secrets)"
     echo "  deploy-mount-fix     redeploy claude-mount + automount (single-project fix)"
-    echo "  deploy-client-bundle publish client scripts for laptop auto-update
-    echo "  deploy-laptop-exec   redeploy SSH-first laptop-exec + rules/hooks to all users"
-    echo "  deploy-laptop-exec-and-bundle  laptop-exec all users + client auto-update bundle""
+    echo "  deploy-client-bundle      publish client scripts for laptop auto-update"
+    echo "  install-client-bundle <zip> install publish-built bundle to /usr/local/share/claude-client/"
+    echo "  deploy-laptop-exec        redeploy SSH-first laptop-exec + rules/hooks to all users"
+    echo "  deploy-laptop-exec-and-bundle  laptop-exec all users + client auto-update bundle"
     echo "  fix-all-now [token]  mount redeploy + auth/cursor sync + user repair"
     echo "  update-server        git pull + full redeploy"
     echo ""
@@ -61,7 +62,7 @@ CMD="${1:-}"
 shift 2>/dev/null || true
 
 case "$CMD" in
-    install|add-user|verify|status|diagnose-auth|sync-auth|deploy-auth|sync-cursor-auth|import-cursor-golden-laptop|audit-cursor-golden|deploy-mount-fix|deploy-client-bundle|deploy-laptop-exec|deploy-laptop-exec-and-bundle|fix-all-now|update-server)
+    install|add-user|verify|status|diagnose-auth|sync-auth|deploy-auth|sync-cursor-auth|import-cursor-golden-laptop|audit-cursor-golden|deploy-mount-fix|deploy-client-bundle|install-client-bundle|deploy-laptop-exec|deploy-laptop-exec-and-bundle|fix-all-now|update-server)
         if [ -z "$COMMANDS_DIR" ]; then
             echo -e "${RED}Error:${NC} commands directory not found." >&2
             echo "Run from repo: bash scripts/server/claude-server install" >&2
@@ -87,4 +88,5 @@ case "$CMD" in
         exit 1
         ;;
 esac
+
 

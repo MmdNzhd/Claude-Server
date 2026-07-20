@@ -1,20 +1,23 @@
-Claude Code Server - Client Package
-=====================================
+Claude Code Server - Client Package (Smart)
+=============================================
 
-Current connect scripts: v20260715.17
+Site: Smart
+Server IP (baked into connect scripts): 192.168.210.240
+Current connect scripts: v20260720.1
 
 WINDOWS
 -------
 1. Copy the extracted folder (claude-code-client-YYYYMMDD) somewhere convenient.
 2. Open the windows\ folder.
 
-   Required files (all seven must be in the same folder):
+   Required files (all must be in the same folder):
      connect.bat
      connect.ps1
      connect-ui.ps1
      editor-launch.ps1
      git-mode.ps1
      cursor-auth-laptop.ps1
+     connect-diagnostic.ps1
      connect-rider.bat   (optional - Cursor-only shortcut)
 
 3. Double-click connect.bat.
@@ -26,7 +29,7 @@ WINDOWS
    optionally set git mode (g) or IDE (c), Cursor or VS Code opens via Remote SSH.
 
    Header must show:
-     claude-server  |  <server-ip>  |  v20260715.17
+     claude-server  |  192.168.210.240  |  v20260720.1
 
    Project menu must include:  g git
 
@@ -48,9 +51,13 @@ MAC
 3. Same flow as Windows (project table, git banner, session keys).
 
    Header must show:
-     claude-server  |  <server-ip>  |  v20260715.17
+     claude-server  |  192.168.210.240  |  v20260720.1
 
    After disconnect: 10s countdown, default M = project menu.
+
+   Mac Remote Login: System Settings -> Sharing -> Remote Login must allow
+   your Mac account (whoami short name) or All users. That is separate from
+   your Linux server username.
 
 GIT MODE (FAST vs SLOW)
 -----------------------
@@ -68,7 +75,7 @@ Preference saved in:
 
 SINGLE PROJECT (important)
 --------------------------
-  Only ONE project is mounted per session. Requires connect scripts v20260715.17+
+  Only ONE project is mounted per session. Requires connect scripts v20260720.1+
   and server-side mount fix (admin deploys from repo - not included in this ZIP).
 
 SESSION KEYS
@@ -86,13 +93,14 @@ TROUBLESHOOTING
 ---------------
 If selecting a project shows "Join-Path ChildPath" prompt:
   - You have an OLD connect.ps1 copy
-  - Re-copy the full windows\ folder from this ZIP (all 7 files above)
+  - Re-copy the full windows\ folder from this ZIP
   - connect.bat blocks outdated folders automatically
 
 If connect.bat says OUTDATED:
-  - Missing connect-ui.ps1 or version is not v20260715.17
+  - Missing connect-ui.ps1 or version is not v20260720.1
 
 Do NOT use old folders from previous ZIP dates or stale Desktop copies.
+Do NOT mix this Smart package with a Sepidz ZIP (different server IP).
 
 REQUIREMENTS
 ------------
@@ -116,9 +124,20 @@ TWO CURSOR PROFILES (no conflict)
   Both can run at the same time. Auth sync never closes any Cursor window -
   merges tokens into the server profile while windows stay open.
 
-LOG FILE (Windows)
-------------------
-  connect.log is written beside connect.bat (rotates at 1.5 MB).
-  Use it when Cursor opens Agent home instead of the remote project folder.
+CURSOR AUTH: server golden tokens + profile machineid; use [Claude Server] window only.
+
+LOGS (server only, v20260720.1+)
+---------------------------------
+  No durable connect.log on the laptop. Session logs are uploaded to the
+  server account:
+
+    ~/.claude/logs/connect-YYYYMMDD.log
+    ~/.claude/logs/laptop-ssh-diag-latest.txt   (after laptop SSH failures)
+
+  Laptop uses a temp buffer only (%TEMP% / /tmp); it is deleted when connect
+  exits. Server retains logs for 1 day (hourly cleanup cron).
+
+  Ask admin to read your server logs if Cursor opens Agent home or reverse
+  SSH (Mac Remote Login) fails.
 
 Questions? Contact the admin (smart).

@@ -106,6 +106,8 @@ grep -q 'ControlPersist' "$SERVER_DIR/laptop-exec.sh" || warn "laptop-exec.sh ma
 grep -q 'GIT_MODE="off"' "$SERVER_DIR/claude-mount.sh" || fail "claude-mount.sh missing GIT_MODE=off"
 
 install -m 755 "$SERVER_DIR/laptop-exec.sh" /usr/local/bin/laptop-exec
+# Windows zip/scp can leave CRLF and break bash ($'\r': command not found).
+sed -i 's/\r$//' /usr/local/bin/laptop-exec "$SERVER_DIR/laptop-exec.sh" 2>/dev/null || true
 ok "laptop-exec -> /usr/local/bin/"
 if [ -f "$SERVER_DIR/claude-mount.sh" ]; then
     install -m 755 "$SERVER_DIR/claude-mount.sh" /usr/local/lib/claude-mount
@@ -114,7 +116,7 @@ if [ -f "$SERVER_DIR/claude-mount.sh" ]; then
 fi
 [ -f "$SERVER_DIR/claude-git-setup.sh" ] && install -m 755 "$SERVER_DIR/claude-git-setup.sh" /usr/local/lib/claude-git-setup && ok "claude-git-setup -> /usr/local/lib/"
 
-for f in cursor-rules/laptop-exec.mdc skills/laptop-exec/SKILL.md cursor-hooks/laptop-exec-guard.sh cursor-hooks/hooks-user.json cursor-hooks/hooks-project.json; do
+for f in cursor-rules/laptop-exec.mdc skills/laptop-exec/SKILL.md cursor-hooks/laptop-exec-guard.sh cursor-hooks/laptop-exec-guard-wrap.sh cursor-hooks/laptop-exec-shell-scan.py cursor-hooks/laptop-exec-session.sh cursor-hooks/hooks-user.json cursor-hooks/hooks-project.json; do
   [ -f "$SERVER_DIR/$f" ] || continue
   dst="/usr/local/lib/claude-server/$f"
   src="$SERVER_DIR/$f"
@@ -124,6 +126,7 @@ for f in cursor-rules/laptop-exec.mdc skills/laptop-exec/SKILL.md cursor-hooks/l
   ok "$f"
 done
 [ -f "$SERVER_DIR/laptop-exec-setup.sh" ] && install -m 755 "$SERVER_DIR/laptop-exec-setup.sh" /usr/local/bin/laptop-exec-setup && ok "laptop-exec-setup"
+[ -f "$SERVER_DIR/claude-self-heal.sh" ] && install -m 755 "$SERVER_DIR/claude-self-heal.sh" /usr/local/bin/claude-self-heal && ok "claude-self-heal" && sed -i 's/\r$//' /usr/local/bin/claude-self-heal 2>/dev/null || true
 if [ -f "$SERVER_DIR/tests/test-laptop-exec.sh" ]; then
     dst="/usr/local/lib/claude-server/tests/test-laptop-exec.sh"
     if [ "$SERVER_DIR/tests/test-laptop-exec.sh" -ef "$dst" ]; then
@@ -134,18 +137,22 @@ if [ -f "$SERVER_DIR/tests/test-laptop-exec.sh" ]; then
     fi
 fi
 
-USERS="smart amir amirhossein aria danial hamed hamed.kh kiana mahdie mehrdad mohammad parsa reza tarane designer"
+# All interactive human accounts (Smart + Sepidz + future users). Hardcoded lists miss Sepidz.
 echo -e "${BOLD}Deploy to users${NC}"
-for u in $USERS; do
-  h=$(getent passwd "$u" 2>/dev/null | cut -d: -f6)
-  [ -n "$h" ] && [ -d "$h" ] || continue
+getent passwd | awk -F: '$3 >= 1000 && $1 != "nobody" && $1 != "nfsnobody" { print $1 ":" $6 }' | while IFS=: read -r u h; do
+  [ -n "$u" ] && [ -n "$h" ] && [ -d "$h" ] || continue
   install -d -m 755 -o "$u" -g "$u" "$h/.local/bin" "$h/.cursor/rules" "$h/.cursor/skills/laptop-exec" "$h/.cursor/hooks"
   install -m 755 -o "$u" -g "$u" /usr/local/bin/laptop-exec "$h/.local/bin/laptop-exec"
+  [ -f /usr/local/bin/laptop-exec-setup ] && install -m 755 -o "$u" -g "$u" /usr/local/bin/laptop-exec-setup "$h/.local/bin/laptop-exec-setup" && sed -i 's/\r$//' "$h/.local/bin/laptop-exec-setup" 2>/dev/null || true
+  [ -f /usr/local/bin/claude-automount ] && install -m 755 -o "$u" -g "$u" /usr/local/bin/claude-automount "$h/.local/bin/claude-automount" && sed -i 's/\r$//' "$h/.local/bin/claude-automount" 2>/dev/null || true
+  [ -f /usr/local/bin/claude-self-heal ] && install -m 755 -o "$u" -g "$u" /usr/local/bin/claude-self-heal "$h/.local/bin/claude-self-heal" && sed -i 's/\r$//' "$h/.local/bin/claude-self-heal" 2>/dev/null || true
+  sed -i 's/\r$//' "$h/.local/bin/laptop-exec" 2>/dev/null || true
   [ -f "$SERVER_DIR/claude-mount.sh" ] && install -m 755 -o "$u" -g "$u" "$SERVER_DIR/claude-mount.sh" "$h/.local/bin/claude-mount"
   [ -f "$SERVER_DIR/claude-git-setup.sh" ] && install -m 755 -o "$u" -g "$u" "$SERVER_DIR/claude-git-setup.sh" "$h/.local/bin/claude-git-setup"
   install -m 644 -o "$u" -g "$u" "$SERVER_DIR/cursor-rules/laptop-exec.mdc" "$h/.cursor/rules/laptop-exec.mdc"
   install -m 644 -o "$u" -g "$u" "$SERVER_DIR/skills/laptop-exec/SKILL.md" "$h/.cursor/skills/laptop-exec/SKILL.md"
-  install -m 755 -o "$u" -g "$u" "$SERVER_DIR/cursor-hooks/laptop-exec-guard.sh" "$h/.cursor/hooks/laptop-exec-guard.sh"
+  install -m 755 -o "$u" -g "$u" "$SERVER_DIR/cursor-hooks/laptop-exec-guard.sh cursor-hooks/laptop-exec-guard-wrap.sh cursor-hooks/laptop-exec-shell-scan.py" "$h/.cursor/hooks/laptop-exec-guard.sh"
+  [ -f "$SERVER_DIR/cursor-hooks/laptop-exec-session.sh" ] && install -m 755 -o "$u" -g "$u" "$SERVER_DIR/cursor-hooks/laptop-exec-session.sh" "$h/.cursor/hooks/laptop-exec-session.sh"
   sudo -u "$u" /usr/local/bin/laptop-exec-setup --user 2>/dev/null || true
   sudo -u "$u" /usr/local/bin/laptop-exec-setup --all-projects 2>/dev/null || true
   ok "user $u"

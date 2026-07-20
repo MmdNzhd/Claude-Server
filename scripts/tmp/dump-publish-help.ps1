@@ -1,0 +1,1 @@
+Select-String -Path D:\Smart\Claude-Code-Server\publish\publish.ps1 -Pattern 'SepidzOnly|param\(|SmartOnly|AutoBump' | Select-Object -First 40 | ForEach-Object { "{0}:{1}" -f $_.LineNumber, $_.Line.Trim() }

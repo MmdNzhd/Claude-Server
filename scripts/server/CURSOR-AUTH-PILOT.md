@@ -25,7 +25,7 @@ sudo claude-server sync-cursor-auth # idempotent re-sync
 ```
 
 Expected:
-- `/etc/cursor-auth/golden/auth.json` exists with access + refresh tokens
+- `/etc/cursor-auth/golden/auth.json` exists with access + refresh tokens (file mode 0600, dir 0700)
 - `/etc/cursor-auth/golden/state-keys.json` exists (full SQLite key map for sync)
 - `/etc/cursor-auth/golden/machine-id.txt` non-empty
 - Each developer `~/.config/Cursor/User/globalStorage/state.vscdb` has matching `storage.serviceMachineId`
@@ -60,6 +60,18 @@ sudo claude-server diagnose-auth
 | machineId drift | `sudo claude-server sync-cursor-auth` |
 | refresh failed / shouldLogout | Re-login once, `sudo cursor-auth-export --from-user <name>`, sync all |
 | golden bundle missing | Complete step 2–3 in Prerequisites |
+
+
+## Laptop profile machineid (v20260717.32+)
+
+Golden tokens in `state.vscdb` are not enough. Electron also reads:
+
+- Mac: `~/Library/Application Support/ClaudeServerCursorProfile/machineid`
+- Windows: `%LOCALAPPDATA%\ClaudeServerCursorProfile\machineid`
+
+Connect writes these from `/etc/cursor-auth/golden/machine-id.txt` on every merge **and** on the already-complete skip path.
+
+Also require the Cursor window to be on the **correct remote path** for that server user (not another user\'s mount under the same `claude-server` alias). Mac v20260717.32+ soft-stops the server profile after auth sync so a stale process cannot keep a logged-out session.
 
 ## Risks (not testable locally)
 

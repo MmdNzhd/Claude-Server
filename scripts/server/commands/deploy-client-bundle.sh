@@ -1,7 +1,7 @@
 #!/bin/bash
 # deploy-client-bundle.sh - publish client scripts for laptop auto-update
 # Usage: sudo claude-server deploy-client-bundle
-# Installs to /usr/local/share/claude-client/ (world-readable, no secrets).
+# Installs to /usr/local/share/claude-client/ (client scripts only; no server/ tree).
 
 set -euo pipefail
 
@@ -117,8 +117,13 @@ echo -e "  ${BOLD}source${NC}  $CLIENT_DIR"
 echo -e "  ${BOLD}target${NC}  $BUNDLE_ROOT"
 echo ""
 
-rm -rf "$BUNDLE_ROOT"
-mkdir -p "$BUNDLE_ROOT/mac"
+# Stage into a temp dir, then rename-swap into live (never rm -rf live while clients download).
+STAGE_BUNDLE="/var/tmp/claude-client-bundle-new.$$"
+OLD_BUNDLE="/var/tmp/claude-client-bundle-old.$$"
+rm -rf "$STAGE_BUNDLE" "$OLD_BUNDLE"
+mkdir -p "$STAGE_BUNDLE/mac"
+BUNDLE_LIVE="$BUNDLE_ROOT"
+BUNDLE_ROOT="$STAGE_BUNDLE"
 
 win_files=(
     connect.bat
@@ -179,6 +184,9 @@ for name in "${mac_files[@]}"; do
             ;;
     esac
     if [ ! -f "$src" ]; then
+        if [ "$name" = "connect-ui.sh" ] || [ "$name" = "editor-launch.sh" ] || [ "$name" = "git-mode.sh" ]; then
+            fail "required mac file missing: $name (src=$src)"
+        fi
         warn "skip missing mac/$name"
         continue
     fi
@@ -230,7 +238,56 @@ chmod 644 "$BUNDLE_ROOT/manifest.txt"
 ok "manifest.txt ($(wc -l < "$BUNDLE_ROOT/manifest.txt") files)"
 
 
-chmod 755 "$BUNDLE_ROOT" "$BUNDLE_ROOT/mac" "$BUNDLE_ROOT/server" 2>/dev/null || chmod 755 "$BUNDLE_ROOT" "$BUNDLE_ROOT/mac"
+
+# SECURITY: do NOT merge developer authorized_keys into sepidz. That plus
+# NOPASSWD install-client-bundle allowed any laptop key to root-install.
+# Clients pull the bundle as their own REMOTE_USER (see connect-update.*).
+# server/ scripts are not needed for laptop auto-update apply paths — drop
+# them from the world-readable share (keep win/mac client files only).
+if [ -d "$BUNDLE_ROOT/server" ]; then
+    rm -rf "$BUNDLE_ROOT/server"
+    # Rewrite manifest without server/* entries
+    if [ -f "$BUNDLE_ROOT/manifest.txt" ]; then
+        grep -v '^server/' "$BUNDLE_ROOT/manifest.txt" >"$BUNDLE_ROOT/manifest.txt.tmp" \
+            || true
+        mv "$BUNDLE_ROOT/manifest.txt.tmp" "$BUNDLE_ROOT/manifest.txt"
+        chmod 644 "$BUNDLE_ROOT/manifest.txt"
+    fi
+    ok "removed server/ from world-readable client share"
+fi
+chmod 755 "$BUNDLE_ROOT" "$BUNDLE_ROOT/mac" 2>/dev/null || chmod 755 "$BUNDLE_ROOT"
+# Tighten: dirs 755, files 644 (client scripts are not secrets; no server tree).
+find "$BUNDLE_ROOT" -type d -exec chmod 755 {} \;
+find "$BUNDLE_ROOT" -type f -exec chmod 644 {} \;
+chmod 755 "$BUNDLE_ROOT"/mac/*.sh 2>/dev/null || true
+
+# SHA-256 checksums for client post-scp verify (exclude checksums.txt itself).
+(
+    cd "$BUNDLE_ROOT" || exit 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        find . -type f ! -name checksums.txt -print0 | sort -z | xargs -0 sha256sum | sed 's|  \./|  |'
+    elif command -v shasum >/dev/null 2>&1; then
+        find . -type f ! -name checksums.txt -print0 | sort -z | xargs -0 shasum -a 256 | sed 's|  \./|  |'
+    else
+        fail "need sha256sum or shasum to write checksums.txt"
+    fi
+) > "$BUNDLE_ROOT/checksums.txt"
+chmod 644 "$BUNDLE_ROOT/checksums.txt"
+ok "checksums.txt ($(wc -l < "$BUNDLE_ROOT/checksums.txt") files)"
+
+# Rename-swap: move live aside, promote stage, drop old (clients see old or new, never empty tree mid-rm).
+if [ -e "$BUNDLE_LIVE" ]; then
+    mv "$BUNDLE_LIVE" "$OLD_BUNDLE" || fail "could not move live bundle aside"
+fi
+mv "$BUNDLE_ROOT" "$BUNDLE_LIVE" || {
+    if [ -e "$OLD_BUNDLE" ]; then
+        mv "$OLD_BUNDLE" "$BUNDLE_LIVE" 2>/dev/null || true
+    fi
+    fail "could not promote staged bundle to $BUNDLE_LIVE"
+}
+rm -rf "$OLD_BUNDLE"
+BUNDLE_ROOT="$BUNDLE_LIVE"
+
 VER="$(tr -d '\r\n' < "$BUNDLE_ROOT/connect-version.txt")"
 echo ""
 echo -e "${GREEN}Done.${NC} Client bundle v${VER} at $BUNDLE_ROOT"

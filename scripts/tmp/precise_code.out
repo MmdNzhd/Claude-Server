@@ -1,0 +1,41 @@
+## scripts/client/git-mode.ps1 (1205 lines)
+  L853: function Push-ServerConnectConf {
+  L857: [switch]$ClearActiveMount
+  L863: if (-not $ClearActiveMount -and [string]::IsNullOrWhiteSpace($ActiveMount)) {
+  L874: if ($ClearActiveMount) { $ActiveMount = '' }
+  L862: # Preserve existing server ACTIVE_MOUNT unless caller clears or sets explicitly.
+  L948: if ($Port) { Push-ServerConnectConf -ClearActiveMount }
+## scripts/client/windows/connect.ps1 (1627 lines)
+  L1172: Push-ServerConnectConf -ClearActiveMount
+  L1227: Push-ServerConnectConf -ClearActiveMount
+  L1238: Push-ServerConnectConf -ClearActiveMount
+## scripts/client/git-mode.sh (2436 lines)
+  L71: push_server_connect_conf() {
+  L75: # Preserve server ACTIVE_MOUNT when caller left it empty (tunnel-ensure must not wipe).
+  L281: push_server_connect_conf --clear
+## scripts/server/claude-automount.sh (166 lines)
+  L12: || [ -n "${VSCODE_RESOLVING_ENVIRONMENT:-}" ] || [ -n "${VSCODE_PID:-}" ] \
+  L16: _ppargs=$(ps -o args= -p "${PPID:-0}" 2>/dev/null || true)
+  L17: case "$_ppargs" in
+  L103: LAST_ACTIVE="$HOME/.cache/claude-last-active-mount"
+  L26: timeout 4 /usr/local/bin/claude-auth-sync >/dev/null 2>&1 || true
+  L30: timeout 4 /usr/local/bin/cursor-auth-sync >/dev/null 2>&1 || true
+  L40: timeout 8 /usr/local/bin/claude-self-heal --quiet >/dev/null 2>&1 || true
+  L42: timeout 8 "$HOME/.local/bin/claude-self-heal" --quiet >/dev/null 2>&1 || true
+## scripts/server/claude-self-heal.sh (423 lines)
+  L358: _heal_active_remount() {
+  L420: _heal_active_remount
+  L333: _heal_connect_log_bufs() {
+  L414: _heal_connect_log_bufs
+  L316: _heal_zombie_readable() {
+  L416: _heal_zombie_readable
+  L66: _infer_active_mount() {
+  L142: if inferred="$(_infer_active_mount)"; then
+  L364: id="$(_infer_active_mount || true)"
+## scripts/server/claude-watchdog.sh (208 lines)
+  L173: need_remount=0
+  L175: need_remount=1
+  L179: need_remount=1
+  L18: HEAL_EVERY=10   # every N loops (~5 min) run quiet self-heal
+  L126: if [ $((_loop % HEAL_EVERY)) -eq 0 ]; then
+  NOT_FOUND: Never use mountpoint

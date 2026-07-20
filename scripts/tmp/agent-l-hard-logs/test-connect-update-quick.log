@@ -1,0 +1,23 @@
+calling connect-update...
+  Update source: smart@192.168.210.240
+  Client update available: v20260701.1 -> v20260714.2
+    downloading client bundle...
+  [!] Update apply failed - rolled back to previous package
+done rc=1 ver=
+
+Get-Content : Cannot find path 'C:\Users\Smart\AppData\Local\Temp\claude-update-quick\connect-version.txt' because it 
+does not exist.
+At D:\Smart\Claude-Code-Server\scripts\client\tests\test-connect-update-quick.ps1:11 char:42
++ ... CODE ver=$((Get-Content (Join-Path $tmp 'connect-version.txt') -Raw). ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (C:\Users\Smart\...ect-version.txt:String) [Get-Content], ItemNotFoundEx 
+   ception
+    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetContentCommand
+ 
+You cannot call a method on a null-valued expression.
+At D:\Smart\Claude-Code-Server\scripts\client\tests\test-connect-update-quick.ps1:11 char:41
++ ... TCODE ver=$((Get-Content (Join-Path $tmp 'connect-version.txt') -Raw) ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException
+    + FullyQualifiedErrorId : InvokeMethodOnNull
+ 

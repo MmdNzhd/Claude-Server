@@ -2,7 +2,9 @@
 
 SSHFS mount of laptop design folder + noVNC browser desktop. No Cursor/VS Code.
 
-Client scripts: **v20260715.17** (Windows developer package uses same git-mode modules).
+Client scripts: **v20260720.1** (Windows developer package uses same git-mode modules).
+
+Ships in the **Sepidz** ZIP under `designer/` (IP `192.168.250.70`). Smart developer ZIPs do not include designer.
 
 ## Windows
 
@@ -43,13 +45,15 @@ bash connect.sh --setup
 
 Same hotkeys (`G`, `R`, `Q`).
 
+EXIT / SIGTERM / **SIGHUP** traps clean up the server mount when the Terminal closes.
+
 ---
 
 ## What This Does
 
-- Reverse SSH tunnel: server
+- Reverse SSH tunnel → server
 - SSHFS: server `/home/designer/mounts/laptop`
-- SSH local forward: laptop `127.0.0.1:27015`
+- SSH local forward: laptop `127.0.0.1:27015` (noVNC binds localhost only)
 - Chrome on server downloads to mounted laptop folder (managed policy)
 
 ---
@@ -70,9 +74,10 @@ Designer Chrome download dir: `/home/designer/mounts/laptop` (via managed policy
 | Issue | Action |
 |-------|--------|
 | noVNC not reachable | Admin: `sudo designer-start start` on server |
-| Mount fails | Check laptop path with `-Setup`; ensure OpenSSH Server running |
+| Mount fails | Check laptop path with `-Setup`; ensure OpenSSH Server / Remote Login |
 | Git hide warning | `G` to remount after closing Cursor/git on laptop |
+| Wrong site IP | Use Sepidz package (`192.168.250.70`), not Smart (`192.168.210.240`) |
 
-Sepidz package uses the same connect scripts; publish patches only the server IP.
+Sepidz package uses the same connect scripts as Smart; publish patches only the server IP.
 
-See [docs/client-connect.md](../../../../docs/client-connect.md) for GIT_MODE details.
+See [docs/client-connect.md](../../../../docs/client-connect.md) for developer connect (logs, GIT_MODE, Smart vs Sepidz).

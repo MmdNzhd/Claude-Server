@@ -1,0 +1,35 @@
+=== Agent G adversarial error-flush contract ===
+root=D:\Smart\Claude-Code-Server
+
+PASS  connect.ps1 exists
+PASS  connect-ui.ps1 exists
+PASS  connect-update.ps1 exists
+PASS  trap block parseable
+PASS  trap Write-ConnectLog ERROR before exit
+PASS  trap exits via Wait-ConnectExit or exit N
+PASS  trap logs ERROR before Wait-ConnectExit
+PASS  Write-ConnectLog ERROR triggers Sync-ConnectLogToServer
+PASS  Wait-ConnectExit calls Sync-ConnectLogToServer
+PASS  Close-ConnectLog calls Sync-ConnectLogToServer
+PASS  trap has flush/log rg evidence
+PASS  Sync-ConnectLogToServer parseable
+PASS  watermark advances only inside if ($scpOk)
+FAIL  no ; true in log append ssh remote cmd
+      trailing ; true => watermark ADVANCES on failed append
+FAIL  connect-update ERROR paths must not exit 0
+      found 6: 236:if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) { Write-UpdateFileLog 'ssh_missing' 'ERROR'; exit 0 } | 237:if (-not (Get-Command scp -ErrorAction SilentlyContinue)) { Write-UpdateFileLog 'scp_missing' 'ERROR'; exit 0 } | 299:if (-not $manifestRaw) { Write-UpdateFileLog 'manifest_empty_or_unreachable' 'ERROR'; exit 0 } | 302:if ($files.Count -eq 0) { Write-UpdateFileLog 'manifest_zero_files' 'ERROR'; exit 0 } | 308->310:exit 0 | 371->372:exit 0
+FAIL  connect-update has exit 1/nonzero near ERROR
+      Select-String found no ERROR+exit nonzero pairing
+
+=== WATERMARK (code read) ===
+  cat line: $cat = 'cat "$HOME/' + $remoteTmp + '" >> "$HOME/' + $remoteDay + '" 2>/dev/null; rm -f "$HOME/' + $remoteTmp + '"; chmod 600 "$HOME/' + $remoteDay + '" 2>/dev/null; true'
+  offset advance gated by scpOk: True
+  cat contains '; true' (masks append fail): True
+  Verdict: if cat remote ends with "; true", ssh ExitCode=0, scpOk stays true,
+           ConnectLogSyncOffset ADVANCES even when append failed (silent loss).
+
+=== RESULT pass=13 fail=3 ===
+CONTRACT FAILED
+  - HARD FAIL: no ; true in log append ssh remote cmd -- trailing ; true => watermark ADVANCES on failed append
+  - HARD FAIL: connect-update ERROR paths must not exit 0 -- found 6: 236:if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) { Write-UpdateFileLog 'ssh_missing' 'ERROR'; exit 0 } | 237:if (-not (Get-Command scp -ErrorAction SilentlyContinue)) { Write-UpdateFileLog 'scp_missing' 'ERROR'; exit 0 } | 299:if (-not $manifestRaw) { Write-UpdateFileLog 'manifest_empty_or_unreachable' 'ERROR'; exit 0 } | 302:if ($files.Count -eq 0) { Write-UpdateFileLog 'manifest_zero_files' 'ERROR'; exit 0 } | 308->310:exit 0 | 371->372:exit 0
+  - HARD FAIL: connect-update has exit 1/nonzero near ERROR -- Select-String found no ERROR+exit nonzero pairing

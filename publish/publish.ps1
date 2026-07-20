@@ -1,15 +1,19 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 # publish.ps1 - Client-only distributable packages (windows/ + mac/ + README).
 # Run: double-click publish.bat  (or: powershell -File publish\publish.ps1)
-# Server scripts and deploy tools stay in the repo â€” NOT shipped in ZIPs.
+# Server scripts and deploy tools stay in the repo Ã¢â‚¬â€ NOT shipped in ZIPs.
 
 param(
     [switch]$NoZip,
-    [switch]$SkipVersionBump
+    [switch]$SkipVersionBump,
+    [switch]$SkipServerDeploy,
+    [switch]$SmartOnly,
+    [switch]$SepidzOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($SmartOnly -and $SepidzOnly) { Write-Err 'Use only one of -SmartOnly or -SepidzOnly' }
 
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 . (Join-Path $PSScriptRoot 'bump-connect-version.ps1')
@@ -38,7 +42,7 @@ $ClientFiles = @(
     @{ Src = "scripts\client\git-mode.ps1";              Dst = "windows\git-mode.ps1";      PatchIp = $false }
     @{ Src = "scripts\client\cursor-auth-laptop.ps1";    Dst = "windows\cursor-auth-laptop.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\connect-ui.ps1";            Dst = "windows\connect-ui.ps1";            PatchIp = $false }
-    # connect-diagnostic.ps1: dot-sourced by connect.ps1; user asked for single-run verdict in connect.log
+    # connect-diagnostic.ps1: dot-sourced by connect.ps1; verdict lines go to server ~/.claude/logs/
     @{ Src = "scripts\client\connect-diagnostic.ps1";    Dst = "windows\connect-diagnostic.ps1";  PatchIp = $false }
     @{ Src = "scripts\client\mac\connect.sh";            Dst = "mac\connect.sh";            PatchIp = $true  }
     @{ Src = "scripts\client\mac\connect-update.sh";     Dst = "mac\connect-update.sh";     PatchIp = $false }
@@ -47,6 +51,14 @@ $ClientFiles = @(
     @{ Src = "scripts\client\connect-ui.sh";             Dst = "mac\connect-ui.sh";         PatchIp = $false }
     @{ Src = "scripts\client\editor-launch.sh";          Dst = "mac\editor-launch.sh";      PatchIp = $false }
     @{ Src = "scripts\server\claude-mount.sh";           Dst = "mac\claude-mount.sh";       PatchIp = $false }
+
+    @{ Src = "scripts\server\claude-self-heal.sh";       Dst = "mac\claude-self-heal.sh";   PatchIp = $false }
+
+    @{ Src = "scripts\server\claude-automount.sh";       Dst = "mac\claude-automount.sh";   PatchIp = $false }
+
+    @{ Src = "scripts\server\claude-self-heal.sh";       Dst = "windows\claude-self-heal.sh"; PatchIp = $false }
+
+    @{ Src = "scripts\server\claude-automount.sh";       Dst = "windows\claude-automount.sh"; PatchIp = $false }
 )
 
 $DesignerFiles = @(
@@ -108,6 +120,19 @@ function Install-PublishedFile {
             [System.IO.File]::WriteAllBytes($DstAbs, $utf8NoBom.GetBytes($text))
         }
         Write-Ok "$(Split-Path $DstAbs -Leaf)  [IP: $FromIp -> $ToIp]"
+        if ($ToIp -eq $SepidIp) {
+            $aliasBytes = [System.IO.File]::ReadAllBytes($DstAbs)
+            $aliasText = [System.Text.Encoding]::UTF8.GetString($aliasBytes)
+            if ($aliasText.Length -gt 0 -and [int][char]$aliasText[0] -eq 0xFEFF) { $aliasText = $aliasText.Substring(1) }
+            $aliasText2 = $aliasText.Replace('$Alias    = "claude-server"', '$Alias    = "claude-server-sepidz"')
+            $aliasText2 = $aliasText2.Replace('$Alias = "claude-server"', '$Alias = "claude-server-sepidz"')
+            $aliasText2 = $aliasText2.Replace('ALIAS="claude-server"', 'ALIAS="claude-server-sepidz"')
+            if ($aliasText2 -ne $aliasText) {
+                $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+                [System.IO.File]::WriteAllBytes($DstAbs, $utf8NoBom.GetBytes($aliasText2))
+                Write-Ok "$(Split-Path $DstAbs -Leaf)  [Alias -> claude-server-sepidz]"
+            }
+        }
     } else {
         $bytes = [System.IO.File]::ReadAllBytes($src)
         if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
@@ -187,6 +212,8 @@ function New-ClientZipFromDirectory {
     }
 }
 Write-Host ""
+$readmeSrc = Join-Path $PSScriptRoot "README.txt"
+if (-not $SepidzOnly) {
 Write-Host "Publishing $PackageName (client only)" -ForegroundColor White
 Write-Host ""
 
@@ -204,7 +231,6 @@ foreach ($entry in $ClientFiles) {
 }
 
 Write-Step "Copying README.txt..."
-$readmeSrc = Join-Path $PSScriptRoot "README.txt"
 if (-not (Test-Path $readmeSrc)) { Write-Err "README.txt not found next to publish.ps1" }
 Copy-Item $readmeSrc (Join-Path $OutDir "README.txt") -Force
 Write-Ok "README.txt"
@@ -219,8 +245,19 @@ if (-not $NoZip) {
     $ZipPath = Join-Path $OutBase "$PackageName.zip"
     New-ClientZipFromDirectory -SourceDir $OutDir -ZipPath $ZipPath
     Write-Ok "$PackageName.zip"
+
+    if (-not $SkipServerDeploy) {
+        Write-Host ""
+        Write-Host "Deploying Smart server bundle..." -ForegroundColor White
+        Write-Host ""
+        & (Join-Path $PSScriptRoot 'deploy-smart-bundle.ps1') -ProjectRoot $ProjectRoot -SmartClientRoot $OutDir
+        if ($LASTEXITCODE -ne 0) { Write-Err "Smart server deploy failed (use -SkipServerDeploy to skip)" }
+    }
 }
 
+}
+
+if (-not $SmartOnly) {
 Write-Host ""
 Write-Host "Building Sepidz package (client only, IP patched)..." -ForegroundColor White
 Write-Host ""
@@ -247,16 +284,15 @@ foreach ($entry in $DesignerFiles) {
         -PatchIp:([bool]$entry.PatchIp)
 }
 
-Write-Step "Copying README.txt to claude-code\README.md..."
-$claudeReadme = Join-Path $SepidDir "claude-code\README.md"
-$readmeBytes = [System.IO.File]::ReadAllBytes($readmeSrc)
-$readmeText = [System.Text.Encoding]::UTF8.GetString($readmeBytes)
-if ($readmeText.Length -gt 0 -and [int][char]$readmeText[0] -eq 0xFEFF) { $readmeText = $readmeText.Substring(1) }
-$readmeText = $readmeText -replace [regex]::Escape($SmartIp), $SepidIp
-$utf8NoBom = New-Object System.Text.UTF8Encoding $false
-[System.IO.File]::WriteAllBytes($claudeReadme, $utf8NoBom.GetBytes($readmeText))
-Write-Ok "claude-code\README.md  [IP patched]"
 
+Write-Step "Copying README-sepidz.txt to claude-code\README.md..."
+$sepidReadmeSrc = Join-Path $PSScriptRoot "README-sepidz.txt"
+if (-not (Test-Path $sepidReadmeSrc)) { Write-Err "README-sepidz.txt not found next to publish.ps1" }
+$claudeReadme = Join-Path $SepidDir "claude-code\README.md"
+$claudeReadmeDir = Split-Path $claudeReadme -Parent
+if (-not (Test-Path $claudeReadmeDir)) { $null = New-Item $claudeReadmeDir -ItemType Directory -Force }
+Copy-Item $sepidReadmeSrc $claudeReadme -Force
+Write-Ok "claude-code\README.md  [Sepidz]"
 Write-Step "Copying designer README.md..."
 $designerReadme = Join-Path $ProjectRoot "scripts\client\users\designer\README.md"
 $designerDir = Join-Path $SepidDir "designer"
@@ -275,14 +311,29 @@ if (-not $NoZip) {
     $SepidZip = Join-Path $OutBase "$SepidName.zip"
     New-ClientZipFromDirectory -SourceDir $SepidDir -ZipPath $SepidZip
     Write-Ok "$SepidName.zip"
+
+    if (-not $SkipServerDeploy) {
+        Write-Host ""
+        Write-Host "Deploying Sepidz server bundle..." -ForegroundColor White
+        Write-Host ""
+        & (Join-Path $PSScriptRoot 'deploy-client-bundles.ps1') `
+            -ProjectRoot $ProjectRoot `
+            -SepidClientRoot (Join-Path $SepidDir 'claude-code') `
+            -DeploySmart:$false `
+            -DeploySepidz:$true
+        if ($LASTEXITCODE -ne 0) { Write-Err "Sepidz server deploy failed (use -SkipServerDeploy to skip)" }
+    }
+}
 }
 
 Write-Host ""
 Write-Host "Done." -ForegroundColor Green
-Write-Host "  Main (Smart IP)  : Desktop\claude-publish\$PackageName" -ForegroundColor Green
-Write-Host "  Sepidz (IP patch): Desktop\claude-publish\$SepidName" -ForegroundColor Green
-if (-not $NoZip) {
-    Write-Host "  Main ZIP         : Desktop\claude-publish\$PackageName.zip" -ForegroundColor Green
-    Write-Host "  Sepidz ZIP       : Desktop\claude-publish\$SepidName.zip" -ForegroundColor Green
+if (-not $SepidzOnly) {
+    Write-Host "  Main (Smart IP)  : Desktop\claude-publish\$PackageName" -ForegroundColor Green
+    if (-not $NoZip) { Write-Host "  Main ZIP         : Desktop\claude-publish\$PackageName.zip" -ForegroundColor Green }
+}
+if (-not $SmartOnly) {
+    Write-Host "  Sepidz (IP patch): Desktop\claude-publish\$SepidName" -ForegroundColor Green
+    if (-not $NoZip) { Write-Host "  Sepidz ZIP       : Desktop\claude-publish\$SepidName.zip" -ForegroundColor Green }
 }
 Write-Host ""

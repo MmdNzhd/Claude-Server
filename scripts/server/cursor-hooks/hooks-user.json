@@ -1,13 +1,20 @@
 {
   "version": 1,
   "hooks": {
+    "sessionStart": [
+      {
+        "command": "./hooks/laptop-exec-session.sh"
+      }
+    ],
     "beforeShellExecution": [
-      { "command": "./hooks/laptop-exec-guard.sh" }
+      {
+        "command": "./hooks/laptop-exec-guard-wrap.sh"
+      }
     ],
     "preToolUse": [
       {
-        "command": "./hooks/laptop-exec-guard.sh",
-        "matcher": "Grep|Glob|Shell|Read|Write|Task"
+        "command": "./hooks/laptop-exec-guard-wrap.sh",
+        "matcher": "Grep|Glob|Read|Write|Edit|EditNotebook|StrReplace|Delete|Task"
       }
     ]
   }

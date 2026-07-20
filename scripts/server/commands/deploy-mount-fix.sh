@@ -74,6 +74,11 @@ echo ""
 
 install -m 755 "$AUTO_SRC" /usr/local/bin/claude-automount
 ok "claude-automount -> /usr/local/bin/"
+if [ -f "$SERVER_DIR/claude-self-heal.sh" ]; then
+  install -m 755 "$SERVER_DIR/claude-self-heal.sh" /usr/local/bin/claude-self-heal
+  sed -i 's/\r$//' /usr/local/bin/claude-self-heal 2>/dev/null || true
+  ok "claude-self-heal -> /usr/local/bin/"
+fi
 
 install -m 755 "$MOUNT_SRC" /usr/local/lib/claude-mount
 ok "claude-mount -> /usr/local/lib/claude-mount"
@@ -115,5 +120,5 @@ for home in /home/*/; do
 done
 
 echo ""
-echo -e "${GREEN}Done.${NC} Users should reconnect connect.bat (v20260715.17+)."
+echo -e "${GREEN}Done.${NC} Users should reconnect connect.bat (v20260720.1+)."
 echo ""

@@ -1,0 +1,59 @@
+function Push-ServerConnectConf {
+    param(
+        [string]$GitMode = (Get-GitMode),
+        [string]$ActiveMount = '',
+        [switch]$ClearActiveMount
+    )
+    $mode = $GitMode
+    # Edge: tunnel-ensure / SSH-setup used to push ACTIVE_MOUNT='' and wipe the
+    # server conf mid-session → automount skipped → Cursor opened empty mounts.
+    # Preserve existing server ACTIVE_MOUNT unless caller clears or sets explicitly.
+    if (-not $ClearActiveMount -and [string]::IsNullOrWhiteSpace($ActiveMount)) {
+        $existing = ''
+        try {
+            $existing = ((SshX "grep -E '^ACTIVE_MOUNT=' ~/.claude-connect.conf 2>/dev/null | tail -1 | cut -d= -f2-") -join '').Trim()
+        } catch { }
+        if ($existing) {
+            $ActiveMount = $existing
+        } elseif ($script:ActiveProjectId) {
+            $ActiveMount = [string]$script:ActiveProjectId
+        }
+    }
+    if ($ClearActiveMount) { $ActiveMount = '' }
+    $am = ($ActiveMount -replace "'", "'\''")
+    Write-GitModeLog "PUSH_CONF laptop_user=$LaptopUser port=$Port git_mode=$mode active_mount=$ActiveMount clear=$ClearActiveMount" 'DEBUG'
+    SshX "mkdir -p ~/.local/bin && printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nGIT_MODE=%s\nLAPTOP_OS=windows\nACTIVE_MOUNT=%s\n' '$LaptopUser' '$Port' '$mode' '$am' > ~/.claude-connect.conf && chmod 600 ~/.claude-connect.conf || true" 2>$null | Out-Null
+
+    # Win+Mac: server-side 
+
+==== CLEAR around Push ClearActive ====
+        [switch]$ClearActiveMount
+    if (-not $ClearActiveMount -and [string]::IsNullOrWhiteSpace($ActiveMount)) {
+    if ($ClearActiveMount) { $ActiveMount = '' }
+    Write-GitModeLog "PUSH_CONF laptop_user=$LaptopUser port=$Port git_mode=$mode active_mount=$ActiveMount clear=$ClearActiveMount" 'DEBUG'
+    if ($Port) { Push-ServerConnectConf -ClearActiveMount }
+
+==== sh push ====
+push_server_connect_conf() {
+    local mode os="${GIT_MODE_LAPTOP_OS:-mac}" active="${ACTIVE_MOUNT_ID:-}"
+    local clear="${1:-}"
+    mode="$(get_git_mode)"
+    # Preserve server ACTIVE_MOUNT when caller left it empty (tunnel-ensure must not wipe).
+    if [ "$clear" != "--clear" ] && [ -z "$active" ]; then
+        active="$(sshx "grep -E '^ACTIVE_MOUNT=' \$HOME/.claude-connect.conf 2>/dev/null | tail -1 | cut -d= -f2-" 2>/dev/null | tr -d '\r' || true)"
+        [ -z "$active" ] && active="${ACTIVE_PROJECT_ID:-}"
+    fi
+    if [ "$clear" = "--clear" ]; then active=""; fi
+    sshx "printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nGIT_MODE=%s\nLAPTOP_OS=%s\nACTIVE_MOUNT=%s\n' '${LAPTOP_USER}' '$PORT' '${mode}' '${os}' '${active}' > \$HOME/.claude-connect.conf && chmod 600 \$HOME/.claude-connect.conf" 2>/dev/null || true
+    # Win+Mac: server-side self-heal after every conf push
+    sshx '/usr/local/bin/claude-self-heal --quiet 2>/dev/null || $HOME/.local/bin/claude-self-heal --quiet 2>/dev/null |
+
+==== sh clear call ====
+           connect_log "CLEAR_MOUNT: down end project=$project_id" 'DEBUG'
+        fi
+    fi
+    ACTIVE_MOUNT_ID=""
+    push_server_connect_conf --clear
+}
+
+lapt

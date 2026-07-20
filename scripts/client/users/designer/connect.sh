@@ -14,7 +14,24 @@ CM='$HOME/.local/bin/claude-mount'
 NOVNC_PORT=27015
 MOUNT_ID="laptop"
 
-die()       { echo ""; echo "  [X] $*"; echo ""; exit 1; }
+
+# Minimal day-log (designer has no connect-ui.sh). Greppable FAIL for multi-agent diagnosis.
+_designer_log() {
+    local msg="$1" level="${2:-INFO}"
+    local day="$HOME/.config/claude-connect/logs"
+    local f="$day/connect-$(date +%Y%m%d).log"
+    local sid="${CLAUDE_CONNECT_RUN_ID:--}"
+    local ts
+    mkdir -p "$day" 2>/dev/null || true
+    ts="$(python3 -c 'import time; t=time.time(); print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)) + ".%03d" % int((t%1)*1000))' 2>/dev/null || date '+%Y-%m-%d %H:%M:%S.000')"
+    printf '[%s] [%s] [%s] %s\n' "$ts" "$level" "$sid" "$msg" >> "$f" 2>/dev/null || true
+}
+
+die() {
+    _designer_log "ERROR: $*" ERROR
+    _designer_log "FAIL DIE: $*" ERROR
+    echo ""; echo "  [X] $*"; echo ""; exit 1
+}
 warn()      { printf '  [!] %s\n' "$*"; }
 step() {
     local s="    $*"
@@ -207,6 +224,8 @@ _GIT_MODE_SH="$SCRIPT_DIR/git-mode.sh"
 [ -f "$_GIT_MODE_SH" ] || die "git-mode.sh not found - re-copy the full designer package"
 . "$_GIT_MODE_SH"
 
+# Multi-instance: no global flock (unlimited concurrent UIs; tunnel slots isolate ports).
+
 step "Server key"
 touch "$HOME/.ssh/authorized_keys"; chmod 600 "$HOME/.ssh/authorized_keys"
 grep -vF "$PUB_B" "$HOME/.ssh/authorized_keys" > "$HOME/.ssh/authorized_keys.tmp" 2>/dev/null && mv "$HOME/.ssh/authorized_keys.tmp" "$HOME/.ssh/authorized_keys" || true
@@ -280,7 +299,7 @@ cleanup_session() {
     printf '\n    Disconnecting...\n'
     timeout 8 ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$ALIAS" "$CM down '$MOUNT_ID'" 2>/dev/null || true
     ACTIVE_MOUNT_ID=""
-    push_server_connect_conf
+    push_server_connect_conf --clear
     [ -n "$bg_pid" ] && kill "$bg_pid" 2>/dev/null || true
 }
 trap cleanup_session EXIT
@@ -345,12 +364,23 @@ while true; do
         printf '    R = retry   Q = quit\n'
         _rk=""
         while [ "$_rk" != "r" ] && [ "$_rk" != "q" ]; do
-            read -r -t 30 -n 1 _rk </dev/tty 2>/dev/null || read -r -t 5 -n 1 _rk 2>/dev/null || { _rk="q"; break; }
-            _rk="$(printf '%s' "$_rk" | tr '[:upper:]' '[:lower:]')"
+            _k=""
+            read -r -t 30 -n 1 _k </dev/tty 2>/dev/null || read -r -t 5 -n 1 _k 2>/dev/null || { _rk="q"; break; }
+            _k="$(printf '%s' "$_k" | tr '[:upper:]' '[:lower:]')"
+            case "$_k" in
+                r) _rk="r" ;;
+                q) _rk="q" ;;
+                *)
+                    _ord="$(printf '%s' "$_k" | od -An -tuC | tr -s ' ' | awk '{print $1; exit}')"
+                    if [ -n "$_ord" ] && [ "$_ord" -gt 127 ]; then
+                        continue
+                    fi
+                    ;;
+            esac
         done
         [ "$_rk" = "r" ] && { echo ""; continue; }
         ACTIVE_MOUNT_ID=""
-        push_server_connect_conf
+        push_server_connect_conf --clear
         kill "$bg_pid" 2>/dev/null || true
         already_down=1; break
     fi
@@ -416,12 +446,23 @@ while true; do
         printf '    R = retry   Q = quit\n'
         _rk=""
         while [ "$_rk" != "r" ] && [ "$_rk" != "q" ]; do
-            read -r -t 30 -n 1 _rk </dev/tty 2>/dev/null || read -r -t 5 -n 1 _rk 2>/dev/null || { _rk="q"; break; }
-            _rk="$(printf '%s' "$_rk" | tr '[:upper:]' '[:lower:]')"
+            _k=""
+            read -r -t 30 -n 1 _k </dev/tty 2>/dev/null || read -r -t 5 -n 1 _k 2>/dev/null || { _rk="q"; break; }
+            _k="$(printf '%s' "$_k" | tr '[:upper:]' '[:lower:]')"
+            case "$_k" in
+                r) _rk="r" ;;
+                q) _rk="q" ;;
+                *)
+                    _ord="$(printf '%s' "$_k" | od -An -tuC | tr -s ' ' | awk '{print $1; exit}')"
+                    if [ -n "$_ord" ] && [ "$_ord" -gt 127 ]; then
+                        continue
+                    fi
+                    ;;
+            esac
         done
         [ "$_rk" = "r" ] && { echo ""; continue; }
         ACTIVE_MOUNT_ID=""
-        push_server_connect_conf
+        push_server_connect_conf --clear
         kill "$bg_pid" 2>/dev/null || true
         already_down=1; break
     fi
@@ -457,19 +498,33 @@ while true; do
     # Flush buffered keypresses before entering wait loop
     while read -r -t 0 </dev/tty 2>/dev/null; do read -r -n 1 </dev/tty 2>/dev/null || true; done
 
-    _action="q"
+    _action=""
     _got_key=0
     while _tunnel_alive "$bg_pid"; do
         if read -r -t 1 -n 1 _key </dev/tty 2>/dev/null; then
             _key_lower="$(printf '%s' "$_key" | tr '[:upper:]' '[:lower:]')"
-            [ "$_key_lower" = "r" ] && _action="r"
-            [ "$_key_lower" = "g" ] && _action="g"
+            _resolved=""
+            case "$_key_lower" in
+                r) _resolved="r" ;;
+                g) _resolved="g" ;;
+                q|$'\n'|$'\r') _resolved="q" ;;
+            esac
+            if [ -z "$_resolved" ]; then
+                # Non-ASCII printable (e.g. Persian ض): ignore and keep waiting.
+                _ord="$(printf '%s' "$_key" | od -An -tuC | tr -s ' ' | awk '{print $1; exit}')"
+                if [ -n "$_ord" ] && [ "$_ord" -gt 127 ]; then
+                    continue
+                fi
+                continue
+            fi
+            _action="$_resolved"
             _got_key=1; break
         fi
     done
     if [ "$_got_key" -eq 0 ] && ! _tunnel_alive "$bg_pid"; then
         tunnel_drop_session_action
     fi
+    [ -z "${_action:-}" ] && continue
 
     if [ "$_action" = "g" ]; then
         configure_git_mode
@@ -480,7 +535,7 @@ while true; do
     printf '    Disconnecting...\n'
     ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$ALIAS" "$CM down '$MOUNT_ID'" 2>/dev/null || true
     ACTIVE_MOUNT_ID=""
-    push_server_connect_conf
+    push_server_connect_conf --clear
     kill "$bg_pid" 2>/dev/null || true
     already_down=1
 
@@ -494,4 +549,35 @@ while true; do
 done
 
 trap - EXIT
+
+# Post-disconnect menu (ASCII commands only; ignore Persian/other glyphs).
+echo ""
+printf '    \033[0;36mDisconnected. What would you like to do?\033[0m\n'
+printf '    \033[0;90mC = connect again   X = exit\033[0m\n'
+echo ""
+_post=""
+while [ "$_post" != "c" ] && [ "$_post" != "x" ]; do
+    _k=""
+    if read -r -t 1 -n 1 _k </dev/tty 2>/dev/null; then
+        _k="$(printf '%s' "$_k" | tr '[:upper:]' '[:lower:]')"
+        case "$_k" in
+            c)
+                printf '    Reconnecting...\n'
+                sleep 1
+                echo ""
+                exec bash "$0" "$@"
+                ;;
+            x)
+                printf '    Exiting...\n'
+                _post="x"
+                ;;
+            *)
+                _ord="$(printf '%s' "$_k" | od -An -tuC | tr -s ' ' | awk '{print $1; exit}')"
+                if [ -n "$_ord" ] && [ "$_ord" -gt 127 ]; then
+                    continue
+                fi
+                ;;
+        esac
+    fi
+done
 echo ""

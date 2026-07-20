@@ -23,6 +23,8 @@ _load_global() {
     if [ -f "$CONNECT_CONF" ]; then
         while IFS='=' read -r k v; do
             v="${v#\"}" v="${v%\"}"
+            # Strip CRLF (Windows-written conf) - parity with claude-watchdog
+            v="$(printf '%s' "$v" | tr -d '\r')"
             case "$k" in
                 LAPTOP_USER)  LAPTOP_USER="$v" ;;
                 TUNNEL_PORT)  TUNNEL_PORT="$v" ;;
@@ -123,7 +125,12 @@ _hide_git() {
 _restore_git() {
     local rpath="$1"
     [ -z "$rpath" ] && return 0
-    _git_tunnel_ready || return 0
+    [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ] || return 0
+    # Prefer healthy tunnel; if probe fails but TCP still open (watchdog DOWN race),
+    # still attempt restore. SSH ConnectTimeout=5 bounds hang; skip if TCP closed.
+    if ! _git_tunnel_ready; then
+        _tunnel_tcp_open || return 0
+    fi
     _restore_git_body "$rpath"
 }
 
@@ -151,15 +158,17 @@ _restore_git_body() {
     [ -z "$rpath" ] && return 0
     local safe="${rpath//\'/\'\'}"
     if [ "$LAPTOP_OS" = "mac" ]; then
-        _mac_sh "[ -e '${safe}/.git.server-session' ] && mv '${safe}/.git.server-session' '${safe}/.git' 2>/dev/null"
+        # Never clobber a real .git dir when both exist; only replace a worktree pointer file.
+        _mac_sh "p='${safe}'; if [ -e \"\$p/.git.server-session\" ]; then if [ -d \"\$p/.git\" ]; then :; elif [ -f \"\$p/.git\" ]; then rm -f \"\$p/.git\" && mv \"\$p/.git.server-session\" \"\$p/.git\"; elif [ ! -e \"\$p/.git\" ]; then mv \"\$p/.git.server-session\" \"\$p/.git\"; fi; fi"
     else
-        _win_ps "\$p='${safe}'; if (Test-Path \$p/.git.server-session) { Rename-Item \$p/.git.server-session .git -Force -ErrorAction SilentlyContinue }"
+        _win_ps "\$p='${safe}'; if (Test-Path \$p/.git.server-session) { if ((Test-Path \$p/.git -PathType Container) -and (Test-Path \$p/.git/HEAD)) { } elseif (Test-Path \$p/.git -PathType Leaf) { Remove-Item \$p/.git -Force -ErrorAction SilentlyContinue; Rename-Item \$p/.git.server-session .git -Force -ErrorAction SilentlyContinue } elseif (-not (Test-Path \$p/.git)) { Rename-Item \$p/.git.server-session .git -Force -ErrorAction SilentlyContinue } }"
     fi
 }
 
 
 _emit_git_hide_warn() {
     local ps_out="$1"
+    ps_out="${ps_out//$'\r'/}"
     local hide_status
     hide_status=$(printf '%s\n' "$ps_out" | grep -o 'GIT_HIDE:.*' | tail -1 || true)
     _GIT_HIDE_LAST_FAILED=0
@@ -188,7 +197,10 @@ _mac_hide_git_and_create_stubs() {
         out=$(_mac_sh "\
 p='${safe}'; \
 has=0; [ -e \"\$p/.git\" ] || [ -e \"\$p/.git.server-session\" ] && has=1; \
-if [ -e \"\$p/.git.server-session\" ] && [ ! -e \"\$p/.git\" ]; then \
+if [ -e \"\$p/.git.server-session\" ] && [ -d \"\$p/.git\" ]; then echo GIT_HIDE:skip; \
+elif [ -e \"\$p/.git.server-session\" ] && [ -f \"\$p/.git\" ]; then \
+  rm -f \"\$p/.git\" 2>/dev/null; mv \"\$p/.git.server-session\" \"\$p/.git\" 2>/dev/null && echo GIT_HIDE:restored || echo GIT_HIDE:fail:mv_denied; \
+elif [ -e \"\$p/.git.server-session\" ] && [ ! -e \"\$p/.git\" ]; then \
   n=0; ok=0; while [ \$n -lt 3 ]; do n=\$((n+1)); mv \"\$p/.git.server-session\" \"\$p/.git\" 2>/dev/null && { echo GIT_HIDE:restored; ok=1; break; }; sleep 2; done; \
   [ \$ok -eq 0 ] && echo GIT_HIDE:fail:mv_denied; \
 elif [ -e \"\$p/.git\" ]; then echo GIT_HIDE:visible; fi; \
@@ -199,7 +211,8 @@ if [ \"\$has\" = 1 ]; then mkdir -p \"\$p/.claude/rules\" \"\$p/.claude/commands
 p='${safe}'; \
 if [ ! -e \"\$p/.git\" ] && [ ! -e \"\$p/.git.server-session\" ]; then echo GIT_HIDE:skip; \
 elif [ -e \"\$p/.git.server-session\" ] && [ ! -e \"\$p/.git\" ]; then echo GIT_HIDE:already; \
-elif [ -e \"\$p/.git\" ] && [ ! -e \"\$p/.git.server-session\" ]; then \
+elif [ -f \"\$p/.git\" ]; then echo GIT_HIDE:skip; \
+elif [ -d \"\$p/.git\" ] && [ ! -e \"\$p/.git.server-session\" ]; then \
   n=0; ok=0; while [ \$n -lt 3 ]; do n=\$((n+1)); mv \"\$p/.git\" \"\$p/.git.server-session\" 2>/dev/null && { echo GIT_HIDE:hidden; ok=1; break; }; \
   if [ \$n -eq 2 ]; then pkill -x git 2>/dev/null || true; sleep 1; else sleep 2; fi; done; \
   [ \$ok -eq 0 ] && echo GIT_HIDE:fail:mv_denied; \
@@ -216,8 +229,8 @@ _win_hide_git_and_create_stubs() {
     local safe="${rpath//\'/\'\'}"
     local ps_out=""
     # Single-line PS (no trailing \\) - backslashes break powershell -Command over SSH.
-    local hide_try='$n=0; $ok=$false; $err=""; if (-not (Test-Path $p/.git) -and -not (Test-Path $p/.git.server-session)) { Write-Output "GIT_HIDE:skip"; exit }; if ((Test-Path $p/.git) -and -not (Test-Path $p/.git.server-session)) { while ($n -lt 3) { $n++; try { Rename-Item $p/.git .git.server-session -Force -ErrorAction Stop; Write-Output "GIT_HIDE:hidden"; $ok=$true; break } catch { $err=$_.Exception.Message; if ($n -eq 2) { Get-Process git -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1 } else { Start-Sleep -Seconds 2 } } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } elseif (Test-Path $p/.git.server-session) { Write-Output "GIT_HIDE:already" } else { Write-Output "GIT_HIDE:skip" }'
-    local restore_try='if (Test-Path $p/.git.server-session) { $n=0; $ok=$false; $err=""; while ($n -lt 3) { $n++; try { if (Test-Path $p/.git) { Remove-Item $p/.git -Force -ErrorAction SilentlyContinue }; Rename-Item $p/.git.server-session .git -Force -ErrorAction Stop; Write-Output "GIT_HIDE:restored"; $ok=$true; break } catch { $err=$_.Exception.Message; Start-Sleep -Seconds 2 } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } elseif (Test-Path $p/.git) { Write-Output "GIT_HIDE:visible" } else { Write-Output "GIT_HIDE:skip" }'
+    local hide_try='$n=0; $ok=$false; $err=""; if (-not (Test-Path $p/.git) -and -not (Test-Path $p/.git.server-session)) { Write-Output "GIT_HIDE:skip"; exit }; if (Test-Path $p/.git -PathType Leaf) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git -PathType Container) -and (Test-Path $p/.git.server-session)) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git -PathType Container) -and -not (Test-Path $p/.git.server-session)) { while ($n -lt 3) { $n++; try { Rename-Item $p/.git .git.server-session -Force -ErrorAction Stop; Write-Output "GIT_HIDE:hidden"; $ok=$true; break } catch { $err=$_.Exception.Message; if ($n -eq 2) { Get-Process git -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1 } else { Start-Sleep -Seconds 2 } } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } elseif (Test-Path $p/.git.server-session) { Write-Output "GIT_HIDE:already" } else { Write-Output "GIT_HIDE:skip" }'
+    local restore_try='if (Test-Path $p/.git.server-session) { if ((Test-Path $p/.git -PathType Container) -and (Test-Path $p/.git/HEAD)) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git) -and -not (Test-Path $p/.git -PathType Leaf)) { Write-Output "GIT_HIDE:skip" } else { $n=0; $ok=$false; $err=""; while ($n -lt 3) { $n++; try { if (Test-Path $p/.git -PathType Leaf) { Remove-Item $p/.git -Force -ErrorAction SilentlyContinue }; if (Test-Path $p/.git) { Write-Output "GIT_HIDE:skip"; $ok=$true; break }; Rename-Item $p/.git.server-session .git -Force -ErrorAction Stop; Write-Output "GIT_HIDE:restored"; $ok=$true; break } catch { $err=$_.Exception.Message; Start-Sleep -Seconds 2 } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } } elseif (Test-Path $p/.git) { Write-Output "GIT_HIDE:visible" } else { Write-Output "GIT_HIDE:skip" }'
     local stub_ps='; if ($hasGit) { New-Item -ItemType Directory -Force -Path $p/.claude/rules,$p/.claude/commands | Out-Null; if (-not (Test-Path $p/.mcp.json) -or (Get-Item $p/.mcp.json).Length -eq 0) { Set-Content -Path $p/.mcp.json -Value "{}" -Encoding utf8 } }'
     local ps_prefix ps_cmd
     ps_prefix="\$p='${safe}'; \$hasGit=(Test-Path \$p/.git) -or (Test-Path \$p/.git.server-session); "
@@ -297,8 +310,85 @@ _hide_git_and_create_stubs() {
     fi
 }
 
+# GIT_MODE=off|hide: disable Cursor SCM git over SSHFS (avoids "Failed to execute git").
+# GIT_MODE=server: re-enable / clear stuck git.enabled=false from a prior hide session.
+# Only remote User settings (NOT workspace .vscode) so laptop-local git stays enabled.
+_apply_git_scm_policy() {
+    local lpath="$1"
+    [ -n "$lpath" ] && [ -d "$lpath" ] || return 0
+    # hide/off: disable Cursor SCM over SSHFS. server: re-enable / clear stuck false.
+    python3 - "${HOME:-}" "$GIT_MODE" <<'SCM_PY' 2>/dev/null || true
+import json, os, sys
+
+home = sys.argv[1] if len(sys.argv) > 1 else ""
+mode = (sys.argv[2] if len(sys.argv) > 2 else "off").lower()
+if not home:
+    raise SystemExit(0)
+disable = {
+    "git.enabled": False,
+    "git.autoRepositoryDetection": False,
+    "git.detectSubmodules": False,
+    "git.repositoryScanMaxDepth": 0,
+}
+# Keys we may have stuck false after hide->server; restore usable defaults.
+enable_keys = (
+    "git.enabled",
+    "git.autoRepositoryDetection",
+    "git.detectSubmodules",
+    "git.repositoryScanMaxDepth",
+)
+
+def merge_settings(path: str) -> None:
+    parent = os.path.dirname(path)
+    # only if this remote editor profile already exists
+    top = os.path.dirname(os.path.dirname(parent))  # .../data
+    if not os.path.isdir(top):
+        return
+    os.makedirs(parent, exist_ok=True)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    changed = False
+    if mode == "server":
+        # Clear stuck disables from a prior hide session
+        for k in enable_keys:
+            if k == "git.enabled" and data.get(k) is False:
+                data[k] = True
+                changed = True
+            elif k == "git.autoRepositoryDetection" and data.get(k) is False:
+                data[k] = True
+                changed = True
+            elif k == "git.detectSubmodules" and data.get(k) is False:
+                data[k] = True
+                changed = True
+            elif k == "git.repositoryScanMaxDepth" and data.get(k) == 0:
+                data.pop(k, None)
+                changed = True
+    else:
+        for k, v in disable.items():
+            if data.get(k) != v:
+                data[k] = v
+                changed = True
+    if changed or not os.path.isfile(path):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+
+for rel in (
+    ".cursor-server/data/User/settings.json",
+    ".vscode-server/data/User/settings.json",
+):
+    merge_settings(os.path.join(home, rel))
+SCM_PY
+}
+
 _warm_sshfs_cache() {
     local lpath="$1"
+    _apply_git_scm_policy "$lpath"
     if [ -x /usr/local/bin/laptop-exec-setup ]; then
         /usr/local/bin/laptop-exec-setup --project "$lpath" 2>/dev/null || true
     fi
@@ -307,6 +397,7 @@ _warm_sshfs_cache() {
         timeout 5 ls "$lpath/.claude/rules/"    >/dev/null 2>&1 || true
         timeout 5 ls "$lpath/.claude/commands/" >/dev/null 2>&1 || true
         timeout 5 ls "$lpath/.cursor/rules/"    >/dev/null 2>&1 || true
+        timeout 5 ls "$lpath/.vscode/"          >/dev/null 2>&1 || true
     ) &
 }
 
@@ -328,7 +419,11 @@ _tunnel_banner_matches_laptop() {
     echo "$banner" | grep -q '^SSH-2.0-' || return 1
     case "${LAPTOP_OS,,}" in
         mac|darwin)
-            echo "$banner" | grep -qiE 'OpenSSH_for_Windows|Ubuntu|Debian|el[0-9]+' && return 1
+            # macOS Remote Login is plain OpenSSH. Reject Windows + common Linux/package banners.
+            echo "$banner" | grep -qi 'OpenSSH' || return 1
+            echo "$banner" | grep -qiE 'OpenSSH_for_Windows|Ubuntu|Debian|el[0-9]+|Fedora|fc[0-9]|Alpine|Raspbian|CentOS|Rocky|Alma|SUSE|FreeBSD|AMI|\bLinux\b' && return 1
+            # Packaged Linux often has "OpenSSH_XpY <distro...>" (space after pN)
+            echo "$banner" | grep -qiE 'OpenSSH_[0-9.]+p[0-9]+[[:space:]]' && return 1
             ;;
         *)
             echo "$banner" | grep -qi 'OpenSSH_for_Windows' || return 1
@@ -391,9 +486,16 @@ _tunnel_diagnose() {
     return "$rc"
 }
 
+_in_proc_mounts() {
+    local mp="${1%/}"
+    [ -n "$mp" ] || return 1
+    # Instant; never hangs on frozen SSHFS (unlike mountpoint -q).
+    grep -F " $mp " /proc/mounts >/dev/null 2>&1
+}
+
 _is_mounted() {
     local lpath="$1"
-    mountpoint -q "$lpath" 2>/dev/null && \
+    _in_proc_mounts "$lpath" && \
         timeout 2 ls "$lpath" >/dev/null 2>&1
 }
 
@@ -414,7 +516,7 @@ _force_unmount_project() {
         [ -n "$rpath" ] && _restore_git "$rpath"
         return 0
     fi
-    if ! mountpoint -q "$lpath" 2>/dev/null; then
+    if ! _in_proc_mounts "$lpath"; then
         [ -n "$rpath" ] && _restore_git "$rpath"
         return 0
     fi
@@ -427,7 +529,7 @@ _force_unmount_project() {
         sleep 1
         _do_unmount "$lpath"
     fi
-    if mountpoint -q "$lpath" 2>/dev/null && timeout 2 ls "$lpath" >/dev/null 2>&1; then
+    if _is_mounted "$lpath"; then
         echo "error: unmount failed: $lpath" >&2
         return 1
     fi
@@ -487,13 +589,15 @@ _do_mount() {
             sleep 1
         else
             echo "already mounted: $lpath"
+            # Always (re)apply hide/stubs first - trusted early-return must not skip re-hide.
+            _hide_git_and_create_stubs "$rpath"
             if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ] && \
                { [ ! -e "$lpath/.git" ] || [ -e "$lpath/.git.server-session" ]; } && \
                [ "$_GIT_HIDE_LAST_FAILED" != "1" ]; then
+                _warm_sshfs_cache "$lpath"
                 _mount_restore_git_mode
                 return 0
             fi
-            _hide_git_and_create_stubs "$rpath"
             # SSHFS cache may keep stale .git after laptop rename - remount if .git still visible.
             # Skip the remount when the hide itself genuinely failed (e.g. access denied) -
             # a fresh mount won't clear a laptop-side lock, so retrying just doubles the wait
@@ -510,7 +614,7 @@ _do_mount() {
     fi
 
     # Clean stale mountpoint (use lazy unmount -uz in case the mount is frozen)
-    if timeout 2 mountpoint -q "$lpath" 2>/dev/null; then
+    if _in_proc_mounts "$lpath"; then
         _do_unmount "$lpath"
         sleep 1
     fi
@@ -788,7 +892,7 @@ cmd_recover_one() {
     _rpath_for_this_laptop "$rpath" || return 0
     [ -n "$lpath" ] && [ -n "$rpath" ] || return 0
     _tunnel_up && tunnel_ok=1
-    if ! mountpoint -q "$lpath" 2>/dev/null; then
+    if ! _in_proc_mounts "$lpath"; then
         [ "$tunnel_ok" -eq 1 ] && _restore_git_body "$rpath"
     elif ! timeout 2 ls "$lpath" >/dev/null 2>&1; then
         lpath_esc=$(printf '%s' "$lpath" | sed 's/[[\.*^$(){}+?|]/\\&/g')
@@ -818,7 +922,7 @@ cmd_recover() {
         lpath="${lpath//\\//}"
         _rpath_for_this_laptop "$rpath" || continue
         if [ -n "$lpath" ] && [ -n "$rpath" ]; then
-            if ! mountpoint -q "$lpath" 2>/dev/null; then
+            if ! _in_proc_mounts "$lpath"; then
                 [ "$tunnel_ok" -eq 1 ] && _restore_git_body "$rpath"
             elif ! timeout 2 ls "$lpath" >/dev/null 2>&1; then
                 lpath_esc=$(printf '%s' "$lpath" | sed 's/[[\.*^$(){}+?|]/\\&/g')
@@ -918,7 +1022,7 @@ cmd_down() {
         rpath="${rpath//\\//}"
 
         if [ -n "$lpath" ]; then
-            if mountpoint -q "$lpath" 2>/dev/null; then
+            if _in_proc_mounts "$lpath"; then
                 _force_unmount_project "$lpath" "$rpath" || return 1
             else
                 echo "not mounted: $lpath"

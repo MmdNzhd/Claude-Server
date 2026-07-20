@@ -1,0 +1,6 @@
+fixed_at=2026-07-20T11:19:24.8940223+03:30
+mac_seq=12
+mac_recover=ok
+win_banner=ok
+win_ensure=ok
+DO NOT REVERT seq 1 12 or recover_mounts or banner_miss_tcp_open_budget

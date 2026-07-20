@@ -29,10 +29,12 @@ fi
     exit 1
 }
 
-if ! grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null; then
-    echo -e "${RED}no CLAUDE_CODE_OAUTH_TOKEN in /etc/environment${NC}" >&2
-    echo "  Set token first, then re-run: sudo claude-server sync-auth" >&2
-    exit 1
+if [ ! -r /etc/claude-code/oauth.env ] || ! grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/claude-code/oauth.env 2>/dev/null; then
+    if ! grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null; then
+        echo -e "${RED}no CLAUDE_CODE_OAUTH_TOKEN in /etc/claude-code/oauth.env${NC}" >&2
+        echo "  Set token: sudo claude-server deploy-auth <token>" >&2
+        exit 1
+    fi
 fi
 
 echo ""

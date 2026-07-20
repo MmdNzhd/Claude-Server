@@ -71,6 +71,11 @@ if [ -x /usr/local/bin/claude-automount ]; then
     chown "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin/claude-automount"
     ok "~/.local/bin/claude-automount installed"
 fi
+if [ -x /usr/local/bin/claude-self-heal ]; then
+    install -m 755 /usr/local/bin/claude-self-heal "/home/$USERNAME/.local/bin/claude-self-heal"
+    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin/claude-self-heal"
+    ok "~/.local/bin/claude-self-heal installed"
+fi
 if [ -x /usr/local/bin/laptop-exec ]; then
     install -m 755 /usr/local/bin/laptop-exec "/home/$USERNAME/.local/bin/laptop-exec"
     chown "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin/laptop-exec"
@@ -167,7 +172,7 @@ cat > "/home/$USERNAME/.claude/settings.json" << 'SETTINGS'
       "env": {
         "SQLSERVER_HOST": "192.168.210.124",
         "SQLSERVER_USER": "Mohammad",
-        "SQLSERVER_PASSWORD": "Mohammad123"
+        "SQLSERVER_PASSWORD": "CHANGE_ME"
       }
     }
   },
@@ -190,11 +195,11 @@ chown "$USERNAME:$USERNAME" "/home/$USERNAME/.claude/settings.json"
 ok "~/.claude/settings.json written"
 
 if [ -x /usr/local/bin/claude-auth-sync ]; then
-    if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null; then
+    if [ -f /etc/claude-code/oauth.env ] || grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null; then
         claude-auth-sync "$USERNAME"
         ok "OAuth token synced (settings.json env + empty credentials.json)"
     else
-        warn "no server OAuth token in /etc/environment yet"
+        warn "no server OAuth token in /etc/claude-code/oauth.env (or legacy /etc/environment) yet"
         warn "set token then run: sudo claude-server sync-auth $USERNAME"
     fi
 else
@@ -230,7 +235,7 @@ case $- in
   *i*)
     if [ -z "$CLAUDE_AUTOMOUNT_DONE" ] && { [ -x "$HOME/.local/bin/claude-automount" ] || [ -x /usr/local/bin/claude-automount ]; }; then
         export CLAUDE_AUTOMOUNT_DONE=1
-        "$HOME/.local/bin/claude-automount" 2>/dev/null || /usr/local/bin/claude-automount 2>/dev/null
+        timeout 10 "$HOME/.local/bin/claude-automount" 2>/dev/null || timeout 10 /usr/local/bin/claude-automount 2>/dev/null
         [ "$PWD" = "$HOME" ] && [ -d "$HOME/work" ] && cd "$HOME/work"
     fi
     ;;
@@ -252,6 +257,10 @@ else
 fi
 
 echo ""
+
+# SECURITY: do not merge this user's keys into sepidz authorized_keys.
+# Auto-update uses the developer's own REMOTE_USER account (connect-update.*).
+
 echo -e "${GREEN}${BOLD}Done.${NC} User $USERNAME is ready."
 echo ""
 echo "  Next steps:"

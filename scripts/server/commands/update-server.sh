@@ -87,12 +87,21 @@ if $REFRESH_TOKEN; then
     read -r -s -p "  CLAUDE_CODE_OAUTH_TOKEN: " NEW_TOKEN
     echo ""
     [ -n "$NEW_TOKEN" ] || fail "empty token - aborted"
-    echo "export CLAUDE_CODE_OAUTH_TOKEN=$NEW_TOKEN" > /etc/profile.d/claude-auth.sh
+    mkdir -p /etc/claude-code
+    chmod 700 /etc/claude-code
+    printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$NEW_TOKEN" > /etc/claude-code/oauth.env
+    chmod 600 /etc/claude-code/oauth.env
+    # Strip legacy world-readable copies
+    if [ -f /etc/environment ]; then
+        grep -v '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment > /tmp/claude-env.$$ || true
+        mv /tmp/claude-env.$$ /etc/environment
+    fi
+    cat > /etc/profile.d/claude-auth.sh <<'PHEOF'
+# Claude OAuth: token is root-only at /etc/claude-code/oauth.env
+# Per-user copies live in ~/.claude/settings.json (claude-auth-sync).
+PHEOF
     chmod 644 /etc/profile.d/claude-auth.sh
-    grep -v '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment > /tmp/claude-env.$$
-    mv /tmp/claude-env.$$ /etc/environment
-    echo "CLAUDE_CODE_OAUTH_TOKEN=$NEW_TOKEN" >> /etc/environment
-    ok "token updated in profile.d + /etc/environment"
+    ok "token updated in /etc/claude-code/oauth.env (0600)"
     if [ -x /usr/local/bin/claude-auth-sync ]; then
         claude-auth-sync --all
         ok "OAuth token synced to all users"
@@ -131,10 +140,17 @@ done
 # --- 5. Verify + auth probe -------------------------------------------------
 step "5 - verify"
 
+VERIFY_OK=1
 if [ -x /usr/local/bin/claude-server ]; then
-    claude-server verify || warn "verify reported failures (see above)"
+    if ! claude-server verify; then
+        warn "verify reported failures (see above)"
+        VERIFY_OK=0
+    fi
 else
-    bash "$REPO_DIR/scripts/server/commands/verify.sh" || true
+    if ! bash "$REPO_DIR/scripts/server/commands/verify.sh"; then
+        warn "verify reported failures (see above)"
+        VERIFY_OK=0
+    fi
 fi
 
 if [ -f "$REPO_DIR/scripts/server/commands/diagnose-auth.sh" ]; then
@@ -146,6 +162,13 @@ elif [ -f /usr/local/lib/claude-server/diagnose-auth.sh ]; then
 fi
 
 echo ""
+if [ "$VERIFY_OK" -ne 1 ]; then
+    echo -e "${RED}${BOLD}Update finished with verify failures.${NC}"
+    echo ""
+    echo "  Developers: disconnect + reconnect Cursor/VS Code after token change."
+    echo ""
+    exit 1
+fi
 echo -e "${GREEN}${BOLD}Update complete.${NC}"
 echo ""
 echo "  Developers: disconnect + reconnect Cursor/VS Code after token change."

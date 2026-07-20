@@ -1,0 +1,1 @@
+ssh -o BatchMode=yes -o ConnectTimeout=10 -o ControlMaster=no smart@192.168.250.70 'grep QSYNC_ ~/.claude/logs/connect-20260719.log | tail -5; echo ---; grep VERIFY_PROBE ~/.claude/logs/connect-20260719.log | tail -3; echo ---; wc -c ~/.claude/logs/connect-20260719.log'

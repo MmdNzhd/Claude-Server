@@ -107,6 +107,34 @@ function FlushKeys {
     } catch {}
 }
 
+function Resolve-DesignKeyLetter {
+    param($ki)
+    if (-not $ki) { return @{ Letter = ''; UseVk = $false; Code = 0 } }
+    $kc = $ki.KeyChar.ToString()
+    $code = if ($kc.Length -eq 1) { [int][char]$kc[0] } else { 0 }
+    $ascii = ($code -ge 32 -and $code -le 126)
+    $letter = if ($ascii) { $kc.ToLowerInvariant() } else { '' }
+    # VK fallback ONLY for null/control KeyChar - never Persian printable (ض on Q).
+    $useVk = ($code -eq 0 -or ($code -gt 0 -and $code -lt 32))
+    return @{ Letter = $letter; UseVk = $useVk; Code = $code }
+}
+
+# Multi-instance: load connect-ui helpers; single-instance lock is a no-op.
+$script:ConnectScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$_connectUi = Join-Path $script:ConnectScriptDir 'connect-ui.ps1'
+if (-not (Test-Path $_connectUi)) {
+    $_connectUi = Join-Path (Split-Path $script:ConnectScriptDir -Parent) 'connect-ui.ps1'
+}
+if (-not (Test-Path $_connectUi)) {
+    $_connectUi = Join-Path (Split-Path (Split-Path $script:ConnectScriptDir -Parent) -Parent) 'connect-ui.ps1'
+}
+if (Test-Path $_connectUi) {
+    . $_connectUi
+    if (Get-Command Enter-ConnectSingleInstance -ErrorAction SilentlyContinue) {
+        $null = Enter-ConnectSingleInstance
+    }
+}
+
 # Get screen dimensions before potential elevation issues
 Add-Type -AssemblyName System.Windows.Forms
 $bounds  = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -284,9 +312,9 @@ try {
             while ($rk -ne 'r' -and $rk -ne 'q') {
                 $ki2 = SafeReadKey
                 if ($ki2) {
-                    $kc2 = $ki2.KeyChar.ToString().ToLower()
-                    if ($kc2 -eq 'r' -or $ki2.Key -eq [ConsoleKey]::R) { $rk = 'r' }
-                    elseif ($kc2 -eq 'q' -or $ki2.Key -eq [ConsoleKey]::Q) { $rk = 'q' }
+                    $rkInfo = Resolve-DesignKeyLetter $ki2
+                    if ($rkInfo.Letter -eq 'r' -or ($rkInfo.UseVk -and $ki2.Key -eq [ConsoleKey]::R)) { $rk = 'r' }
+                    elseif ($rkInfo.Letter -eq 'q' -or ($rkInfo.UseVk -and $ki2.Key -eq [ConsoleKey]::Q)) { $rk = 'q' }
                 } else { Start-Sleep -Milliseconds 200 }
             }
             if ($rk -ne 'r') { $keepRunning = $false }
@@ -320,21 +348,23 @@ try {
 
         FlushKeys
 
-        $action = 'q'
+        $action = ''
         $gotKey = $false
         while (-not $bgTunnel.HasExited) {
             $ki = SafeReadKey
             if ($ki) {
-                $kc = $ki.KeyChar.ToString().ToLower()
-                if ($kc -eq 'r' -or $ki.Key -eq [ConsoleKey]::R) {
-                    $action = 'r'; $gotKey = $true; break
-                } elseif ($kc -eq 'q' -or $ki.Key -eq [ConsoleKey]::Q -or $ki.Key -eq [ConsoleKey]::Enter) {
-                    $action = 'q'; $gotKey = $true; break
+                $info = Resolve-DesignKeyLetter $ki
+                $resolved = ''
+                if ($info.Letter -eq 'r' -or ($info.UseVk -and $ki.Key -eq [ConsoleKey]::R)) { $resolved = 'r' }
+                elseif ($info.Letter -eq 'q' -or ($info.UseVk -and $ki.Key -eq [ConsoleKey]::Q) -or $ki.Key -eq [ConsoleKey]::Enter) { $resolved = 'q' }
+                if ($resolved) {
+                    $action = $resolved; $gotKey = $true; break
                 }
-                # any other key: ignore, keep waiting
+                # Persian/other printable non-ASCII: ignore, keep waiting
             }
             Start-Sleep -Milliseconds 500
         }
+        if (-not $action) { $action = 'q' }
 
         # Tunnel died on its own - always check kick regardless of whether a key was pressed
         if ($bgTunnel.HasExited -and -not ($gotKey -and $action -eq 'q')) {
@@ -349,9 +379,9 @@ try {
                 while ($rk -ne 'r' -and $rk -ne 'q') {
                     $ki3 = SafeReadKey
                     if ($ki3) {
-                        $kc3 = $ki3.KeyChar.ToString().ToLower()
-                        if ($kc3 -eq 'r' -or $ki3.Key -eq [ConsoleKey]::R) { $rk = 'r' }
-                        elseif ($kc3 -eq 'q' -or $ki3.Key -eq [ConsoleKey]::Q) { $rk = 'q' }
+                        $rkInfo = Resolve-DesignKeyLetter $ki3
+                        if ($rkInfo.Letter -eq 'r' -or ($rkInfo.UseVk -and $ki3.Key -eq [ConsoleKey]::R)) { $rk = 'r' }
+                        elseif ($rkInfo.Letter -eq 'q' -or ($rkInfo.UseVk -and $ki3.Key -eq [ConsoleKey]::Q)) { $rk = 'q' }
                     } else { Start-Sleep -Milliseconds 200 }
                 }
                 if ($rk -eq 'q') { $keepRunning = $false; $action = 'q' }
@@ -411,3 +441,4 @@ Write-Host ""
 Write-Host "    Disconnected. Chrome session stays alive on server." -ForegroundColor DarkGray
 Write-Host ""
 
+if (Get-Command Exit-ConnectSingleInstance -ErrorAction SilentlyContinue) { Exit-ConnectSingleInstance }

@@ -329,6 +329,11 @@ function Build-CursorAuthValuesFromGoldenDir {
         if ($auth) {
             if ($auth.accessToken) { $vals['cursorAuth/accessToken'] = [string]$auth.accessToken }
             if ($auth.refreshToken) { $vals['cursorAuth/refreshToken'] = [string]$auth.refreshToken }
+            # Keep auth.json metadata on early (state-keys present) path - same as full path.
+            if ($auth.cachedEmail) { $vals['cursorAuth/cachedEmail'] = [string]$auth.cachedEmail }
+            if ($auth.cachedSignUpType) { $vals['cursorAuth/cachedSignUpType'] = [string]$auth.cachedSignUpType }
+            if ($auth.stripeMembershipType) { $vals['cursorAuth/stripeMembershipType'] = [string]$auth.stripeMembershipType }
+            if ($auth.stripeSubscriptionStatus) { $vals['cursorAuth/stripeSubscriptionStatus'] = [string]$auth.stripeSubscriptionStatus }
         }
         if ($machineId) {
             $vals['storage.serviceMachineId'] = $machineId
@@ -363,10 +368,44 @@ function Build-CursorAuthValuesFromGoldenDir {
     return $null
 }
 
+function Get-CursorAuthTempRoot {
+    # Prefer a resolvable long path; broken 8.3 TEMP shorts (C:\Users\XXXX~1.YYY) can make Remove-Item
+    # throw a terminating error that connect.ps1 trap surfaces as Unexpected error on disconnect.
+    $candidates = New-Object System.Collections.Generic.List[string]
+    try { $p = [System.IO.Path]::GetTempPath(); if ($p) { [void]$candidates.Add($p) } } catch {}
+    if ($env:TEMP) { [void]$candidates.Add($env:TEMP) }
+    if ($env:TMP) { [void]$candidates.Add($env:TMP) }
+    if ($env:LOCALAPPDATA) { [void]$candidates.Add((Join-Path $env:LOCALAPPDATA 'Temp')) }
+    [void]$candidates.Add((Join-Path $env:SystemRoot 'Temp'))
+    foreach ($cand in $candidates) {
+        if (-not $cand) { continue }
+        try {
+            if (-not (Test-Path -LiteralPath $cand)) {
+                New-Item -ItemType Directory -Force -Path $cand -ErrorAction Stop | Out-Null
+            }
+            $full = (Get-Item -LiteralPath $cand -ErrorAction Stop).FullName
+            if ($full) { return $full }
+        } catch { continue }
+    }
+    return [System.IO.Path]::GetTempPath()
+}
+
+function Remove-CursorAuthTempDir {
+    param([string]$Path)
+    if (-not $Path) { return }
+    try {
+        if (Test-Path -LiteralPath $Path) {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+        }
+    } catch {
+        # never let temp cleanup abort connect disconnect
+    }
+}
+
 function Get-RemoteCursorAuthFromGolden {
     param([Parameter(Mandatory)][string]$Alias)
 
-    $tmp = Join-Path $env:TEMP ("cursor-golden-{0}" -f [guid]::NewGuid().ToString('n'))
+    $tmp = Join-Path (Get-CursorAuthTempRoot) ("cursor-golden-{0}" -f [guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     try {
         $ok = $true
@@ -382,8 +421,22 @@ function Get-RemoteCursorAuthFromGolden {
         if (-not $ok) { return $null }
         return (Build-CursorAuthValuesFromGoldenDir -GoldenDir $tmp)
     } finally {
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-CursorAuthTempDir -Path $tmp
     }
+}
+
+
+function Write-CursorProfileMachineId {
+    param([string]$MachineId)
+    if (-not $MachineId) { return $false }
+    $profileDir = Get-CursorRemoteProfileDir
+    if (-not (Test-Path -LiteralPath $profileDir)) {
+        New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+    }
+    $mid = $MachineId.Trim()
+    Set-Content -LiteralPath (Join-Path $profileDir 'machineid') -Value $mid -Encoding Ascii -NoNewline
+    Set-Content -LiteralPath (Join-Path $profileDir 'machineId') -Value $mid -Encoding Ascii -NoNewline
+    return $true
 }
 
 function Merge-CursorAuthIntoLocalDb {
@@ -400,7 +453,13 @@ function Merge-CursorAuthIntoLocalDb {
     if ($map.Count -eq 0) { return $false }
 
     for ($attempt = 0; $attempt -lt 5; $attempt++) {
-        if ([CursorAuthSqlite]::MergeAuthValues($DbPath, $map)) { return $true }
+        if ([CursorAuthSqlite]::MergeAuthValues($DbPath, $map)) {
+            $mid = $null
+            if ($map.ContainsKey('storage.serviceMachineId')) { $mid = $map['storage.serviceMachineId'] }
+            elseif ($map.ContainsKey('telemetry.machineId')) { $mid = $map['telemetry.machineId'] }
+            if ($mid) { Write-CursorProfileMachineId -MachineId $mid | Out-Null }
+            return $true
+        }
         Start-Sleep -Milliseconds 400
     }
     return $false
@@ -411,10 +470,13 @@ function Merge-CursorStorageJsonFromGolden {
         [Parameter(Mandatory)][string]$Alias,
         [Parameter(Mandatory)][string]$LocalPath
     )
-    $tmp = "$LocalPath.merge-src"
-    if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+    $tmp = Join-Path (Get-CursorAuthTempRoot) ("cursor-storage-merge-{0}.json" -f [guid]::NewGuid().ToString('n'))
+    Remove-CursorAuthTempDir -Path $tmp
     scp -o BatchMode=yes -o ConnectTimeout=20 -q "${Alias}:/etc/cursor-auth/golden/storage.json" $tmp 2>$null
-    if ($LASTEXITCODE -ne 0) { return $false }
+    if ($LASTEXITCODE -ne 0) {
+        Remove-CursorAuthTempDir -Path $tmp
+        return $false
+    }
 
     try {
         $remote = $null
@@ -453,7 +515,7 @@ function Merge-CursorStorageJsonFromGolden {
     } catch {
         return $false
     } finally {
-        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Remove-CursorAuthTempDir -Path $tmp
     }
 }
 
@@ -507,6 +569,45 @@ function Test-CursorAuthNeedsRefresh {
         }
     } catch {
         $reasons += 'serviceMachineId_check_failed'
+    }
+
+    # Electron machineid file must match golden (login breaks when it drifts).
+    try {
+        $profileDir = Get-CursorRemoteProfileDir
+        $fileMid = ''
+        $midPath = Join-Path $profileDir 'machineid'
+        if (Test-Path -LiteralPath $midPath) {
+            $fileMid = (Get-Content -LiteralPath $midPath -Raw -ErrorAction SilentlyContinue).Trim()
+        }
+        $goldMid = ''
+        if (Get-Command SshX -ErrorAction SilentlyContinue) {
+            $goldMid = ((SshX "tr -d '[:space:]' < /etc/cursor-auth/golden/machine-id.txt 2>/dev/null") -join '').Trim()
+        }
+        if ($goldMid -and ($fileMid -ne $goldMid)) {
+            $reasons += 'machineid_file_mismatch'
+            Write-AuthSyncLog "AUTH ERROR machineid_file_mismatch" 'WARN'
+        }
+    } catch {
+        $reasons += 'machineid_file_check_failed'
+    }
+
+    # Golden token rotates ~6h; skip-forever when editor open must still detect stale stamp.
+    try {
+        $gs = Split-Path -Parent $DbPath
+        $syncedAtPath = Join-Path $gs 'golden-synced-at.txt'
+        $syncedAt = if (Test-Path -LiteralPath $syncedAtPath) {
+            (Get-Content -LiteralPath $syncedAtPath -Raw -ErrorAction SilentlyContinue).Trim()
+        } else { '' }
+        $goldenExportedAt = ''
+        if (Get-Command SshX -ErrorAction SilentlyContinue) {
+            $goldenExportedAt = ((SshX "cat /etc/cursor-auth/golden/exported-at 2>/dev/null") -join '').Trim()
+        }
+        if ($goldenExportedAt -and ($syncedAt -ne $goldenExportedAt)) {
+            $reasons += 'golden_stale'
+            Write-AuthSyncLog "AUTH ERROR golden_stale synced_at='$syncedAt' exported_at='$goldenExportedAt'" 'WARN'
+        }
+    } catch {
+        $reasons += 'golden_stale_check_failed'
     }
 
     $personalMain = 0
@@ -602,7 +703,20 @@ function Sync-CursorGoldenAuth {
     $syncedAt = if (Test-Path $syncedAtPath) { (Get-Content $syncedAtPath -Raw -ErrorAction SilentlyContinue).Trim() } else { '' }
     $goldenCurrent = $goldenExportedAt -and ($syncedAt -eq $goldenExportedAt)
     if (-not $Force -and $goldenCurrent -and (Test-LocalCursorAuthComplete -DbPath $dbPath)) {
-        Write-AuthSyncLog "skip already complete golden_exported_at=$goldenExportedAt" 'DEBUG'
+        # Heal Electron machineid even when SQLite auth is already complete.
+        $midHeal = $null
+        try {
+            $goldMidDir = Join-Path (Get-CursorAuthTempRoot) ("claude-golden-mid-" + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Force -Path $goldMidDir | Out-Null
+            $goldMidFile = Join-Path $goldMidDir 'machine-id.txt'
+            scp -o BatchMode=yes -o ConnectTimeout=10 -q "${Alias}:/etc/cursor-auth/golden/machine-id.txt" $goldMidFile 2>$null
+            if (($LASTEXITCODE -eq 0) -and (Test-Path -LiteralPath $goldMidFile)) {
+                $midHeal = (Get-Content -LiteralPath $goldMidFile -Raw -ErrorAction SilentlyContinue).Trim()
+            }
+            Remove-CursorAuthTempDir -Path $goldMidDir
+        } catch { }
+        if ($midHeal) { Write-CursorProfileMachineId -MachineId $midHeal | Out-Null }
+        Write-AuthSyncLog "skip already complete golden_exported_at=$goldenExportedAt (machineid healed)" 'DEBUG'
         Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=true skipped=true already_complete=true db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
         $authTotalSw.Stop()
         Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra 'path=skip_already_complete'

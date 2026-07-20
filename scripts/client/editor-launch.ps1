@@ -31,22 +31,106 @@ function Initialize-CursorServerProfile {
 '@ | Set-Content -Path $settingsPath -Encoding UTF8
 }
 
+function Get-CodeRemoteProfileDir {
+    # Isolated VS Code profile for server Remote-SSH (parity with Mac ClaudeServerCodeProfile).
+    return (Join-Path $env:LOCALAPPDATA 'ClaudeServerCodeProfile')
+}
+
+function Initialize-CodeServerProfile {
+    $userDir = Join-Path (Get-CodeRemoteProfileDir) 'User'
+    $settingsPath = Join-Path $userDir 'settings.json'
+    if (Test-Path $settingsPath) { return }
+    if (-not (Test-Path $userDir)) {
+        New-Item -ItemType Directory -Force -Path $userDir | Out-Null
+    }
+    @'
+{
+  "window.title": "${dirty}${activeEditorShort}${separator}[Claude Server Code] ${rootName}",
+  "workbench.colorCustomizations": {
+    "titleBar.activeBackground": "#1e3a5f",
+    "titleBar.activeForeground": "#e8e8e8",
+    "titleBar.inactiveBackground": "#152a45",
+    "titleBar.inactiveForeground": "#a0a0a0"
+  }
+}
+'@ | Set-Content -Path $settingsPath -Encoding UTF8
+}
+
 function Ensure-EditorOnPath {
     param([string]$EditorCmd)
     $leaf = if ($EditorCmd -eq 'cursor') { 'cursor.cmd' } else { 'code.cmd' }
+    $exeLeaf = if ($EditorCmd -eq 'cursor') { 'Cursor.exe' } else { 'Code.exe' }
     $relBin = if ($EditorCmd -eq 'cursor') { 'resources\app\bin' } else { 'bin' }
     $folder = if ($EditorCmd -eq 'cursor') { 'cursor' } else { 'Microsoft VS Code' }
-    foreach ($u in @($script:LaptopUser, $env:USERNAME) | Where-Object { $_ }) {
-        $root = [System.IO.Path]::Combine("C:\Users\$u\AppData\Local\Programs", $folder)
-        $binDir = [System.IO.Path]::Combine($root, $relBin)
+
+    function ConvertTo-EditorCliFromRoot {
+        param([string]$Root)
+        if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return $null }
+        $binDir = [System.IO.Path]::Combine($Root, $relBin)
         $cli = [System.IO.Path]::Combine($binDir, $leaf)
-        if (Test-Path $cli) {
-            if ($env:Path -notlike "*$([regex]::Escape($binDir))*") {
-                $env:Path = "$binDir;$env:Path"
-            }
-            return $cli
-        }
+        if (Test-Path -LiteralPath $cli) { return $cli }
+        $exe = [System.IO.Path]::Combine($Root, $exeLeaf)
+        if (Test-Path -LiteralPath $exe) { return $exe }
+        return $null
     }
+
+    function Add-EditorBinToPath {
+        param([string]$CliPath)
+        if (-not $CliPath) { return $null }
+        $binDir = Split-Path -Parent $CliPath
+        # If we resolved Cursor.exe at install root, prefer resources\app\bin when present
+        if ($CliPath -match '\\Cursor\.exe$' -or $CliPath -match '\\Code\.exe$') {
+            $maybeBin = [System.IO.Path]::Combine((Split-Path -Parent $CliPath), $relBin)
+            $maybeCli = [System.IO.Path]::Combine($maybeBin, $leaf)
+            if (Test-Path -LiteralPath $maybeCli) {
+                $CliPath = $maybeCli
+                $binDir = $maybeBin
+            }
+        }
+        if ($binDir -and ($env:Path -notlike "*$([regex]::Escape($binDir))*")) {
+            $env:Path = "$binDir;$env:Path"
+        }
+        return $CliPath
+    }
+
+    # 1) Preferred accounts first (LaptopUser / current), then every local profile.
+    #    Fixes Admin connect when Cursor is installed under another Windows user.
+    $userNames = New-Object System.Collections.Generic.List[string]
+    foreach ($u in @($script:LaptopUser, $env:USERNAME)) {
+        if ($u -and -not $userNames.Contains($u)) { [void]$userNames.Add($u) }
+    }
+    $usersRoot = 'C:\Users'
+    if (Test-Path -LiteralPath $usersRoot) {
+        Get-ChildItem -LiteralPath $usersRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notin @('Public', 'Default', 'Default User', 'All Users') } |
+            ForEach-Object {
+                if (-not $userNames.Contains($_.Name)) { [void]$userNames.Add($_.Name) }
+            }
+    }
+
+    foreach ($u in $userNames) {
+        $root = [System.IO.Path]::Combine("C:\Users\$u\AppData\Local\Programs", $folder)
+        $hit = ConvertTo-EditorCliFromRoot -Root $root
+        if ($hit) { return (Add-EditorBinToPath -CliPath $hit) }
+    }
+
+    # 2) Current LOCALAPPDATA + machine-wide Program Files
+    $candidateRoots = @(
+        $(if ($env:LOCALAPPDATA) { [System.IO.Path]::Combine($env:LOCALAPPDATA, 'Programs', $folder) } else { $null }),
+        $(if ($env:ProgramFiles) { [System.IO.Path]::Combine($env:ProgramFiles, $folder) } else { $null }),
+        $(if (${env:ProgramFiles(x86)}) { [System.IO.Path]::Combine(${env:ProgramFiles(x86)}, $folder) } else { $null })
+    ) | Where-Object { $_ }
+    foreach ($root in $candidateRoots) {
+        $hit = ConvertTo-EditorCliFromRoot -Root $root
+        if ($hit) { return (Add-EditorBinToPath -CliPath $hit) }
+    }
+
+    # 3) Already on PATH (Get-Command)
+    $cmd = Get-Command $EditorCmd -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source -and (Test-Path -LiteralPath $cmd.Source)) {
+        return (Add-EditorBinToPath -CliPath $cmd.Source)
+    }
+
     return $null
 }
 
@@ -412,6 +496,7 @@ function Start-ProcessAsInteractiveUser {
 }
 
 $script:EditorCimCache = @{}
+$script:EditorCimCacheTtlSec = 2
 $script:LaunchCimCallCount = 0
 $script:VerboseLaunch = ($env:CLAUDE_CONNECT_VERBOSE_LAUNCH -eq '1')
 
@@ -421,9 +506,10 @@ function Clear-CursorProcessCache {
 
 function Test-LaunchPerfEnabled {
     if (Get-Command Test-ConnectPerfEnabled -ErrorAction SilentlyContinue) {
-        return Test-ConnectPerfEnabled
+        return [bool](Test-ConnectPerfEnabled)
     }
-    return $true
+    # Keep the standalone fallback aligned with connect-ui.ps1: PERF is opt-in.
+    return ($env:CLAUDE_CONNECT_PERF_LOG -eq '1')
 }
 
 function Write-LaunchPerfLog {
@@ -450,14 +536,28 @@ function Invoke-CimEditorProcessQuery {
     )
     if ($null -eq $script:LaunchCimCallCount) { $script:LaunchCimCallCount = 0 }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    # Bug 48: TTL so closed editors are detected (cache must expire).
+    if (-not $script:EditorCimCacheTtlSec) { $script:EditorCimCacheTtlSec = 2 }
     if (-not $ForceRefresh -and $script:EditorCimCache.ContainsKey($ExeName)) {
-        $cached = @($script:EditorCimCache[$ExeName])
-        $sw.Stop()
-        Write-LaunchPerfLog -Mark 'cim_query' -Ms $sw.ElapsedMilliseconds -Extra "reason=$Reason count=$($cached.Count) cache_hit=1 exe=$ExeName"
-        return $cached
+        $entry = $script:EditorCimCache[$ExeName]
+        $cached = $null
+        $ageOk = $false
+        if ($entry -is [hashtable] -and $entry.ContainsKey('At') -and $entry.ContainsKey('Procs')) {
+            $ageOk = ((Get-Date) - [datetime]$entry.At).TotalSeconds -lt [double]$script:EditorCimCacheTtlSec
+            $cached = @($entry.Procs)
+        } else {
+            # Legacy bare array entry - treat as expired.
+            $cached = @($entry)
+            $ageOk = $false
+        }
+        if ($ageOk) {
+            $sw.Stop()
+            Write-LaunchPerfLog -Mark 'cim_query' -Ms $sw.ElapsedMilliseconds -Extra "reason=$Reason count=$($cached.Count) cache_hit=1 exe=$ExeName"
+            return $cached
+        }
     }
     $result = @(Get-CimInstance Win32_Process -Filter "Name='$ExeName'" -Property ProcessId,Name,CommandLine -ErrorAction SilentlyContinue)
-    $script:EditorCimCache[$ExeName] = $result
+    $script:EditorCimCache[$ExeName] = @{ At = Get-Date; Procs = $result }
     $script:LaunchCimCallCount++
     $sw.Stop()
     Write-LaunchPerfLog -Mark 'cim_query' -Ms $sw.ElapsedMilliseconds -Extra "reason=$Reason count=$($result.Count) cache_hit=0 exe=$ExeName"
@@ -493,7 +593,7 @@ function Get-RemoteEditorProcesses {
     $exe = if ($EditorCmd -eq 'cursor') { 'Cursor.exe' } else { 'Code.exe' }
     $uriNeedle = "ssh-remote+${Alias}"
     $pathNeedle = $RemotePath.TrimEnd('/')
-    $profileDir = if ($EditorCmd -eq 'cursor') { Get-CursorRemoteProfileDir } else { $null }
+    $profileDir = if ($EditorCmd -eq 'cursor') { Get-CursorRemoteProfileDir } elseif ($EditorCmd -eq 'code') { Get-CodeRemoteProfileDir } else { $null }
 
     $matches = @(Invoke-CimEditorProcessQuery -ExeName $exe -Reason 'remote_editor_procs' -ForceRefresh:$ForceRefresh |
         Where-Object {
@@ -653,6 +753,72 @@ function Test-RemoteEditorOnCorrectFolder {
         }
     }
     return $false
+}
+
+function Get-RemoteEditorSessionPresence {
+    param(
+        [Parameter(Mandatory)][string]$EditorCmd,
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][string]$RemotePath
+    )
+    # Bug 60: single-pass on_folder + window_open (one CIM walk via shared cache).
+    $onFolder = $false
+    $windowOpen = $false
+    if ($EditorCmd -ne 'cursor') {
+        $matched = @(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)
+        $onFolder = ($matched.Count -gt 0)
+        foreach ($p in $matched) {
+            try {
+                $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
+                if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { $windowOpen = $true; break }
+            } catch { }
+        }
+        return [pscustomobject]@{ OnFolder = [bool]$onFolder; WindowOpen = [bool]$windowOpen }
+    }
+    if (Test-RemoteEditorInAgentHome -RemotePath $RemotePath) {
+        $mains = @(Get-CursorMainProfileProcesses)
+        foreach ($p in $mains) {
+            try {
+                $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
+                if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { $windowOpen = $true; break }
+            } catch { }
+        }
+        return [pscustomobject]@{ OnFolder = $false; WindowOpen = [bool]$windowOpen }
+    }
+    $uri = Get-RemoteFolderUri -Alias $Alias -RemotePath $RemotePath
+    $pathNeedle = [regex]::Escape($RemotePath.TrimEnd('/'))
+    $aliasNeedle = [regex]::Escape("ssh-remote+${Alias}")
+    $uriNeedle = [regex]::Escape($uri)
+    $rootName = ($RemotePath.TrimEnd('/') -split '/')[-1]
+    $rootNeedle = if ($rootName) { [regex]::Escape($rootName) } else { '' }
+    $aliasOnlyNeedle = [regex]::Escape($Alias)
+    foreach ($p in @(Get-CursorMainProfileProcesses)) {
+        $cmd = $p.CommandLine
+        $hit = $false
+        if ($cmd) {
+            if ($cmd -match $uriNeedle) { $hit = $true }
+            elseif ($cmd -match $aliasNeedle -and $cmd -match $pathNeedle) { $hit = $true }
+        }
+        try {
+            $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
+            if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { $windowOpen = $true }
+            if ($hit -and -not (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath)) {
+                $onFolder = $true
+            }
+            if ($rootNeedle) {
+                $title = $wp.MainWindowTitle
+                if ($title -and $title -match $rootNeedle -and
+                    ($title -match '\[Claude Server\]' -or $title -match "(?i)\[SSH:\s*${aliasOnlyNeedle}\]")) {
+                    $onFolder = $true
+                }
+            }
+        } catch {
+            if ($hit -and -not (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath)) {
+                $onFolder = $true
+            }
+        }
+    }
+    return [pscustomobject]@{ OnFolder = [bool]$onFolder; WindowOpen = [bool]$windowOpen }
 }
 
 function Get-RemoteEditorStateExplain {
@@ -903,7 +1069,8 @@ function Get-RemoteEditorLaunchStrategies {
         return $strategies
     }
 
-    $common = @()
+    $profileDir = Get-CodeRemoteProfileDir
+    $common = @('--user-data-dir', $profileDir)
     if ($NewWindow) { $common += '--new-window' }
     $strategies += [PSCustomObject]@{
         Name = 'folder-uri'
@@ -1026,6 +1193,9 @@ function Stop-CursorServerProfileTreeIfNeeded {
         [Parameter(Mandatory)][string]$Reason,
         [switch]$Force
     )
+    # WARNING: -Force kills EVERY Cursor process using ClaudeServerCursorProfile
+    # (all open remote projects). Launch-RemoteEditor must NOT call this with -Force.
+    # Kept for rare operator/manual recovery only.
     $procs = @(Get-CursorProfileProcesses)
     if ($procs.Count -eq 0) {
         Write-EditorLaunchLog "LAUNCH_KILL_SKIP: reason=$Reason profile_count=0" 'DEBUG'
@@ -1035,7 +1205,7 @@ function Stop-CursorServerProfileTreeIfNeeded {
         Write-EditorLaunchLog "LAUNCH_KILL_SKIP: reason=$Reason profile_count=$($procs.Count) force_not_set" 'DEBUG'
         return 0
     }
-    Write-EditorLaunchLog "LAUNCH_KILL: reason=$Reason profile_count=$($procs.Count) elevated=$(Test-IsElevatedShell)" 'INFO'
+    Write-EditorLaunchLog "LAUNCH_KILL: reason=$Reason profile_count=$($procs.Count) elevated=$(Test-IsElevatedShell) WARNING=closes_all_profile_windows" 'WARN'
     Stop-CursorServerProfileTree
     Start-Sleep -Milliseconds 400
     $remaining = @(Get-CursorProfileProcesses).Count
@@ -1111,8 +1281,12 @@ function Launch-RemoteEditor {
         [Parameter(Mandatory)][string]$EditorCmd,
         [Parameter(Mandatory)][string]$Alias,
         [Parameter(Mandatory)][string]$RemotePath,
-        [switch]$KnownOnFolder
+        [switch]$KnownOnFolder,
+        [switch]$AuthRelaunch
     )
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog ("LAUNCH begin editor={0} path={1}" -f $EditorCmd, $RemotePath)
+    }
 
     $script:LaunchCimCallCount = 0
     Clear-CursorProcessCache
@@ -1149,10 +1323,22 @@ function Launch-RemoteEditor {
     $swProfile.Stop()
     Write-LaunchPerfLog -Mark 'entry_profile_counts' -Ms $swProfile.ElapsedMilliseconds -Extra "profile_main=$hasProfileWindow profile_all=$profileProcCount"
 
+    # Auth just merged to disk - soft-stop so Electron reloads tokens/machineid (even if already on folder).
+    if ($AuthRelaunch -and $EditorCmd -eq 'cursor' -and $profileProcCount -gt 0) {
+        Write-EditorLaunchLog ("LAUNCH_KILL: reason=auth_relaunch soft-stop profile_count={0}" -f $profileProcCount) 'WARN'
+        Stop-CursorServerProfileTree
+        Start-Sleep -Milliseconds 800
+        Clear-CursorProcessCache
+        $onFolder = $false
+        $agentHome = $false
+        $hasProfileWindow = $false
+        $profileProcCount = 0
+    }
+
     Write-EditorLaunchLog (
         "LAUNCH_BEGIN: exe=$cli editor=$EditorCmd alias=$Alias path=$RemotePath uri=$uri " +
         "on_folder=$onFolder agent_home=$agentHome profile_main=$hasProfileWindow profile_all=$profileProcCount " +
-        "elevated=$(Test-IsElevatedShell) known_on_folder=$KnownOnFolder"
+        "elevated=$(Test-IsElevatedShell) known_on_folder=$KnownOnFolder auth_relaunch=$AuthRelaunch"
     ) 'INFO'
 
     if ($onFolder -and -not $agentHome) {
@@ -1178,14 +1364,19 @@ function Launch-RemoteEditor {
         Initialize-CursorServerProfile
         $swInit.Stop()
         Write-LaunchPerfLog -Mark 'launch_init_profile' -Ms $swInit.ElapsedMilliseconds
+    } elseif ($EditorCmd -eq 'code') {
+        $swInit = [System.Diagnostics.Stopwatch]::StartNew()
+        Initialize-CodeServerProfile
+        $swInit.Stop()
+        Write-LaunchPerfLog -Mark 'launch_init_profile' -Ms $swInit.ElapsedMilliseconds
     }
 
-    $needKill = ($EditorCmd -eq 'cursor') -and ($agentHome -or $useNewWindow) -and ($profileProcCount -gt 0)
-    if ($needKill) {
-        $swKill = [System.Diagnostics.Stopwatch]::StartNew()
-        $null = Stop-CursorServerProfileTreeIfNeeded -Reason 'pre_launch_agent_or_new_window' -Force
-        $swKill.Stop()
-        Write-LaunchPerfLog -Mark 'launch_kill_profile' -Ms $swKill.ElapsedMilliseconds
+    # Never force-kill the ClaudeServerCursorProfile tree before launch.
+    # Multiple remote projects share one profile -- killing the tree closes ALL Cursor windows.
+    # Prefer --new-window (already set via $useNewWindow) and keep other projects open.
+    if ($EditorCmd -eq 'cursor' -and ($agentHome -or $useNewWindow) -and ($profileProcCount -gt 0)) {
+        Write-EditorLaunchLog ("LAUNCH_KILL_SKIP: reason=preserve_open_windows profile_count={0} agent_home={1} use_new_window={2}" -f $profileProcCount, $agentHome, $useNewWindow) 'INFO'
+        Write-LaunchPerfLog -Mark 'launch_kill_profile' -Ms 0 -Extra 'skipped=preserve_open_windows'
     }
 
     $swPlan = [System.Diagnostics.Stopwatch]::StartNew()
@@ -1199,8 +1390,9 @@ function Launch-RemoteEditor {
     $script:LastLaunchAttempts = @()
     foreach ($strategy in $strategies) {
         $attempt++
-        if ($attempt -gt 1 -and $EditorCmd -eq 'cursor' -and (Get-CursorProfileProcesses).Count -gt 0) {
-            $null = Stop-CursorServerProfileTreeIfNeeded -Reason "retry_before_$($strategy.Name)" -Force
+        if ($attempt -gt 1 -and $EditorCmd -eq 'cursor') {
+            # Do not wipe the profile on strategy retry -- other open projects must stay alive.
+            Write-EditorLaunchLog "LAUNCH_RETRY_NO_KILL: strategy=$($strategy.Name) preserving profile windows" 'DEBUG'
         }
 
         if ($script:VerboseLaunch) {

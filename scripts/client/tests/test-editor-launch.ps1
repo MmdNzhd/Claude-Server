@@ -18,8 +18,9 @@ Assert ([bool](Get-Command code -ErrorAction SilentlyContinue)) "code on PATH"
 Assert (Get-Command Launch-RemoteEditor -ErrorAction SilentlyContinue) "Launch-RemoteEditor defined"
 Assert (Get-Command Get-RemoteEditorLaunchStrategies -ErrorAction SilentlyContinue) "Get-RemoteEditorLaunchStrategies defined"
 Assert (Get-Command Write-EditorLaunchSnapshot -ErrorAction SilentlyContinue) "Write-EditorLaunchSnapshot defined"
-if (Get-Command cursor -ErrorAction SilentlyContinue) {
-    Assert $true "cursor on PATH"
+$cursorCmd = Get-Command cursor -ErrorAction SilentlyContinue
+if ($cursorCmd) {
+    Assert ([bool]$cursorCmd.Source) "cursor on PATH ($($cursorCmd.Source))"
 } else {
     Write-Host "  SKIP  cursor not installed" -ForegroundColor DarkGray
 }

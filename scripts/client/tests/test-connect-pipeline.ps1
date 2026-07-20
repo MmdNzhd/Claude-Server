@@ -40,7 +40,7 @@ foreach ($rel in @('windows\connect.ps1')) {
     Assert ($bundle -match 'function Get-GitMode') "$rel has Get-GitMode (via git-mode.ps1)"
     Assert ($bundle -match 'GIT_MODE=%s') "$rel pushes GIT_MODE to server"
     Assert ($bundle -match 'LAPTOP_OS=windows') "$rel pushes LAPTOP_OS to server"
-    Assert ($src -match '"g" \{ Configure-GitMode \}') "$rel has git menu option"
+    Assert ($src -match '"g" \{.*Configure-GitMode') "$rel has git menu option"
     Assert ($bundle -match 'Push-ServerConnectConf') "$rel has Push-ServerConnectConf"
     Assert ($src -match '@\(Choose-Project -Mounts \$allMounts\)\[-1\]') "$rel uses safe Choose-Project capture"
     Assert ($src -match 'Initialize-SessionBgTunnel') "$rel pre-warms tunnel after Ready"
@@ -59,6 +59,30 @@ foreach ($rel in @('windows\connect.ps1')) {
     Assert ($src -match 'Start-ProcessAsInteractiveUser|Start-Process powershell\.exe -Verb RunAs') "$rel self-elevates to administrator on launch"
     Assert ($src -match 'Invoke-LaptopAdminOps') "$rel has laptop admin SSH helpers"
 }
+
+
+# P0 recovery/tunnel safety contract (connect-fix-100 #93-95).
+$winConnect = Get-Content (Get-ClientFile 'windows\connect.ps1') -Raw
+function Get-FunctionSource {
+    param([string]$Source, [string]$Name)
+    $m = [regex]::Match($Source, "(?ms)^function\s+$([regex]::Escape($Name))\s*\{.*?(?=^function\s+|\z)")
+    if ($m.Success) { return $m.Value }
+    return ''
+}
+
+$syncTunnel = Get-FunctionSource $gitModePs1 'Sync-SessionTunnelProcess'
+$pushConf = Get-FunctionSource $gitModePs1 'Push-ServerConnectConf'
+Assert ($winConnect -match 'RECOVERY_SKIP_CLEAR_MOUNT') 'auto recovery logs RECOVERY_SKIP_CLEAR_MOUNT when editor stays open'
+Assert ($winConnect -match 'FINALLY_KEEP_TUNNEL') 'finally keeps tunnel alive while editor remains on remote folder'
+Assert ($syncTunnel -match 'TUNNEL_SYNC soft_fail[^\r\n]*(no_ssh_proc|tcp_open_no_process|no_process_tcp_open|no_proc_tcp_open)') 'tunnel sync soft-fails when TCP is open without a process handle'
+Assert (($gitModePs1 + $winConnect) -match 'TunnelSyncFailCount') 'Windows tunnel sync debounces consecutive failures'
+Assert ($pushConf -notmatch 'claude-self-heal') 'Push-ServerConnectConf does not invoke claude-self-heal'
+Assert ($pushConf -match 'ToBase64String|base64 -d') 'Push-ServerConnectConf uses base64 remote body'
+Assert ($pushConf -match 'PUSH_CONF_RESULT') 'Push-ServerConnectConf requires PUSH_CONF_RESULT'
+Assert ($pushConf -match 'hasResult') 'Push-ServerConnectConf gates dedupe on hasResult'
+Assert ($gitModePs1 -match 'function Invoke-SshXChecked') 'git-mode.ps1 has Invoke-SshXChecked for Out-Null hot paths'
+
+Assert ($syncTunnel -match 'LastTunnelSyncTraceAt[\s\S]*?TotalSeconds\s+-ge\s+30') 'Windows TUNNEL_SYNC TRACE is throttled to at least 30 seconds'
 
 $authLaptop = Get-Content (Get-ClientFile 'cursor-auth-laptop.ps1') -Raw
 $editorLaunch = Get-Content (Get-ClientFile 'editor-launch.ps1') -Raw
@@ -114,11 +138,25 @@ Assert ($authLaptop -match 'Write-AuthPerfLog') 'cursor-auth-laptop emits auth P
 Assert ($authLaptop -match 'auth_total') 'cursor-auth-laptop tracks auth_total'
 Assert ($gitMode -match 'mount_ssh_up') 'git-mode emits mount PERF marks'
 
+# V9 additive: session log + tunnel-drop contracts (full suite in test-session-log-contracts.ps1)
+$connectBat = Get-Content (Get-ClientFile 'windows\connect.bat') -Raw
+$connectUiPs1 = Get-Content (Get-ClientFile 'connect-ui.ps1') -Raw
+$connectUiSh = Get-Content (Get-ClientFile 'connect-ui.sh') -Raw
+Assert ($connectBat -match 'CLAUDE_CONNECT_RUN_ID') 'connect.bat bootstraps CLAUDE_CONNECT_RUN_ID'
+Assert ($gitMode -match 'TUNNEL_DROP') 'git-mode.ps1 emits TUNNEL_DROP on tunnel soft-fail'
+Assert ($connectUiPs1 -match 'TUNNEL_DROP') 'connect-ui.ps1 forces log sync on TUNNEL_DROP'
+Assert ($connectUiSh -match 'TUNNEL_DROP') 'connect-ui.sh forces log sync on TUNNEL_DROP'
+
 $publish = Get-Content (Join-Path $script:RepoRoot 'publish\publish.ps1') -Raw
 Assert (-not (Test-Path (Get-ClientFile 'users\sepidz\connect.ps1'))) 'no sepidz connect fork (single codebase)'
 Assert ($publish -match 'scripts\\client\\windows\\connect\.ps1') 'publish uses canonical windows connect.ps1'
 Assert ($publish -match 'PatchIp = \$true') 'publish has IP patch flag for Sepidz'
 Assert ($publish -notmatch 'users\\sepidz') 'publish does not reference users/sepidz fork'
+
+$sessionLogRc = 0
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-session-log-contracts.ps1')
+if ($LASTEXITCODE -ne 0) { $sessionLogRc = [int]$LASTEXITCODE; $failed += 1; Write-Host 'FAIL session-log-contracts (see above)' -ForegroundColor Red }
+
 
 Write-Host ""
 if ($fail -eq 0) { Write-Host "All tests passed." -ForegroundColor Green; exit 0 }

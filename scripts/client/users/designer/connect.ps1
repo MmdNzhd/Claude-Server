@@ -31,7 +31,10 @@ $CM         = '$HOME/.local/bin/claude-mount'
 $NovncPort  = 27015
 $MountId    = "laptop"
 
-function Die($m)  { Write-Host ""; Write-Host "  [X] $m" -ForegroundColor Red; Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
+function Die($m)  {
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) { Write-ConnectLog "FAIL DIE: $m" 'ERROR' }
+    Write-Host ""; Write-Host "  [X] $m" -ForegroundColor Red; Write-Host ""; Read-Host "    Press Enter to close" | Out-Null; exit 1
+}
 function Warn($m) { Write-Host "  [!] $m" -ForegroundColor DarkYellow }
 function Step($m) { Write-Host ("    " + $m).PadRight(46, '.') -NoNewline -ForegroundColor DarkCyan }
 function StepOk  {
@@ -42,6 +45,7 @@ function StepOk  {
 }
 function StepFail {
     param([string]$d='')
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) { Write-ConnectLog ("FAIL STEP name={0} detail={1}" -f $script:currentStepName, $d) 'ERROR' }
     Write-Host " failed" -ForegroundColor Red
     if ($d) { Write-Host "      -> $d" -ForegroundColor DarkGray }
     $script:pendingFixes = @()
@@ -132,6 +136,24 @@ if (-not (Test-Path $_gitMode)) {
     Die "git-mode.ps1 not found - re-copy the full designer package"
 }
 . $_gitMode
+
+$_connectUi = Join-Path $script:ConnectScriptDir 'connect-ui.ps1'
+if (-not (Test-Path $_connectUi)) {
+    $_connectUi = Join-Path (Split-Path $script:ConnectScriptDir -Parent) 'connect-ui.ps1'
+}
+if (-not (Test-Path $_connectUi)) {
+    $_connectUi = Join-Path (Split-Path (Split-Path $script:ConnectScriptDir -Parent) -Parent) 'connect-ui.ps1'
+}
+if (Test-Path $_connectUi) {
+    . $_connectUi
+    if (Get-Command Initialize-ConnectLog -ErrorAction SilentlyContinue) {
+        Initialize-ConnectLog -ScriptDir $script:ConnectScriptDir -Version 'designer'
+    }
+}
+# Multi-instance: Enter-ConnectSingleInstance is a no-op (unlimited concurrent UIs).
+if (Get-Command Enter-ConnectSingleInstance -ErrorAction SilentlyContinue) {
+    $null = Enter-ConnectSingleInstance
+}
 
 function Test-NovncLocal {
     try {
@@ -317,12 +339,26 @@ $existingMount = (SshX "$CM list 2`>/dev/null") | Where-Object { $_ -match "^${M
 $cleanPath = $LaptopPath -replace "'", "-"
 if (-not $existingMount) {
     Step "Configuring laptop mount"
-    SshX "$CM add '$MountId' 'Laptop' '$cleanPath' '$MountLpath'" 2>$null | Out-Null
-    StepOk $MountLpath
+    $addEc = 0
+    if (Get-Command Invoke-SshXChecked -ErrorAction SilentlyContinue) {
+        $addEc = Invoke-SshXChecked -RemoteCmd "$CM add '$MountId' 'Laptop' '$cleanPath' '$MountLpath'" -Label 'DESIGNER_MOUNT_ADD'
+    } else {
+        $null = SshX "$CM add '$MountId' 'Laptop' '$cleanPath' '$MountLpath'" 2>$null
+        $addEc = [int]$global:LASTEXITCODE
+        if ($addEc -ne 0) { Warn "DESIGNER_MOUNT_ADD fail exit=$addEc" }
+    }
+    if ($addEc -eq 0) { StepOk $MountLpath } else { StepFail "mount add exit=$addEc" }
 } elseif ($Setup) {
     Step "Updating laptop mount path"
-    SshX "$CM edit '$MountId' 'Laptop' '$cleanPath' '$MountLpath'" 2>$null | Out-Null
-    StepOk $cleanPath
+    $editEc = 0
+    if (Get-Command Invoke-SshXChecked -ErrorAction SilentlyContinue) {
+        $editEc = Invoke-SshXChecked -RemoteCmd "$CM edit '$MountId' 'Laptop' '$cleanPath' '$MountLpath'" -Label 'DESIGNER_MOUNT_EDIT'
+    } else {
+        $null = SshX "$CM edit '$MountId' 'Laptop' '$cleanPath' '$MountLpath'" 2>$null
+        $editEc = [int]$global:LASTEXITCODE
+        if ($editEc -ne 0) { Warn "DESIGNER_MOUNT_EDIT fail exit=$editEc" }
+    }
+    if ($editEc -eq 0) { StepOk $cleanPath } else { StepFail "mount edit exit=$editEc" }
 } else {
     Step "Laptop mount"
     StepOk "already configured"
@@ -435,11 +471,11 @@ try {
             Write-Host "    R = retry   Q = quit" -ForegroundColor DarkGray
             $rk = Read-RetryQuitKey
             if ($rk -eq 'r') { Write-Host ""; continue }
-            Push-ServerConnectConf -ActiveMount ''
+            Push-ServerConnectConf -ClearActiveMount
             $alreadyDown = $true; break sessionLoop
         }
 
-        SshX "$CM recover" 2>$null | Out-Null
+        if (Get-Command Invoke-SshXChecked -ErrorAction SilentlyContinue) { [void](Invoke-SshXChecked -RemoteCmd "$CM recover" -Label 'DESIGNER_MOUNT_RECOVER') } else { $null = SshX "$CM recover" 2>$null; if ($global:LASTEXITCODE -ne 0) { Warn "DESIGNER_MOUNT_RECOVER fail exit=$($global:LASTEXITCODE)" } }
         if (-not (Test-Tunnel)) {
             Write-Host "      -> tunnel dropped during recover, restarting..." -ForegroundColor DarkGray
             continue sessionLoop
@@ -499,7 +535,7 @@ try {
             Write-Host "    R = retry   Q = quit" -ForegroundColor DarkGray
             $rk = Read-RetryQuitKey
             if ($rk -eq 'r') { Write-Host ""; continue }
-            Push-ServerConnectConf -ActiveMount ''
+            Push-ServerConnectConf -ClearActiveMount
             $alreadyDown = $true; break sessionLoop
         }
 
@@ -533,15 +569,23 @@ try {
         # Flush buffered keypresses before entering wait loop
         while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
 
-        # Check both KeyChar (English layout) and Key (physical key, layout-independent)
-        # so R works even when Persian/Arabic keyboard layout is active.
-        $action = 'q'
+        # VK fallback ONLY for null/control KeyChar - never Persian printable non-ASCII (ض on Q).
+        $action = ''
         $gotKey = $false
         while (-not $bgTunnel.HasExited) {
             if ([Console]::KeyAvailable) {
                 $ki = [Console]::ReadKey($true)
-                if ($ki.KeyChar.ToString().ToLower() -eq 'r' -or $ki.Key -eq [ConsoleKey]::R) { $action = 'r' }
-                elseif ($ki.KeyChar.ToString().ToLower() -eq 'g' -or $ki.Key -eq [ConsoleKey]::G) { $action = 'g' }
+                $kc = $ki.KeyChar.ToString()
+                $code = if ($kc.Length -eq 1) { [int][char]$kc[0] } else { 0 }
+                $ascii = ($code -ge 32 -and $code -le 126)
+                $letter = if ($ascii) { $kc.ToLowerInvariant() } else { '' }
+                $useVk = ($code -eq 0 -or ($code -gt 0 -and $code -lt 32))
+                $resolved = ''
+                if ($letter -eq 'r' -or ($useVk -and $ki.Key -eq [ConsoleKey]::R)) { $resolved = 'r' }
+                elseif ($letter -eq 'g' -or ($useVk -and $ki.Key -eq [ConsoleKey]::G)) { $resolved = 'g' }
+                elseif ($letter -eq 'q' -or ($useVk -and $ki.Key -eq [ConsoleKey]::Q) -or $ki.Key -eq [ConsoleKey]::Enter) { $resolved = 'q' }
+                if (-not $resolved) { continue }
+                $action = $resolved
                 $gotKey = $true
                 break
             }
@@ -551,13 +595,20 @@ try {
             # Drain any key the user pressed while the tunnel was dying
             if ([Console]::KeyAvailable) {
                 $ki = [Console]::ReadKey($true)
-                if ($ki.KeyChar.ToString().ToLower() -eq 'r' -or $ki.Key -eq [ConsoleKey]::R) { $action = 'r' }
-                # any other key (Q, Enter, etc.) -> action stays 'q'
+                $kc = $ki.KeyChar.ToString()
+                $code = if ($kc.Length -eq 1) { [int][char]$kc[0] } else { 0 }
+                $ascii = ($code -ge 32 -and $code -le 126)
+                $letter = if ($ascii) { $kc.ToLowerInvariant() } else { '' }
+                $useVk = ($code -eq 0 -or ($code -gt 0 -and $code -lt 32))
+                if ($letter -eq 'r' -or ($useVk -and $ki.Key -eq [ConsoleKey]::R)) { $action = 'r' }
+                elseif ($letter -eq 'q' -or ($useVk -and $ki.Key -eq [ConsoleKey]::Q) -or $ki.Key -eq [ConsoleKey]::Enter) { $action = 'q' }
+                else { $action = 'r' }  # ignore non-command (incl. Persian); auto-recover
             } else {
                 $action = 'r'
                 Write-Host "    Connection dropped - reconnecting..." -ForegroundColor Yellow
             }
         }
+        if (-not $action) { continue sessionLoop }
 
         if ($action -eq 'g') {
             Configure-GitMode
@@ -566,8 +617,8 @@ try {
 
         Write-Host ""
         Write-Host "    Disconnecting..." -ForegroundColor DarkGray
-        SshX "$CM down '$MountId'" 2>$null | Out-Null
-        Push-ServerConnectConf -ActiveMount ''
+        if (Get-Command Invoke-SshXChecked -ErrorAction SilentlyContinue) { [void](Invoke-SshXChecked -RemoteCmd "$CM down '$MountId'" -Label 'DESIGNER_MOUNT_DOWN') } else { $null = SshX "$CM down '$MountId'" 2>$null; if ($global:LASTEXITCODE -ne 0) { Warn "DESIGNER_MOUNT_DOWN fail exit=$($global:LASTEXITCODE)" } }
+        Push-ServerConnectConf -ClearActiveMount
         if (-not $bgTunnel.HasExited) {
             Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
         }
@@ -587,13 +638,19 @@ try {
     if (-not $alreadyDown) {
         Write-Host ""
         Write-Host "    Disconnecting..." -ForegroundColor DarkGray
-        SshX "$CM down '$MountId'" 2>$null | Out-Null
-        Push-ServerConnectConf -ActiveMount ''
+        if (Get-Command Invoke-SshXChecked -ErrorAction SilentlyContinue) { [void](Invoke-SshXChecked -RemoteCmd "$CM down '$MountId'" -Label 'DESIGNER_MOUNT_DOWN') } else { $null = SshX "$CM down '$MountId'" 2>$null; if ($global:LASTEXITCODE -ne 0) { Warn "DESIGNER_MOUNT_DOWN fail exit=$($global:LASTEXITCODE)" } }
+        Push-ServerConnectConf -ClearActiveMount
         Write-Host ""
     }
     if ($bgTunnel -and -not $bgTunnel.HasExited) {
         Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
     }
+    if (Get-Command Exit-ConnectSingleInstance -ErrorAction SilentlyContinue) { Exit-ConnectSingleInstance }
+elseif ($script:ConnectInstanceMutex) {
+    try { $script:ConnectInstanceMutex.ReleaseMutex() } catch { }
+    try { $script:ConnectInstanceMutex.Dispose() } catch { }
+    $script:ConnectInstanceMutex = $null
+}
 }
 
 # Flush buffered keys before post-disconnect menu
@@ -608,13 +665,19 @@ $choice = ""
 while ($choice -ne "c" -and $choice -ne "x") {
     if ([Console]::KeyAvailable) {
         $ki = [Console]::ReadKey($true)
-        $kc = $ki.KeyChar.ToString().ToLower()
-        if ($kc -eq "c" -or $ki.Key -eq [ConsoleKey]::C) {
+        $kc = $ki.KeyChar.ToString()
+        $code = if ($kc.Length -eq 1) { [int][char]$kc[0] } else { 0 }
+        $ascii = ($code -ge 32 -and $code -le 126)
+        $letter = if ($ascii) { $kc.ToLowerInvariant() } else { '' }
+        $useVk = ($code -eq 0 -or ($code -gt 0 -and $code -lt 32))
+        if ($letter -eq 'c' -or ($useVk -and $ki.Key -eq [ConsoleKey]::C)) {
+            $choice = 'c'
             Write-Host "    Reconnecting..." -ForegroundColor Green
             Start-Sleep -Seconds 1
             Write-Host ""
             continue mainLoop
-        } elseif ($kc -eq "x" -or $ki.Key -eq [ConsoleKey]::X) {
+        } elseif ($letter -eq 'x' -or ($useVk -and $ki.Key -eq [ConsoleKey]::X)) {
+            $choice = 'x'
             Write-Host "    Exiting..." -ForegroundColor DarkGray
             break mainLoop
         }
@@ -623,3 +686,10 @@ while ($choice -ne "c" -and $choice -ne "x") {
 
 } # end :mainLoop
 Write-Host ""
+
+if (Get-Command Exit-ConnectSingleInstance -ErrorAction SilentlyContinue) { Exit-ConnectSingleInstance }
+elseif ($script:ConnectInstanceMutex) {
+    try { $script:ConnectInstanceMutex.ReleaseMutex() } catch { }
+    try { $script:ConnectInstanceMutex.Dispose() } catch { }
+    $script:ConnectInstanceMutex = $null
+}

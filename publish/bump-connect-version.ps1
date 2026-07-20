@@ -92,9 +92,24 @@ function Set-ConnectVersionInRepo {
             Replace = "v$Version"
         },
         @{
+            Path    = Join-Path $ProjectRoot 'publish\README-sepidz.txt'
+            Pattern = 'v\d{8}\.\d+'
+            Replace = "v$Version"
+        },
+        @{
             Path    = Join-Path $ProjectRoot 'scripts\client\users\designer\README.md'
             Pattern = 'v\d{8}\.\d+'
             Replace = "v$Version"
+        },
+        @{
+            Path    = Join-Path $ProjectRoot 'CLAUDE.md'
+            Pattern = "ConnectVersion = '\d{8}\.\d+'"
+            Replace = "ConnectVersion = '$Version'"
+        },
+        @{
+            Path    = Join-Path $ProjectRoot 'CLAUDE.md'
+            Pattern = "CONNECT_VERSION='\d{8}\.\d+'"
+            Replace = "CONNECT_VERSION='$Version'"
         },
         @{
             Path    = Join-Path $ProjectRoot 'docs\client-connect.md'

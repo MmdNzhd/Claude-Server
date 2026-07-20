@@ -108,8 +108,8 @@ if [ -f "$SERVER_DIR/claude-auth-probe.sh" ]; then
 fi
 
 touch /var/log/claude-auth.log
-chmod 644 /var/log/claude-auth.log
-ok "/var/log/claude-auth.log ready"
+chmod 600 /var/log/claude-auth.log
+ok "/var/log/claude-auth.log ready (0600 root-only)"
 
 if [ -x /usr/local/bin/claude-auth-probe ]; then
     cat > /etc/cron.d/claude-auth-probe <<'CRON'
@@ -227,6 +227,25 @@ if [ -f "$SERVER_DIR/laptop-exec-setup.sh" ]; then
     done
     ok "laptop-exec-setup --user + --all-projects -> all users"
 fi
+if [ -f "$SERVER_DIR/sudo-from-laptop.sh" ]; then
+    install -m 755 "$SERVER_DIR/sudo-from-laptop.sh" /usr/local/bin/sudo-from-laptop
+    install -m 755 "$SERVER_DIR/sudo-from-laptop.sh" /usr/local/lib/claude-server/sudo-from-laptop.sh 2>/dev/null || true
+    ok "sudo-from-laptop -> /usr/local/bin/"
+fi
+if [ -f "$SERVER_DIR/sudoers.d/claude-client-deploy" ]; then
+    install -m 440 "$SERVER_DIR/sudoers.d/claude-client-deploy" /etc/sudoers.d/claude-client-deploy
+    if visudo -cf /etc/sudoers.d/claude-client-deploy >/dev/null 2>&1; then
+        ok "sudoers claude-client-deploy (NOPASSWD bundle install)"
+    else
+        rm -f /etc/sudoers.d/claude-client-deploy
+        warn "sudoers claude-client-deploy invalid - skipped"
+    fi
+fi
+if [ -f "$SERVER_DIR/commands/install-client-bundle.sh" ]; then
+    mkdir -p /usr/local/lib/claude-server/commands
+    install -m 755 "$SERVER_DIR/commands/install-client-bundle.sh" /usr/local/lib/claude-server/commands/install-client-bundle.sh
+    ok "install-client-bundle.sh -> /usr/local/lib/claude-server/commands/"
+fi
 if [ -f "$SERVER_DIR/claude-watchdog.sh" ]; then
     install -m 755 "$SERVER_DIR/designer-start.sh" /usr/local/bin/designer-start
     ok "designer-start -> /usr/local/bin/"
@@ -262,9 +281,23 @@ if [ -f "$SERVER_DIR/audit-cursor-golden-deep.py" ]; then
     ok "audit-cursor-golden-deep.py -> /usr/local/lib/claude-server/"
 fi
 
+# Connect client logs on server only (1-day retention)
+install -m 755 "$SERVER_DIR/claude-connect-logs-cleanup.sh" /usr/local/bin/claude-connect-logs-cleanup
+cat > /etc/cron.d/claude-connect-logs <<'CRON'
+# Clean per-user ~/.claude/logs older than 1 day (hourly)
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+0 * * * * root /usr/local/bin/claude-connect-logs-cleanup >/dev/null 2>&1
+CRON
+chmod 644 /etc/cron.d/claude-connect-logs
+
+
 mkdir -p /etc/cursor-auth/golden
-chmod 755 /etc/cursor-auth/golden
-ok "/etc/cursor-auth/golden ready (755, readable for automount sync)"
+chmod 700 /etc/cursor-auth/golden
+# Harden any pre-existing secret files (legacy 644 from older installs/refresh).
+chmod 600 /etc/cursor-auth/golden/* 2>/dev/null || true
+# New secrets written 0600 by cursor-auth-export / refresh; root cron + add-user sync.
+ok "/etc/cursor-auth/golden ready (0700; secret files 0600)"
 
 touch /var/log/cursor-auth-refresh.log
 chmod 644 /var/log/cursor-auth-refresh.log
@@ -454,9 +487,39 @@ done
 ok "claude-server -> /usr/local/bin/claude-server"
 ok "commands -> /usr/local/lib/claude-server/"
 
-if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null && [ -x /usr/local/bin/claude-auth-sync ]; then
-    claude-auth-sync --all
-    ok "OAuth token synced to all users"
+# OAuth store: root-only dir + file (never leave token in world-readable /etc/environment 644).
+mkdir -p /etc/claude-code
+chmod 700 /etc/claude-code
+if [ -f /etc/claude-code/oauth.env ]; then
+    chmod 600 /etc/claude-code/oauth.env
+fi
+# Migrate legacy token from /etc/environment into oauth.env (0600) and strip environment.
+if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null; then
+    if [ -f /usr/local/lib/claude-server/claude-auth-lib.py ]; then
+        if python3 <<'PYMIG'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("cal", "/usr/local/lib/claude-server/claude-auth-lib.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+tok = mod.read_env_token()
+if tok:
+    mod.write_env_token(tok)
+sys.exit(0)
+PYMIG
+        then
+            ok "OAuth migrated to /etc/claude-code/oauth.env (0600); stripped from /etc/environment"
+        else
+            echo "WARN: OAuth migrate from /etc/environment failed (manual: claude-server deploy-auth)" >&2
+        fi
+    fi
+fi
+
+if { [ -f /etc/claude-code/oauth.env ] && grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/claude-code/oauth.env 2>/dev/null; } \
+    || grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null; then
+    if [ -x /usr/local/bin/claude-auth-sync ]; then
+        claude-auth-sync --all
+        ok "OAuth token synced to all users"
+    fi
 fi
 
 if [ -f /etc/cursor-auth/golden/auth.json ] && [ -x /usr/local/bin/cursor-auth-sync ]; then
@@ -484,9 +547,8 @@ echo ""
 echo "  1. Set Claude auth token:"
 echo "     On a laptop with a browser: claude setup-token"
 echo "     Then on this server as root:"
-echo "       echo 'export CLAUDE_CODE_OAUTH_TOKEN=<token>' > /etc/profile.d/claude-auth.sh"
-echo "       chmod 644 /etc/profile.d/claude-auth.sh"
-echo "       echo 'CLAUDE_CODE_OAUTH_TOKEN=<token>' >> /etc/environment"
+echo "       sudo claude-server deploy-auth <token>"
+echo "     (stores root-only /etc/claude-code/oauth.env mode 0600; syncs per-user settings)"
 echo ""
 echo "  2. Add developers:"
 echo "       sudo claude-server add-user <username>"

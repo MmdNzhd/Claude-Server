@@ -21,7 +21,7 @@ get_git_mode() {
 
 get_active_mount_id() {
     local line
-    line="$(sshx "grep -E '^ACTIVE_MOUNT=' ~/.claude-connect.conf 2>/dev/null" 2>/dev/null | tail -1 || true)"
+    line="$(sshx "grep ^ACTIVE_MOUNT= \$HOME/.claude-connect.conf 2>/dev/null" 2>/dev/null | tail -1 || true)"
     line="${line#ACTIVE_MOUNT=}"
     line="${line//$'\r'/}"
     line="${line//$'\n'/}"
@@ -41,6 +41,11 @@ _TUNNEL_BANNER_CACHE_BANNER=''
 _TUNNEL_BANNER_CACHE_UP=0
 _TUNNEL_BANNER_CACHE_INVALID=0
 _LAST_FORWARD_PROBE_AT=0
+_TUNNEL_SYNC_FAIL_COUNT=0
+_TUNNEL_SOFT_FAIL_COUNT=0
+_LAST_TUNNEL_SPAWN_SUCCESS_AT=0
+_LAST_TUNNEL_SPAWN_SUCCESS_PORT=
+_LAST_TUNNEL_SPAWN_PID=
 
 clear_tunnel_banner_cache() {
     _TUNNEL_BANNER_CACHE_AT=0
@@ -70,8 +75,81 @@ wait_pid_timeout() {
 
 push_server_connect_conf() {
     local mode os="${GIT_MODE_LAPTOP_OS:-mac}" active="${ACTIVE_MOUNT_ID:-}"
+    local clear="${1:-}" clear_flag=0 prefer="" lu port mode_esc
+    local dedupe_key now_ts
     mode="$(get_git_mode)"
-    sshx "printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nGIT_MODE=%s\nLAPTOP_OS=%s\nACTIVE_MOUNT=%s\n' '${LAPTOP_USER}' '$PORT' '${mode}' '${os}' '${active}' > ~/.claude-connect.conf && chmod 600 ~/.claude-connect.conf" 2>/dev/null || true
+    # Preserve server ACTIVE_MOUNT when caller left it empty (tunnel-ensure must not wipe).
+    if [ "$clear" = "--clear" ]; then
+        clear_flag=1
+        active=""
+        prefer=""
+    else
+        if [ -n "$active" ]; then
+            prefer="$active"
+        elif [ -n "${ACTIVE_PROJECT_ID:-}" ]; then
+            prefer="${ACTIVE_PROJECT_ID}"
+            active="$prefer"
+        else
+            prefer=""
+        fi
+    fi
+    lu="${LAPTOP_USER:-}"
+    port="${PORT:-}"
+    dedupe_key="${lu}|${port}|${mode}|${prefer}|${clear_flag}"
+    now_ts="$(date +%s 2>/dev/null || printf '0')"
+    if [ -n "${_LAST_PUSH_CONF_KEY:-}" ] && [ "$_LAST_PUSH_CONF_KEY" = "$dedupe_key" ] \
+        && [ -n "${_LAST_PUSH_CONF_AT:-}" ] && [ "$now_ts" != "0" ] \
+        && [ $(( now_ts - _LAST_PUSH_CONF_AT )) -le 8 ]; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "PUSH_CONF skip_duplicate key=$dedupe_key" 'INFO'
+        fi
+        return 0
+    fi
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "PUSH_CONF begin laptop_user=$lu port=$port git_mode=$mode prefer_mount=$prefer clear=$clear_flag" 'INFO'
+    fi
+    # Base64 remote body - avoids quote-eating on nested ssh (parity with Windows).
+    local remote_body b64 push_out push_ec
+    remote_body="$(cat <<EOF
+set +e
+CLEAR='$clear_flag'
+PREFER='$prefer'
+LU='$lu'
+PORT='$port'
+MODE='$mode'
+OS='$os'
+if [ "\$CLEAR" = "1" ]; then
+  AM=
+elif [ -n "\$PREFER" ]; then
+  AM=\$PREFER
+else
+  AM=\$(grep -E '^ACTIVE_MOUNT=' "\$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
+fi
+printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nGIT_MODE=%s\nLAPTOP_OS=%s\nACTIVE_MOUNT=%s\n' "\$LU" "\$PORT" "\$MODE" "\$OS" "\$AM" > "\$HOME/.claude-connect.conf"
+chmod 600 "\$HOME/.claude-connect.conf" 2>/dev/null || true
+printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s\n' "\$CLEAR" "\$PREFER" "\$AM"
+EOF
+)"
+    b64="$(printf '%s' "$remote_body" | base64 | tr -d '\n')"
+    # Do not swallow sshx failures with || true - need real exit for RESULT/dedupe gate.
+    push_out="$(sshx "echo $b64 | base64 -d | bash" 2>/dev/null)"
+    push_ec=$?
+    result_line="$(printf '%s' "$push_out" | grep PUSH_CONF_RESULT | tail -1 | tr '\n' ' ')"
+    if [ "$push_ec" -ne 0 ] || [ -z "$result_line" ]; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "PUSH_CONF fail exit=$push_ec out=${result_line:-no_result} $(printf '%s' "$push_out" | tr '\n' ' ')" 'ERROR'
+        fi
+        # Do not record dedupe on failure - allow immediate retry.
+        if [ "$push_ec" -ne 0 ]; then
+            return "$push_ec"
+        fi
+        return 1
+    fi
+    _LAST_PUSH_CONF_KEY="$dedupe_key"
+    _LAST_PUSH_CONF_AT="$now_ts"
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "PUSH_CONF ok exit=0 $result_line" 'INFO'
+    fi
 }
 
 unmount_other_projects() {
@@ -82,17 +160,41 @@ unmount_other_projects() {
 
 
 push_remote_file_if_changed() {
-    local src="$1" remote="$2" local_h="" remote_h=""
+    # remote may be ~/path - never run remote cmds with quoted "~" (no expand).
+    # scp still gets the ~/ form (OpenSSH expands after host:).
+    local src="$1" remote="$2" local_h="" remote_h="" rpath
     [ -f "$src" ] || return 0
-    local_h="$(local_file_sha256 "$src" 2>/dev/null || true)"
-    remote_h="$(sshx "sha256sum '$remote' 2>/dev/null | awk '{print \$1}'" 2>/dev/null | tr -d '\r\n')"
-    [ -n "$local_h" ] && [ "$local_h" = "$remote_h" ] && return 0
-    sshx "mkdir -p \"\$(dirname '$remote')\"" 2>/dev/null || true
-    scp -o BatchMode=yes -o ConnectTimeout=20 -q "$src" "$ALIAS:$remote" 2>/dev/null || return 1
+    # Normalize: callers pass ~/path; never allow $HOME/~/path on the server.
+    # IMPORTANT: do NOT use ${remote#~/} - bash tilde-expands the # pattern to $HOME/,
+    # so the strip fails and rpath becomes $HOME/~/... (literal directory "~/").
     case "$remote" in
-        */laptop-exec|*/laptop-exec-setup|*/laptop-exec-guard.sh)
-            sshx "chmod +x '$remote'" 2>/dev/null || true ;;
+        '~/'*) remote="${remote:2}" ;;
+        '~')   remote='' ;;
     esac
+    case "$remote" in
+        '')          rpath='\$HOME' ;;
+        '$HOME/'*)   rpath="$remote" ;;
+        /home/*)     rpath="$remote" ;;
+        /*)          rpath="$remote" ;;
+        *)           rpath="\$HOME/$remote" ;;
+    esac
+    local_h="$(local_file_sha256 "$src" 2>/dev/null || true)"
+    remote_h="$(sshx "sha256sum $rpath 2>/dev/null | awk '{print \$1}'" 2>/dev/null | tr -d '\r\n')"
+    [ -n "$local_h" ] && [ "$local_h" = "$remote_h" ] && return 0
+    sshx "mkdir -p \"\$(dirname $rpath)\"" >/dev/null 2>&1 || true
+    local scp_dest="$remote"
+    case "$scp_dest" in
+        ''|'$HOME') scp_dest='~' ;;
+        '$HOME/'*)  scp_dest="~/${scp_dest:6}" ;;  # len('$HOME/')==6; avoid #~/ tilde pitfall
+        /*)         ;;
+        *)          scp_dest="~/$scp_dest" ;;
+    esac
+    scp -o BatchMode=yes -o ConnectTimeout=20 -q "$src" "$ALIAS:$scp_dest" 2>/dev/null || return 1
+    case "$scp_dest" in
+        */laptop-exec|*/laptop-exec-setup|*/laptop-exec-guard.sh|*/laptop-exec-guard-wrap.sh|*/laptop-exec-shell-scan.py|*/laptop-exec-session.sh|*/claude-self-heal|*/claude-automount)
+            sshx "chmod +x $rpath" >/dev/null 2>&1 || true ;;
+    esac
+    return 0
 }
 
 push_laptop_exec_bundle() {
@@ -100,10 +202,20 @@ push_laptop_exec_bundle() {
     [ -n "$server_dir" ] || return 0
     push_remote_file_if_changed "$server_dir/laptop-exec.sh" '~/.local/bin/laptop-exec' || true
     push_remote_file_if_changed "$server_dir/laptop-exec-setup.sh" '~/.local/bin/laptop-exec-setup' || true
+    push_remote_file_if_changed "$server_dir/claude-self-heal.sh" '~/.local/bin/claude-self-heal' || true
+    push_remote_file_if_changed "$server_dir/claude-automount.sh" '~/.local/bin/claude-automount' || true
     push_remote_file_if_changed "$server_dir/cursor-rules/laptop-exec.mdc" '~/.cursor/rules/laptop-exec.mdc' || true
     push_remote_file_if_changed "$server_dir/skills/laptop-exec/SKILL.md" '~/.cursor/skills/laptop-exec/SKILL.md' || true
     push_remote_file_if_changed "$server_dir/cursor-hooks/laptop-exec-guard.sh" '~/.cursor/hooks/laptop-exec-guard.sh' || true
-    sshx '~/.local/bin/laptop-exec-setup --user 2>/dev/null; /usr/local/bin/laptop-exec-setup --user 2>/dev/null; true' 2>/dev/null || true
+    push_remote_file_if_changed "$server_dir/cursor-hooks/laptop-exec-guard-wrap.sh" '~/.cursor/hooks/laptop-exec-guard-wrap.sh' || true
+    push_remote_file_if_changed "$server_dir/cursor-hooks/laptop-exec-shell-scan.py" '~/.cursor/hooks/laptop-exec-shell-scan.py' || true
+    push_remote_file_if_changed "$server_dir/cursor-hooks/laptop-exec-session.sh" '~/.cursor/hooks/laptop-exec-session.sh' || true
+    push_remote_file_if_changed "$server_dir/cursor-hooks/laptop-exec-session.sh" '~/.cursor/hooks/laptop-exec-session.sh' || true
+    # chmod + CRLF strip (safe for Mac and Windows-origin bundles)
+    sshx "chmod +x \$HOME/.local/bin/laptop-exec \$HOME/.local/bin/laptop-exec-setup \$HOME/.local/bin/claude-self-heal \$HOME/.local/bin/claude-automount 2>/dev/null; sed -i 's/\r\$//' \$HOME/.local/bin/laptop-exec \$HOME/.local/bin/laptop-exec-setup \$HOME/.local/bin/claude-self-heal \$HOME/.local/bin/claude-automount \$HOME/.local/bin/claude-mount 2>/dev/null; true" >/dev/null 2>&1 || true
+    sshx '$HOME/.local/bin/laptop-exec-setup --user 2>/dev/null; /usr/local/bin/laptop-exec-setup --user 2>/dev/null; true' >/dev/null 2>&1 || true
+    # Self-heal for Mac and Windows laptop sessions (server-side)
+    sshx '$HOME/.local/bin/claude-self-heal --quiet 2>/dev/null; /usr/local/bin/claude-self-heal --quiet 2>/dev/null; true' >/dev/null 2>&1 || true
 }
 
 resolve_server_script_dir() {
@@ -221,31 +333,43 @@ _stop_code_server_profile() {
 }
 
 clear_session_mount() {
-    local project_id="$1" editor_cmd="${2:-}" alias_name="${3:-}" remote_path="${4:-}" skip_editor="${5:-0}"
+    local project_id="$1" editor_cmd="${2:-}" alias_name="${3:-}" remote_path="${4:-}" skip_editor="${5:-0}" reason="${6:-}"
+    local reason_part="" down_begin down_ms
+    [ -n "$reason" ] && reason_part=" reason=$reason"
     if declare -F connect_log >/dev/null 2>&1; then
-        connect_log "CLEAR_MOUNT project=$project_id skip_editor=$skip_editor editor=$editor_cmd path=$remote_path" 'INFO'
+        connect_log "CLEAR_MOUNT project=$project_id skip_editor=$skip_editor editor=$editor_cmd path=$remote_path$reason_part" 'INFO'
     fi
     if [ "$skip_editor" != "1" ] && [ -n "$editor_cmd" ] && [ -n "$alias_name" ] && [ -n "$remote_path" ]; then
         stop_remote_editor "$editor_cmd" "$alias_name" "$remote_path"
     fi
     clear_tunnel_banner_cache
     if [ -n "$project_id" ]; then
+        down_begin=$SECONDS
         if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "CLEAR_MOUNT: down begin project=$project_id" 'DEBUG'
+            connect_log "CLEAR_MOUNT: down begin project=$project_id" 'INFO'
         fi
         sshx "timeout 8 $CM down '$project_id' 2>/dev/null" 2>/dev/null || true
+        down_ms=$(( (SECONDS - down_begin) * 1000 ))
         if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "CLEAR_MOUNT: down end project=$project_id" 'DEBUG'
+            connect_log "CLEAR_MOUNT: down end ms=$down_ms project=$project_id" 'INFO'
         fi
     fi
     ACTIVE_MOUNT_ID=""
-    push_server_connect_conf
+    push_server_connect_conf --clear
 }
 
 laptop_ssh_prepare_dir() {
     mkdir -p "$HOME/.ssh"
     chmod 755 "$HOME" 2>/dev/null || true
     chmod 700 "$HOME/.ssh" 2>/dev/null || true
+}
+
+mac_login_realname() {
+    # Sharing UI shows Full Name; SSH uses short name (whoami).
+    local rn=""
+    rn="$(id -F 2>/dev/null | tr -d '\r\n' || true)"
+    [ -n "$rn" ] || rn="$(dscl . -read "/Users/$(whoami)" RealName 2>/dev/null | tail -1 | sed 's/^RealName: *//;s/^ //' | tr -d '\r\n' || true)"
+    printf '%s' "$rn"
 }
 
 remote_login_on() {
@@ -264,28 +388,73 @@ laptop_ssh_ready() {
 
 read_laptop_admin_password() {
     [ -n "${LAPTOP_ADMIN_PW:-}" ] && return 0
-    printf '    \033[0;33mMac password (one time, fixes Remote Login):\033[0m\n' >/dev/tty 2>/dev/null || true
-    read -rs LAPTOP_ADMIN_PW </dev/tty 2>/dev/null || read -rs LAPTOP_ADMIN_PW || true
+    # Only one interactive prompt per connect (avoid double-ask on retry pass).
+    if [ "${_MAC_ADMIN_PW_ASKED:-0}" -eq 1 ]; then
+        return 1
+    fi
+    _MAC_ADMIN_PW_ASKED=1
+    printf '    \033[0;33mMac password (one time, 45s timeout, fixes Remote Login):\033[0m\n' >/dev/tty 2>/dev/null || true
+    if ! read -rs -t 45 LAPTOP_ADMIN_PW </dev/tty 2>/dev/null; then
+        read -rs -t 45 LAPTOP_ADMIN_PW 2>/dev/null || LAPTOP_ADMIN_PW=""
+    fi
     echo '' >/dev/tty 2>/dev/null || echo ''
     [ -n "${LAPTOP_ADMIN_PW:-}" ]
 }
 
 run_mac_admin_cmd() {
-    local cmd="$1"
+    # Run one privileged Mac command. Password at most once per connect
+    # (cached in LAPTOP_ADMIN_PW). Avoids 3x GUI prompts + silent hangs.
+    local cmd="$1" osa_pid i rc=1
     [ "$(uname -s)" = "Darwin" ] || return 1
     [ -n "$cmd" ] || return 1
-    if osascript -e "do shell script \"${cmd//\"/\\\"}\" with administrator privileges" >/dev/null 2>&1; then
-        return 0
+
+    if [ -n "${LAPTOP_ADMIN_PW:-}" ]; then
+        printf '%s\n' "$LAPTOP_ADMIN_PW" | sudo -S -p '' sh -c "$cmd" >/dev/null 2>&1 && return 0
     fi
-    if read_laptop_admin_password; then
-        printf '%s\n' "$LAPTOP_ADMIN_PW" | sudo -S sh -c "$cmd" >/dev/null 2>&1 && return 0
+
+    # Terminal password first (connect.sh always has /dev/tty).
+    if [ -z "${LAPTOP_ADMIN_PW:-}" ]; then
+        read_laptop_admin_password || true
+    fi
+    if [ -n "${LAPTOP_ADMIN_PW:-}" ]; then
+        printf '%s\n' "$LAPTOP_ADMIN_PW" | sudo -S -p '' sh -c "$cmd" >/dev/null 2>&1 && return 0
+    fi
+
+    # One GUI prompt with hard timeout (cancelled dialogs used to hang forever).
+    if [ "${_MAC_ADMIN_GUI_TRIED:-0}" -eq 0 ]; then
+        _MAC_ADMIN_GUI_TRIED=1
+        osascript -e "do shell script \"${cmd//\"/\\\"}\" with administrator privileges" >/dev/null 2>&1 &
+        osa_pid=$!
+        i=0
+        while kill -0 "$osa_pid" 2>/dev/null; do
+            i=$((i + 1))
+            if [ "$i" -ge 90 ]; then
+                kill "$osa_pid" 2>/dev/null || true
+                break
+            fi
+            sleep 1
+        done
+        wait "$osa_pid" 2>/dev/null && return 0
     fi
     return 1
 }
 
+
+mac_ssh_access_blocked() {
+    local user="${1:-${LAPTOP_USER:-$(whoami)}}"
+    id -Gn "$user" 2>/dev/null | tr ' ' '\n' | grep -qx 'com.apple.access_ssh-disabled'
+}
+
+mac_ssh_clear_disabled_cmd() {
+    local user="${1:-${LAPTOP_USER:-$(whoami)}}"
+    # Prefer dseditgroup; dscl fallback for stubborn DirectoryService state.
+    printf '%s' "dseditgroup -o edit -d '$user' -t user com.apple.access_ssh-disabled 2>/dev/null || dscl . -delete /Groups/com.apple.access_ssh-disabled GroupMembership '$user' 2>/dev/null || true; dseditgroup -o edit -a '$user' -t user com.apple.access_ssh 2>/dev/null || true"
+}
+
 grant_laptop_ssh_access() {
     local user="${LAPTOP_USER:-$(whoami)}"
-    run_mac_admin_cmd "dseditgroup -o edit -a '$user' -t user com.apple.access_ssh 2>/dev/null || true"
+    # Must REMOVE from com.apple.access_ssh-disabled; adding to access_ssh alone is not enough.
+    run_mac_admin_cmd "$(mac_ssh_clear_disabled_cmd "$user")"
 }
 
 fix_laptop_ssh_firewall() {
@@ -316,19 +485,22 @@ laptop_key_from_prefix() {
 }
 
 install_laptop_server_pubkey() {
-    local pub="$1"
+    local pub="$1" prefix
     pub="${pub//$'\r'/}"
     [ -n "$pub" ] || return 1
-    laptop_ssh_prepare_dir
-    touch "$HOME/.ssh/authorized_keys"
-    chmod 600 "$HOME/.ssh/authorized_keys"
+    laptop_ssh_prepare_dir || return 1
+    mkdir -p "$HOME/.ssh" || return 1
+    touch "$HOME/.ssh/authorized_keys" || return 1
+    chmod 700 "$HOME/.ssh" 2>/dev/null || true
+    chmod 600 "$HOME/.ssh/authorized_keys" || true
     awk -v pub="$pub" 'index($0, pub) == 0 && NF > 0' "$HOME/.ssh/authorized_keys" > "$HOME/.ssh/authorized_keys.tmp" 2>/dev/null \
         && mv "$HOME/.ssh/authorized_keys.tmp" "$HOME/.ssh/authorized_keys"
     rm -f "$HOME/.ssh/authorized_keys.tmp"
-    chmod 600 "$HOME/.ssh/authorized_keys"
-    echo "$(laptop_key_from_prefix) $pub" >> "$HOME/.ssh/authorized_keys"
-    chmod 600 "$HOME/.ssh/authorized_keys"
+    prefix="$(laptop_key_from_prefix 2>/dev/null || echo from-claude-server)"
+    echo "$prefix $pub" >> "$HOME/.ssh/authorized_keys" || return 1
+    chmod 600 "$HOME/.ssh/authorized_keys" || true
     xattr -c "$HOME/.ssh/authorized_keys" 2>/dev/null || true
+    return 0
 }
 
 fetch_laptop_server_pubkey() {
@@ -341,9 +513,137 @@ fetch_laptop_server_pubkey() {
         printf '%s' "$PUB_B"
         return 0
     fi
-    pub="$(sshx "cat ~/.ssh/claude_laptop.pub" 2>/dev/null | tr -d '\r' | grep '^ssh-' | head -1)"
+    pub="$(sshx "cat \$HOME/.ssh/claude_laptop.pub" 2>/dev/null | tr -d '\r' | grep '^ssh-' | head -1)"
     [ -n "$pub" ] || return 1
     printf '%s' "$pub"
+}
+
+diagnose_laptop_ssh_failure() {
+    # Full diagnostics -> server ~/.claude/logs/ only (laptop temp buffer wiped after sync).
+    # so admins can read from the Linux server without asking the user to paste.
+    local pub="${1:-}" user frag="" key_tmp="" ak="$HOME/.ssh/authorized_keys"
+    local port22=0 rl=0 in_group="?" key_in_ak=0 from_line="?"
+    local diag_local diag_remote_dir diag_remote_latest diag_remote_stamp
+    local _ssh_rc=1 ssh_out="" _ssh_err _rn _sys _launch _ak_lines _uname_a
+    user="${LAPTOP_USER:-$(whoami)}"
+    pub="${pub//$'\r'/}"
+    frag="$(printf '%s' "$pub" | awk '{print $2}')"
+    _rn="$(mac_login_realname 2>/dev/null || true)"
+    diag_local="$(mktemp "${TMPDIR:-/tmp}/claude-laptop-ssh-diag.XXXXXX")"
+    diag_remote_dir='$HOME/.claude/logs'
+    diag_remote_latest='$HOME/.claude/logs/laptop-ssh-diag-latest.txt'
+
+    _dlog() {
+        local m="$1"
+        printf '%s\n' "$m" >> "$diag_local"
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "LAPTOP_SSH_DIAG: $m" 'WARN'
+        fi
+        printf '      diag: %s\n' "$m"
+    }
+
+    {
+        echo "==== Claude laptop SSH diagnose ===="
+        echo "ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        echo "connect_version=${CONNECT_VERSION:-${script:ConnectVersion:-unknown}}"
+        echo "host=$(hostname 2>/dev/null || true)"
+        echo "short_user=$user"
+        echo "realname=${_rn}"
+        echo "server_user=${REMOTE_USER:-?}"
+        echo "server_alias=${ALIAS:-?}"
+        echo "server_ip=${SERVER_IP:-?}"
+        echo "tunnel_port=${PORT:-?}"
+        echo "uname=$(uname -a 2>/dev/null || true)"
+        echo "sw_vers=$(sw_vers 2>/dev/null | tr '\n' '|' || true)"
+        echo "id=$(id 2>/dev/null || true)"
+    } > "$diag_local"
+
+    nc -zw1 127.0.0.1 22 2>/dev/null && port22=1 || port22=0
+    remote_login_on && rl=1 || rl=0
+    _dlog "port22_open=$port22 remote_login_on=$rl"
+
+    _sys="$(systemsetup -getremotelogin 2>&1 | tr '\n' ' ' | tr -d '\r')"
+    _dlog "systemsetup_getremotelogin=${_sys}"
+
+    _launch="$(launchctl print system/com.openssh.sshd 2>&1 | grep -E 'state =|path =|pid =' | head -5 | tr '\n' ';')"
+    _dlog "sshd_launchctl=${_launch}"
+
+    if id -Gn "$user" 2>/dev/null | tr ' ' '\n' | grep -qx 'com.apple.access_ssh-disabled'; then
+        in_group=DISABLED
+        _dlog "access_ssh_disabled=yes FIX=System Settings > Sharing > Remote Login > allow this Mac user (or All users)"
+    elif dseditgroup -o check -n . -m "$user" com.apple.access_ssh >/dev/null 2>&1; then
+        in_group=yes
+    elif dseditgroup -o read com.apple.access_ssh >/dev/null 2>&1; then
+        in_group=no
+        _dlog "access_ssh_members=$(dseditgroup -o read com.apple.access_ssh 2>/dev/null | grep -i 'GroupMembership|users' | head -3 | tr '\n' ' ')"
+    else
+        in_group=absent_or_all_users
+    fi
+    _dlog "access_ssh_group=$in_group"
+    _dlog "id_groups=$(id -Gn "$user" 2>/dev/null | tr ' ' ',' || true)"
+
+    _dlog "perms home=$(stat -f '%Lp %Su:%Sg' "$HOME" 2>/dev/null || true) .ssh=$(stat -f '%Lp %Su:%Sg' "$HOME/.ssh" 2>/dev/null || true) ak=$(stat -f '%Lp %Su:%Sg' "$ak" 2>/dev/null || true)"
+    _dlog "ls_ssh=$(ls -la "$HOME/.ssh" 2>/dev/null | tr '\n' '|' || true)"
+
+    _ak_lines=0
+    [ -f "$ak" ] && _ak_lines="$(grep -cve '^[[:space:]]*$' "$ak" 2>/dev/null || echo 0)"
+    _dlog "authorized_keys_nonempty_lines=${_ak_lines}"
+
+    if [ -n "$frag" ] && [ -f "$ak" ] && grep -Fq "$frag" "$ak" 2>/dev/null; then
+        key_in_ak=1
+        from_line="$(grep -F "$frag" "$ak" | head -1 | awk '{print $1}')"
+        _dlog "matching_ak_key_present=yes (pubkey redacted)"
+    fi
+    _dlog "server_pubkey_in_authorized_keys=$key_in_ak from_prefix=$from_line frag_tail=$(printf '%s' "$frag" | tail -c 12)"
+
+    # sshd config snippets (no secrets)
+    if [ -f /etc/ssh/sshd_config ]; then
+        _dlog "sshd_config=$(grep -Ei '^(PubkeyAuthentication|PasswordAuthentication|AuthorizedKeysFile|AllowUsers|AllowGroups|PermitRootLogin|#Pubkey|#Password)' /etc/ssh/sshd_config 2>/dev/null | tr '\n' ';' || true)"
+    fi
+
+    if [ -z "$frag" ]; then
+        _dlog "FAIL reason=no_server_pubkey_fragment"
+    elif [ "$key_in_ak" -eq 0 ]; then
+        _dlog "FAIL reason=pubkey_not_in_authorized_keys"
+    elif [ "$port22" -eq 0 ]; then
+        _dlog "FAIL reason=sshd_not_listening_on_22"
+    else
+        # SECURITY: do not pull ~/.ssh/claude_laptop private key into diagnose logs/tmp.
+        # Pubkey + sshd/port/allow-list checks above are enough for diagnosis.
+        _dlog "local_ssh_vv=skipped reason=no_private_key_fetch_in_diagnose"
+        _dlog "HINT: if auth fails, check Remote Login allow-list, authorized_keys from=, and sshd"
+    fi
+
+    _dlog "connect_log_buffer=${CONNECT_LOG_PATH:-unset} (durable local day log + server sync)"
+    if declare -F sync_connect_log_to_server >/dev/null 2>&1; then sync_connect_log_to_server || true; fi
+
+    # Push full report to server home (readable by admin / agent on Linux).
+    if [ -n "${ALIAS:-}" ] && command -v scp >/dev/null 2>&1; then
+        sshx "mkdir -p \$HOME/.claude/logs && chmod 700 \$HOME/.claude \$HOME/.claude/logs 2>/dev/null; true" >/dev/null 2>&1 || true
+        if scp -o BatchMode=yes -o ConnectTimeout=15 -q "$diag_local" "${ALIAS}:.claude/logs/laptop-ssh-diag-latest.txt" 2>/dev/null; then
+            sshx "cp -f \$HOME/.claude/logs/laptop-ssh-diag-latest.txt \"\$HOME/.claude/logs/laptop-ssh-diag-\$(date +%Y%m%d-%H%M%S).txt\" 2>/dev/null; chmod 600 \$HOME/.claude/logs/laptop-ssh-diag*.txt 2>/dev/null; true" >/dev/null 2>&1 || true
+            warn "Diagnostics uploaded to server: ~/.claude/logs/laptop-ssh-diag-latest.txt (user ${REMOTE_USER:-?})"
+            _dlog "uploaded_to_server=yes path=~/.claude/logs/laptop-ssh-diag-latest.txt"
+        else
+            # fallback: base64 via sshx
+            if command -v base64 >/dev/null 2>&1; then
+                _b64="$(base64 < "$diag_local" | tr -d '\n\r')"
+                if sshx "mkdir -p \$HOME/.claude/logs && echo '$_b64' | base64 -d > \$HOME/.claude/logs/laptop-ssh-diag-latest.txt && chmod 600 \$HOME/.claude/logs/laptop-ssh-diag-latest.txt" >/dev/null 2>&1; then
+                    warn "Diagnostics uploaded to server: ~/.claude/logs/laptop-ssh-diag-latest.txt"
+                    _dlog "uploaded_to_server=yes via=base64"
+                else
+                    warn "Could not upload diagnostics to server (SSH/scp failed)"
+                    _dlog "uploaded_to_server=no"
+                fi
+            else
+                _dlog "uploaded_to_server=no"
+            fi
+        fi
+    fi
+
+    warn "Diagnostics on server only: ~/.claude/logs/laptop-ssh-diag-latest.txt (+ connect-YYYYMMDD.log)"
+    rm -f "$diag_local"
+    return 0
 }
 
 verify_laptop_local_pubkey() {
@@ -354,7 +654,7 @@ verify_laptop_local_pubkey() {
     grep -Fq "$frag" "$HOME/.ssh/authorized_keys" 2>/dev/null || return 1
     key_tmp="$(mktemp "${TMPDIR:-/tmp}/claude-laptop-key.XXXXXX")"
     umask 077
-    if sshx "cat ~/.ssh/claude_laptop" 2>/dev/null > "$key_tmp"; then
+    if sshx "base64 < \$HOME/.ssh/claude_laptop" 2>/dev/null | tr -d '\r\n' | (base64 -D 2>/dev/null || base64 -d 2>/dev/null) > "$key_tmp"; then
         chmod 600 "$key_tmp"
         ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
             -i "$key_tmp" "${LAPTOP_USER:-$(whoami)}@127.0.0.1" true >/dev/null 2>&1
@@ -371,13 +671,22 @@ fetch_tunnel_banner() {
 # One sshx RTT: TCP open + SSH banner (replaces separate port_open + banner calls).
 tunnel_fetch_banner_raw() {
     [ -n "${PORT:-}" ] || return 1
-    sshx "timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${PORT} 2>/dev/null && timeout 2 nc 127.0.0.1 ${PORT} 2>/dev/null | head -1' 2>/dev/null" 2>/dev/null | tr -d '\r\n'
+    # Single TCP connection (nc only). Old /dev/tcp+nc used 2 MaxStartups slots.
+    sshx "timeout 3 nc -w 2 127.0.0.1 ${PORT} 2>/dev/null | head -1" 2>/dev/null | tr -d '\r\n'
+}
+
+tunnel_tcp_open() {
+    [ -n "${PORT:-}" ] || return 1
+    local out
+    out="$(sshx "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${PORT} 2>/dev/null' && echo open || echo closed" 2>/dev/null | tr -d '\r\n')"
+    echo "$out" | grep -q 'open'
 }
 
 tunnel_fetch_banner() {
     local now age_ms banner
     [ -n "${PORT:-}" ] || return 1
-    if [ "$_TUNNEL_BANNER_CACHE_INVALID" -eq 0 ] && [ "$_TUNNEL_BANNER_CACHE_AT" -gt 0 ]; then
+    # Positive cache only ���?" never poison with empty banner for 3s.
+    if [ "$_TUNNEL_BANNER_CACHE_INVALID" -eq 0 ] && [ "$_TUNNEL_BANNER_CACHE_AT" -gt 0 ] && [ "$_TUNNEL_BANNER_CACHE_UP" -eq 1 ]; then
         now="$(date +%s 2>/dev/null || printf '0')"
         age_ms=$(( (now - _TUNNEL_BANNER_CACHE_AT) * 1000 ))
         if [ "$age_ms" -lt 3000 ]; then
@@ -390,12 +699,25 @@ tunnel_fetch_banner() {
     fi
     _TUNNEL_BANNER_CACHE_INVALID=0
     banner="$(tunnel_fetch_banner_raw 2>/dev/null || true)"
-    _TUNNEL_BANNER_CACHE_AT="$(date +%s 2>/dev/null || printf '0')"
-    _TUNNEL_BANNER_CACHE_BANNER="$banner"
+    case "$banner" in
+        *MaxStartups*)
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_BANNER soft_fail port=$PORT reason=maxstartups" 'WARN'
+            fi
+            banner=""
+            ;;
+    esac
     if [ -n "$banner" ] && tunnel_banner_is_this_laptop "$banner"; then
+        _TUNNEL_BANNER_CACHE_AT="$(date +%s 2>/dev/null || printf '0')"
+        _TUNNEL_BANNER_CACHE_BANNER="$banner"
         _TUNNEL_BANNER_CACHE_UP=1
     else
+        _TUNNEL_BANNER_CACHE_AT=0
+        _TUNNEL_BANNER_CACHE_BANNER=""
         _TUNNEL_BANNER_CACHE_UP=0
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "TUNNEL_BANNER miss port=$PORT banner=$banner" 'DEBUG'
+        fi
     fi
     printf '%s' "$banner"
 }
@@ -407,6 +729,9 @@ tunnel_banner_is_this_laptop() {
     echo "$banner" | grep -q '^SSH-2.0-' || return 1
     case "$os" in
         mac|darwin)
+            # macOS Remote Login advertises a normal OpenSSH banner. Reject
+            # server/Linux and Windows banners so a foreign forward is not reused.
+            echo "$banner" | grep -qi 'OpenSSH' || return 1
             echo "$banner" | grep -qiE 'OpenSSH_for_Windows|Ubuntu|Debian|el[0-9]+' && return 1
             ;;
         win|windows)
@@ -421,58 +746,160 @@ tunnel_port_open() {
 }
 
 tunnel_up() {
-    local banner age_ms now
-    if [ "$_TUNNEL_BANNER_CACHE_INVALID" -eq 0 ] && [ "$_TUNNEL_BANNER_CACHE_AT" -gt 0 ]; then
+    local banner age_ms now attempt
+    if [ "$_TUNNEL_BANNER_CACHE_INVALID" -eq 0 ] && [ "$_TUNNEL_BANNER_CACHE_AT" -gt 0 ] && [ "$_TUNNEL_BANNER_CACHE_UP" -eq 1 ]; then
         now="$(date +%s 2>/dev/null || printf '0')"
         age_ms=$(( (now - _TUNNEL_BANNER_CACHE_AT) * 1000 ))
         if [ "$age_ms" -lt 3000 ]; then
             if declare -F connect_log >/dev/null 2>&1; then
-                connect_log "TUNNEL_UP port=$PORT up=$_TUNNEL_BANNER_CACHE_UP cache=1" 'TRACE'
+                connect_log "TUNNEL_UP port=$PORT up=1 cache=1" 'TRACE'
             fi
-            [ "$_TUNNEL_BANNER_CACHE_UP" -eq 1 ]
-            return
+            return 0
         fi
     fi
-    banner="$(tunnel_fetch_banner 2>/dev/null || true)"
-    [ -n "$banner" ] || return 1
-    tunnel_banner_is_this_laptop "$banner"
+    for attempt in 1 2 3; do
+        [ "$attempt" -gt 1 ] && sleep 0.25
+        banner="$(tunnel_fetch_banner 2>/dev/null || true)"
+        if [ -n "$banner" ] && tunnel_banner_is_this_laptop "$banner"; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_UP port=$PORT up=1 attempt=$attempt" 'TRACE'
+            fi
+            return 0
+        fi
+    done
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "TUNNEL_UP port=$PORT up=0" 'TRACE'
+    fi
+    return 1
+}
+
+
+_tunnel_session_diag_suffix() {
+    local proj=""
+    if [ -n "${ACTIVE_PROJECT_ID:-}" ]; then
+        proj=" project=${ACTIVE_PROJECT_ID}"
+    fi
+    printf '%s soft_fail=%s sync_fail=%s' "$proj" "${_TUNNEL_SOFT_FAIL_COUNT:-0}" "${_TUNNEL_SYNC_FAIL_COUNT:-0}"
+}
+
+log_tunnel_drop() {
+    local reason="${1:-auto_reconnect}"
+    local project_id="${2:-${ACTIVE_PROJECT_ID:-?}}"
+    local tunnel_sync_ok="${3:-false}"
+    local editor_opened="${4:-${_editor_opened:-0}}"
+    local editor_seen="${5:-${_editor_seen_open:-0}}"
+    local gen="${6:-${RECOVERY_GENERATION:-0}}"
+    local tcp_open=0 tunnel_up=0
+    local drop_cause="${LAST_TUNNEL_SYNC_DROP_REASON:-}"
+    local cause_part="" bg_part=""
+    if declare -F tunnel_tcp_open >/dev/null 2>&1 && tunnel_tcp_open; then tcp_open=1; fi
+    if declare -F tunnel_up >/dev/null 2>&1 && tunnel_up; then tunnel_up=1; fi
+    [ -n "$drop_cause" ] && [ "$reason" = "auto_reconnect" ] && cause_part=" drop_cause=$drop_cause"
+    [ -n "${bg_pid:-}" ] && bg_part=" bg_pid=$bg_pid"
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "TUNNEL_DROP reason=$reason soft_fail=${_TUNNEL_SOFT_FAIL_COUNT:-0} sync_fail=${_TUNNEL_SYNC_FAIL_COUNT:-0} tcp_open=$tcp_open tunnel_up=$tunnel_up tunnel_sync_ok=$tunnel_sync_ok project=$project_id editor_opened=$editor_opened editor_seen=$editor_seen gen=$gen$cause_part$bg_part port=${PORT:-?}" 'WARN'
+    fi
 }
 
 # When bg tunnel process is alive, probe forward every 30s (zombie forward detection).
 sync_session_tunnel_forward() {
     local bg_pid="${1:-}" now probe_up
+    local fail_threshold="${TUNNEL_FORWARD_FAIL_THRESHOLD:-3}"
     [ -n "$bg_pid" ] || return 1
-    kill -0 "$bg_pid" 2>/dev/null || return 1
+    case "$fail_threshold" in ''|*[!0-9]*) fail_threshold=3 ;; esac
+    [ "$fail_threshold" -ge 1 ] 2>/dev/null || fail_threshold=3
+
+    # A missing local ssh PID is not definitive: the reverse forward can still
+    # be healthy after process re-parenting. Trust TCP/banner evidence first.
+    if ! kill -0 "$bg_pid" 2>/dev/null; then
+        if tunnel_up || { declare -F tunnel_tcp_open >/dev/null 2>&1 && tunnel_tcp_open; }; then
+            _TUNNEL_SYNC_FAIL_COUNT=0
+            _TUNNEL_SOFT_FAIL_COUNT=$(( ${_TUNNEL_SOFT_FAIL_COUNT:-0} + 1 ))
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_SYNC soft_fail count=$_TUNNEL_SOFT_FAIL_COUNT/6 pid=$bg_pid port=$PORT reason=no_ssh_proc_tcp_open$(_tunnel_session_diag_suffix)" 'WARN'
+            fi
+            if [ "$_TUNNEL_SOFT_FAIL_COUNT" -lt 6 ]; then
+                return 0
+            fi
+            if declare -F connect_log >/dev/null 2>&1; then
+                LAST_TUNNEL_SYNC_DROP_REASON=no_ssh_proc_tcp_open_budget
+                log_tunnel_drop no_ssh_proc_tcp_open_budget "${ACTIVE_PROJECT_ID:-?}" false "${_editor_opened:-0}" "${_editor_seen_open:-0}" "${RECOVERY_GENERATION:-0}"
+            fi
+            _TUNNEL_SOFT_FAIL_COUNT=0
+            return 1
+        fi
+        _TUNNEL_SYNC_FAIL_COUNT=$(( _TUNNEL_SYNC_FAIL_COUNT + 1 ))
+        if [ "$_TUNNEL_SYNC_FAIL_COUNT" -lt "$fail_threshold" ]; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_SYNC soft_fail pid=$bg_pid port=$PORT reason=no_ssh_proc count=$_TUNNEL_SYNC_FAIL_COUNT threshold=$fail_threshold$(_tunnel_session_diag_suffix)" 'WARN'
+            fi
+            return 0
+        fi
+        if declare -F connect_log >/dev/null 2>&1; then
+            LAST_TUNNEL_SYNC_DROP_REASON=no_ssh_proc_tunnel_down
+            log_tunnel_drop no_ssh_proc_tunnel_down "${ACTIVE_PROJECT_ID:-?}" false "${_editor_opened:-0}" "${_editor_seen_open:-0}" "${RECOVERY_GENERATION:-0}"
+        fi
+        _TUNNEL_SYNC_FAIL_COUNT=0
+        return 1
+    fi
+
     now="$(date +%s 2>/dev/null || printf '0')"
     if [ "$_LAST_FORWARD_PROBE_AT" -eq 0 ]; then
         _LAST_FORWARD_PROBE_AT="$now"
-        if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "TUNNEL_SYNC: bg_alive pid=$bg_pid port=$PORT" 'TRACE'
-        fi
         return 0
     fi
     if [ $(( now - _LAST_FORWARD_PROBE_AT )) -lt 30 ]; then
-        if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "TUNNEL_SYNC: bg_alive pid=$bg_pid port=$PORT" 'TRACE'
-        fi
         return 0
     fi
     _LAST_FORWARD_PROBE_AT="$now"
     clear_tunnel_banner_cache
     if tunnel_up; then
         probe_up=1
+        _TUNNEL_SYNC_FAIL_COUNT=0
+        _TUNNEL_SOFT_FAIL_COUNT=0
     else
         probe_up=0
     fi
     if [ "$probe_up" -eq 0 ]; then
-        if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "TUNNEL_DROP pid=$bg_pid port=$PORT reason=bg_alive_forward_dead" 'WARN'
+        if declare -F tunnel_tcp_open >/dev/null 2>&1 && tunnel_tcp_open; then
+            _TUNNEL_SOFT_FAIL_COUNT=$(( ${_TUNNEL_SOFT_FAIL_COUNT:-0} + 1 ))
+            _TUNNEL_SYNC_FAIL_COUNT=0
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_SYNC soft_fail count=$_TUNNEL_SOFT_FAIL_COUNT/6 pid=$bg_pid port=$PORT reason=banner_miss_tcp_open$(_tunnel_session_diag_suffix)" 'WARN'
+            fi
+            if [ "$_TUNNEL_SOFT_FAIL_COUNT" -ge 6 ]; then
+                if declare -F connect_log >/dev/null 2>&1; then
+                    LAST_TUNNEL_SYNC_DROP_REASON=banner_miss_tcp_open_budget
+                    log_tunnel_drop banner_miss_tcp_open_budget "${ACTIVE_PROJECT_ID:-?}" false "${_editor_opened:-0}" "${_editor_seen_open:-0}" "${RECOVERY_GENERATION:-0}"
+                fi
+                release_stale_tunnel_port || true
+                _TUNNEL_SOFT_FAIL_COUNT=0
+                return 1
+            fi
+            return 0
+        else
+            _TUNNEL_SYNC_FAIL_COUNT=$(( _TUNNEL_SYNC_FAIL_COUNT + 1 ))
+            if [ "$_TUNNEL_SYNC_FAIL_COUNT" -lt "$fail_threshold" ]; then
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "TUNNEL_SYNC soft_fail pid=$bg_pid port=$PORT reason=forward_probe_failed count=$_TUNNEL_SYNC_FAIL_COUNT threshold=$fail_threshold$(_tunnel_session_diag_suffix)" 'WARN'
+                fi
+                return 0
+            fi
+            if declare -F connect_log >/dev/null 2>&1; then
+                LAST_TUNNEL_SYNC_DROP_REASON=bg_alive_forward_dead
+                log_tunnel_drop bg_alive_forward_dead "${ACTIVE_PROJECT_ID:-?}" false "${_editor_opened:-0}" "${_editor_seen_open:-0}" "${RECOVERY_GENERATION:-0}"
+            fi
+            _TUNNEL_SYNC_FAIL_COUNT=0
+            release_stale_tunnel_port || true
+            return 1
         fi
-        release_stale_tunnel_port || true
-        return 1
     fi
     if declare -F connect_log >/dev/null 2>&1; then
-        connect_log "TUNNEL_SYNC: bg_alive pid=$bg_pid port=$PORT forward_ok=1" 'TRACE'
+        _now=$(date +%s)
+        if [ -z "${_LAST_TUNNEL_TRACE:-}" ] || [ $((_now - _LAST_TUNNEL_TRACE)) -ge 30 ]; then
+            connect_log "TUNNEL_SYNC: bg_alive pid=$bg_pid port=$PORT" 'TRACE'
+            _LAST_TUNNEL_TRACE=$_now
+        fi
     fi
     return 0
 }
@@ -481,14 +908,26 @@ wait_for_tunnel_up() {
     local pid="${1:-}" i sleep_s
     for i in $(seq 1 12); do
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_WAIT fail=1 attempt=$i reason=ssh_died pid=$pid" 'WARN'
+            fi
             printf '    Tunnel check... SSH process died\n'
             release_stale_tunnel_port || true
             return 1
         fi
         if tunnel_up; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_WAIT ok=1 attempt=$i port=$PORT pid=$pid" 'DEBUG'
+            fi
             return 0
         fi
+        if [ "$i" -ge 12 ]; then
+            break
+        fi
         sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "TUNNEL_WAIT ok=0 attempt=$i port=$PORT" 'TRACE'
+        fi
         sleep "$sleep_s"
     done
     release_stale_tunnel_port || true
@@ -499,11 +938,17 @@ poll_tunnel_with_progress() {
     local pid="${1:-}" i sleep_s up=""
     for i in $(seq 1 12); do
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_WAIT fail=1 attempt=$i reason=ssh_died pid=$pid" 'WARN'
+            fi
             printf '    Tunnel check... SSH process died\n'
             release_stale_tunnel_port || true
             return 1
         fi
         if tunnel_up; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_WAIT ok=1 attempt=$i port=$PORT pid=$pid" 'DEBUG'
+            fi
             if [ "$i" -eq 1 ]; then
                 printf '    Tunnel check... port %d is open\n' "$PORT"
             else
@@ -516,6 +961,9 @@ poll_tunnel_with_progress() {
         fi
         sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
         printf '    Tunnel check %d/12... port %d not open yet\n' "$i" "$PORT"
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "TUNNEL_WAIT ok=0 attempt=$i port=$PORT" 'TRACE'
+        fi
         sleep "$sleep_s"
     done
     release_stale_tunnel_port || true
@@ -541,7 +989,7 @@ local_file_sha256() {
 }
 
 remote_claude_mount_sha256() {
-    sshx "sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print \$1}'" 2>/dev/null | tr -d '\r\n'
+    sshx "sha256sum \$HOME/.local/bin/claude-mount 2>/dev/null | awk '{print \$1}'" 2>/dev/null | tr -d '\r\n'
 }
 
 push_claude_mount_if_changed() {
@@ -553,7 +1001,7 @@ push_claude_mount_if_changed() {
         [ "$local_h" = "$remote_h" ] && return 0
     fi
     scp -o BatchMode=yes -o ConnectTimeout=20 -q "$src" "$ALIAS:~/.local/bin/claude-mount" 2>/dev/null \
-        && sshx "chmod +x ~/.local/bin/claude-mount" 2>/dev/null || true
+        && sshx "chmod +x \$HOME/.local/bin/claude-mount" 2>/dev/null || true
 }
 
 prepare_server_session_parallel() {
@@ -584,7 +1032,7 @@ project_mount_healthy() {
 }
 
 recover_mounts_if_needed() {
-    local id="$1" fresh_tunnel="${2:-0}"
+    local id="$1" fresh_tunnel="${2:-0}" recover_ec=0 recover_begin recover_ms
     if [ "$fresh_tunnel" = "0" ] && project_mount_healthy "$id"; then
         if [ "$(get_git_mode)" = "off" ]; then
             sshx "timeout 15 $CM recover-if-needed '$id' 2>/dev/null" 2>/dev/null || true
@@ -592,15 +1040,28 @@ recover_mounts_if_needed() {
         return 0
     fi
     printf '    \033[0;90mRecovering stale mounts...\033[0m\n'
+    recover_begin=$SECONDS
     if declare -F connect_log >/dev/null 2>&1; then
-        connect_log "RECOVER: begin project=$id fresh_tunnel=$fresh_tunnel" 'DEBUG'
+        connect_log "RECOVER: begin project=$id fresh_tunnel=$fresh_tunnel" 'INFO'
     fi
     clear_tunnel_banner_cache
-    timeout 30 sshx "$CM recover-one '$id' 2>/dev/null || timeout 30 sshx "$CM recover-if-needed '$id' 2>/dev/null || timeout 30 sshx "$CM recover" 2>/dev/null || true
-    if declare -F connect_log >/dev/null 2>&1; then
-        connect_log "RECOVER: end project=$id" 'DEBUG'
+    # Single remote command (Win parity) - no nested sshx on the server.
+    if ! sshx "timeout 30 $CM recover-one '$id' 2>/dev/null || timeout 30 $CM recover-if-needed '$id' 2>/dev/null || timeout 30 $CM recover 2>/dev/null || true"; then
+        recover_ec=$?
     fi
-    printf '    \033[0;90mRecover done\033[0m\n'
+    recover_ms=$(( (SECONDS - recover_begin) * 1000 ))
+    if declare -F connect_log >/dev/null 2>&1; then
+        if [ "$recover_ec" -ne 0 ]; then
+            connect_log "RECOVER: fail project=$id exit=$recover_ec ms=$recover_ms" 'WARN'
+        else
+            connect_log "RECOVER: end project=$id ms=$recover_ms" 'INFO'
+        fi
+    fi
+    if [ "$recover_ec" -ne 0 ]; then
+        printf '    \033[0;33mRecover finished with errors (exit %s)\033[0m\n' "$recover_ec"
+    else
+        printf '    \033[0;90mRecover done\033[0m\n'
+    fi
 }
 
 # Reset session state after tunnel drop (manual R or auto recovery).
@@ -612,6 +1073,11 @@ begin_connect_recovery() {
     export CURSOR_AUTH_FORCE=1
     if declare -F connect_log >/dev/null 2>&1; then
         connect_log "RECOVERY_BEGIN trigger=$trigger project=$project_id editor_opened=$editor_was_open gen=$RECOVERY_GENERATION"
+    fi
+    if [ "$trigger" = "auto" ] && declare -F invoke_connect_silent_update_check >/dev/null 2>&1; then
+        invoke_connect_silent_update_check || true
+    fi
+    if declare -F connect_log >/dev/null 2>&1; then
         connect_log 'RECOVERY_STATE_RESET editor_opened=0 force_auth=1 post_recovery=1'
     fi
 }
@@ -674,17 +1140,63 @@ ensure_laptop_reverse_ssh_cached() {
     return "$rc"
 }
 
+tunnel_port_tcp_open() {
+    local port="${1:-${PORT:-}}"
+    local out=""
+    [ -n "$port" ] || return 1
+    out="$(sshx "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${port} 2>/dev/null' && echo open || echo closed" 2>/dev/null | tr -d '\r\n')"
+    [ "$out" = open ]
+}
+
 # Reuse live tunnel when possible; sets TUNNEL_REUSED=0|1 and bg_pid.
 ensure_session_tunnel() {
     TUNNEL_REUSED=0
-    if [ -n "${bg_pid:-}" ] && _tunnel_alive "$bg_pid" && tunnel_up; then
-        TUNNEL_REUSED=1
-        return 0
+    local now_ts
+    # PID loss is not authoritative: a re-parented reverse forward can remain usable.
+    # Reuse valid banner/TCP evidence before any kill or stale-forward cleanup.
+    if [ -n "${bg_pid:-}" ]; then
+        if tunnel_up; then
+            TUNNEL_REUSED=1
+            _TUNNEL_SYNC_FAIL_COUNT=0
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "ENSURE_TUNNEL reused=1 pid=$bg_pid port=$PORT reason=tunnel_up" 'DEBUG'
+            fi
+            return 0
+        fi
+        # Banner miss + TCP open: zombie forward. Do not return success / TUNNEL_REUSED.
+        # Match Windows Ensure-SessionTunnel: soft_fail then fall through to kill + reseed.
+        if tunnel_port_tcp_open "$PORT"; then
+            connect_log "ENSURE_TUNNEL soft_fail pid=$bg_pid port=$PORT reason=banner_miss_tcp_open action=reseed$(_tunnel_session_diag_suffix)" 'WARN'
+            # Fall through unless recent_success (5s) covers brief banner flicker.
+        fi
+        # 5s recent_success reuse (Win parity).
+        now_ts="$(date +%s 2>/dev/null || printf '0')"
+        if [ -n "${_LAST_TUNNEL_SPAWN_SUCCESS_AT:-}" ] && [ "${_LAST_TUNNEL_SPAWN_SUCCESS_AT:-0}" != "0" ] \
+            && [ -n "${_LAST_TUNNEL_SPAWN_PID:-}" ] && [ "$_LAST_TUNNEL_SPAWN_PID" = "$bg_pid" ] \
+            && [ "${_LAST_TUNNEL_SPAWN_SUCCESS_PORT:-}" = "${PORT:-}" ] \
+            && [ "$now_ts" != "0" ] \
+            && [ $(( now_ts - _LAST_TUNNEL_SPAWN_SUCCESS_AT )) -lt 5 ]; then
+            TUNNEL_REUSED=1
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "ENSURE_TUNNEL reused=1 pid=$bg_pid port=$PORT reason=recent_success" 'DEBUG'
+            fi
+            return 0
+        fi
     fi
-    [ -n "${bg_pid:-}" ] && kill "$bg_pid" 2>/dev/null || true
-    [ -n "${bg_pid:-}" ] && [ -n "${PORT:-}" ] && clear_server_stale_tunnel_forward "$PORT" || true
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "ENSURE_TUNNEL start port=$PORT alias=${ALIAS:-} had_bg=$([ -n "${bg_pid:-}" ] && echo 1 || echo 0)" 'DEBUG'
+    fi
+    local _old_bg="${bg_pid:-}"
+    if [ -n "${bg_pid:-}" ]; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "ENSURE_TUNNEL killing stale bg pid=$bg_pid" 'DEBUG'
+        fi
+        kill "$bg_pid" 2>/dev/null || true
+        [ -n "${PORT:-}" ] && clear_server_stale_tunnel_forward "$PORT" || true
+    fi
     bg_pid=""
-    pkill -f "ssh.*-R ${PORT}:localhost:22" 2>/dev/null && clear_server_stale_tunnel_forward "$PORT" || true
+    # Prefer orphan helper with no protect (old bg already killed) over blind pkill storms.
+    remove_local_orphan_tunnel "$PORT" "" || true
     local uid_str=""
     uid_str="$(sshx 'id -u' 2>/dev/null | tr -d '\r' | grep -E '^[0-9]+$' | head -1 | tr -dc '0-9')"
     if [ -n "$uid_str" ]; then
@@ -694,24 +1206,31 @@ ensure_session_tunnel() {
     sanitize_ssh_alias_config
     clear_tunnel_banner_cache
     _LAST_FORWARD_PROBE_AT=0
+    _TUNNEL_SYNC_FAIL_COUNT=0
     ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=5 \
         -R "${PORT}:localhost:22" "$ALIAS" 2>/dev/null &
     bg_pid=$!
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "ENSURE_TUNNEL spawned pid=$bg_pid port=$PORT slot=${TUNNEL_SLOT:-}" 'INFO'
+    fi
     if poll_tunnel_with_progress "$bg_pid"; then
+        _LAST_TUNNEL_SPAWN_SUCCESS_AT="$(date +%s 2>/dev/null || printf '0')"
+        _LAST_TUNNEL_SPAWN_SUCCESS_PORT="${PORT:-}"
+        _LAST_TUNNEL_SPAWN_PID="$bg_pid"
+        _TUNNEL_SYNC_FAIL_COUNT=0
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "ENSURE_TUNNEL ok=1 pid=$bg_pid" 'INFO'
+        fi
         return 0
+    fi
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "ENSURE_TUNNEL ok=0 reason=wait_timeout pid=$bg_pid" 'WARN'
     fi
     kill "$bg_pid" 2>/dev/null || true
     bg_pid=""
     return 1
 }
 
-tunnel_port_tcp_open() {
-    local port="${1:-${PORT:-}}"
-    local out=""
-    [ -n "$port" ] || return 1
-    out="$(sshx "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${port} 2>/dev/null' && echo open || echo closed" 2>/dev/null | tr -d '\r\n')"
-    [ "$out" = open ]
-}
 
 clear_server_stale_tunnel_forward() {
     local port="${1:-${PORT:-}}" i=0
@@ -723,7 +1242,7 @@ clear_server_stale_tunnel_forward() {
     clear_tunnel_banner_cache
     while [ "$i" -lt 8 ]; do
         i=$(( i + 1 ))
-        sleep 0.5
+        sleep 0.25
         clear_tunnel_banner_cache
         if ! tunnel_port_tcp_open "$port"; then
             if declare -F connect_log >/dev/null 2>&1; then
@@ -739,12 +1258,30 @@ clear_server_stale_tunnel_forward() {
 }
 
 remove_local_orphan_tunnel() {
-    local target_port="$1" killed=0
+    local target_port="$1" killed=0 protect_pid="${2:-${bg_pid:-}}"
     [ -n "$target_port" ] || return 0
-    if pkill -f "ssh.*-R ${target_port}:localhost:22" 2>/dev/null; then
-        killed=1
+    # Do not kill the live session tunnel (Win skip_current parity).
+    if [ -n "$protect_pid" ] && kill -0 "$protect_pid" 2>/dev/null; then
         if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "ORPHAN_TUNNEL: killed local ssh port=$target_port" 'DEBUG'
+            connect_log "ORPHAN_TUNNEL: skip_current pid=$protect_pid port=$target_port" 'DEBUG'
+        fi
+        # Kill other matching ssh reverse forwards on this port, if any.
+        local p
+        for p in $(pgrep -f "ssh.*-R ${target_port}:localhost:22" 2>/dev/null || true); do
+            if [ "$p" != "$protect_pid" ]; then
+                kill "$p" 2>/dev/null || true
+                killed=1
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "ORPHAN_TUNNEL: killing local pid=$p port=$target_port" 'DEBUG'
+                fi
+            fi
+        done
+    else
+        if pkill -f "ssh.*-R ${target_port}:localhost:22" 2>/dev/null; then
+            killed=1
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "ORPHAN_TUNNEL: killed local ssh port=$target_port" 'DEBUG'
+            fi
         fi
     fi
     clear_tunnel_banner_cache
@@ -904,12 +1441,14 @@ laptop_ssh_bootstrap_local() {
     local user="${LAPTOP_USER:-$(whoami)}" askpass="" rc=1
     read_laptop_admin_password || return 1
     askpass="$(mktemp "${TMPDIR:-/tmp}/claude-askpass.XXXXXX")"
+    secref="$(mktemp "${TMPDIR:-/tmp}/claude-askpass-secret.XXXXXX")"
     umask 077
+    # Password lives only in mode-600 secret file; askpass argv is "cat <file>" (no pw on cmdline).
+    printf '%s\n' "$LAPTOP_ADMIN_PW" > "$secref"
+    chmod 600 "$secref"
     {
         printf '#!/bin/sh\n'
-        printf 'echo '
-        printf '%q' "$LAPTOP_ADMIN_PW"
-        printf '\n'
+        printf 'cat %q\n' "$secref"
     } > "$askpass"
     chmod 700 "$askpass"
     SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force \
@@ -918,50 +1457,78 @@ laptop_ssh_bootstrap_local() {
             -o ConnectTimeout=10 -o NumberOfPasswordPrompts=1 \
             "${user}@127.0.0.1" true >/dev/null 2>&1
     rc=$?
-    rm -f "$askpass"
+    rm -f "$askpass" "$secref"
     [ "$rc" -eq 0 ]
 }
 
 invoke_laptop_admin_ops() {
-    local pub="$1" firewall_fix="${2:-0}"
+    local pub="$1" firewall_fix="${2:-0}" user
     pub="$(printf '%s' "$pub" | tr -d '\r')"
     [ "$(uname -s)" = "Darwin" ] || return 1
     if [ -z "$pub" ] && [ "$firewall_fix" != "1" ]; then
         return 1
     fi
+    user="${LAPTOP_USER:-$(whoami)}"
 
-    grant_laptop_ssh_access || true
-    [ "$firewall_fix" = "1" ] && fix_laptop_ssh_firewall || true
+    warn "Fixing Mac SSH access for Mac user '${user}' (server user is '${REMOTE_USER:-?}'; password once)..."
+    run_mac_admin_cmd "$(mac_ssh_clear_disabled_cmd "$user"); $(
+        if [ "$firewall_fix" = "1" ]; then
+            printf '%s' "/usr/libexec/ApplicationFirewall/socketfilterfw --add /usr/sbin/sshd 2>/dev/null; /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /usr/sbin/sshd 2>/dev/null; "
+        fi
+    )launchctl kickstart -k system/com.openssh.sshd 2>/dev/null || true" || true
+    wait_laptop_sshd || true
+
+    if mac_ssh_access_blocked "$user"; then
+        warn "STILL BLOCKED: '$user' is still in com.apple.access_ssh-disabled (password may have been wrong/cancelled)."
+        warn "Fix once in Terminal, then press R:"
+        warn "  sudo dseditgroup -o edit -d $(whoami) -t user com.apple.access_ssh-disabled"
+        warn "Or Sharing > Remote Login > All users (UI name may be Full Name, e.g. Mohammad)."
+    fi
+
     if [ -n "$pub" ]; then
         install_laptop_server_pubkey "$pub" || return 1
     fi
-    restart_laptop_sshd || true
     if [ -n "$pub" ] && verify_laptop_local_pubkey "$pub"; then
         unset LAPTOP_ADMIN_PW
         return 0
     fi
     [ -z "$pub" ] && return 0
 
-    cycle_remote_login || true
+    warn "Retrying firewall + Remote Login allow list..."
     fix_laptop_ssh_firewall || true
-    install_laptop_server_pubkey "$pub" || return 1
-    restart_laptop_sshd || true
-    verify_laptop_local_pubkey "$pub" && { unset LAPTOP_ADMIN_PW; return 0; }
-
-    laptop_ssh_bootstrap_local || {
-        warn "Remote Login fix needs your Mac password (GUI prompt or terminal)."
-        warn "Or enable: System Settings -> General -> Sharing -> Remote Login"
-        unset LAPTOP_ADMIN_PW
-        return 1
-    }
-    fix_laptop_ssh_firewall || true
+    grant_laptop_ssh_access || true
+    if mac_ssh_access_blocked "$user"; then
+        warn "Allow-list still blocked after retry."
+    fi
     install_laptop_server_pubkey "$pub" || return 1
     restart_laptop_sshd || true
     if verify_laptop_local_pubkey "$pub"; then
         unset LAPTOP_ADMIN_PW
         return 0
     fi
-    warn "Remote Login still failing - check Mac password prompt or Sharing settings."
+
+    if ! remote_login_on; then
+        warn "Remote Login is off - enabling..."
+        enable_remote_login || cycle_remote_login || true
+        install_laptop_server_pubkey "$pub" || return 1
+        if verify_laptop_local_pubkey "$pub"; then
+            unset LAPTOP_ADMIN_PW
+            return 0
+        fi
+    fi
+
+    warn "Laptop SSH still not accepting the server key."
+    warn "SSH uses Mac short name '${user}' (whoami). Server user is '${REMOTE_USER:-?}' (different)."
+    _rn="$(mac_login_realname 2>/dev/null || true)"
+    if mac_ssh_access_blocked "$user"; then
+        warn "CONFIRMED: id shows com.apple.access_ssh-disabled for '${user}'."
+        warn "  sudo dseditgroup -o edit -d ${user} -t user com.apple.access_ssh-disabled"
+    elif [ -n "${_rn}" ] && [ "${_rn}" != "${user}" ]; then
+        warn "In System Settings the name may look like '${_rn}' - allow THAT row (or All users)."
+    else
+        warn "System Settings -> Sharing -> Remote Login: ON, allow '${user}' or All users."
+    fi
+    diagnose_laptop_ssh_failure "$pub" || true
     unset LAPTOP_ADMIN_PW
     return 1
 }
@@ -971,9 +1538,14 @@ ensure_laptop_ssh_key() {
     pub="$(fetch_laptop_server_pubkey "${1:-}")" || return 1
     install_laptop_server_pubkey "$pub" || return 1
     verify_laptop_local_pubkey "$pub" && return 0
-    warn "Fixing Remote Login automatically..."
-    invoke_laptop_admin_ops "$pub" || return 1
-    verify_laptop_local_pubkey "$pub"
+    warn "Server cannot SSH back to this Mac yet - fixing (password at most once)..."
+    if ! invoke_laptop_admin_ops "$pub"; then
+        # diagnose already run inside invoke on failure
+        return 1
+    fi
+    verify_laptop_local_pubkey "$pub" && return 0
+    diagnose_laptop_ssh_failure "$pub" || true
+    return 1
 }
 
 ensure_laptop_reverse_ssh() {
@@ -995,29 +1567,102 @@ ensure_laptop_reverse_ssh() {
     return 1
 }
 
+warn_foreign_server_session() {
+    # Return 1 when user aborts a likely wrong-account takeover.
+    # Self-heal: if another laptop left a conf but its reverse tunnel is down,
+    # clear the stale file and continue (no prompt).
+    local existing_lu existing_os existing_port choice this_os="${GIT_MODE_LAPTOP_OS:-}" live=0
+    existing_lu="$(sshx "grep -E '^LAPTOP_USER=' \$HOME/.claude-connect.conf 2>/dev/null | tail -1 | cut -d= -f2-" 2>/dev/null | tr -d '\r\n' || true)"
+    existing_os="$(sshx "grep -E '^LAPTOP_OS=' \$HOME/.claude-connect.conf 2>/dev/null | tail -1 | cut -d= -f2-" 2>/dev/null | tr -d '\r\n' || true)"
+    existing_port="$(sshx "grep -E '^TUNNEL_PORT=' \$HOME/.claude-connect.conf 2>/dev/null | tail -1 | cut -d= -f2-" 2>/dev/null | tr -d '\r\n' || true)"
+    case "${existing_lu}" in
+      ''|*"bash:"*|*"unexpected EOF"*|*"syntax error"*) return 0 ;;
+    esac
+    [ -n "${existing_lu:-}" ] || return 0
+    [ "${existing_lu}" = "${LAPTOP_USER:-}" ] && return 0
+
+    existing_port="$(printf '%s' "$existing_port" | tr -dc '0-9')"
+    ss_ok=0
+    if [ -n "$existing_port" ]; then
+        live_raw="$(sshx "ss -ltn 2>/dev/null | grep -cE ':${existing_port}[[:space:]]' || echo SS_UNKNOWN" 2>/dev/null | tr -d '\r\n')"
+        if printf '%s' "$live_raw" | grep -Eq '^[0-9]+$'; then
+            live="$live_raw"
+            ss_ok=1
+        else
+            live=0
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "SS:UNKNOWN port=$existing_port raw=$live_raw - not clearing connect conf" 'WARN'
+            fi
+        fi
+    fi
+    # Only auto-clear when ss positively reports zero listeners (or no port in conf).
+    if [ -z "$existing_port" ] || { [ "$ss_ok" = "1" ] && [ "${live:-0}" = "0" ]; }; then
+        warn "Cleared stale session from laptop '${existing_lu}' (no active tunnel)."
+        sshx "rm -f \$HOME/.claude-connect.conf" 2>/dev/null || true
+        return 0
+    fi
+    if [ "$ss_ok" != "1" ]; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "FOREIGN_SESSION ss_ambiguous port=$existing_port - prompting" 'WARN'
+        fi
+    fi
+
+    warn "Server account '${REMOTE_USER:-?}' is already used by laptop '${existing_lu}'${existing_os:+ ($existing_os)} (tunnel active)."
+    warn "Your laptop user is '${LAPTOP_USER:-unknown}'. Taking over will disconnect them."
+
+    if [ -n "${existing_os:-}" ] && [ -n "${this_os:-}" ] && [ "$existing_os" != "$this_os" ]; then
+        warn "OS mismatch ($existing_os vs $this_os) - confirm this is your server account."
+    fi
+    printf '    Continue and take over that session? [y/N]: '
+    read -r choice </dev/tty 2>/dev/null || read -r choice || choice=""
+    choice="$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')"
+    if [ "$choice" != "y" ] && [ "$choice" != "yes" ]; then
+        warn "Aborted. Fix username with: bash connect.sh --setup"
+        return 1
+    fi
+    return 0
+}
+
 initialize_server_session() {
     local script_dir="$1"
     local port_base="${CONNECT_PORT_BASE:-20000}"
     local port_min="$port_base" _init uid_str pub_b server_dir
     local src="" git_src="" scp_pids="" push_ok=1 pid _chmod
+    INIT_SERVER_SESSION_ERROR=""
 
-    _init="$(sshx "id -u && (test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q) && cat ~/.ssh/claude_laptop.pub" 2>/dev/null)"
+    _init="$(sshx "id -u && (test -f \$HOME/.ssh/claude_laptop || ssh-keygen -t ed25519 -N "" -f \$HOME/.ssh/claude_laptop -q) && cat \$HOME/.ssh/claude_laptop.pub" 2>/dev/null)"
     uid_str="$(printf '%s\n' "$_init" | tr -d '\r' | grep -E '^[0-9]+$' | head -1 | tr -dc '0-9')"
     pub_b="$(printf '%s\n' "$_init" | tr -d '\r' | grep '^ssh-' | head -1)"
+    if [ -z "$uid_str" ]; then
+        INIT_SERVER_SESSION_ERROR="could not get UID from server"
+        if declare -F connect_log >/dev/null 2>&1; then connect_log "INIT_SERVER_SESSION fail=$INIT_SERVER_SESSION_ERROR" 'ERROR'; fi
+        return 1
+    fi
+    if [ -z "$pub_b" ]; then
+        INIT_SERVER_SESSION_ERROR="could not read server key"
+        if declare -F connect_log >/dev/null 2>&1; then connect_log "INIT_SERVER_SESSION fail=$INIT_SERVER_SESSION_ERROR" 'ERROR'; fi
+        return 1
+    fi
     if ! acquire_tunnel_port "$uid_str"; then
-        PORT=$(( port_base + ${uid_str:-0} ))
+        PORT=$(( port_base + uid_str ))
         TUNNEL_SLOT=0
     fi
-    if [ "$PORT" -le "$port_min" ] || [ "$PORT" -gt 65535 ] || [ -z "$pub_b" ]; then
+    if [ -z "${PORT:-}" ] || [ "$PORT" -le "$port_min" ] || [ "$PORT" -gt 65535 ]; then
+        INIT_SERVER_SESSION_ERROR="invalid tunnel port (${PORT:-unset})"
+        if declare -F connect_log >/dev/null 2>&1; then connect_log "INIT_SERVER_SESSION fail=$INIT_SERVER_SESSION_ERROR" 'ERROR'; fi
         return 1
     fi
     PUB_B="$pub_b"
 
     server_dir="$(resolve_server_script_dir "$script_dir" 2>/dev/null || true)"
+    # Bundle layout: claude-mount.sh may live next to connect.sh (mac/)
+    if [ -z "$server_dir" ] && [ -f "$script_dir/claude-mount.sh" ]; then
+        server_dir="$script_dir"
+    fi
     if [ -n "$server_dir" ]; then
         [ -f "$server_dir/claude-mount.sh" ] && src="$server_dir/claude-mount.sh"
         [ -f "$server_dir/claude-git-setup.sh" ] && git_src="$server_dir/claude-git-setup.sh"
-        sshx "mkdir -p ~/.local/bin" 2>/dev/null || true
+        sshx "mkdir -p \$HOME/.local/bin" >/dev/null 2>&1 || true
         if [ -n "$src" ]; then
             local local_h remote_h
             local_h="$(local_file_sha256 "$src" 2>/dev/null || true)"
@@ -1030,7 +1675,7 @@ initialize_server_session() {
         if [ -n "$git_src" ]; then
             local git_local git_remote
             git_local="$(local_file_sha256 "$git_src" 2>/dev/null || true)"
-            git_remote="$(sshx "sha256sum ~/.local/bin/claude-git-setup 2>/dev/null | awk '{print \$1}'" 2>/dev/null | tr -d '\r\n')"
+            git_remote="$(sshx "sha256sum \$HOME/.local/bin/claude-git-setup 2>/dev/null | awk '{print \$1}'" 2>/dev/null | tr -d '\r\n')"
             if [ -z "$git_local" ] || [ "$git_local" != "$git_remote" ]; then
                 scp -o BatchMode=yes -o ConnectTimeout=30 -q "$git_src" "$ALIAS:~/.local/bin/claude-git-setup" &
                 scp_pids="$scp_pids $!"
@@ -1039,7 +1684,11 @@ initialize_server_session() {
         push_laptop_exec_bundle "$server_dir"
     fi
 
-    install_laptop_server_pubkey "$pub_b" || return 1
+    if ! install_laptop_server_pubkey "$pub_b"; then
+        INIT_SERVER_SESSION_ERROR="laptop SSH key setup failed"
+        if declare -F connect_log >/dev/null 2>&1; then connect_log "INIT_SERVER_SESSION fail=$INIT_SERVER_SESSION_ERROR" 'ERROR'; fi
+        return 1
+    fi
 
     awk -v a="$ALIAS" '
         /^[[:space:]]*Host[[:space:]]+/ { skip=0; for(i=2;i<=NF;i++) if($i==a) skip=1 }
@@ -1060,16 +1709,23 @@ EOF
 
     for pid in $scp_pids; do
         [ -z "$pid" ] && continue
-        wait_pid_timeout "$pid" server_scripts 30 || push_ok=0
+        if ! wait_pid_timeout "$pid" server_scripts 30; then
+            push_ok=0
+            warn "server script push failed (continuing; server already has scripts)"
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "SCP: server_scripts failed (non-fatal)" 'WARN'
+            fi
+        fi
     done
     if [ -n "$server_dir" ] && { [ -n "$src" ] || [ -n "$git_src" ]; }; then
         _chmod=""
-        [ -n "$src" ] && _chmod="chmod +x ~/.local/bin/claude-mount; grep -q 'CLAUDE_LOCAL_BIN_PATH' ~/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=\$HOME/.local/bin:\$PATH\n' >> ~/.bashrc"
-        [ -n "$git_src" ] && _chmod="${_chmod:+"$_chmod; "}chmod +x ~/.local/bin/claude-git-setup"
+        [ -n "$src" ] && _chmod="chmod +x \$HOME/.local/bin/claude-mount; grep -q 'CLAUDE_LOCAL_BIN_PATH' \$HOME/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=\$HOME/.local/bin:\$PATH\n' >> \$HOME/.bashrc"
+        [ -n "$git_src" ] && _chmod="${_chmod:+"$_chmod; "}chmod +x \$HOME/.local/bin/claude-git-setup"
         [ -n "$_chmod" ] && sshx "$_chmod" 2>/dev/null || true
     fi
 
-    [ "$push_ok" -eq 1 ]
+    # Match Windows: script push failure must not abort connect (port/key already OK).
+    return 0
 }
 
 configure_git_mode() {
@@ -1156,12 +1812,21 @@ tunnel_drop_session_action() {
             _pl="$(printf '%s' "$_peek" | tr '[:upper:]' '[:lower:]')"
             if [ "$_pl" = "r" ]; then
                 _action="r"
-            else
+            elif [ "$_pl" = "q" ]; then
                 _action="q"
                 _got_key=1
+            else
+                # Ignore non-command (incl. Persian); auto-recover like no key.
+                _action="r"
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "SESSION_KEY ignore non_command(during_drop) key=$_pl" 'INFO'
+                fi
             fi
         else
             _action="r"
+            if declare -F log_tunnel_drop >/dev/null 2>&1; then
+                log_tunnel_drop auto_reconnect "${ACTIVE_PROJECT_ID:-?}" false "${_editor_opened:-0}" "${_editor_seen_open:-0}" "${RECOVERY_GENERATION:-0}"
+            fi
             printf '\n    Connection dropped - reconnecting...\n'
         fi
     fi
@@ -1690,14 +2355,40 @@ print(json.dumps(vals))
     return 1
 }
 
+write_cursor_profile_machineid() {
+    # Electron reads profile-root machineid; SQLite telemetry alone is not enough.
+    local profile mid_file mid=""
+    profile="$(get_cursor_remote_profile_dir)"
+    mid_file="$profile/machineid"
+    [ -d "$profile" ] || mkdir -p "$profile" 2>/dev/null || true
+    if [ -n "${1:-}" ]; then
+        mid="$(printf '%s' "$1" | tr -d '[:space:]')"
+    fi
+    if [ -z "$mid" ]; then
+        mid="$(sshx 'tr -d "[:space:]" < /etc/cursor-auth/golden/machine-id.txt 2>/dev/null' 2>/dev/null | tr -d '\r\n' || true)"
+    fi
+    [ -n "$mid" ] || return 1
+    printf '%s' "$mid" > "$mid_file"
+    printf '%s' "$mid" > "$profile/machineId"
+    return 0
+}
+
 merge_cursor_auth_into_local_db() {
-    local gs="$1" payload="$2" attempt db="${1}/state.vscdb" pairs_file
+    local gs="$1" payload="$2" attempt db="${1}/state.vscdb" pairs_file mid=""
     [ -n "$payload" ] || return 1
     cursor_sqlite3_available || return 1
     pairs_file="$(mktemp "${TMPDIR:-/tmp}/cursor-auth-pairs.XXXXXX")"
     cursor_auth_payload_to_pairs "$payload" "$pairs_file" || { rm -f "$pairs_file"; return 1; }
     for attempt in 1 2 3 4 5; do
         if cursor_sqlite_merge_pairs "$db" "$pairs_file"; then
+            sqlite3 "$db" "PRAGMA wal_checkpoint(FULL);" >/dev/null 2>&1 || true
+            if command -v jq >/dev/null 2>&1; then
+                mid="$(printf '%s' "$payload" | jq -r '."storage.serviceMachineId" // ."telemetry.machineId" // empty' 2>/dev/null || true)"
+            else
+                mid="$(awk -F'\t' '$1=="storage.serviceMachineId"{print $2; exit}' "$pairs_file" 2>/dev/null || true)"
+                [ -n "$mid" ] || mid="$(awk -F'\t' '$1=="telemetry.machineId"{print $2; exit}' "$pairs_file" 2>/dev/null || true)"
+            fi
+            write_cursor_profile_machineid "$mid" || true
             rm -f "$pairs_file"
             return 0
         fi
@@ -1719,7 +2410,7 @@ merge_cursor_storage_json_from_golden() {
                 | $local
                 | .["telemetry.machineId"] = ($remote["telemetry.machineId"] // .["telemetry.machineId"])
                 | .["telemetry.macMachineId"] = ($remote["telemetry.macMachineId"] // .["telemetry.macMachineId"])
-                | .["telemetry.devDeviceId"] = ($remote["telemetry.devDeviceId"] // .["telemetry.devDeviceId"])
+                | .["telemetry.devDeviceId"] = ($remote["telemetry.devDeviceId"] // $remote["telemetry.machineId"] // .["telemetry.devDeviceId"])
                 | .["telemetry.sqmId"] = ($remote["telemetry.sqmId"] // .["telemetry.sqmId"])
             ' "$dst" "$src" >"$tmp_out" 2>/dev/null || { rm -f "$src" "$tmp_out"; return 1; }
         else
@@ -1786,6 +2477,14 @@ cursor_auth_needs_refresh() {
     if ! cursor_db_value_length "$db" 'storage.serviceMachineId'; then
         reasons="${reasons}serviceMachineId_empty "
     fi
+    # Electron machineid file must match golden (login breaks when it drifts).
+    _prof="$(get_cursor_remote_profile_dir)"
+    _file_mid=""
+    [ -f "$_prof/machineid" ] && _file_mid="$(tr -d "[:space:]" < "$_prof/machineid")"
+    _gold_mid="$(sshx 'tr -d "[:space:]" < /etc/cursor-auth/golden/machine-id.txt 2>/dev/null' 2>/dev/null | tr -d '\r\n' || true)"
+    if [ -n "$_gold_mid" ] && [ "$_file_mid" != "$_gold_mid" ]; then
+        reasons="${reasons}machineid_file_mismatch "
+    fi
     if declare -F test_personal_cursor_dominant >/dev/null 2>&1 && test_personal_cursor_dominant; then
         reasons="${reasons}personal_without_profile "
     fi
@@ -1820,9 +2519,13 @@ sync_cursor_golden_auth_status() {
 
     # Skip only when auth is complete AND stamped with the CURRENT golden export.
     # Presence alone is not enough: OAuth rotate every 6h invalidates old pairs.
+    # Even on skip, heal Electron machineid file (SQLite-complete profiles can still drift).
     if [ "$force" != "1" ] && [ "$golden_current" -eq 1 ] && [ -f "$db" ] && local_cursor_auth_complete "$db"; then
+        # Prefer local SQLite machine id (already golden); fall back to server file.
+        _skip_mid="$(sqlite3 "$db" "SELECT value FROM ItemTable WHERE key='storage.serviceMachineId' LIMIT 1;" 2>/dev/null | tr -d '\r\n' || true)"
+        write_cursor_profile_machineid "${_skip_mid:-}" || true
         CURSOR_AUTH_SYNC_RESULT=ok
-        declare -F connect_log >/dev/null 2>&1 && connect_log "AUTH_SYNC: skip already_complete golden_exported_at=$golden_exported" 'DEBUG'
+        declare -F connect_log >/dev/null 2>&1 && connect_log "AUTH_SYNC: skip already_complete golden_exported_at=$golden_exported (machineid healed)" 'DEBUG'
         return 0
     fi
 
@@ -1934,6 +2637,27 @@ count_skipped_mounts_for_laptop() {
     printf '%s' $(( total - visible ))
 }
 
+purge_incompatible_server_mounts() {
+    # Remove mount configs whose laptop path cannot work on this OS (e.g. D:/ on Mac).
+    local os="${1:-${GIT_MODE_LAPTOP_OS:-}}" raw line mid mrpath n=0
+    [ -n "$os" ] || return 0
+    raw="$(sshx "$CM list 2>/dev/null" 2>/dev/null || true)"
+    [ -n "$raw" ] || return 0
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        IFS='|' read -r mid _label mrpath _lpath <<< "$line"
+        [ -n "$mid" ] && [ -n "$mrpath" ] || continue
+        if laptop_rpath_compatible "$mrpath" "$os"; then
+            continue
+        fi
+        sshx "$CM remove '$mid' 2>/dev/null" >/dev/null 2>&1 || \
+            sshx "rm -f \"\$HOME/.claude-mounts.d/${mid}.conf\"" >/dev/null 2>&1 || true
+        n=$((n + 1))
+    done <<< "$raw"
+    [ "$n" -gt 0 ] && warn "Removed $n leftover project(s) incompatible with this laptop OS."
+    return 0
+}
+
 mount_list_step_label() {
     local raw="$1" os="${2:-${GIT_MODE_LAPTOP_OS:-mac}}" visible hidden label
     visible="$(filter_mounts_for_laptop "$raw" "$os" | grep -c '|' 2>/dev/null || echo 0)"
@@ -1961,18 +2685,17 @@ read_post_disconnect_key() {
         printf '\r    Default %s in %ss...   ' "$default" "$left"
         if read -r -t 1 -n 1 key </dev/tty 2>/dev/null; then
             printf '\n'
+            # Bug 59: Mac TTY has no ConsoleKey VK (Win useVk). ASCII m/c/x only;
+            # ignore Persian/other glyphs so they never false-trigger.
             key="$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')"
             case "$key" in
                 m) printf 'm'; return 0 ;;
                 c) printf 'c'; return 0 ;;
                 x) printf 'x'; return 0 ;;
+                *) ;; # non-ASCII / other: ignore until timeout default
             esac
         fi
     done
     printf '\n    Default %s\n' "$default"
     printf '%s' "$default"
 }
-
-
-
-

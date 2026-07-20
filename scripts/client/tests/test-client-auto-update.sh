@@ -82,6 +82,15 @@ fi
 grep -q 'connect-update.ps1' "$WIN_SRC/connect.bat" && pass "connect.bat hook" || fail "connect.bat hook"
 grep -q 'connect-update.sh' "$CLIENT_DIR/mac/connect.sh" && pass "connect.sh hook" || fail "connect.sh hook"
 
+grep -q 'CLAUDE_CONNECT_UPDATE_DEPTH' "$WIN_SRC/connect.bat" && pass "connect.bat relaunch bound" || fail "connect.bat relaunch bound"
+grep -q 'IdentityAgent=none' "$WIN_SRC/connect-update.ps1" && pass "win IdentityAgent" || fail "win IdentityAgent"
+grep -q 'IdentityAgent=none' "$CLIENT_DIR/mac/connect-update.sh" && pass "mac IdentityAgent" || fail "mac IdentityAgent"
+grep -q '_run_timed' "$CLIENT_DIR/mac/connect-update.sh" && pass "mac ssh/scp timeout" || fail "mac ssh/scp timeout"
+grep -q 'Test-BundleChecksums\|checksums.txt' "$WIN_SRC/connect-update.ps1" && pass "win checksum verify" || fail "win checksum verify"
+grep -q 'STAGE_BUNDLE' "$REPO_ROOT/scripts/server/commands/deploy-client-bundle.sh" && pass "deploy stage-swap" || fail "deploy stage-swap"
+grep -q 'VERIFY_OK' "$REPO_ROOT/scripts/server/commands/update-server.sh" && pass "update-server verify exit" || fail "update-server verify exit"
+grep -q 'UTF8Encoding]::new(\$false)' "$REPO_ROOT/publish/deploy-client-bundles.ps1" && pass "manifest no BOM" || fail "manifest no BOM"
+
 for f in deploy-client-bundle.sh connect-update.sh connect.sh; do
     bash -n "$REPO_ROOT/scripts/server/commands/$f" 2>/dev/null || bash -n "$CLIENT_DIR/mac/$f" 2>/dev/null
     pass "bash -n $f"

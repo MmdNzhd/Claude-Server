@@ -1,0 +1,8 @@
+Join-Path : Cannot bind argument to parameter 'Path' because it is null.
+At D:\Smart\Claude-Code-Server\scripts\tmp\test-log-sync-contracts.ps1:42 char:46
++ $uiRaw = Get-Content -LiteralPath (Join-Path $RepoRoot 'scripts/clien ...
++                                              ~~~~~~~~~
+    + CategoryInfo          : InvalidData: (:) [Join-Path], ParameterBindingValidationException
+    + FullyQualifiedErrorId : ParameterArgumentValidationErrorNullNotAllowed,Microsoft.PowerShell.Commands.JoinPathCom 
+   mand
+ 

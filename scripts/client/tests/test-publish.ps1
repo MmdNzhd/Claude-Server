@@ -46,16 +46,18 @@ function Test-PackageRoot {
 function Test-NoForbiddenStrings {
     param([string]$Root, [string]$Label)
     $textFiles = Get-ChildItem -Path $Root -Recurse -File -Include *.ps1,*.sh,*.bat,*.md,*.txt -ErrorAction SilentlyContinue
+    $hitCount = 0
     foreach ($f in $textFiles) {
         $raw = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
         if (-not $raw) { continue }
         foreach ($bad in $Forbidden) {
             if ($raw -match [regex]::Escape($bad)) {
                 Assert $false "$Label $($f.FullName) contains forbidden '$bad'"
+                $hitCount++
             }
         }
     }
-    Assert $true "$Label has no sepidz-fork strings (21000, claude-connect-sepidz, ...)"
+    Assert ($hitCount -eq 0) "$Label has no sepidz-fork strings (21000, claude-connect-sepidz, ...); hits=$hitCount"
 }
 
 function Test-NoUtf8Bom {
@@ -203,6 +205,28 @@ Assert ($gitModeSh -match 'scripts/server') 'resolve_server_script_dir finds rep
 $designerSh = Get-Content (Get-ClientFile 'users\designer\connect.sh') -Raw
 Assert ($designerSh -match 'resolve_server_script_dir') 'designer connect.sh uses shared resolve (not broken ../../server)'
 
+
+# --- publish -> server deploy integration ---
+$deployScript = Join-Path $RepoRoot 'publish\deploy-client-bundles.ps1'
+Assert (Test-Path $deployScript) 'deploy-client-bundles.ps1 exists'
+$pubRaw = Get-Content (Join-Path $RepoRoot 'publish\publish.ps1') -Raw
+Assert ($pubRaw -match '\[switch\]\$SkipServerDeploy') 'publish.ps1 supports -SkipServerDeploy'
+Assert ($pubRaw -match 'deploy-client-bundles\.ps1') 'publish.ps1 invokes deploy-client-bundles.ps1'
+Assert ($pubRaw -match '\[switch\]\$SmartOnly') 'publish.ps1 supports -SmartOnly'
+Assert ($pubRaw -match '\[switch\]\$SepidzOnly') 'publish.ps1 supports -SepidzOnly'
+Assert ($pubRaw -match 'deploy-smart-bundle\.ps1') 'publish.ps1 invokes deploy-smart-bundle.ps1 after Smart ZIP'
+Assert (Test-Path (Join-Path $RepoRoot 'publish\deploy-smart-bundle.ps1')) 'deploy-smart-bundle.ps1 exists'
+Assert (Test-Path (Join-Path $RepoRoot 'publish\publish-smart.bat')) 'publish-smart.bat exists'
+Assert (Test-Path (Join-Path $RepoRoot 'publish\publish-sepidz.bat')) 'publish-sepidz.bat exists'
+
+$depRaw = Get-Content $deployScript -Raw
+Assert ($depRaw -match '192\.168\.210\.240') 'deploy script targets Smart server'
+Assert ($depRaw -match '192\.168\.250\.70') 'deploy script targets Sepidz server'
+$installBundle = Join-Path $RepoRoot 'scripts\server\commands\install-client-bundle.sh'
+Assert (Test-Path $installBundle) 'install-client-bundle.sh exists'
+$installRaw = Get-Content $installBundle -Raw
+Assert ($installRaw -match '_extract_zip') 'install-client-bundle supports python3 zip fallback'
 Write-Host ''
 if ($fail -eq 0) { Write-Host 'All publish deep tests passed.' -ForegroundColor Green; exit 0 }
 Write-Host "$fail test(s) failed." -ForegroundColor Red; exit 1
+

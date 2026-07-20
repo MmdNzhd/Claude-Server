@@ -164,7 +164,7 @@ function Get-ConnectProblemVerdict {
             Code = 'CURSOR_LAUNCH_NO_WINDOW'; Severity = 'WARN'
             Summary = 'Launch ran but no Cursor window detected.'
             Cause = 'Process exited immediately or wrong profile.'
-            Fix = 'Check LAUNCH_HISTORY and PROC_START lines in connect.log.'
+            Fix = 'Check LAUNCH_HISTORY and PROC_START on server ~/.claude/logs/connect-YYYYMMDD.log.'
             NextAction = 'O'
         }
     }
@@ -239,7 +239,7 @@ function Write-ConnectDiagnosticReport {
 
     $sessionStatus = if ($verdict.Severity -eq 'INFO') { 'OK' } else { 'BROKEN' }
     $elev = if ((Get-Command Test-IsElevatedShell -ErrorAction SilentlyContinue) -and (Test-IsElevatedShell)) { 'yes' } else { 'no' }
-    $logPath = if ($script:ConnectLogPath) { $script:ConnectLogPath } else { 'connect.log' }
+    $logPath = if ($script:ConnectLogPath) { $script:ConnectLogPath } else { '(server ~/.claude/logs)' }
 
     $lines = @(
         "======== DIAGNOSTIC REPORT [$Phase] ========"

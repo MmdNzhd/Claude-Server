@@ -22,3 +22,7 @@ __MACOSX/
 
 # FAST git-mode session stub (never commit)
 .git.server-session/
+
+# Deploy credentials (laptop only) - never commit real passwords
+*-deploy.local.ps1
+publish/*-deploy.local.ps1

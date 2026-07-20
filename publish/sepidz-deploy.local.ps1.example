@@ -1,0 +1,4 @@
+# Copy to sepidz-deploy.local.ps1 (gitignored) on your Windows laptop.
+# Do NOT commit sepidz-deploy.local.ps1. Example values only - not real secrets.
+$SepidzSshUser = 'sepidz'
+$SepidzSudoPassword = 'YOUR_SEPIDZ_SUDO_PASSWORD'

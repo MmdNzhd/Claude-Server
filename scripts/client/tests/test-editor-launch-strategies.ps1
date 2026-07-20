@@ -46,6 +46,9 @@ Assert ($remoteClassic.Args -contains $path) 'remote-classic includes absolute r
 $codeStrategies = @(Get-RemoteEditorLaunchStrategies -EditorCmd 'code' -Alias $alias -RemotePath $path -Uri $uri -NewWindow)
 Assert ($codeStrategies.Count -eq 2) 'code has 2 launch strategies'
 Assert (-not ($codeStrategies[0].Args -contains '--classic')) 'VS Code strategies omit --classic'
+Assert ($codeStrategies[0].Args -contains '--user-data-dir') 'code strategies use isolated profile'
+Assert ((Get-Command Get-CodeRemoteProfileDir -ErrorAction SilentlyContinue)) 'Get-CodeRemoteProfileDir defined'
+Assert ((Get-CodeRemoteProfileDir) -match 'ClaudeServerCodeProfile') 'VS Code profile is ClaudeServerCodeProfile'
 
 Assert (Get-Command Test-CursorWindowTitleIsAgentHome -ErrorAction SilentlyContinue) 'Test-CursorWindowTitleIsAgentHome defined'
 
@@ -57,6 +60,8 @@ Assert ($explain -match 'on_folder=') 'Get-RemoteEditorStateExplain includes on_
 
 $launchSrc = Get-Content (Get-ClientFile 'editor-launch.ps1') -Raw
 Assert ($launchSrc -match 'param\([\s\S]*KnownOnFolder') 'Launch-RemoteEditor has KnownOnFolder param'
+Assert ($launchSrc -match 'AuthRelaunch') 'Launch-RemoteEditor has AuthRelaunch param'
+Assert ($launchSrc -match 'LAUNCH_KILL: reason=auth_relaunch') 'AuthRelaunch soft-stops profile'
 Assert ($launchSrc -match 'if \(\$onFolder -and -not \$agentHome\)[\s\S]{0,600}LAUNCH_SKIP') 'F1 early skip before verbose'
 Assert ($launchSrc -notmatch 'SKIP_ALREADY_ON_FOLDER') 'F1 removed SKIP verbose block'
 Assert ($launchSrc -match '\$script:VerboseLaunch') 'F3 VerboseLaunch defined'
@@ -64,6 +69,11 @@ Assert ($launchSrc -match 'Invoke-CimCursorProcessQuery') 'F5 CIM cache wrapper'
 Assert ($launchSrc -match 'Test-RemoteEditorWindowOpenWhenOnFolder') 'single-pass window check helper'
 Assert ($launchSrc -match 'Write-LaunchPerfLog') 'PERF launch logging'
 Assert ($launchSrc -match 'launch_total') 'launch_total perf mark'
+Assert ($launchSrc -match 'LAUNCH_KILL_SKIP: reason=preserve_open_windows') 'launch skips force-kill to preserve open windows'
+Assert ($launchSrc -match 'LAUNCH_RETRY_NO_KILL') 'launch retry does not force-kill profile tree'
+Assert ($launchSrc -notmatch "Stop-CursorServerProfileTreeIfNeeded -Reason 'pre_launch_agent_or_new_window' -Force") 'pre_launch force-kill removed'
+Assert ($launchSrc -notmatch 'retry_before_\$\(\$strategy\.Name\)' ) 'retry force-kill removed'
+
 
 Write-Host ""
 if ($fail -eq 0) { Write-Host "All tests passed." -ForegroundColor Green; exit 0 }

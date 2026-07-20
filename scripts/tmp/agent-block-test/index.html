@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent Block Test</title>
+  <style>
+    :root {
+      --bg1: #0f2027;
+      --bg2: #203a43;
+      --bg3: #2c5364;
+      --accent: #7ef9c5;
+      --text: #e8fff6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: var(--text);
+      background: linear-gradient(135deg, var(--bg1), var(--bg2), var(--bg3));
+      background-size: 200% 200%;
+      animation: bgShift 10s ease-in-out infinite;
+    }
+    @keyframes bgShift {
+      0% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+    .card {
+      text-align: center;
+      padding: 2.5rem 3rem;
+    }
+    h1 {
+      margin: 0 0 0.5rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    p {
+      margin: 0 0 2rem;
+      opacity: 0.85;
+    }
+    .orb {
+      width: 96px;
+      height: 96px;
+      margin: 0 auto;
+      border-radius: 50%;
+      background: radial-gradient(circle at 30% 30%, #fff, var(--accent) 45%, #1a6b4f);
+      box-shadow: 0 0 0 0 rgba(126, 249, 197, 0.55);
+      animation: pulse 1.8s ease-out infinite, spin 6s linear infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(126, 249, 197, 0.55); transform: scale(1); }
+      70% { box-shadow: 0 0 0 28px rgba(126, 249, 197, 0); transform: scale(1.06); }
+      100% { box-shadow: 0 0 0 0 rgba(126, 249, 197, 0); transform: scale(1); }
+    }
+    @keyframes spin {
+      from { filter: hue-rotate(0deg); }
+      to { filter: hue-rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="orb" aria-hidden="true"></div>
+    <h1>Agent Block Test</h1>
+    <p>If you see this pulsing orb, the write path worked.</p>
+  </div>
+</body>
+</html>

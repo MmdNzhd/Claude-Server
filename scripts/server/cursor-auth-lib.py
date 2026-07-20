@@ -246,8 +246,8 @@ def write_golden_bundle(
     *,
     require_profile_metadata: bool = False,
 ) -> None:
-    GOLDEN_DIR.mkdir(mode=0o755, exist_ok=True)
-    os.chmod(GOLDEN_DIR, 0o755)
+    GOLDEN_DIR.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(GOLDEN_DIR, 0o700)
 
     auth_payload = {
         "accessToken": state_values.get("cursorAuth/accessToken", ""),
@@ -290,18 +290,19 @@ def write_golden_bundle(
             "cursor-auth-export: missing required keys: " + ", ".join(missing)
         )
 
-    atomic_write(AUTH_JSON, json.dumps(auth_payload, indent=2) + "\n", mode=0o644)
+    # Secrets: root-only 0600. Metadata (machine-id, timestamps) also 0600 — directory is 0700.
+    atomic_write(AUTH_JSON, json.dumps(auth_payload, indent=2) + "\n", mode=0o600)
     atomic_write(
-        STATE_KEYS_JSON, json.dumps(state_values, indent=2) + "\n", mode=0o644
+        STATE_KEYS_JSON, json.dumps(state_values, indent=2) + "\n", mode=0o600
     )
-    atomic_write(STORAGE_JSON, json.dumps(storage_data, indent=2) + "\n", mode=0o644)
-    atomic_write(MACHINE_ID_TXT, machine_id + "\n", mode=0o644)
+    atomic_write(STORAGE_JSON, json.dumps(storage_data, indent=2) + "\n", mode=0o600)
+    atomic_write(MACHINE_ID_TXT, machine_id + "\n", mode=0o600)
     atomic_write(
         EXPORTED_AT,
         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n",
-        mode=0o644,
+        mode=0o600,
     )
-    atomic_write(SOURCE_HOST, source_host + "\n", mode=0o644)
+    atomic_write(SOURCE_HOST, source_host + "\n", mode=0o600)
 
 
 def global_storage_dirs(home: Path) -> list[Path]:

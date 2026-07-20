@@ -65,65 +65,75 @@ echo -e "${GRAY}$(date -Is 2>/dev/null || date)  host=$(hostname -f 2>/dev/null 
 # --- 1. Claude OAuth token (most common "please log in" cause) ---------------
 step "Claude OAuth token"
 
+TOKEN_FILE="/etc/claude-code/oauth.env"
 AUTH_FILE="/etc/profile.d/claude-auth.sh"
 ENV_FILE="/etc/environment"
 
-token_profile=""
-token_env=""
+token_secure=""
+token_legacy=""
 
-if [ -f "$AUTH_FILE" ]; then
-    token_profile="$(token_from_file "$AUTH_FILE" || true)"
-    ok "found $AUTH_FILE"
-    info "$(token_fingerprint "$token_profile")"
-else
-    fail "missing $AUTH_FILE"
-    note_fail
-    info "Fix: claude setup-token on a laptop, then on server as root:"
-    info "  echo 'export CLAUDE_CODE_OAUTH_TOKEN=<token>' > $AUTH_FILE"
-    info "  chmod 644 $AUTH_FILE"
-fi
-
-if [ -f "$ENV_FILE" ]; then
-    token_env="$(grep -E '^CLAUDE_CODE_OAUTH_TOKEN=' "$ENV_FILE" 2>/dev/null | tail -1 \
+if [ -f "$TOKEN_FILE" ]; then
+    token_secure="$(grep -E '^CLAUDE_CODE_OAUTH_TOKEN=' "$TOKEN_FILE" 2>/dev/null | tail -1 \
         | sed -E 's/^CLAUDE_CODE_OAUTH_TOKEN=//; s/^["'\'' ]//; s/["'\'' ]$//')"
-    if [ -n "$token_env" ]; then
-        ok "found CLAUDE_CODE_OAUTH_TOKEN in $ENV_FILE"
-        info "$(token_fingerprint "$token_env")"
+    perms="$(stat -c '%a %U:%G' "$TOKEN_FILE" 2>/dev/null || echo '?')"
+    mode="${perms%% *}"
+    if [ -n "$token_secure" ]; then
+        ok "found CLAUDE_CODE_OAUTH_TOKEN in $TOKEN_FILE"
+        info "$(token_fingerprint "$token_secure") mode=$perms"
+        case "$mode" in
+            600|0600) ok "oauth.env is root-only (600)" ;;
+            *) fail "oauth.env should be chmod 600 (got $mode)"; note_fail ;;
+        esac
     else
-        fail "CLAUDE_CODE_OAUTH_TOKEN not in $ENV_FILE"
+        fail "$TOKEN_FILE exists but token empty"
         note_fail
-        info "VS Code / Cursor Remote SSH uses non-login shells - token MUST be in $ENV_FILE"
-        info "Fix: echo 'CLAUDE_CODE_OAUTH_TOKEN=<token>' >> $ENV_FILE"
     fi
 else
-    fail "missing $ENV_FILE"
+    fail "missing $TOKEN_FILE (root-only token store)"
     note_fail
+    info "Fix: sudo claude-server deploy-auth <token>"
 fi
 
-if [ -n "$token_profile" ] && [ -n "$token_env" ] && [ "$token_profile" != "$token_env" ]; then
-    fail "token mismatch between $AUTH_FILE and $ENV_FILE"
+# Legacy world-readable locations must NOT hold the token anymore.
+if [ -f "$ENV_FILE" ] && grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' "$ENV_FILE" 2>/dev/null; then
+    token_legacy="$(grep -E '^CLAUDE_CODE_OAUTH_TOKEN=' "$ENV_FILE" 2>/dev/null | tail -1 \
+        | sed -E 's/^CLAUDE_CODE_OAUTH_TOKEN=//; s/^["'\'' ]//; s/["'\'' ]$//')"
+    fail "CLAUDE_CODE_OAUTH_TOKEN still in world-readable $ENV_FILE"
     note_fail
-    info "Both files must contain the same token"
+    info "Fix: sudo claude-server deploy-auth <token>  (migrates to $TOKEN_FILE and strips legacy)"
+fi
+if [ -f "$AUTH_FILE" ] && grep -qE 'CLAUDE_CODE_OAUTH_TOKEN=' "$AUTH_FILE" 2>/dev/null; then
+    fail "CLAUDE_CODE_OAUTH_TOKEN still exported from $AUTH_FILE"
+    note_fail
+    info "Fix: sudo claude-server deploy-auth <token>"
+elif [ -f "$AUTH_FILE" ]; then
+    ok "found $AUTH_FILE (stub; no token export)"
+else
+    info "optional stub missing: $AUTH_FILE (created by deploy-auth)"
 fi
 
-if [ -z "$token_profile" ] && [ -z "$token_env" ]; then
+if [ -z "$token_secure" ] && [ -z "$token_legacy" ]; then
     fail "no OAuth token configured anywhere"
     note_fail
 fi
 
-if [ -f "$AUTH_FILE" ]; then
-    perms="$(stat -c '%a %U:%G' "$AUTH_FILE" 2>/dev/null || stat -f '%OLp %Su:%Sg' "$AUTH_FILE" 2>/dev/null || echo '?')"
-    mode="${perms%% *}"
-    info "permissions: $perms"
-    case "$mode" in
-        644|640|600) ok "auth file permissions look fine" ;;
-        *) warn "auth file permissions may block login shells: $perms (use chmod 644)" ;;
-    esac
-fi
+# For later live-env checks, prefer secure token.
+token_env="$token_secure"
+token_profile="$token_secure"
+[ -n "$token_legacy" ] && [ -z "$token_env" ] && token_env="$token_legacy"
 
 [ -x /usr/local/bin/claude-auth-sync ] && ok "claude-auth-sync installed" || warn "claude-auth-sync missing - run: sudo claude-server install"
 [ -x /usr/local/bin/claude-auth-probe ] && ok "claude-auth-probe installed" || warn "claude-auth-probe missing - run: sudo claude-server install"
-[ -f /var/log/claude-auth.log ] && ok "audit log: /var/log/claude-auth.log" || info "audit log not created yet - run: sudo claude-server install"
+if [ -f /var/log/claude-auth.log ]; then
+    ok "audit log: /var/log/claude-auth.log"
+    alperms="$(stat -c '%a' /var/log/claude-auth.log 2>/dev/null || echo '?')"
+    case "$alperms" in
+        600|0600) ok "audit log mode 600" ;;
+        *) warn "audit log should be chmod 600 (got $alperms)" ;;
+    esac
+else
+    info "audit log not created yet - run: sudo claude-server install"
+fi
 
 if [ -f /etc/cron.d/claude-auth-probe ]; then
     ok "probe cron: /etc/cron.d/claude-auth-probe (every 30 min)"
@@ -137,6 +147,7 @@ if [ -f /var/log/claude-auth.log ]; then
         info "last probe: $last_probe"
     fi
 fi
+
 
 # --- 2. Live env check (simulates login shell vs VS Code shell) -------------
 step "Environment visibility"
@@ -455,7 +466,7 @@ if [ "$ISSUES" -eq 0 ]; then
     echo ""
     echo "  If you still see a login prompt, note WHERE it appears:"
     echo "    - SSH password prompt     -> run connect.bat/connect.sh on laptop, or: passwd <user>"
-    echo "    - Cursor/VS Code terminal -> token must be in /etc/environment (see above)"
+    echo "    - Cursor/VS Code -> token in ~/.claude/settings.json via claude-auth-sync (root store: /etc/claude-code/oauth.env)"
     echo "    - claude CLI in terminal  -> refresh OAuth token (claude setup-token)"
     echo "    - Designer Chrome/noVNC   -> log in to claude.ai once in server Chrome"
     echo "    - Cursor Chat/Composer    -> run: sudo claude-server sync-cursor-auth"

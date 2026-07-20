@@ -1,0 +1,9 @@
+start_v=/home/smart/.claude/logs/connect-20260719.log:153
+end=/home/smart/.claude/logs/connect-20260719.log:153
+DROP=0
+soft=0
+SYNC=4638
+ENSURE=126
+ORPHAN=18
+RECOV=9
+uniq_start=17

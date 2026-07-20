@@ -1,0 +1,31 @@
+﻿LIVE:
+20260719.81
+1
+1
+2
+8
+1
+1
+1
+connect.ps1 Read-Host count=0 (expect 0 outside Wait-ConnectExit)
+connect.ps1 has Wait-ConnectExit refs=15
+connect.ps1 Write-ConnectDecision=20
+connect.ps1 Read-ConnectPrompt=13
+CHECK sync_every_line=True
+CHECK sync_target_fallback=True
+CHECK Wait-ConnectExit=True
+CHECK Write-ConnectDecision=True
+CHECK session_id=True
+CHECK keep_local_on_close=True
+CHECK Read-ConnectPrompt=True
+CHECK watermark=True
+CHECK durable_local=True
+UPDATE SSH_STAGE=8
+UPDATE silent exit without Write-UpdateFileLog nearby?
+  silent@line 360: exit 0
+silent_exit0_count=1
+BAT BOOTSTRAP=True
+MAC connect_prompt uses=24
+MAC connect_decision uses=8
+MAC raw read -rp left=0
+DONE

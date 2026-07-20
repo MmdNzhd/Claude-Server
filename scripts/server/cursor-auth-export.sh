@@ -106,8 +106,8 @@ if mod.jwt_expired(auth.get("accessToken", "")):
 PY
 fi
 
-chmod 755 /etc/cursor-auth/golden 2>/dev/null || true
-chmod 644 /etc/cursor-auth/golden/* 2>/dev/null || true
+chmod 700 /etc/cursor-auth/golden 2>/dev/null || true
+chmod 600 /etc/cursor-auth/golden/* 2>/dev/null || true
 
 echo "OK golden bundle written to /etc/cursor-auth/golden/"
 echo "Next: sudo claude-server sync-cursor-auth"

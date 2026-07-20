@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import Any
 
 AUTH_LOG = Path("/var/log/claude-auth.log")
-ENV_FILE = Path("/etc/environment")
+# Root-only token store (mode 0600). Legacy /etc/environment is migrated away.
+TOKEN_FILE = Path("/etc/claude-code/oauth.env")
+ENV_FILE = Path("/etc/environment")  # legacy; token stripped on deploy
 PROFILE_FILE = Path("/etc/profile.d/claude-auth.sh")
 API_URL = "https://api.anthropic.com/v1/messages"
 PROBE_MODEL = "claude-sonnet-4-20250514"
@@ -27,22 +29,34 @@ def utc_now() -> str:
 
 
 def token_fingerprint(token: str | None) -> dict[str, Any]:
+    """Non-secret summary for admin diagnostics. Never log raw token or prefix bytes."""
     if not token:
-        return {"len": 0, "sha256": "", "prefix": "empty"}
+        return {"len": 0, "sha256": "", "present": False}
     digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
-    return {
-        "len": len(token),
-        "sha256": digest,
-        "prefix": token[:16] + "..." if len(token) > 16 else token,
-    }
+    return {"len": len(token), "sha256": digest, "present": True}
+
+
+def _parse_token_line(line: str) -> str:
+    line = line.strip()
+    if line.startswith("export "):
+        line = line[7:].strip()
+    if line.startswith("CLAUDE_CODE_OAUTH_TOKEN="):
+        return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
 
 
 def read_env_token() -> str:
-    if not ENV_FILE.is_file():
-        return ""
-    for line in ENV_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
-        if line.startswith("CLAUDE_CODE_OAUTH_TOKEN="):
-            return line.split("=", 1)[1].strip()
+    """Read OAuth token from root-only file; fall back to legacy /etc/environment."""
+    for path in (TOKEN_FILE, ENV_FILE):
+        if not path.is_file():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                tok = _parse_token_line(line)
+                if tok:
+                    return tok
+        except OSError:
+            continue
     return ""
 
 
@@ -59,8 +73,16 @@ def validate_setup_token(token: str) -> None:
 def log_event(event: str, **fields: Any) -> None:
     AUTH_LOG.parent.mkdir(parents=True, exist_ok=True)
     entry = {"timestamp": utc_now(), "event": event, **fields}
+    # Root-only audit log — fingerprints still must not include raw token bytes.
+    if not AUTH_LOG.exists():
+        AUTH_LOG.touch(mode=0o600)
+        os.chmod(AUTH_LOG, 0o600)
     with AUTH_LOG.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    try:
+        os.chmod(AUTH_LOG, 0o600)
+    except OSError:
+        pass
     print(json.dumps(entry, ensure_ascii=False))
 
 
@@ -133,29 +155,41 @@ def probe_token(token: str | None = None, source: str = "probe") -> dict[str, An
         return result
 
 
+def _strip_token_from_file(path: Path) -> None:
+    if not path.is_file():
+        return
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return
+    out = [
+        ln
+        for ln in lines
+        if not ln.strip().startswith("CLAUDE_CODE_OAUTH_TOKEN=")
+        and not ln.strip().startswith("export CLAUDE_CODE_OAUTH_TOKEN=")
+    ]
+    if out != lines:
+        path.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+
+
 def write_env_token(token: str) -> None:
+    """Write token to root-only /etc/claude-code/oauth.env; strip legacy world-readable copies."""
     validate_setup_token(token)
-    lines: list[str] = []
-    if ENV_FILE.is_file():
-        lines = ENV_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
-    out: list[str] = []
-    replaced = False
-    for line in lines:
-        if line.startswith("CLAUDE_CODE_OAUTH_TOKEN="):
-            if not replaced:
-                out.append(f"CLAUDE_CODE_OAUTH_TOKEN={token}")
-                replaced = True
-            continue
-        out.append(line)
-    if not replaced:
-        out.append(f"CLAUDE_CODE_OAUTH_TOKEN={token}")
-    ENV_FILE.write_text("\n".join(out) + "\n", encoding="utf-8")
+    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(TOKEN_FILE.parent, 0o700)
+    TOKEN_FILE.write_text(f"CLAUDE_CODE_OAUTH_TOKEN={token}\n", encoding="utf-8")
+    os.chmod(TOKEN_FILE, 0o600)
+    # Remove world-readable copies (historical /etc/environment mode 644).
+    _strip_token_from_file(ENV_FILE)
 
 
 def write_profile_token(token: str) -> None:
+    """Profile stub only — never put the token in world-readable profile.d."""
     validate_setup_token(token)
     PROFILE_FILE.write_text(
-        f'export CLAUDE_CODE_OAUTH_TOKEN="{token}"\n',
+        "# Claude OAuth: token is root-only at /etc/claude-code/oauth.env\n"
+        "# Per-user copies live in ~/.claude/settings.json (claude-auth-sync).\n"
+        "# Do not export CLAUDE_CODE_OAUTH_TOKEN from this file.\n",
         encoding="utf-8",
     )
     os.chmod(PROFILE_FILE, 0o644)
