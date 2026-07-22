@@ -146,10 +146,23 @@ function Set-ConnectVersionInRepo {
     Write-BumpedFile -Path $macVerFile -NewText $Version
 }
 
+function Set-ConnectBuildIdInRepo {
+    param([string]$ProjectRoot)
+    # Internal-only per-publish build tag - never shown in the console UI, never compared
+    # for update/newer-than logic (unlike $Version above). Purely so a specific running
+    # session's log can be tied back to the exact build that produced it. A fresh GUID
+    # every publish; the user never sees it change.
+    $buildId = [guid]::NewGuid().ToString()
+    Invoke-BumpFileReplacement -Path (Join-Path $ProjectRoot 'scripts\client\windows\connect.ps1') `
+        -Pattern "ConnectBuildId = '[^']+'" -Replace "ConnectBuildId = '$buildId'" -Utf8Bom
+    return $buildId
+}
+
 function Invoke-BumpConnectVersion {
     param([string]$ProjectRoot)
     $current = Get-RepoConnectVersion -ProjectRoot $ProjectRoot
     $next = Get-NextConnectVersion -Current $current
     Set-ConnectVersionInRepo -ProjectRoot $ProjectRoot -Version $next
+    Set-ConnectBuildIdInRepo -ProjectRoot $ProjectRoot | Out-Null
     return $next
 }

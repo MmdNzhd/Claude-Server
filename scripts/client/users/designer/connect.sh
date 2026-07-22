@@ -52,8 +52,35 @@ tunnel_up() {
 port_open()  { nc -zw3 "$1" "$2" 2>/dev/null; }
 novnc_open() { nc -zw2 127.0.0.1 "$NOVNC_PORT" 2>/dev/null; }
 
+
+# Share Global Connect lock with main connect (one UI per machine).
+enter_connect_single_instance() {
+    local lockdir="${HOME}/.config/claude-connect"
+    local lockfile="${lockdir}/connect.lock"
+    mkdir -p "$lockdir" 2>/dev/null || true
+    exec 9>"$lockfile" || return 1
+    if ! flock -n 9; then
+        _designer_log "SINGLE_INSTANCE: blocked pid=$$" ERROR
+        printf '\n  [X] Another Claude Connect is already running.\n\n' >&2
+        return 1
+    fi
+    CONNECT_LOCK_HELD=1
+    _designer_log "SINGLE_INSTANCE: acquired pid=$$" INFO
+    return 0
+}
+exit_connect_single_instance() {
+    if [ "${CONNECT_LOCK_HELD:-0}" = 1 ]; then
+        flock -u 9 2>/dev/null || true
+        exec 9>&- 2>/dev/null || true
+        CONNECT_LOCK_HELD=0
+    fi
+}
 if [ "$(id -u)" -eq 0 ]; then
     die "Do not run with sudo. Run as your normal user: bash connect.sh"
+fi
+
+if ! enter_connect_single_instance; then
+    exit 1
 fi
 
 check_writable() {
@@ -224,7 +251,7 @@ _GIT_MODE_SH="$SCRIPT_DIR/git-mode.sh"
 [ -f "$_GIT_MODE_SH" ] || die "git-mode.sh not found - re-copy the full designer package"
 . "$_GIT_MODE_SH"
 
-# Multi-instance: no global flock (unlimited concurrent UIs; tunnel slots isolate ports).
+# Operator: one Connect UI per PC. Win designer shares connect-ui mutex; close main connect before Mac designer.
 
 step "Server key"
 touch "$HOME/.ssh/authorized_keys"; chmod 600 "$HOME/.ssh/authorized_keys"

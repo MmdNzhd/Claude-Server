@@ -106,6 +106,7 @@ if mod.jwt_expired(auth.get("accessToken", "")):
 PY
 fi
 
+chmod 700 /etc/cursor-auth 2>/dev/null || true
 chmod 700 /etc/cursor-auth/golden 2>/dev/null || true
 chmod 600 /etc/cursor-auth/golden/* 2>/dev/null || true
 

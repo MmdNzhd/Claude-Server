@@ -39,6 +39,10 @@ Assert ($mac -match "download_failed" -and $mac -match "exit 1") 'mac ERROR path
 
 Assert ($bat -match "CLAUDE_CONNECT_UPDATE_DEPTH") 'connect.bat bounds update relaunch'
 Assert ($bat -match "GEQ 3") 'connect.bat relaunch depth limit is 3'
+Assert ($bat -match 'start "" /D "%HERE%" powershell -NoProfile -STA -ExecutionPolicy Bypass -File "%HERE%connect\.ps1"') 'connect.bat async handoff to connect.ps1'
+Assert ($bat -notmatch '-WindowStyle Hidden -ExecutionPolicy Bypass -File "%HERE%connect\.ps1"') 'connect.bat does not inline-hidden connect.ps1'
+Assert ($bat -match 'exit /b 0') 'connect.bat exits after connect.ps1 handoff'
+
 Assert ($macConn -match "CLAUDE_CONNECT_UPDATE_DEPTH") 'mac connect.sh bounds update relaunch'
 
 Assert ($dcb -match "STAGE_BUNDLE") 'deploy-client-bundle stages before swap'

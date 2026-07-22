@@ -2,7 +2,7 @@
 
 SSHFS mount of laptop design folder + noVNC browser desktop. No Cursor/VS Code.
 
-Client scripts: **v20260720.1** (Windows developer package uses same git-mode modules).
+Client scripts: **v20260722.24** (Windows developer package uses same git-mode modules).
 
 Ships in the **Sepidz** ZIP under `designer/` (IP `192.168.250.70`). Smart developer ZIPs do not include designer.
 
@@ -48,6 +48,11 @@ Same hotkeys (`G`, `R`, `Q`).
 EXIT / SIGTERM / **SIGHUP** traps clean up the server mount when the Terminal closes.
 
 ---
+
+
+## One Connect UI per PC
+
+Run **one** connect window at a time on the laptop. Windows designer uses the same `Enter-ConnectSingleInstance` lock as developer connect (via `connect-ui.ps1`). Do not run designer and developer connect together — the second launch shows `[X] Another Claude Connect is already running.`
 
 ## What This Does
 

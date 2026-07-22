@@ -11,6 +11,7 @@ $suites = @(
     @{ Name = 'connect-pipeline';     Script = 'test-connect-pipeline.ps1' }
     @{ Name = 'laptop-ssh-ready';     Script = 'test-laptop-ssh-ready.ps1' }
     @{ Name = 'git-mode-deep';        Script = 'test-git-mode-deep.ps1' }
+    @{ Name = 'cursor-proxy-lifetime'; Script = 'test-cursor-proxy-lifetime.ps1' }
     @{ Name = 'editor-launch';        Script = 'test-editor-launch.ps1' }
     @{ Name = 'editor-launch-strategies'; Script = 'test-editor-launch-strategies.ps1' }
     @{ Name = 'connect-diagnostic';     Script = 'test-connect-diagnostic.ps1' }
@@ -22,6 +23,8 @@ $suites = @(
     @{ Name = 'pushconf-quoting';     Script = 'test-pushconf-quoting.ps1' }
     @{ Name = 'connect-update-fail-exit'; Script = 'test-connect-update-fail-exit.ps1' }
     @{ Name = 'session-log-contracts'; Script = 'test-session-log-contracts.ps1' }
+    @{ Name = 'log-sync-contracts';     Script = 'test-log-sync-contracts.ps1' }
+    @{ Name = 'error-flush-contract';   Script = 'test-error-flush-contract.ps1' }
     @{ Name = 'hard-multi-agent-regressions'; Script = 'test-hard-multi-agent-regressions.ps1' }
 )
 

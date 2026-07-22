@@ -21,9 +21,9 @@ cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)
 pid="$(_extract_pid "$roots"$'\n'"$cwd"$'\n'"${PWD:-}" 2>/dev/null || true)"
 user="${USER:-smart}"
 
-base='SSH-FIRST HARD STOP: Never call Cursor Read/Grep/Glob/Write/Edit/StrReplace/Delete on ~/mounts/. Hook deny is expected — do NOT retry. First I/O = Shell + laptop-exec (read|rg|write|git|run). Flag orders OK: laptop-exec -p ID read REL  OR  laptop-exec read -p ID REL. Paths are laptop repo-relative (never /home/.../mounts/...).'
+base='SSH-FIRST HARD STOP: Never call Cursor Read/Grep/Glob/Write/Edit/StrReplace/Delete on ~/mounts/. Deny expected — do NOT retry; run NEXT:. First I/O = Shell + laptop-exec -p ID (read|rg|write|git|run). Never laptop-exec rg -i/-l/-n/--glob. Paths repo-relative (never /home/.../mounts/).'
 
-multi='MULTI-AGENT: Task spawn is allowed. EVERY subagent prompt MUST require laptop-exec only (-p ID; no Read/Grep/Shell on /mounts/). Parent must pass -p and laptop-exec-only rules in the Task prompt. Parallel agents share one SSH mux (max ~8 concurrent laptop-exec); queue is OK — never spam new connections. If a tool is denied, run the NEXT: laptop-exec command immediately.'
+multi='MULTI-AGENT: Task spawn allowed. EVERY Task prompt MUST paste: SSH-first mandatory; laptop-exec -p PROJECT on every read/rg/git/run/write; never Read/Grep/Write on /mounts/; never rg -i/-l/-n/--glob; on deny run NEXT:; prefer ≤4 parallel (hard cap 8 slots). Children do not inherit parent discipline. Queue OK — never raw ssh. Tunnel DOWN => stop; user connect.bat/sh.'
 
 if [[ -z "$pid" ]]; then
   ctx="$base $multi Tunnel DOWN => stop; tell user to run connect.bat/sh."

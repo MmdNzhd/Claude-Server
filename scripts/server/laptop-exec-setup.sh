@@ -11,6 +11,7 @@ set -euo pipefail
 
 GOLDEN_RULE="/usr/local/lib/claude-server/cursor-rules/laptop-exec.mdc"
 GOLDEN_SKILL="/usr/local/lib/claude-server/skills/laptop-exec/SKILL.md"
+GOLDEN_SKILL_REF="/usr/local/lib/claude-server/skills/laptop-exec/reference-windows-mcp.md"
 GOLDEN_BIN="/usr/local/bin/laptop-exec"
 GOLDEN_HEAL="/usr/local/bin/claude-self-heal"
 GOLDEN_HOOKS="/usr/local/lib/claude-server/cursor-hooks"
@@ -24,6 +25,17 @@ HOOK_CMD_SESSION="$HOME/.cursor/hooks/laptop-exec-session.sh"
 # is often STALE or NOT_MOUNTED and used to run an old guard that false-denied everything.
 HOOK_CMD_PROJECT="$HOME/.cursor/hooks/laptop-exec-guard-wrap.sh"
 HOOK_MATCHER="Grep|Glob|Read|Write|Edit|EditNotebook|StrReplace|Delete|Task"
+
+# atomic_install MODE SRC DST
+# Installs SRC to DST via a same-directory temp file + rename so a process already
+# executing DST (laptop-exec is invoked constantly; claude-watchdog polls
+# claude-mount every 30s and periodically re-runs claude-self-heal) never observes
+# a partially-written file.
+atomic_install() {
+    local mode="$1" src="$2" dst="$3" tmp="${3}.new.$$"
+    install -m "$mode" "$src" "$tmp" || return 1
+    mv -f "$tmp" "$dst"
+}
 
 
 _merge_hooks_json() {
@@ -40,7 +52,7 @@ _merge_hooks_json() {
     local tmp merged
     tmp=$(mktemp)
     merged=$(mktemp)
-    jq --arg cmd "$hook_cmd" --arg scmd "$session_cmd" '
+    jq --arg cmd "$hook_cmd" --arg scmd "$session_cmd" --arg matcher "$HOOK_MATCHER" '
         .version //= 1 |
         .hooks.beforeShellExecution //= [] |
         .hooks.preToolUse //= [] |
@@ -52,8 +64,11 @@ _merge_hooks_json() {
             .hooks.beforeShellExecution += [{"command": $cmd}]
         else . end |
         if ([.hooks.preToolUse[]? | select(.command == $cmd)] | length) == 0 then
-            .hooks.preToolUse += [{"command": $cmd, "matcher": "Grep|Glob|Shell|Read|Write|Edit|StrReplace|Delete|Task"}]
-        else . end |
+            .hooks.preToolUse += [{"command": $cmd, "matcher": $matcher}]
+        else
+            # Force-correct matcher (strip Shell / add EditNotebook) on existing wrap entry
+            .hooks.preToolUse |= map(if .command == $cmd then .matcher = $matcher else . end)
+        end |
         if ($scmd != "") and (([.hooks.sessionStart[]? | select(.command == $scmd)] | length) == 0) then
             .hooks.sessionStart += [{"command": $scmd}]
         else . end
@@ -164,17 +179,17 @@ _ensure_user() {
     [ -f "$GOLDEN_BIN" ] || return 0
     mkdir -p "$HOME/.local/bin" "$HOME/.cursor/rules" "$HOME/.cursor/skills/laptop-exec"
     if [ ! -f "$HOME/.local/bin/laptop-exec" ] || [ "$GOLDEN_BIN" -nt "$HOME/.local/bin/laptop-exec" ]; then
-        install -m 755 "$GOLDEN_BIN" "$HOME/.local/bin/laptop-exec"
+        atomic_install 755 "$GOLDEN_BIN" "$HOME/.local/bin/laptop-exec"
     fi
     # Keep setup itself in PATH so heal/audit/login can re-run without relying only on /usr/local/bin.
     if [ -x /usr/local/bin/laptop-exec-setup ]; then
         if [ ! -f "$HOME/.local/bin/laptop-exec-setup" ] || [ /usr/local/bin/laptop-exec-setup -nt "$HOME/.local/bin/laptop-exec-setup" ]; then
-            install -m 755 /usr/local/bin/laptop-exec-setup "$HOME/.local/bin/laptop-exec-setup"
+            atomic_install 755 /usr/local/bin/laptop-exec-setup "$HOME/.local/bin/laptop-exec-setup"
         fi
     fi
     if [ -x /usr/local/bin/claude-automount ]; then
         if [ ! -f "$HOME/.local/bin/claude-automount" ] || [ /usr/local/bin/claude-automount -nt "$HOME/.local/bin/claude-automount" ]; then
-            install -m 755 /usr/local/bin/claude-automount "$HOME/.local/bin/claude-automount"
+            atomic_install 755 /usr/local/bin/claude-automount "$HOME/.local/bin/claude-automount"
         fi
     fi
     if [ -f "$GOLDEN_RULE" ]; then
@@ -183,10 +198,13 @@ _ensure_user() {
     if [ -f "$GOLDEN_SKILL" ]; then
         install -m 644 "$GOLDEN_SKILL" "$HOME/.cursor/skills/laptop-exec/SKILL.md"
     fi
+    if [ -f "$GOLDEN_SKILL_REF" ]; then
+        install -m 644 "$GOLDEN_SKILL_REF" "$HOME/.cursor/skills/laptop-exec/reference-windows-mcp.md"
+    fi
     _ensure_user_hooks
     _ensure_cursor_git_off
     if [ -x "$GOLDEN_HEAL" ]; then
-        install -m 755 "$GOLDEN_HEAL" "$HOME/.local/bin/claude-self-heal"
+        atomic_install 755 "$GOLDEN_HEAL" "$HOME/.local/bin/claude-self-heal"
         "$HOME/.local/bin/claude-self-heal" --quiet 2>/dev/null || true
     fi
 }
@@ -197,6 +215,9 @@ _ensure_project_skill() {
     [ -d "$lpath" ] || return 0
     mkdir -p "$lpath/.cursor/skills/laptop-exec"
     install -m 644 "$GOLDEN_SKILL" "$lpath/.cursor/skills/laptop-exec/SKILL.md" 2>/dev/null || true
+    if [ -f "$GOLDEN_SKILL_REF" ]; then
+        install -m 644 "$GOLDEN_SKILL_REF" "$lpath/.cursor/skills/laptop-exec/reference-windows-mcp.md" 2>/dev/null || true
+    fi
 }
 
 _ensure_project() {

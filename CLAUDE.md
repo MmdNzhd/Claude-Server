@@ -7,7 +7,7 @@ All scripts (`*.sh`, `*.ps1`, `*.bat`) must use English only — comments, varia
 
 ## Architecture Overview
 
-SSH reverse tunnel: client laptop → server, port = `20000 + server_UID`.
+SSH reverse tunnel: client laptop → server, port = `20000 + (server_UID - 1000) * 10 + slot` (10-port non-overlapping block per user, slot 0-9; see `Get-TunnelPortUserBase` / `tunnel_port_user_base`).
 **Source of truth = laptop disk.** Optional SSHFS under `~/mounts/<ID>/` is for Cursor UI only and may be STALE or NOT_MOUNTED.
 
 **Agents must use SSH-first `laptop-exec`** (not Cursor Read/Grep/Write on `/mounts/`). Connect UI `sshx()` / `SshX()` open one-shot SSH (no mux). `laptop-exec` uses a shared SSH ControlMaster through the same reverse tunnel.
@@ -27,6 +27,7 @@ scripts/
     windows/connect.ps1           # Windows launcher (PowerShell, self-elevates to admin)
     connect-ui.sh / connect-ui.ps1 # Shared connect UI + server-only logging
     editor-launch.ps1 / .sh       # Shared VS Code/Cursor launch (dot-sourced by connect)
+ windows-mcp-laptop.ps1 # Windows-MCP ensure (dot-sourced by connect.ps1)
     git-mode.ps1 / git-mode.sh    # Shared GIT_MODE helpers + Mac SSH diag upload
     tests/                        # Client regression tests (run-all.bat)
     users/designer/               # Designer-only (noVNC, no editor) — separate product
@@ -125,6 +126,22 @@ REPO=/path/to/claude-code-server
 bash "$REPO/scripts/server/commands/add-user.sh" <name>
 ```
 
+
+## Cursor MCP Pack (Remote SSH agents)
+
+Synced into each developer's `~/.cursor/mcp.json` by `cursor-mcp-sync` (also merges HTTP `figma` / `context7` into Claude `~/.claude/settings.json`):
+
+| Server | Notes |
+|---|---|
+| `figma` | `https://mcp.figma.com/mcp` + golden OAuth `Authorization: Bearer figu_…` from `/etc/claude-code/figma-mcp.env` (not PAT `figd_`) |
+| `context7` | `https://mcp.context7.com/mcp` — no API key required |
+| `playwright` | `npx -y @playwright/mcp@latest` |
+| `sequential-thinking` | `npx -y @modelcontextprotocol/server-sequential-thinking` |
+| `memory` | `npx -y @modelcontextprotocol/server-memory` (per-user `~/.cursor/mcp-memory.jsonl`) |
+| `sqlserver` | `/usr/bin/mcp-sqlserver` + env from `/etc/claude-code/sqlserver.env` |
+
+Details: [`docs/cursor-mcp-pack.md`](docs/cursor-mcp-pack.md). After sync: **Reload Window** in Cursor.
+
 ## MCP Servers (installed per-user via add-user.sh)
 
 Every user gets these MCP servers wired into `~/.claude/settings.json` automatically:
@@ -135,28 +152,14 @@ Every user gets these MCP servers wired into `~/.claude/settings.json` automatic
 | `headroom` | Context compression — reduces tokens sent to LLM | `pip3 install headroom-ai[mcp]` (step 10) |
 | `sqlserver` | SQL Server query access via MCP | `npm install -g @bilims/mcp-sqlserver` |
 
-**SQL Server connection settings** — stored in `~/.claude/settings.json` under `mcpServers.sqlserver.env`. Each user can edit their own file to change the connection:
+**SQL Server connection settings** — golden secrets live root-only in `/etc/claude-code/sqlserver.env` (`SQLSERVER_HOST` / `SQLSERVER_USER` / `SQLSERVER_PASSWORD`, mode `0600`). `cursor-mcp-sync` injects them into each user's Cursor `~/.cursor/mcp.json` and Claude `~/.claude/settings.json`. Optional per-user override: `~/.config/cursor-mcp/sqlserver.env`. **Never** commit passwords or bake them into git templates.
 
-```json
-"sqlserver": {
-  "type": "stdio",
-  "command": "/usr/bin/mcp-sqlserver",
-  "args": [],
-  "env": {
-    "SQLSERVER_HOST": "192.168.210.124",
-    "SQLSERVER_USER": "Mohammad",
-    "SQLSERVER_PASSWORD": "CHANGE_ME"
-  }
-}
-```
-
-To update the IP for all users at once (run as root on server):
 ```bash
-for user in smart amir amirhossein aria danial hamed hamed.kh kiana mahdie mehrdad mohammad parsa reza tarane; do
-  f="/home/$user/.claude/settings.json"
-  [ -f "$f" ] && sed -i 's/OLD_IP/NEW_IP/g' "$f" && echo "✓ $user"
-done
+sudo claude-server sync-cursor-mcp          # push pack + SQL + Figma golden to all users
+sudo claude-server sync-cursor-mcp USER     # one user
 ```
+
+To change the shared DB login: edit `/etc/claude-code/sqlserver.env`, then re-run sync (do not sed passwords into homedirs by hand).
 
 **CodeGraph per-project indexing** — runs automatically on login via `claude-automount`. Manual trigger:
 ```bash
@@ -178,357 +181,55 @@ The `settings.json` template lives in `add-user.sh` step 4 — if you add/remove
 
 ## Connect session logs
 
-**Policy:** zero-loss offline-first. The laptop keeps a **durable local day log** and watermark-syncs to the server when SSH works. Session end does **not** delete the local day file.
+**Policy:** zero-loss offline-first. The laptop keeps a **durable local day log** and watermark-syncs to the server when SSH works. Session end does **not** delete the local day file. WARN lines append locally immediately but may lag up to **5s** on the server (coalesced `Request-ConnectLogSync` / `LOG_SYNC_ASYNC scheduled=1` drain); ERROR and session-end always call `Complete-ConnectLogAsyncDrain -Force` so no WARN backlog survives past session end. Details: [`docs/client-connect.md`](docs/client-connect.md#logging).
 
 | Artifact | Path |
 |---|---|
 | Laptop day log (durable) | Win: `%USERPROFILE%\.config\claude-connect\logs\connect-YYYYMMDD.log` · Mac: `~/.config/claude-connect/logs/connect-YYYYMMDD.log` |
 | Server (synced) | `~/.claude/logs/connect-YYYYMMDD.log` |
 | Laptop SSH failure diag | `~/.claude/logs/laptop-ssh-diag-latest.txt` (+ timestamped copies) |
-| Retention | Server: client flush + cron `claude-connect-logs-cleanup` delete `-mtime +1`; local day logs stay for offline audit |
+| Retention | Laptop + server: delete connect logs `-mtime +1` (client start / sync flush + cron `claude-connect-logs-cleanup`); today's local day file kept until next retention window |
 
 Client UI helpers: `scripts/client/connect-ui.sh` / `connect-ui.ps1`. Deploy: `sudo claude-server install` installs cleanup + `/etc/cron.d/claude-connect-logs`. Details: [`docs/client-connect.md`](docs/client-connect.md).
 
 
 ## SSH-First / laptop-exec (agents)
 
-Verified against live `laptop-exec` / hooks. Numbers and matchers are exact.
+**Source of truth for agent behavior:** Cursor skill + rule `laptop-exec` (kept short on purpose). Do **not** duplicate that encyclopedia here.
+
+Verified against live `laptop-exec` / hooks. Numbers below are exact.
 
 ### Mental model
 
 ```
 [Cursor agent on Linux]
-   Read/Grep/Write/… path under /mounts/     → preToolUse DENY (+ NEXT:)
-   Grep/Glob with no path but workspace_roots under /mounts/ → DENY
-   Shell heavy + (cwd or cmd touches /mounts/) → beforeShellExecution DENY
-   Shell containing substring "laptop-exec"  → not heavy
-   Task spawn                                  → always ALLOW
-        |
-        v
-[laptop-exec]  ControlPath=~/.cache/laptop-exec/cm-%C
-               8 flock slots (slot-0 … slot-7); cm.lock for master only
-        |
-        +-- SSH ControlMaster --> 127.0.0.1:$TUNNEL_PORT --> laptop disk (truth)
-Optional SSHFS ~/mounts/<ID>/ may be STALE/NOT_MOUNTED — UI only; never prefer over laptop-exec.
+  Read/Grep/Write on /mounts/ → hook DENY (+ NEXT:)
+  Shell heavy on mounts → DENY
+  Task spawn → ALLOW (child must still use laptop-exec)
+       ↓
+[laptop-exec] ControlMaster → 127.0.0.1:$TUNNEL_PORT → laptop disk
+Optional SSHFS ~/mounts/<ID>/ = UI only (may be STALE)
 ```
 
-Session: `~/.claude-connect.conf` (`LAPTOP_USER`, `TUNNEL_PORT`, `LAPTOP_OS`, `ACTIVE_MOUNT`, `GIT_MODE`).  
-Key `~/.ssh/claude_laptop`. KnownHosts `~/.ssh/known_hosts_claude_mount`.  
-Cache dir `~/.cache/laptop-exec/` (`cm-*`, `cm.lock`, `slot-*.lock`, `cache.lock`, `sshfs-cache.tsv`, `git-dir-cache.tsv`).
+Session: `~/.claude-connect.conf`. Cache: `~/.cache/laptop-exec/` (8 `slot-*.lock`, `cm-%C`).
 
-### Project resolve order (exact)
+### Hard rules (summary)
 
-1. `-p` / `--project` (also **before** subcommand: `laptop-exec -p ID read REL`)
-2. `-w` / `--workspace` if path contains `/mounts/`
-3. Else first of `LAPTOP_EXEC_WORKSPACE`, `CURSOR_WORKSPACE`, `CURSOR_PROJECT_DIR`, `PWD` containing `/mounts/`
-4. Else `ACTIVE_MOUNT`
-5. Else die: `no project`
+1. Denied on mounts: Grep, Glob, Read, Write, Edit, EditNotebook, StrReplace, Delete — run `NEXT:`; never retry.
+2. First I/O = Shell + `laptop-exec -p ID` (repo-relative paths only).
+3. `rg` is **not** ripgrep: `-i`/`-l`/`-n`/`--glob` rejected (old hangs pinned mux slots for hours).
+4. Mux: **8** slots; prefer ≤4 parallel; `session slots full` → wait; no raw SSH storms.
+5. Tunnel DOWN → user `connect.bat`/`connect.sh`. STALE mount + UP tunnel → still laptop-exec.
+6. Sudo: `sudo-from-laptop --smart|--sepidz` — never ask for a password.
+7. Every Task prompt must paste the SSH-first block from the `laptop-exec` skill.
 
-Cursor often does not export `CURSOR_*`. Prefer always `-p`. Both flag orders work.
+Project hooks must be exactly `{"version":1,"hooks":{}}`. User hooks use `laptop-exec-guard-wrap.sh` (fail-open). `preToolUse` matcher has **no** Shell (Shell only in `beforeShellExecution`).
 
-`sessionStart` (when project id inferred) also sets env: `LAPTOP_EXEC_WORKSPACE=/home/$USER/mounts/<ID>`, `LAPTOP_EXEC_PROJECT=<ID>`.
-
-### Hard rules
-
-1. Denied on mounts: **Grep, Glob, Read, Write, Edit, EditNotebook, StrReplace, Delete** — do not retry; run `NEXT:`.
-2. **Task** matched but always allowed to spawn.
-3. First I/O = Shell + `laptop-exec`. Paths for `read|write|rg` are **laptop repo-relative**.
-4. Tunnel DOWN → stop; user `connect.bat` / `connect.sh`. Do not ask to enable SSHFS.
-5. No tunnel stress/burst. No sudo password prompts (`sudo-from-laptop`).
-6. Windows `read` stdout may mangle non-ASCII; `write`/scp binary-safe — verify with byte dump via `run` if needed.
-7. After `write`: `laptop-exec git -p ID -- status` / `diff` (when relevant).
-8. Every Task prompt must require laptop-exec-only + `-p`.
-
-### Decision tree
-
-```
-Need file contents?
-  under ~/mounts/ID → laptop-exec read -p ID REL
-  /tmp or ~/.cursor or non-mount /home → Cursor Read OK
-
-Need search?
-  project → laptop-exec rg -p ID PATTERN [pathspec]
-  server-only paths → Cursor Grep OK
-
-Need edit?
-  read → edit locally (/tmp) → laptop-exec write -p ID REL < file
-  then git -- diff/status
-
-Need build/test?
-  laptop-exec run -p ID -- …   (or git/test)
-  not: cd mounts && dotnet/npm/pytest
-
-Tunnel?
-  status UP → proceed (even if sshfs STALE)
-  status DOWN / exit 1 → user connect; stop
-```
-
-### CLI — behavior-accurate
-
-Subcommands: `status`, `health`, `list` [`--full`], `resolve`, `mount-status`, `path`, `count`, `read`, `write`, `run`, `git`, `rg`, `test`, `help`.
-
-#### status / health / list
-
-- `status`: `tunnel_port`, `laptop_user`, `laptop_os` (`windows|mac`), `active_mount`, `git_mode` (`hide|server|off`), `tunnel` UP|DOWN, `sshfs` for active only, `prefer`. Exit **1** if no `LAPTOP_USER` or tunnel DOWN.
-- `health`: status (tolerate fail) + projects + fast list.
-- `list`: default fast (`sshfs=(list --full)` placeholder). `list --full`: real sshfs probe. Active marked ` *`.
-- sshfs probe cache TTL **45s** (`sshfs-cache.tsv`).
-
-#### mount-status / path / count
-
-- `mount-status [-p ID]`: project, local_path, laptop_path, sshfs, tunnel, recommend.
-- `path [-p ID]`: print laptop `REMOTE_PATH`.
-- `count [-p ID]`: file count on laptop.
-
-#### read
-
-```bash
-laptop-exec read [-p ID] [-w PATH] <file>     # exactly one file
-```
-
-Relative to laptop project root; `\` → `/`. Windows: `Get-Content -LiteralPath -Raw` over SSH. Mac: `cat`. Never `/home/.../mounts/...`.
-
-UTF-8 verify (Windows):
-
-```bash
-laptop-exec run -p ID -- powershell -NoProfile -Command \
-  "[BitConverter]::ToString([IO.File]::ReadAllBytes('REL'))"
-```
-
-#### write
-
-```bash
-laptop-exec write [-p ID] <file>   # stdin required; full file replace
-```
-
-Server temp → scp → laptop `$REMOTE_PATH/$rel`; creates parents; binary-safe. No stdin → `write: no stdin`.
-
-```bash
-laptop-exec write -p ID path/file <<'EOF'
-...
-EOF
-```
-
-#### rg
-
-```bash
-laptop-exec rg [-p ID] <pattern> [pathspec...]
-```
-
-1. Detect git dir `.git.server-session` or `.git` (cache TTL **300s**).
-2. If git: pattern contains `[]()|+?` → `git grep -n -E`; else `-F`. Exit **1** = no matches (normal).
-3. Else Windows: `Select-String` (all files); Mac: `rg` or `grep -R -E`.
-
-No `-i`. `.*` alone does **not** force `-E`.
-
-#### git
-
-```bash
-laptop-exec git [-p ID] [--] <args...>
-```
-
-`GIT_MODE=server` → plain `git`. Else `git --git-dir=<detected> --work-tree=.`. Hide mode: SSHFS may hide `.git`; laptop still has it — always use `laptop-exec git`.
-
-#### run
-
-```bash
-laptop-exec run [-p ID] [--] <cmd...>
-```
-
-cd to project on laptop then run. Windows: PowerShell `-EncodedCommand` (UTF-16LE). Mac: `bash -lc`. Use `--` before flag-like args.
-
-#### test
-
-`laptop-exec test` — built-in self-check.
-
-#### SSH transport (exact)
-
-| Item | Value |
-|---|---|
-| Opts | `BatchMode`, `ConnectTimeout=8`, `ServerAliveInterval=15`, `ServerAliveCountMax=3`, `ControlMaster=auto`, `ControlPersist=300`, `ControlPath=cm-%C` |
-| Slots | 8 (`0..7`); wait up to **240×0.2s=48s**; then stderr + return **255** |
-| Master | `flock -w 8` on `cm.lock`; flock fail → **no** `ssh -fN`; bring-up `ConnectTimeout=3` |
-| Retry | ≤4 on exit 255; sleep ~0.5–0.9s; delete mux sockets **only if** master `ssh -O check` fails |
-| Cache lock | `cache.lock` around TSV rewrites |
-
-`GIT_MODE` normalize: `server|on|yes|1|slow` → server; `hide|fast` → hide; else `off`.
-
-### Hooks (complete)
-
-**User** `~/.cursor/hooks.json` → absolute wrap/session paths.
-
-| Event | Command | Notes |
-|---|---|---|
-| `sessionStart` | `…/laptop-exec-session.sh` | `additional_context` + optional env |
-| `beforeShellExecution` | `…/laptop-exec-guard-wrap.sh` | all shells |
-| `preToolUse` | `…/laptop-exec-guard-wrap.sh` | matcher below |
-
-Exact `preToolUse` matcher (no Shell):
-
-```
-Grep|Glob|Read|Write|Edit|EditNotebook|StrReplace|Delete|Task
-```
-
-**Project** hooks must be exactly `{"version":1,"hooks":{}}`. `laptop-exec-setup` `_ensure_project_hooks` writes only that (no guard copies under mounts). Golden: `cursor-hooks/hooks-user.json`, `hooks-project.json`.
-
-**Wrap:** always exit 0; missing/broken/`bash -n` fail/non-JSON/nonzero → `{"permission":"allow"}`. Stamp `.guard-syntax-ok` skips `bash -n` when newer than guard.
-
-**Guard:** `set -uo pipefail`; `trap '_allow' ERR`; deny via jq then `exit 0` (Cursor treats exit **2** as deny — wrap prevents that).
-
-**Path targeting (`_tool_path_blob`):** `tool_input`/`input` fields `path`, `target_directory`, `file_path`, `target_notebook`, arrays `paths`. **Not** Shell `working_directory` as a file path (avoids false-deny `echo` with cwd under mounts).
-
-If those paths empty: Grep/Glob/Read/Write/Edit/EditNotebook/StrReplace/Delete fall back to `workspace_roots` + `cwd` touching `/mounts/`.
-
-Shell uses `tool_input.command`/`command` + `tool_input.working_directory`/`cwd` with `_shell_should_block` only.
-
-**Scan:** strip heredocs, quotes, `\| head|tail|wc …`. Fast path (no `<<`, no quotes): bash `sed` only (skip python).
-
-### Heavy shell (exact)
-
-Interpreters `python|python2|python3|node|nodejs|ruby|perl|python3.*` → allow unless `python -m pytest|unittest`.
-
-Heavy alternation (guard):
-
-```
-git|find|rg|grep|dotnet|npm|npx|yarn|pnpm|bun|deno|cargo|make|cmake|mvn|gradle|
-go[[:space:]]+(build|test|run)|python[[:space:]]+-m[[:space:]]+(pytest|unittest)|
-pytest|jest|vitest|tsc|webpack|vite[[:space:]]+build|cat|sed|awk|head|tail|wc|ls[[:space:]]+-R
-```
-
-Anchor: BOL, or after space/`&`;/`|`, or after `/` (`/usr/bin/git`).
-
-Substring `laptop-exec` → not heavy.
-
-**Block:** (1) not heavy → allow (2) heavy + cmd touches mounts → deny (3) heavy + cwd mounts → deny unless escape (4) else allow.
-
-**Escape (`_cmd_has_non_mount_abs`):** strip `#` comments; allow only `git -C /tmp…`, or `(cat|sed|awk|find|rg|grep|git|npm|dotnet) /tmp…`, or `(cat|sed|awk|find|rg|grep) /home/…` where token does not touch mounts. **Not** escapes: `git status && echo /tmp`, `cat README && ls /usr`.
-
-False-deny fixed historically: heredoc body with word `git`; `ls | head`; `echo` with mounts cwd.
-
-### Multi-agent — failure chain (exact)
-
-| # | Failure | Mechanism | Mitigation |
-|---|---|---|---|
-| 1 | Double fire | user + nonempty project hooks | project hooks `{}` |
-| 2 | Shell double-gate | Shell in preToolUse + beforeShell | matcher without Shell |
-| 3 | Task denied | explore/shell blocked | Task → `_allow` |
-| 4 | Mux overflow | default MaxSessions **10** | **8** slots |
-| 5 | Cascade | old `ssh -O exit` / wipe `cm-*` | reset only if master dead |
-| 6 | Master race | `flock \|\| true` + `-fN` | flock must succeed |
-| 7 | Deny storm | children retry Read/Grep | session + skill Task prompts |
-| 8 | Tunnel drop | MaxStartups / TCP storm | shared mux; no stress tests |
-| 9 | Cache race | concurrent TSV | `cache.lock` |
-
-Connect sets laptop `sshd_config` **`MaxSessions 32`**, **`MaxStartups 20:50:100`** before sshd restart (`Ensure-OpenSshMuxLimits` / `ensure_openssh_mux_limits`). File ≠ live until reconnect. Agents must not restart sshd while tunnel is needed.
-
-### Recipes
-
-Wrong `active_mount`:
-
-```bash
-laptop-exec read -p claude-code-server CLAUDE.md
-export LAPTOP_EXEC_WORKSPACE=/home/$USER/mounts/claude-code-server
-```
-
-Find files on Windows laptop:
-
-```bash
-laptop-exec run -p ID -- powershell -NoProfile -Command \
-  "Get-ChildItem -Recurse -Filter *.csproj | Select-Object -Expand FullName"
-```
-
-Edit loop:
-
-```bash
-laptop-exec read -p ID REL > /tmp/x
-# edit /tmp/x
-laptop-exec write -p ID REL < /tmp/x
-laptop-exec git -p ID -- diff -- REL
-```
-
-Task / subagent prompt block (paste verbatim):
-
-```
-SSH-first mandatory. laptop-exec status first.
-Use -p PROJECT on every read/rg/git/run/write.
-Paths repo-relative on laptop; never /home/.../mounts/...
-Cursor Read/Grep/Write on /mounts/ are hook-denied; do not retry.
-On deny: run the NEXT: laptop-exec command immediately.
-```
-
-### Errors
-
-| Signal | Action |
-|---|---|
-| Hook SSH-first BLOCKED / Do NOT retry / `NEXT:` | Remap; do not retry Cursor tool |
-| `no connect session` / status exit 1 / tunnel DOWN | user connect.bat/sh |
-| `unknown project` | `laptop-exec list` |
-| `no project` | pass `-p` |
-| `unknown command '-p'` | stale binary; current accepts both orders |
-| `no git repository on laptop` | wrong `-p` or no git on laptop |
-| `Get-Content Cannot find path` | use relative REL |
-| `write: no stdin` | heredoc/pipe |
-| `rg` exit 1 | no matches (normal) |
-| Mojibake on read | byte verify / prefer write |
-| `session slots full` | wait ≤48s; reduce parallel `run` |
-| Sepidz sudo auth fail | fix `sepidz-deploy.local.ps1`; deploy via laptop SSH |
-
-### Deploy / sudo (complete)
-
-| Target | Reach | Auth file (gitignored on laptop) |
-|---|---|---|
-| Smart | local sudo | `publish/smart-deploy.local.ps1` → `SmartSudoPassword` |
-| Sepidz `192.168.250.70` | laptop SSH `Host claude-server-sepidz` (Smart server often cannot route) | `publish/sepidz-deploy.local.ps1` → `SepidzSudoPassword`, `SepidzSshUser` |
-
-```bash
-sudo-from-laptop --smart -v
-sudo-from-laptop --sepidz -v
-sudo-from-laptop --smart -- claude-server deploy-laptop-exec
-sudo-from-laptop --smart -- install -m 755 /tmp/x /usr/local/bin/x
-```
-
-Never ask the user for sudo password. Never interactive `sudo` that hangs on a prompt.
-
-Per-user: `~/.local/bin/laptop-exec`, `~/.cursor/hooks/{guard,wrap,scan,session}.…`, hooks.json as above, empty project hooks, skill + rule.  
-Golden: `/usr/local/bin/laptop-exec`, `laptop-exec-setup`, `/usr/local/lib/claude-server/cursor-hooks/`, skills/rules.  
-After hooks.json change: Cursor **Reload Window** / new chat.
-
-### Checklist
-
-```
-[ ] laptop-exec status → UP
-[ ] -p if workspace != active_mount
-[ ] REL paths only (no /home/.../mounts/)
-[ ] read/rg/write/git/run via laptop-exec
-[ ] no retry of denied Cursor tools
-[ ] Task prompts include laptop-exec-only block
-[ ] after write: git -- diff/status
-[ ] non-ASCII: write + byte verify if needed
-[ ] project hooks.json is {"version":1,"hooks":{}}
-[ ] preToolUse matcher has no Shell
-```
-
-### Anti-patterns
-
-| Wrong | Right |
-|---|---|
-| Retry Read/Grep after deny | `NEXT:` laptop-exec |
-| `laptop-exec read -p ID /home/.../mounts/ID/REL` | `read -p ID REL` |
-| Ignore workspace ≠ active_mount | always `-p` |
-| `cd mounts && git/npm/cat` | `laptop-exec git/run/read` |
-| Assume `rg -i` / rich globs | unsupported; use pattern/pathspec/`run` |
-| Trust UTF-8 via Windows read stdout | write OK; byte-dump verify |
-| Fill project hooks with user hooks | keep `{}` |
-| `Shell` in preToolUse matcher | Shell only in beforeShellExecution |
-| Burst parallel laptop-exec / raw ssh tests | slots + shared mux; no stress |
-| Ask user for sudo password | `sudo-from-laptop` |
-| Restart laptop sshd from agent to apply MaxSessions | user re-runs connect |
+CLI: `laptop-exec status|health|list|read|write|rg|git|run|test|help`. Deep ops: `laptop-exec --help` and `scripts/server/skills/laptop-exec/SKILL.md`.
 
 ### Related paths
 
-`scripts/server/laptop-exec.sh`, `laptop-exec-setup.sh`, `cursor-hooks/*` (guard, wrap, scan, session, hooks-user/project), `skills/laptop-exec/SKILL.md`, `cursor-rules/laptop-exec.mdc`, `sudo-from-laptop.sh`, `commands/deploy-laptop-exec.sh`, `scripts/client/windows/connect.ps1`, `scripts/client/mac/connect.sh`, `publish/*-deploy.local.ps1`.
-
-Deep agent skill (also installed per-user): [`scripts/server/skills/laptop-exec/SKILL.md`](scripts/server/skills/laptop-exec/SKILL.md). Client guide: [`docs/client-connect.md`](docs/client-connect.md).
+`scripts/server/laptop-exec.sh`, `laptop-exec-setup.sh`, `cursor-hooks/*`, `skills/laptop-exec/SKILL.md`, `cursor-rules/laptop-exec.mdc`, `sudo-from-laptop.sh`, `commands/deploy-laptop-exec.sh`.
 
 ## Sync Rule for Server Scripts
 
@@ -567,7 +268,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 
 | Invariant | Location | Why |
 |---|---|---|
-| `PORT = 20000 + server_UID` | mac:9, win:361 | Port formula; guard: `20000 < PORT ≤ 65535` |
+| `PORT = 20000 + (UID-1000)*10 + slot` | `Get-TunnelPortUserBase` (git-mode.ps1), `tunnel_port_user_base` (git-mode.sh) | Non-overlapping 10-port block per user (fixed 2026-07-21 — old `20000+UID+slot` overlapped up to 6/10 ports between adjacent UIDs); guard: `20000 < PORT ≤ 65535` |
 | `CM='$HOME/.local/bin/claude-mount'` | mac:12, win:28 | Single-quoted — `$HOME` must expand on the REMOTE shell |
 | `already_down` / `$alreadyDown` flag | mac:432, win:560 | Prevents double-cleanup in EXIT/finally traps |
 | `_editor_opened` / `$editorOpened` flag | mac:434, win:557 | Prevents editor re-opening on tunnel reconnect |
@@ -577,7 +278,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | Both EXIT and SIGTERM traps | mac:444-445 | `kill <pid>` won't trigger EXIT alone |
 | `[Console]::Key` + `KeyChar` checks | win:610,728,784 | Physical key check so R/Q/C/X work under Persian/Arabic keyboard layouts |
 | `[Uri]::EscapeDataString` for Gateway URL | win:695 | PS5.1+PS7 safe; avoids `System.Web` dependency |
-| `$script:ConnectVersion = '20260720.1'` | win connect.ps1 | Must match connect.bat guard |
+| `$script:ConnectVersion = '20260722.24'` | win connect.ps1 | Must match connect.bat guard |
 | `@(Choose-Project -Mounts $mounts)[-1]` | win connect.ps1 | Prevents pipeline leak → Join-Path ChildPath prompt |
 | `@(Resolve-EditorChoice -CfgDir $CfgDir)[-1]` | win connect.ps1 | Same pipeline-safe capture |
 | `return ,($obj)` in Choose-Project | win connect.ps1 | Unary comma suppresses pipeline output |
@@ -585,7 +286,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | connect.bat guards | windows/connect.bat | Requires git-mode.ps1, Path.Combine, @(Choose-Project, version |
 | Dot-source git-mode.ps1 / git-mode.sh | all Windows/Mac launchers | GIT_MODE must not be duplicated in forks |
 | Push GIT_MODE to ~/.claude-connect.conf | connect.ps1/sh | Server claude-mount reads hide vs server |
-| `CONNECT_VERSION='20260720.1'` | mac connect.sh | Must match published client version |
+| `CONNECT_VERSION='20260722.24'` | mac connect.sh | Must match published client version |
 | Dot-source `connect-ui.ps1` / source `connect-ui.sh` | all launchers | UI tables, header, session box |
 | Always elevate at start of connect.ps1 (UAC) unless already admin | win | Non-admin relaunches via `RunAs`; `-AdminFix` is the elevated child / repair path; `Ensure-LaptopSshReady` still used mid-session |
 | Publish client package **12 files** | publish.ps1 | +connect-ui, editor-launch.sh (mac) |
@@ -622,7 +323,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 
 ## Client Codebase (Smart + Sepidz)
 
-**One codebase** — `windows/connect.ps1` + `mac/connect.sh`. Same alias (`claude-server`), cfg (`~/.config/claude-connect`), port base (`20000 + UID`).
+**One codebase** — `windows/connect.ps1` + `mac/connect.sh`. Same alias (`claude-server`), cfg (`~/.config/claude-connect`), port base (`20000 + (UID-1000)*10`, 10-slot non-overlapping block per user).
 
 **Sepidz vs Smart differs only at publish time:** `publish.ps1` builds two ZIPs; the Sepidz package copies the same client scripts with `SERVER_IP` patched (`192.168.210.240 -> 192.168.250.70`) in `connect.ps1`, `connect.sh`, and designer connect scripts. Package READMEs: `publish/README.txt` (Smart) vs `publish/README-sepidz.txt` (Sepidz). **Do not** maintain a separate `users/sepidz/` fork.
 
@@ -690,8 +391,8 @@ Outputs to `Desktop\claude-publish\`:
 
 | Package | Contents | Notes |
 |---|---|---|
-| `claude-code-client-YYYYMMDD.zip` | `windows/` + `mac/` + `README.txt` | Smart IP `192.168.210.240`; client only - **no `server/`** |
-| `claude-code-sepidz-YYYYMMDD.zip` | `claude-code/` + `designer/` + READMEs | Sepidz IP `192.168.250.70`; scripts IP-patched; README from `README-sepidz.txt` |
+| `claude-code-client.zip` | `windows/` + `mac/` + `README.txt` | Smart IP `192.168.210.240`; client only - **no `server/`** |
+| `claude-code-sepidz.zip` | `claude-code/` + `designer/` + READMEs | Sepidz IP `192.168.250.70`; scripts IP-patched; README from `README-sepidz.txt` |
 
 **Client-only rule:** Published ZIPs must never contain `server/`, `deploy-mount-fix.sh`, or `deploy-server-mount-fix.*`. Server deploy runs from repo `scripts/client/deploy-server-mount-fix.bat` (admin, smart laptop).
 

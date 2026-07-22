@@ -113,6 +113,9 @@ Assert ($gitModePs1 -match 'Cleared stale session') 'git-mode.ps1 self-heals sta
 Assert ($gitModeSh -match 'script push failure must not abort connect') 'git-mode.sh documents non-fatal script push'
 Assert ($gitModeSh -notmatch '(?s)initialize_server_session\(\) \{.*?\[ "\$push_ok" -eq 1 \]') 'initialize_server_session does not fail on push_ok'
 Assert ($gitModePs1 -match 'function Warn-ForeignServerSession') 'git-mode.ps1 has Warn-ForeignServerSession'
+Assert ($gitModePs1 -match '\[switch\]\$StopEditor') 'git-mode.ps1 Clear-SessionMount uses opt-in StopEditor'
+Assert ($gitModePs1 -notmatch 'SkipEditorStop') 'git-mode.ps1 removed SkipEditorStop'
+Assert ($winConnect -notmatch '-SkipEditorStop') 'connect.ps1 does not pass SkipEditorStop'
 
 foreach ($rel in @('mac\connect.sh')) {
     $src = Get-Content (Get-ClientFile $rel) -Raw
@@ -126,7 +129,8 @@ Assert ($winConnect -match 'NOT your Windows login') 'connect.ps1 setup clarifie
 Assert ($winConnect -match 'server script push failed \(continuing\)') 'connect.ps1 continues after script push fail'
 Assert ($winConnect -match 'PushOk') 'connect.ps1 tracks PushOk for non-fatal script push'
 Assert ($gitModeSh -match 'stop_remote_editor') 'git-mode.sh has stop_remote_editor'
-Assert ($gitModeSh -match '_stop_cursor_server_profile') 'git-mode.sh kills ClaudeServerCursorProfile tree on disconnect'
+Assert ($gitModeSh -match '_stop_remote_editor_by_uri') 'git-mode.sh stop_remote_editor is path-scoped by uri/path'
+Assert ($gitModeSh -match 'skip_editor="\$\{5:-1\}"') 'git-mode.sh clear_session_mount skips editor stop by default'
 
 foreach ($rel in @('mac\connect.sh')) {
     $src = Get-Content (Get-ClientFile $rel) -Raw
@@ -135,7 +139,7 @@ foreach ($rel in @('mac\connect.sh')) {
     Assert ($src -match 'exit_requested|menuLoop') "$rel has post-disconnect menu loop"
     Assert ($src -match 'read_post_disconnect_key') "$rel has post-disconnect countdown"
     Assert ($src -match 'ui_session_box|G = git mode') "$rel has session git hotkey"
-    Assert ($src -match 'clear_session_mount') "$rel closes editor on disconnect"
+    Assert ($src -match 'clear_session_mount') "$rel clears mount on disconnect"
     Assert ($src -match 'initialize_server_session') "$rel uses parallel server setup"
     Assert ($src -notmatch 'unmount_other_projects|Unmount-OtherProjects') "$rel does not unmount other projects on connect"
     Assert ($src -match 'ACTIVE_MOUNT_ID') "$rel tracks ACTIVE_MOUNT on server"
@@ -191,8 +195,22 @@ Assert ($gitModeSh -match 'ensure_session_tunnel') 'git-mode.sh has ensure_sessi
 Assert ($gitModeSh -match 'invoke_mount_project') 'git-mode.sh has invoke_mount_project'
 Assert ($gitModePs1 -match 'Ensure-LaptopReverseSshCached') 'git-mode.ps1 has Ensure-LaptopReverseSshCached'
 Assert ($gitModePs1 -match 'Acquire-TunnelPort') 'git-mode.ps1 has Acquire-TunnelPort'
-Assert ($gitModePs1 -match 'MOUNT_UP skip') 'git-mode.ps1 skips mount when check ok'
-Assert ($gitModePs1 -match "Get-GitMode\) -ne 'off'") 'git-mode.ps1 still runs up when GIT_MODE=off'
+Assert ($gitModePs1 -match 'Test-TunnelPortIsForeignPeer') 'git-mode.ps1 has foreign peer guard'
+Assert ($gitModePs1 -match 'ACQUIRE_SKIP: foreign_peer') 'git-mode.ps1 skips foreign peer ports'
+Assert ($gitModePs1 -match 'skip_foreign_peer') 'git-mode.ps1 never kills foreign peer forwards'
+Assert ($gitModePs1 -match 'Get-TunnelHostKeyFingerprint') 'git-mode.ps1 pins laptop host key fingerprint'
+Assert ($gitModePs1 -match 'PUSH_CONF blocked') 'git-mode.ps1 refuses PushConf for foreign ports'
+Assert ($gitModePs1 -match 'refuse_kill_foreign') 'git-mode.ps1 never fuser-kills foreign peers'
+$heal = Get-Content (Get-ServerFile 'server\claude-self-heal.sh') -Raw
+Assert ($heal -match '_heal_tunnel_ownership') 'claude-self-heal clears unowned TUNNEL_PORT'
+Assert ($heal -match 'cleared unowned TUNNEL_PORT') 'claude-self-heal logs unowned port clear'
+$gitModeSh = Get-Content (Get-ClientFile 'git-mode.sh') -Raw
+Assert ($gitModeSh -match 'refuse_kill_foreign') 'git-mode.sh refuses killing foreign peers'
+Assert ($gitModeSh -match 'PUSH_CONF blocked') 'git-mode.sh blocks PushConf for foreign ports'
+Assert ($gitModeSh -match 'LAPTOP_HOSTKEY_FP=%s') 'git-mode.sh pushes LAPTOP_HOSTKEY_FP'
+
+Assert ($gitModePs1 -match 'MOUNT_UP check_reuse|MOUNT_UP skip') 'git-mode.ps1 reuses or skips mount when check ok'
+Assert ($gitModePs1 -match "Get-GitMode\) -eq 'off'|Get-GitMode\) -ne 'off'|off_mode_apply") 'git-mode.ps1 still runs up when GIT_MODE=off'
 Assert ($gitModePs1 -match 'off_mode_apply')
  'git-mode.ps1 applies off mode on healthy mount'
 Assert ($mount -match 'CLAUDE_TRUSTED_TUNNEL') 'claude-mount has trusted-tunnel fast path'

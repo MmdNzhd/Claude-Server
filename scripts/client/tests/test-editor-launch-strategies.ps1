@@ -61,7 +61,7 @@ Assert ($explain -match 'on_folder=') 'Get-RemoteEditorStateExplain includes on_
 $launchSrc = Get-Content (Get-ClientFile 'editor-launch.ps1') -Raw
 Assert ($launchSrc -match 'param\([\s\S]*KnownOnFolder') 'Launch-RemoteEditor has KnownOnFolder param'
 Assert ($launchSrc -match 'AuthRelaunch') 'Launch-RemoteEditor has AuthRelaunch param'
-Assert ($launchSrc -match 'LAUNCH_KILL: reason=auth_relaunch') 'AuthRelaunch soft-stops profile'
+Assert ($launchSrc -match 'auth_relaunch_never_kill|hard_refuse_') 'AuthRelaunch never soft-stops profile'
 Assert ($launchSrc -match 'if \(\$onFolder -and -not \$agentHome\)[\s\S]{0,600}LAUNCH_SKIP') 'F1 early skip before verbose'
 Assert ($launchSrc -notmatch 'SKIP_ALREADY_ON_FOLDER') 'F1 removed SKIP verbose block'
 Assert ($launchSrc -match '\$script:VerboseLaunch') 'F3 VerboseLaunch defined'

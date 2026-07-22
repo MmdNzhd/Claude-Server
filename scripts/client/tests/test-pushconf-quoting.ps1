@@ -29,6 +29,9 @@ Assert ($pushWin.Length -gt 200) 'Push-ServerConnectConf extracted from git-mode
 Assert ($pushWin -match 'ToBase64String') 'Win PushConf encodes remote body as Base64'
 Assert ($pushWin -match 'base64 -d \| bash') 'Win PushConf runs echo b64 | base64 -d | bash'
 Assert ($pushWin -match 'PUSH_CONF_RESULT') 'Win remote body prints PUSH_CONF_RESULT'
+Assert ($pushWin -match 'LAPTOP_HOSTKEY_FP=%s') 'Win PushConf writes LAPTOP_HOSTKEY_FP'
+Assert ($pushWin -match "HK='") 'Win PushConf sets HK= for hostkey'
+
 
 # Farzad storm shape: CLEAR / PREFER / elif AM= (not AM="" in the ssh argv).
 Assert ($pushWin -match "CLEAR='") 'Win remote body uses CLEAR= single-quoted assignment'
@@ -67,7 +70,7 @@ else
   AM=`$(grep -E '^ACTIVE_MOUNT=' "`$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
 fi
 mkdir -p "`$HOME/.local/bin"
-printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nGIT_MODE=%s\nLAPTOP_OS=windows\nACTIVE_MOUNT=%s\n' "`$LU" "`$PORT" "`$MODE" "`$AM" > "`$HOME/.claude-connect.conf"
+printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nPORT=%s\nTUNNEL_SLOT=%s\nGIT_MODE=%s\nLAPTOP_OS=windows\nACTIVE_MOUNT=%s\nLAPTOP_HOSTKEY_FP=%s\n' "`$LU" "`$PORT" "`$PORT" "`$SLOT" "`$MODE" "`$AM" "`$HK" > "`$HOME/.claude-connect.conf"
 chmod 600 "`$HOME/.claude-connect.conf" 2>/dev/null || true
 printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s\n' "`$CLEAR" "`$PREFER" "`$AM"
 "@

@@ -52,6 +52,7 @@ echo ""
 echo -e "${BOLD}=== Re-sync all users from updated golden ===${NC}"
 bash "$SYNC_BIN" --all
 
+chmod 700 /etc/cursor-auth 2>/dev/null || true
 chmod 700 /etc/cursor-auth/golden 2>/dev/null || true
 chmod 600 /etc/cursor-auth/golden/* 2>/dev/null || true
 

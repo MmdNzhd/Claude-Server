@@ -1,66 +1,48 @@
 ---
-description: SSH-first HARD STOP — never Read/Grep/Write /mounts/; first I/O = laptop-exec; Task spawn allowed but laptop-exec-only prompts
+description: SSH-first HARD STOP — never Read/Grep/Write /mounts/; first I/O = laptop-exec; Windows may also use windows-mcp; Task prompts must paste laptop-exec block
 alwaysApply: true
 ---
 
-# Laptop Exec - SSH-First (deep)
+# Laptop Exec - SSH-First
 
-~/mounts/ is optional SSHFS (may be STALE/NOT_MOUNTED). Project truth is on the laptop via tunnel + laptop-exec. Do not ask the user to enable SSHFS.
+`~/mounts/` is optional SSHFS (may be STALE). Truth = laptop via `laptop-exec`. Do not ask to enable SSHFS.
 
 ## No trial-and-error
 
-Hooks deny on `/mounts/`: Read, Write, Edit, EditNotebook, StrReplace, Delete, Grep, Glob, and heavy Shell (git find rg grep cat sed awk head/tail/wc-on-files npm npx bun deno dotnet …).
-
-That deny is **expected**. **Do not retry.** First I/O = Shell + `laptop-exec`. Hooks run via **laptop-exec-guard-wrap.sh** (fail-open). Project `hooks.json` must stay empty `{}`.
+Hooks deny on `/mounts/`: Read, Write, Edit, EditNotebook, StrReplace, Delete, Grep, Glob, and heavy Shell. Deny is **expected**. **Do not retry.** First I/O = Shell + `laptop-exec` (or windows-mcp per hybrid below). Project `hooks.json` must stay `{"version":1,"hooks":{}}`.
 
 | Denied | Use |
 |--------|-----|
-| Read | `laptop-exec read [-p ID] REL` |
-| Write/Edit/StrReplace | `laptop-exec write [-p ID] REL` (full stdin; scp) |
-| Grep/Glob | `laptop-exec rg [-p ID] PATTERN [pathspec]` |
-| heavy Shell | `laptop-exec git\|run\|rg\|read [-p ID] …` |
+| Read | `laptop-exec read -p ID REL` (or windows-mcp `FileSystem` on Windows when ready) |
+| Write/Edit/StrReplace | `laptop-exec write -p ID REL` (full stdin) / MCP `FileSystem` write |
+| Grep/Glob | `laptop-exec rg -p ID PATTERN [pathspec]` (**not** MCP — content search) |
+| heavy Shell | `laptop-exec git\|run\|rg\|read -p ID …` / MCP `PowerShell` when ready |
 
-**Task spawn is ALWAYS allowed** by hooks. Every Task/subagent prompt MUST require laptop-exec only (`-p ID`; no Read/Grep/Shell-heavy on `/mounts/`). On deny, run the `NEXT:` command.
+**rg is NOT ripgrep:** never `-i`/`-l`/`-n`/`--glob` (rejected; old hangs). Pathspecs only.
 
-Both flag orders work: `laptop-exec -p ID read REL` and `laptop-exec read -p ID REL`.
+**Task spawn is ALWAYS allowed.** Every Task `prompt` MUST paste the SSH-first block from the `laptop-exec` skill (`-p ID`; no Read/Grep on mounts; no `rg -i/--glob`; hybrid note). Prefer ≤4 parallel `laptop-exec` (hard cap 8). On deny, run `NEXT:`.
 
-## Paths
+Both flag orders: `laptop-exec -p ID read REL` and `laptop-exec read -p ID REL`.
 
-- Laptop repo-relative only (`src/a.ts`).
-- Never `laptop-exec read /home/$USER/mounts/ID/...`
-- Windows read stdout may mangle non-ASCII; write/scp is binary-safe.
+## Hybrid (Windows only)
 
-## Boot
+- **Keep laptop-exec** always (Mac, `git`, content `rg`, MCP down).
+- When Cursor MCP `windows-mcp` is ready: prefer it for FileSystem/UI/Screenshot/PowerShell.
+- Never delete or skip laptop-exec because MCP exists.
+- Full routing: skill `laptop-exec` (+ `reference-windows-mcp.md`).
 
-```bash
-laptop-exec status
-laptop-exec health
-```
+## Paths / boot
 
-DOWN => user runs connect.bat/sh; stop. STALE mount + UP tunnel => still laptop-exec.
-
-## Resolve order
-
-`-p` > `-w` / `$LAPTOP_EXEC_WORKSPACE` / `$CURSOR_*` / `$PWD` under `/mounts/ID/` > `ACTIVE_MOUNT`.  
-Workspace folder != active_mount => always `-p`.
+- Repo-relative only for laptop-exec — never `/home/$USER/mounts/ID/...`
+- windows-mcp paths: absolute Windows under project root (not Desktop-relative)
+- Windows `read` may mojibake non-ASCII; `write` is binary-safe
+- `laptop-exec status` → DOWN => user `connect.bat/sh`; STALE mount + UP tunnel => still laptop-exec
+- Resolve: `-p` > workspace env/`PWD` under mounts > `ACTIVE_MOUNT`
 
 ## Allowed without laptop-exec
 
-`/tmp/**`, `~/.cursor/**`, non-mount paths; light shell (`echo`, `ls`, `python3`) even if cwd is mounts; any command containing `laptop-exec`.
+`/tmp/**`, `~/.cursor/**`, non-mount paths; light shell (`echo`, `ls`, `python3`); any command containing `laptop-exec`; Cursor MCP `windows-mcp` tools when that server is ready.
 
-## Multi-agent
+## Mux / sudo
 
-Do not create rules that forbid laptop-exec (`00-no-laptop-exec` style) — they conflict with hooks and lock the agent. Shared SSH mux uses session slots; queue is OK.
-
-## Deploy sudo (no prompts)
-
-```bash
-sudo-from-laptop --smart -- <cmd...>
-sudo-from-laptop --sepidz -- <cmd...>
-```
-
-Never ask the user for sudo password.
-
-## Mux
-
-8 session slots; shared ControlMaster; connect sets MaxSessions 32. Do not stress-test the tunnel.
+8 session slots; shared ControlMaster; do not stress-test the tunnel. Sudo: `sudo-from-laptop --smart|--sepidz -- …` — never ask for a password.

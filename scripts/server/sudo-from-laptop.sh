@@ -104,34 +104,23 @@ _run_smart() {
 }
 
 _run_sepidz() {
-  local pw target qcmd
-  pw="$(_load_sepidz_pw)"
-  [ -n "$pw" ] || _die "empty SepidzSudoPassword - set publish/sepidz-deploy.local.ps1 on laptop"
+  local target qcmd
+  # Smart server cannot TCP to Sepidz LAN (192.168.250.70). SSH+sudo must run on the laptop.
+  # Password is read on the laptop only (never loaded onto the Smart server).
   target="$(_load_sepidz_target)"
   if [ "$VALIDATE_ONLY" -eq 1 ]; then
-    if printf '%s\n' "$pw" | ssh -o BatchMode=yes -o ConnectTimeout=15 "$target" \
-      "sudo -S -v" >/dev/null 2>&1; then
-      echo "sudo-from-laptop: sepidz auth OK (target=$target project=$PROJECT)"
+    if laptop-exec run -p "$PROJECT" -- powershell -NoProfile -ExecutionPolicy Bypass -File scripts/server/sepidz-sudo-via-laptop.ps1 -- true >/dev/null 2>&1; then
+      echo "sudo-from-laptop: sepidz auth OK (target=$target project=$PROJECT via-laptop)"
       return 0
     fi
-    _die "sudo auth failed for Sepidz ($target)"
+    _die "sudo auth failed for Sepidz ($target) via laptop"
   fi
   [ "${#CMD[@]}" -gt 0 ] || _die "usage: sudo-from-laptop --sepidz -- <command...>"
   qcmd="$(printf '%q ' "${CMD[@]}")"
-  # SECURITY: password only on SSH stdin — never in remote command string / process list.
-  remote_script=$(cat <<'RS'
-set -euo pipefail
-IFS= read -r -s PW || true
-printf '%s\n' "$PW" | sudo -S -p '' -v >/dev/null
-printf '%s\n' "$PW" | sudo -S -p '' bash -lc "$1"
-RS
-)
-  # Pass qcmd as $1 to remote bash; password via ssh stdin (first line).
-  if printf '%s\n' "$pw" | ssh -o BatchMode=yes -o ConnectTimeout=120 "$target" \
-    "bash -c $(printf '%q' "$remote_script") _ $(printf '%q' "$qcmd")"; then
+  if laptop-exec run -p "$PROJECT" -- powershell -NoProfile -ExecutionPolicy Bypass -File scripts/server/sepidz-sudo-via-laptop.ps1 -- "$qcmd"; then
     return 0
   fi
-  _die "sudo auth/exec failed for Sepidz ($target)"
+  _die "sudo auth/exec failed for Sepidz ($target) via laptop"
 }
 
 

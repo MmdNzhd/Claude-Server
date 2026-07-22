@@ -2,7 +2,7 @@
 
 Developer and end-user guide for `connect.bat` / `connect.sh`.
 
-**Current client version:** **`20260720.1`**
+**Current client version:** **`20260722.24`**
 
 See also: [sshfs-performance.md](sshfs-performance.md) (GIT_MODE deep dive), [CLAUDE.md](../CLAUDE.md) (server admin).
 
@@ -35,14 +35,36 @@ Recovery policy:
 - Recovery should re-establish the reverse `-R` forward, validate the existing mount, and only remount after the editor no longer owns the folder or an explicit user disconnect permits cleanup.
 - Manual disconnect (`Q` / Enter) may stop the editor and clear the mount. A `finally` / exit handler may keep the `-R` tunnel alive when Cursor still owns the folder; tunnel teardown is not more important than preserving the active editor session.
 
+## One Connect UI per PC
+
+Run **at most one** Claude Connect window per laptop (developer connect, designer, or connect-design). A second launch is refused:
+
+```
+[X] Another Claude Connect is already running.
+```
+
+| Platform | Mechanism |
+|----------|-----------|
+| **Windows** | `Global\ClaudeConnect` mutex in `connect-ui.ps1` |
+| **Mac** | `flock` on `~/.config/claude-connect/connect.lock` |
+
+Designer Windows and connect-design dot-source the same `connect-ui` helpers as main connect, so they share the lock. Do not run designer and developer connect at the same time.
+
+**Why:** Multiple connect UIs contend for the same reverse `-R` port (`20000 + server UID`). Orphan tunnel cleanup is scoped to stale local `ssh -R` processes and must not kill a peer session (see below).
+
+### Tunnel orphan cleanup (peer safety)
+
+When connect acquires or recovers a tunnel port, `Remove-LocalOrphanTunnel` (Windows) / `remove_local_orphan_tunnel` (Mac) kills **stale** local `ssh -R` forwards only. The live session tunnel PID is always skipped — look for `ORPHAN_TUNNEL: skip_current` in connect logs. Cleanup must never terminate another active connect session on the same port.
+
+
 ## Smart vs Sepidz
 
 One client codebase. Two publish packages (same scripts; different server IP):
 
 | Package | ZIP name | Server IP | README in ZIP |
 |---------|----------|-----------|---------------|
-| **Smart** | `claude-code-client-YYYYMMDD.zip` | `192.168.210.240` | `README.txt` from `publish/README.txt` |
-| **Sepidz** | `claude-code-sepidz-YYYYMMDD.zip` | `192.168.250.70` | `claude-code/README.md` from `publish/README-sepidz.txt` + `designer/` |
+| **Smart** | `claude-code-client.zip` | `192.168.210.240` | `README.txt` from `publish/README.txt` |
+| **Sepidz** | `claude-code-sepidz.zip` | `192.168.250.70` | `claude-code/README.md` from `publish/README-sepidz.txt` + `designer/` |
 
 Do not mix Smart and Sepidz folders on one laptop for the same workflow - check the IP in the connect header. Logging policy (server-only `~/.claude/logs/`) is identical on both sites.
 
@@ -102,6 +124,8 @@ If hide fails (Cursor locks `.git`): close Remote SSH / git on laptop, then pres
 - `cursor-auth-laptop.ps1` merges auth keys into server profile SQLite (never closes Cursor).
 - Also writes the Electron profile-root `machineid` / `machineId` files from the server golden identity (login fails if SQLite tokens match but this file drifts).
 - Skip path (auth already complete) still heals `machineid`.
+- **Stamp-first skip:** when local `golden-synced-at.txt` matches server `exported-at` and auth is already complete, connect skips the heavy merge (still heals `machineid` if it drifted).
+- After golden token **rotation** (~6h), if the editor stayed open through a stale window, press **`O`** or fully quit `[Claude Server]` — Reload Window alone is not enough.
 
 If Cursor opens **Agent home** instead of the project folder, check the **server** connect log (see [Logging](#logging)). Correct-folder detection requires the **full remote path** (not only `ssh-remote+alias`).
 
@@ -117,6 +141,8 @@ After auth sync, if Chat still fails: **Developer → Reload Window** in the `[C
 - `git-mode.sh` merges golden auth into server profile `state.vscdb` on each connect (requires `sqlite3`).
 - Writes profile-root `machineid` / `machineId` to match `/etc/cursor-auth/golden/machine-id.txt`.
 - After auth sync, connect sets `CURSOR_AUTH_RELAUNCH=1` so a long-lived profile process is soft-stopped and relaunched (avoids reusing a weeks-old logged-out window).
+- **Stamp-first skip:** same `golden-synced-at.txt` / `exported-at` stamp match avoids redundant merges when auth is current.
+- After golden **rotation**, if Chat fails but logs show auth ok and the editor never relaunched, press **`O`** (or fully quit) — do not personal-login into `[Claude Server]`.
 - Correct-folder checks require the **full** remote path (e.g. `/home/mohammad/mounts/...`). Matching only `ssh-remote+claude-server` is wrong when several server users share the same SSH alias.
 
 **Remote SSH extension:** install **`anysphere.remote-ssh`** only. Uninstall Microsoft's `ms-vscode-remote.remote-ssh` if present (Extensions → search `@id:anysphere.remote-ssh`).
@@ -131,11 +157,11 @@ Connect also sets `TMPDIR=/tmp` automatically when needed.
 
 If Cursor still asks to log in after sync shows **ok**: fully quit the `[Claude Server]` window (or press **`O`**), do not personal-login into that profile. Reload Window alone is not enough if a stale process held old in-memory auth.
 
-If Cursor opens **Agent home** / wrong user mount path, press **`O`** or reconnect (v20260720.1+).
+If Cursor opens **Agent home** / wrong user mount path, press **`O`** or reconnect (v20260722.24+).
 
 ## Logging
 
-**Policy (v20260720.1+):** zero-loss offline-first. The laptop appends a **durable local day log** and watermark-syncs new bytes to the server when SSH works. `Close-ConnectLog` / `flush_connect_log_to_server` do **not** delete the local day file (offline / failed-SSH sessions stay auditable).
+**Policy (v20260722.24+):** zero-loss offline-first. The laptop appends a **durable local day log** and watermark-syncs new bytes to the server when SSH works. `Close-ConnectLog` / `flush_connect_log_to_server` do **not** delete the local day file (offline / failed-SSH sessions stay auditable).
 
 | Where | Path |
 |-------|------|
@@ -146,14 +172,15 @@ If Cursor opens **Agent home** / wrong user mount path, press **`O`** or reconne
 
 Legacy beside-script `connect.log` / `connect.log.1` are removed on start. Short-lived chunk files under `%TEMP%` / `.chunk` are only staging for scp sync.
 
-**Retention:** server copies under `~/.claude/logs/` older than **1 day** are deleted:
+**Retention:** connect logs older than **1 day** (`mtime +1`) are deleted on both sides:
 
-- Client: `find … -mtime +1 -delete` on each sync flush
-- Server: `/usr/local/bin/claude-connect-logs-cleanup` via `/etc/cron.d/claude-connect-logs` (hourly, as root)
+- Laptop local day logs (`~/.config/claude-connect/logs/`): purged on each connect start (`Clear-ConnectLocalLogsOlderThan` / `find … -mtime +1`); `sessions.index` is kept
+- Server `~/.claude/logs/`: client `find … -mtime +1 -delete` on each sync flush
+- Server cron: `/usr/local/bin/claude-connect-logs-cleanup` via `/etc/cron.d/claude-connect-logs` (hourly, as root)
 
-Local day logs are kept (no automatic wipe on session end).
+Session end does **not** delete today's local day file (offline / failed-SSH sessions stay auditable until the next day's retention window).
 
-### What a full log contains (v20260720.1+)
+### What a full log contains (v20260722.24+)
 
 Each connect run uploads a timeline to `~/.claude/logs/connect-YYYYMMDD.log`. Look for these markers in order:
 
@@ -175,6 +202,22 @@ Each connect run uploads a timeline to `~/.claude/logs/connect-YYYYMMDD.log`. Lo
 | `======== session end` | Final line of the session (local day log kept) |
 
 `CONTEXT` lines always include: `REMOTE_USER`, `LAPTOP_USER`, `SERVER_IP`, `PORT`, `CONNECT_VERSION`, `GIT_MODE`, `ACTIVE_MOUNT`, editor flags, and `local_cfg` (DEBUG).
+
+### WARN/ERROR sync timing
+
+- **WARN**: local day-log append is immediate; the server-side copy may lag up to **5s** because WARN bursts are coalesced into a single async drain (`Request-ConnectLogSync`) instead of forcing a sync per line.
+- **ERROR** and **session-end** (`Wait-ConnectExit`, `Close-ConnectLog`) always call `Complete-ConnectLogAsyncDrain -Force`, which drains any pending WARN backlog *and* force-syncs immediately - no WARN line is ever left stranded on the laptop past session end.
+- Watch for `LOG_SYNC_ASYNC scheduled=1` (DEBUG) when a sync has been scheduled but not yet drained; the equivalent Mac helper is `request_connect_log_sync`.
+
+### CONTEXT throttling
+
+- The first `CONTEXT phase=session_loop` on a run is always emitted in full.
+- Later reconnect iterations within the same run throttle the repeat snapshot to avoid log spam - look for `CONTEXT skip reason=throttle phase=session_loop iter=N` (DEBUG) instead of the full block. `startup`, `server_ready`, `project_selected`, and `cleanup` phases are never throttled.
+
+### Realistic open-time targets
+
+- ~40s typical cold open, ~35s on a warm laptop (SSHFS/tunnel already primed).
+- SSHFS mount itself is **~8-10s irreducible** (SFTP round trips for stat/mkdir) - this floor will not move without changing transport.
 
 **Admin read (on server):**
 
@@ -226,7 +269,7 @@ The reverse tunnel needs the **server** to SSH into the Mac as `LAPTOP_USER` (`w
 
 1. System Settings → Sharing → **Remote Login** = On
 2. Allow the Mac account shown by `whoami`, or **All users** (Sharing UI often shows Full Name — allow that row if listed)
-3. User must **not** remain only in `com.apple.access_ssh-disabled` (connect heals this from v20260720.1+ / current v20260720.1+: remove from disabled + add to `com.apple.access_ssh`)
+3. User must **not** remain only in `com.apple.access_ssh-disabled` (connect heals this from v20260722.24+ / current v20260722.24+: remove from disabled + add to `com.apple.access_ssh`)
 4. If key auth still fails, leave connect running until it finishes; diagnostics upload to `~/.claude/logs/laptop-ssh-diag-latest.txt` on the server
 
 Admin password is requested **at most once** per connect run (45s timeout). Destructive Remote Login cycling is skipped when login is already on.
@@ -245,7 +288,7 @@ If `~/.claude-connect.conf` points at another laptop user but the tunnel port is
 scripts\client\tests\run-all.bat
 ```
 
-Key tests: `test-connect-pipeline.ps1`, `test-editor-launch-strategies.ps1`, `test-parse-connect-perf.ps1`, `test-git-mode-deep.ps1`, `audit-local-connect.ps1`.
+Key tests: `test-connect-pipeline.ps1`, `test-log-sync-contracts.ps1`, `test-error-flush-contract.ps1`, `test-cursor-auth-merge.ps1`, `test-verify-perf-gates.ps1`, `test-parse-connect-perf.ps1`, `audit-local-connect.ps1`.
 
 Mac: `scripts/client/tests/verify-all.sh`
 
@@ -266,18 +309,32 @@ Mac: `scripts/client/tests/verify-all.sh`
 |---------|-----|
 | Join-Path ChildPath prompt | Old `connect.ps1` - copy full `windows\` folder from latest ZIP |
 | connect.bat OUTDATED | Missing `connect-ui.ps1` or wrong version in header |
-| Cursor Agent home / wrong user path | Update to **v20260720.1+**; press `O`; check `LAUNCH_*` in server log (folder match needs full path) |
+| Cursor Agent home / wrong user path | Update to **v20260722.24+**; press `O`; check `LAUNCH_*` in server log (folder match needs full path) |
 | Cursor asks to log in (Mac/Win) after auth **ok** | Quit `[Claude Server]` fully or press `O` (stale process); do not personal-login; confirm `machineid` matches golden |
 | Cursor Chat cannot send (Mac/Win) | Reconnect, then **Developer → Reload Window** in `[Claude Server]` window |
-| Mac Remote SSH `listen EINVAL` | Update to v20260720.1+; or `launchctl setenv TMPDIR /tmp` + quit Cursor fully |
+| Mac Remote SSH `listen EINVAL` | Update to v20260722.24+; or `launchctl setenv TMPDIR /tmp` + quit Cursor fully |
 | Mac Remote SSH timeout | Use `anysphere.remote-ssh` (not Microsoft extension) |
 | Laptop SSH key / Permission denied (Mac) | Enable Remote Login; remove user from `access_ssh-disabled`; read `laptop-ssh-diag-latest.txt` on server |
 | Empty project list on Mac after Windows session | Auto-adds / purges incompatible `rpath`; add the Mac folder once |
 | Stale “foreign session” / wrong LAPTOP_USER | Auto-cleared when tunnel port is down; reconnect |
-| No `connect.log` beside bat | Expected — logs are on the server only (v20260720.1+) |
+| No `connect.log` beside bat | Expected — durable day log is `%USERPROFILE%\.config\claude-connect\logs\` (Win) or `~/.config/claude-connect/logs/` (Mac); synced copy at `~/.claude/logs/` |
 | git hide failed | Close Cursor/git on laptop, press `G` |
+| Second connect refused | Close the other connect window first (one UI per PC) |
 | Tunnel drops | Auto-reconnect; editor not re-opened on reconnect |
-| Server path `$HOME/~/...` or leftover `~/` under home | Fixed in v20260720.1+ (`${var#~/}` tilde pitfall); admin may `rm -rf ~/\~` leftover dir |
+| Server path `$HOME/~/...` or leftover `~/` under home | Fixed in v20260722.24+ (`${var#~/}` tilde pitfall); admin may `rm -rf ~/\~` leftover dir |
 
+
+## Windows EXE-only users
+
+Give end users **only** `Claude-Connect.exe` (on Desktop after publish). Do not hand out `claude-publish/.../windows` folders.
+
+- First run installs into `Desktop/Claude-Connect/` and launches connect.
+- Later updates download that same EXE from the server bundle (not a full script tree).
+- Server install must never CRLF-strip `*.exe` (`install-client-bundle.sh`). A stripped EXE fails with "not a valid application for this OS platform".
 
 Questions: contact admin (smart).
+
+
+## Client auto-update policy
+
+Default mode is **optional** (`scripts/server/client-update-policy.json`): users can defer 48 hours. Silent mid-session checks never auto-apply optional updates. Set `force_min_version` for required upgrades. Laptop VPN is not a supported Cursor egress path — use Connect xray proxy (PROXY_HEALTH).

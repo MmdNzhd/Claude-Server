@@ -10,7 +10,11 @@ if (-not $lu) { $lu = $env:USERNAME }
 $port = 21003
 if ($c.TUNNEL_SLOT -match '^\d+$') {
     $uid = (ssh -n -o BatchMode=yes -o ConnectTimeout=10 claude-server 'id -u' 2>$null).Trim()
-    if ($uid -match '^\d+$') { $port = 20000 + [int]$uid + [int]$c.TUNNEL_SLOT }
+    if ($uid -match '^\d+$') {
+        $offset = [int]$uid - 1000
+        if ($offset -lt 0) { $offset = 0 }
+        $port = 20000 + ($offset * 10) + [int]$c.TUNNEL_SLOT
+    }
 }
 Write-Host "LAPTOP_USER=$lu  PORT=$port" -ForegroundColor Cyan
 $pub = (ssh -n -o BatchMode=yes -o ConnectTimeout=10 claude-server 'cat ~/.ssh/claude_laptop.pub 2>/dev/null').Trim()

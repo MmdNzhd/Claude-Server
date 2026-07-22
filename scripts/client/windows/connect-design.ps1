@@ -49,8 +49,13 @@ function Test-LocalPort([int]$port) {
 }
 
 function SshX([string]$cmd) {
+    # Base64-encode: a bare native-exe argument with embedded quotes can be mangled by
+    # PowerShell's argument marshaling to ssh.exe (seen in production as "unexpected EOF
+    # while looking for matching `""). A base64 blob has no shell-special characters.
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($cmd))
+    $wrapped = "echo $b64|base64 -d|bash"
     $r = & ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=10 `
-        -o ServerAliveInterval=5 -o ServerAliveCountMax=3 $Alias $cmd 2>$null
+        -o ServerAliveInterval=5 -o ServerAliveCountMax=3 $Alias $wrapped 2>$null
     return $r
 }
 
@@ -119,7 +124,7 @@ function Resolve-DesignKeyLetter {
     return @{ Letter = $letter; UseVk = $useVk; Code = $code }
 }
 
-# Multi-instance: load connect-ui helpers; single-instance lock is a no-op.
+# Single-instance: load connect-ui helpers; Enter-ConnectSingleInstance shares Global\ClaudeConnect with main connect.
 $script:ConnectScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $_connectUi = Join-Path $script:ConnectScriptDir 'connect-ui.ps1'
 if (-not (Test-Path $_connectUi)) {
@@ -131,7 +136,10 @@ if (-not (Test-Path $_connectUi)) {
 if (Test-Path $_connectUi) {
     . $_connectUi
     if (Get-Command Enter-ConnectSingleInstance -ErrorAction SilentlyContinue) {
-        $null = Enter-ConnectSingleInstance
+        if (-not (Enter-ConnectSingleInstance)) {
+            if (Get-Command Wait-ConnectExit -ErrorAction SilentlyContinue) { Wait-ConnectExit -Reason 'single_instance' -Code 2 }
+            else { exit 2 }
+        }
     }
 }
 

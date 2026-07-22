@@ -15,6 +15,20 @@ warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 fail() { echo -e "  ${RED}x${NC} $1"; exit 1; }
 step() { echo -e "\n${BOLD}=== $1 ===${NC}"; }
 
+# atomic_install MODE SRC DST [OWNER] [GROUP]
+# Installs SRC to DST via a same-directory temp file + rename so a process already
+# executing DST (e.g. claude-watchdog polling claude-mount every 30s, relevant when
+# re-running add-user against an existing user) never observes a partially-written file.
+atomic_install() {
+    local mode="$1" src="$2" dst="$3" owner="${4:-}" group="${5:-}" tmp="${3}.new.$$"
+    if [ -n "$owner" ]; then
+        install -m "$mode" -o "$owner" -g "$group" "$src" "$tmp" || return 1
+    else
+        install -m "$mode" "$src" "$tmp" || return 1
+    fi
+    mv -f "$tmp" "$dst"
+}
+
 [ "$EUID" -ne 0 ] && fail "must run as root: sudo claude-server add-user <username>"
 
 USERNAME="${1:-}"
@@ -42,6 +56,15 @@ else
     passwd "$USERNAME"
 fi
 
+# cursorauth group: group-read access to /etc/cursor-auth/golden/{auth.json,machine-id.txt,
+# state-keys.json,exported-at} so cursor-auth-laptop.ps1's plain (non-root) SSH probes can
+# actually read the golden Cursor auth bundle. Without this every laptop's "Syncing Cursor
+# auth" step always reports golden_missing (permission-denied indistinguishable from absent),
+# even when cursor-auth-export has run and the bundle is fully present and fresh.
+getent group cursorauth >/dev/null 2>&1 || groupadd cursorauth
+usermod -aG cursorauth "$USERNAME"
+ok "user $USERNAME added to cursorauth group (Cursor golden-auth read access)"
+
 step "2 - home directory"
 mkdir -p "/home/$USERNAME/work"
 # Avoid chown -R on the entire home tree: SSHFS mounts under ~/mounts/ are
@@ -54,31 +77,26 @@ ok "/home/$USERNAME/work ready (isolated)"
 step "3 - claude-mount + git-setup"
 mkdir -p "/home/$USERNAME/.local/bin"
 if [ -f /usr/local/lib/claude-mount ]; then
-    install -m 755 /usr/local/lib/claude-mount "/home/$USERNAME/.local/bin/claude-mount"
-    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin/claude-mount"
+    atomic_install 755 /usr/local/lib/claude-mount "/home/$USERNAME/.local/bin/claude-mount" "$USERNAME" "$USERNAME"
     ok "~/.local/bin/claude-mount installed"
 else
     warn "/usr/local/lib/claude-mount not found - run: sudo claude-server install"
 fi
 
 if [ -x /usr/local/bin/claude-git-setup ]; then
-    install -m 755 /usr/local/bin/claude-git-setup "/home/$USERNAME/.local/bin/claude-git-setup"
-    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin/claude-git-setup"
+    atomic_install 755 /usr/local/bin/claude-git-setup "/home/$USERNAME/.local/bin/claude-git-setup" "$USERNAME" "$USERNAME"
     ok "~/.local/bin/claude-git-setup installed"
 fi
 if [ -x /usr/local/bin/claude-automount ]; then
-    install -m 755 /usr/local/bin/claude-automount "/home/$USERNAME/.local/bin/claude-automount"
-    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin/claude-automount"
+    atomic_install 755 /usr/local/bin/claude-automount "/home/$USERNAME/.local/bin/claude-automount" "$USERNAME" "$USERNAME"
     ok "~/.local/bin/claude-automount installed"
 fi
 if [ -x /usr/local/bin/claude-self-heal ]; then
-    install -m 755 /usr/local/bin/claude-self-heal "/home/$USERNAME/.local/bin/claude-self-heal"
-    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin/claude-self-heal"
+    atomic_install 755 /usr/local/bin/claude-self-heal "/home/$USERNAME/.local/bin/claude-self-heal" "$USERNAME" "$USERNAME"
     ok "~/.local/bin/claude-self-heal installed"
 fi
 if [ -x /usr/local/bin/laptop-exec ]; then
-    install -m 755 /usr/local/bin/laptop-exec "/home/$USERNAME/.local/bin/laptop-exec"
-    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.local/bin/laptop-exec"
+    atomic_install 755 /usr/local/bin/laptop-exec "/home/$USERNAME/.local/bin/laptop-exec" "$USERNAME" "$USERNAME"
     ok "~/.local/bin/laptop-exec installed"
 fi
 SKILL_SRC="/usr/local/lib/claude-server/skills/laptop-exec/SKILL.md"
@@ -168,17 +186,21 @@ cat > "/home/$USERNAME/.claude/settings.json" << 'SETTINGS'
     "sqlserver": {
       "type": "stdio",
       "command": "/usr/bin/mcp-sqlserver",
-      "args": [],
-      "env": {
-        "SQLSERVER_HOST": "192.168.210.124",
-        "SQLSERVER_USER": "Mohammad",
-        "SQLSERVER_PASSWORD": "CHANGE_ME"
-      }
+      "args": []
+    },
+    "figma": {
+      "type": "http",
+      "url": "https://mcp.figma.com/mcp"
+    },
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp"
     }
   },
   "enabledPlugins": {
     "superpowers@claude-plugins-official": true,
-    "ecc@ecc": true
+    "ecc@ecc": true,
+    "figma@claude-plugins-official": true
   },
   "extraKnownMarketplaces": {
     "ecc": {
@@ -214,6 +236,12 @@ elif [ -f /etc/cursor-auth/golden/auth.json ]; then
 else
     warn "no Cursor golden auth yet - after first login run: sudo cursor-auth-export --from-user $USERNAME"
     warn "then: sudo claude-server sync-cursor-auth $USERNAME"
+fi
+
+if [ -x /usr/local/bin/cursor-mcp-sync ]; then
+    cursor-mcp-sync --user "$USERNAME" || warn "cursor-mcp-sync failed for $USERNAME (non-fatal)"
+else
+    warn "cursor-mcp-sync not installed - run: sudo claude-server install"
 fi
 
 step "5 - SSH"

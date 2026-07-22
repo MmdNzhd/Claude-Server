@@ -57,6 +57,7 @@ foreach ($rel in @('windows\connect.ps1')) {
     Assert ($src -match 'Get-InteractiveLaptopUser') "$rel stores LAPTOP_USER from interactive session not elevated token"
     Assert ($src -match 'tunnelAuthRetryCount') "$rel caps tunnel auth retry loop"
     Assert ($src -match 'Start-ProcessAsInteractiveUser|Start-Process powershell\.exe -Verb RunAs') "$rel self-elevates to administrator on launch"
+    Assert ($src -notmatch 'Verb RunAs -ArgumentList $elevArgs -PassThru -Wait') "$rel elevate does not -Wait (avoids stuck unelevated console)"
     Assert ($src -match 'Invoke-LaptopAdminOps') "$rel has laptop admin SSH helpers"
 }
 
@@ -118,7 +119,7 @@ Assert ($mount -match '_mac_sh') "claude-mount.sh has Mac laptop git ops"
 Assert ($mount -match 'GIT_HIDE:fail') "claude-mount reports git hide failures"
 Assert ($mount -match 'warn: git hide failed') "claude-mount warns on git hide failure"
 Assert ($mount -match 'warn: laptop tunnel down') "claude-mount warns when tunnel down"
-Assert ($mount -match '\$n -lt 3') "claude-mount retries git rename 3x"
+Assert ($mount -match '\$n -lt 2') "claude-mount git hide fail-fast (<=2 attempts)"
 Assert ($mount -match '_mount_restore_git_mode') "claude-mount restores GIT_MODE explicitly"
 Assert ($mount -notmatch "trap 'GIT_MODE") "claude-mount has no RETURN trap on GIT_MODE"
 
@@ -129,7 +130,7 @@ Assert ($winConnect -match 'RECOVERY_BEGIN trigger=') 'connect.ps1 logs RECOVERY
 Assert ($winConnect -match 'STEP begin:') 'connect.ps1 logs STEP begin'
 Assert ($winConnect -match 'function SshX') 'connect.ps1 has SshX wrapper'
 Assert ($winConnect -match 'SSH_TIMEOUT exit=124') 'connect.ps1 retries SshX on timeout'
-Assert ($winConnect -match 'timeout 45 bash -lc') 'connect.ps1 wraps SshX with timeout'
+Assert ($winConnect -match 'timeout 45 bash') 'connect.ps1 wraps SshX with timeout'
 
 $gitMode = Get-Content (Get-ClientFile 'git-mode.ps1') -Raw
 Assert ($gitMode -match 'function Invoke-MountProject') 'git-mode.ps1 auto-retries mount after script push'
@@ -143,6 +144,9 @@ $connectBat = Get-Content (Get-ClientFile 'windows\connect.bat') -Raw
 $connectUiPs1 = Get-Content (Get-ClientFile 'connect-ui.ps1') -Raw
 $connectUiSh = Get-Content (Get-ClientFile 'connect-ui.sh') -Raw
 Assert ($connectBat -match 'CLAUDE_CONNECT_RUN_ID') 'connect.bat bootstraps CLAUDE_CONNECT_RUN_ID'
+Assert ($connectBat -notmatch '-WindowStyle Hidden.*connect\.ps1') 'connect.bat runs connect.ps1 in visible console (not hidden window)'
+Assert ($connectBat -match 'start "" /D "%HERE%" powershell.*connect-boot\.ps1') 'connect.bat async handoff starts connect-boot.ps1'
+Assert ($connectBat -match 'connect-boot\.ps1') 'connect.bat handoffs via connect-boot.ps1'
 Assert ($gitMode -match 'TUNNEL_DROP') 'git-mode.ps1 emits TUNNEL_DROP on tunnel soft-fail'
 Assert ($connectUiPs1 -match 'TUNNEL_DROP') 'connect-ui.ps1 forces log sync on TUNNEL_DROP'
 Assert ($connectUiSh -match 'TUNNEL_DROP') 'connect-ui.sh forces log sync on TUNNEL_DROP'

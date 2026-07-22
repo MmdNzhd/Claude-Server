@@ -27,7 +27,7 @@ if ($failed -gt 0) { Write-Host "FAILED $failed"; exit 1 }
 
 Assert ($ui -match 'FAIL EXIT reason=') 'Wait-ConnectExit logs FAIL EXIT on non-zero code'
 Assert ($ui -match 'Write-ConnectUserFacingError') 'Write-ConnectUserFacingError helper exists'
-Assert ($ui -match 'MULTI_INSTANCE: allowed') 'multi-instance allowed (no global mutex)'
+Assert ($ui -match 'SINGLE_INSTANCE|Global\\ClaudeConnect') 'single-instance mutex (Global\\ClaudeConnect)'
 Assert ($win -match 'FAIL NEED_ADMIN') 'connect.ps1 logs FAIL NEED_ADMIN'
 Assert ($win -match 'FAIL STEP name=') 'connect.ps1 logs FAIL STEP'
 Assert ($win -match 'FAIL ADMIN_UAC') 'connect.ps1 logs FAIL ADMIN_UAC'

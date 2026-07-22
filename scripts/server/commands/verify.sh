@@ -58,9 +58,28 @@ for h in claude-hook-pre claude-hook-stop claude-hook-logout-block; do
     [ -x "/usr/local/bin/$h" ] && ok "$h: installed" || fail "$h: missing or not executable"
 done
 
-for b in claude-automount claude-auth-sync claude-git-setup cursor-auth-sync cursor-auth-export cursor-auth-refresh; do
+for b in claude-automount claude-auth-sync claude-git-setup cursor-auth-sync cursor-auth-export cursor-auth-refresh cursor-mcp-sync; do
     [ -x "/usr/local/bin/$b" ] && ok "$b: installed" || warn "$b: missing"
 done
+
+# Cursor MCP golden secrets (Figma OAuth + SQL)
+if [ -f /etc/claude-code/figma-mcp.env ]; then
+    _mode=$(stat -c '%a' /etc/claude-code/figma-mcp.env 2>/dev/null || echo '?')
+    [ "$_mode" = "600" ] && ok "figma-mcp.env mode 600" || warn "figma-mcp.env mode $_mode (want 600)"
+    grep -q '^FIGMA_MCP_ACCESS_TOKEN=figu_' /etc/claude-code/figma-mcp.env && ok "figma-mcp.env has figu_ token" || warn "figma-mcp.env missing figu_ access token"
+else
+    warn "figma-mcp.env missing (Figma golden OAuth)"
+fi
+if [ -f /etc/claude-code/sqlserver.env ]; then
+    _mode=$(stat -c '%a' /etc/claude-code/sqlserver.env 2>/dev/null || echo '?')
+    [ "$_mode" = "600" ] && ok "sqlserver.env mode 600" || warn "sqlserver.env mode $_mode (want 600)"
+    grep -q '^SQLSERVER_USER=Claude_Ai' /etc/claude-code/sqlserver.env && ok "sqlserver.env user Claude_Ai" || warn "sqlserver.env user not Claude_Ai"
+else
+    warn "sqlserver.env missing"
+fi
+
+
+[ -f /usr/local/lib/claude-server/cursor-mcp-template.json ] && ok "cursor-mcp-template.json: installed" || warn "cursor-mcp-template.json: missing"
 
 [ -f /usr/local/lib/claude-mount ] && ok "claude-mount: installed" || warn "claude-mount: missing"
 if [ -f /usr/local/lib/claude-mount ]; then
@@ -226,6 +245,26 @@ PY
     $has_le && ok "laptop-exec CLI" || warn "laptop-exec missing (~/.local/bin)"
     $has_le_rule && ok "SSH-first rule" || warn "laptop-exec.mdc missing"
     $has_le_hook && ok "SSH-first hook" || warn "laptop-exec-guard.sh missing"
+    if _user_readable "$h/.cursor/mcp.json"; then
+        for _mcp_key in figma context7 playwright sequential-thinking memory sqlserver; do
+            _user_grep "$h/.cursor/mcp.json" "\"$_mcp_key\"" && ok "Cursor MCP: $_mcp_key" || warn "Cursor MCP: $_mcp_key missing in ~/.cursor/mcp.json"
+        done
+        unset _mcp_key
+        _user_grep "$h/.cursor/mcp.json" "Bearer figu_" && ok "Cursor MCP: figma OAuth bearer" || warn "Cursor MCP: figma missing Bearer figu_ (run: sudo claude-server sync-cursor-mcp $u)"
+        _user_grep "$h/.cursor/mcp.json" "Claude_Ai" && ok "Cursor MCP: sqlserver user Claude_Ai" || warn "Cursor MCP: sqlserver user not Claude_Ai"
+        if _user_grep "$h/.cursor/mcp.json" "CHANGE_ME" || _user_grep "$h/.cursor/mcp.json" "\"Mohammad\""; then
+            warn "Cursor MCP: stale SQL placeholder still present"
+        fi
+    else
+        info "Cursor MCP: ~/.cursor/mcp.json not present (run: sudo claude-server sync-cursor-mcp $u)"
+    fi
+    if _user_readable "$h/.claude/settings.json"; then
+        _user_grep "$h/.claude/settings.json" "Bearer figu_" && ok "Claude MCP: figma OAuth bearer" || warn "Claude MCP: figma missing Bearer figu_"
+        _user_grep "$h/.claude/settings.json" "\"sqlserver\"" && ok "Claude MCP: sqlserver" || warn "Claude MCP: sqlserver missing"
+        _user_grep "$h/.claude/settings.json" "Claude_Ai" && ok "Claude MCP: sqlserver user Claude_Ai" || warn "Claude MCP: sqlserver user not Claude_Ai"
+    else
+        info "Claude settings.json not present for MCP checks"
+    fi
     $has_bashrc  && ok "automount .bashrc" || fail "automount missing in .bashrc"
     echo ""
 done

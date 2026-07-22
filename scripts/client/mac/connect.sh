@@ -13,6 +13,17 @@ if [ -z "${CLAUDE_CONNECT_RUN_ID:-}" ]; then
     fi
 fi
 export CLAUDE_CONNECT_RUN_ID
+
+# Early single-instance (before update): same lockfile as enter_connect_single_instance.
+_lockdir_early="$HOME/.config/claude-connect"
+mkdir -p "$_lockdir_early" 2>/dev/null || true
+exec 9>"$_lockdir_early/connect.lock" || true
+if ! flock -n 9 2>/dev/null; then
+    printf '\n  [i] Claude Connect is already running - use the existing window.\n\n' >&2
+    exit 0
+fi
+CONNECT_LOCK_HELD=1
+
 _bootstrap_log_dir="$HOME/.config/claude-connect/logs"
 _bootstrap_log_file="$_bootstrap_log_dir/connect-$(date +%Y%m%d).log"
 mkdir -p "$_bootstrap_log_dir" 2>/dev/null || true
@@ -39,7 +50,7 @@ if [ -f "$_update_script" ]; then
     fi
 fi
 
-CONNECT_VERSION='20260720.8'
+CONNECT_VERSION='20260722.24'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).
@@ -108,8 +119,8 @@ step_fail() {
 
 sshx() {
     local orig_cmd="$*" remote_cmd ec=0 ms=0 trunc_cmd out b64
-    # Base64-wrap so nested quotes survive Mac ssh → server.
-    # Old: bash -lc '$esc' broke on any single quote (grep -E '^X=', ssh-keygen -N '', …)
+    # Base64-wrap so nested quotes survive Mac ssh â†’ server.
+    # Old: bash -lc '$esc' broke on any single quote (grep -E '^X=', ssh-keygen -N '', â€¦)
     # and made warn_foreign_server_session show "unexpected EOF" instead of the real laptop name.
     if ! printf '%s' "$orig_cmd" | grep -qE '^[[:space:]]*timeout[[:space:]]'; then
         b64="$(printf '%s' "$orig_cmd" | base64 | tr -d '\n\n')"
@@ -214,10 +225,45 @@ _UI_SH="$SCRIPT_DIR/connect-ui.sh"
 . "$_UI_SH"
 
 _EDITOR_SH="$SCRIPT_DIR/editor-launch.sh"
+_sidecar="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/cursor-proxy-sidecar.sh"
+if [ -f "$_sidecar" ]; then
+  # shellcheck disable=SC1090
+  . "$_sidecar"
+fi
 [ -f "$_EDITOR_SH" ] || _EDITOR_SH="$SCRIPT_DIR/../editor-launch.sh"
 [ -f "$_EDITOR_SH" ] || die "editor-launch.sh not found - re-copy the full mac package"
 # shellcheck source=../editor-launch.sh
 . "$_EDITOR_SH"
+
+# Win parity: silent client update after tunnel is up (git-mode begin_connect_recovery runs pre-tunnel).
+begin_connect_recovery() {
+    local trigger="$1" project_id="$2" editor_was_open="${3:-0}"
+    RECOVERY_GENERATION="${RECOVERY_GENERATION:-0}"
+    RECOVERY_GENERATION=$(( RECOVERY_GENERATION + 1 ))
+    POST_TUNNEL_RECOVERY=1
+    export CURSOR_AUTH_FORCE=1
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "RECOVERY_BEGIN trigger=$trigger project=$project_id editor_opened=$editor_was_open gen=$RECOVERY_GENERATION"
+    fi
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log 'RECOVERY_STATE_RESET editor_opened=0 force_auth=1 post_recovery=1'
+    fi
+}
+
+complete_post_tunnel_recovery() {
+    local mount_ok="${1:-0}" auth_detail="${2:-}"
+    [ "${POST_TUNNEL_RECOVERY:-0}" = "1" ] || return 0
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "RECOVERY_END mount_ok=$mount_ok gen=${RECOVERY_GENERATION:-0} auth=$auth_detail"
+    fi
+    if [ "$mount_ok" = "1" ] && declare -F tunnel_up >/dev/null 2>&1 && tunnel_up; then
+        if declare -F invoke_connect_silent_update_check >/dev/null 2>&1; then
+            connect_log 'UPDATE_SILENT phase=post_tunnel_recovery' 'DEBUG'
+            invoke_connect_silent_update_check || true
+        fi
+    fi
+    POST_TUNNEL_RECOVERY=0
+}
 
 clear
 init_connect_log "$SCRIPT_DIR" "$CONNECT_VERSION"
@@ -232,7 +278,7 @@ if declare -F enter_connect_single_instance >/dev/null 2>&1; then
 fi
 if declare -F log_session_context >/dev/null 2>&1; then log_session_context 'startup'; fi
 # Upload+wipe temp log on any early exit (before session cleanup_session trap).
-# CONNECT_LOG_EARLY_FLUSH — nonzero exit: ERROR then force flush (set -u/pipefail has no ERR without -e).
+# CONNECT_LOG_EARLY_FLUSH â€” nonzero exit: ERROR then force flush (set -u/pipefail has no ERR without -e).
 trap 'ec=$?; if [ "$ec" -ne 0 ] && [ -n "${CONNECT_LOG_PATH:-}" ] && declare -F connect_log >/dev/null 2>&1; then connect_log "FAIL UNHANDLED: exit=$ec" "ERROR"; connect_log "FAIL EXIT reason=trap_exit code=$ec" "ERROR" || true; fi; if declare -F flush_connect_log_to_server >/dev/null 2>&1; then flush_connect_log_to_server || true; fi' EXIT
 # Unexpected error flush (fires if errexit enabled later / in sourced helpers).
 trap 'ec=$?; if declare -F connect_log >/dev/null 2>&1; then connect_log "FAIL UNHANDLED: exit=$ec line=$LINENO cmd=$BASH_COMMAND" "ERROR" || true; fi; if declare -F flush_connect_log_to_server >/dev/null 2>&1; then flush_connect_log_to_server || true; fi' ERR
@@ -379,7 +425,7 @@ if ! initialize_server_session "$_script_dir"; then
 fi
 step_ok "port $PORT git=$(get_git_mode)"
 if declare -F log_session_context >/dev/null 2>&1; then log_session_context 'server_ready'; fi
-if declare -F sync_connect_log_to_server >/dev/null 2>&1; then sync_connect_log_to_server || true; fi
+if declare -F request_connect_log_sync >/dev/null 2>&1; then request_connect_log_sync || true; elif declare -F sync_connect_log_to_server >/dev/null 2>&1; then sync_connect_log_to_server || true; fi
 
 step "Laptop SSH access"
 if ensure_laptop_ssh_key "$PUB_B"; then
@@ -394,7 +440,7 @@ else
         warn "System Settings -> Sharing -> Remote Login = ON, allow '${_lu}' or All users."
     fi
 fi
-if declare -F sync_connect_log_to_server >/dev/null 2>&1; then sync_connect_log_to_server || true; fi
+if declare -F request_connect_log_sync >/dev/null 2>&1; then request_connect_log_sync || true; elif declare -F sync_connect_log_to_server >/dev/null 2>&1; then sync_connect_log_to_server || true; fi
 LAPTOP_SSH_VERIFIED=0
 
 echo ""
@@ -645,7 +691,7 @@ while [ "$exit_requested" -eq 0 ]; do
                 if [ "$already_down" -eq 0 ]; then
                     already_down=1
                     printf '\n    Disconnecting...\n'
-                    clear_session_mount "$go_id" "$EDITOR_CMD" "$ALIAS" "$go_path" 0 'unexpected_disconnect'
+                    clear_session_mount "$go_id" "$EDITOR_CMD" "$ALIAS" "$go_path" 1 'unexpected_disconnect'
                     printf '    Laptop folder restored.\n'
                 fi
                 stop_session_tunnel_cleanup 1
@@ -718,7 +764,7 @@ while [ "$exit_requested" -eq 0 ]; do
 
             recover_mounts_if_needed "$go_id" "$(( TUNNEL_REUSED ^ 1 ))"
 
-            # Win Test-TunnelUp parity — banner/TCP, not PID-only.
+            # Win Test-TunnelUp parity â€” banner/TCP, not PID-only.
             if ! tunnel_up; then
                 printf '      -> tunnel dropped during recover, restarting...\n'
                 LAPTOP_SSH_VERIFIED=0
@@ -891,6 +937,7 @@ while [ "$exit_requested" -eq 0 ]; do
 
             _on_folder=0
             _did_launch=0
+            _launch_ok=0
             if [ "$_editor_opened" -eq 1 ] && declare -F remote_editor_on_correct_folder >/dev/null 2>&1; then
                 remote_editor_on_correct_folder "$EDITOR_CMD" "$ALIAS" "$go_path" && _on_folder=1
             fi
@@ -898,7 +945,18 @@ while [ "$exit_requested" -eq 0 ]; do
             # Win parity: auth refresh relaunches even when already on folder.
             _auth_relaunch=0
             [ "${CURSOR_AUTH_RELAUNCH:-0}" = "1" ] && _auth_relaunch=1
-            if [ "$_auth_relaunch" -eq 1 ] || [ "$_editor_opened" -eq 0 ]; then
+            _profile_already_open=0
+            if [ "$_auth_relaunch" -eq 1 ] && declare -F cursor_profile_process_count >/dev/null 2>&1; then
+                [ "$(cursor_profile_process_count)" -gt 0 ] && _profile_already_open=1
+            elif [ "$_auth_relaunch" -eq 1 ] && declare -F cursor_profile_main_count >/dev/null 2>&1; then
+                [ "$(cursor_profile_main_count)" -gt 0 ] && _profile_already_open=1
+            fi
+            if [ "$_auth_relaunch" -eq 1 ] && [ "$_profile_already_open" -eq 1 ]; then
+                declare -F connect_log >/dev/null 2>&1 && connect_log 'EDITOR_LAUNCH skip_auth_relaunch reason=profile_windows_open_preserve_after_tunnel_recovery' 'WARN'
+                if [ "$_on_folder" -eq 1 ]; then
+                    _launch_ok=1
+                fi
+            elif [ "$_auth_relaunch" -eq 1 ] || [ "$_editor_opened" -eq 0 ]; then
                 if [ "$_auth_relaunch" -eq 1 ] && [ "$_on_folder" -eq 1 ]; then
                     step "Reloading $EDITOR_NAME (auth refresh)"
                     if declare -F connect_log >/dev/null 2>&1; then
@@ -913,10 +971,11 @@ while [ "$exit_requested" -eq 0 ]; do
                     if launch_remote_editor "$EDITOR_CMD" "$ALIAS" "$go_path" "$_on_folder"; then
                         step_ok "$go_path"
                         _did_launch=1
+                        _launch_ok=1
                         _editor_seen_open=1
                         export CURSOR_AUTH_RELAUNCH=0
                         if [ "$EDITOR_CMD" = "cursor" ]; then
-                            printf '      -> \033[0;33mIf Cursor asks to log in: [Claude Server] window → Developer → Reload Window\033[0m\n'
+                            printf '      -> \033[0;33mIf Cursor asks to log in: [Claude Server] window â†’ Developer â†’ Reload Window\033[0m\n'
                             printf '      -> \033[0;90mDo NOT use a personal login in that window\033[0m\n'
 
                             printf '      -> \033[0;90mServer profile [Claude Server] - personal Cursor is separate\033[0m\n'
@@ -931,19 +990,29 @@ while [ "$exit_requested" -eq 0 ]; do
                     launch_remote_editor "$EDITOR_CMD" "$ALIAS" "$go_path" 0 || true
                     step_ok "$go_path"
                     _did_launch=1
+                    _launch_ok=1
                     _editor_seen_open=1
                 else
                     step_fail "$EDITOR_NAME not found (install Cursor or VS Code + Remote-SSH)"
                 fi
                 echo ""
                 printf "    \033[0;90mRun 'claude' in the %s terminal.\033[0m\n" "$EDITOR_NAME"
+            elif [ "$_on_folder" -eq 1 ]; then
+                declare -F connect_log >/dev/null 2>&1 && connect_log 'EDITOR_LAUNCH_SKIP reason=known_on_folder'
             fi
 
-            if declare -F remote_editor_on_correct_folder >/dev/null 2>&1; then
+            if [ "$_did_launch" -eq 1 ] && [ "$_launch_ok" -eq 1 ]; then
+                # Trust path: the launch already confirmed the correct folder/window - do NOT
+                # re-probe (possibly stale) state here, which was causing a false "not on
+                # target folder" relaunch (double launch) right after a successful open.
+                _editor_opened=1
+                _editor_seen_open=1
+                declare -F connect_log >/dev/null 2>&1 && connect_log 'SESSION: trusting launch result (did_launch+launch_ok) - skip relaunch check' 'DEBUG'
+            elif declare -F remote_editor_on_correct_folder >/dev/null 2>&1; then
                 if remote_editor_on_correct_folder "$EDITOR_CMD" "$ALIAS" "$go_path"; then
                     _editor_opened=1
                     _editor_seen_open=1
-                elif [ "$_did_launch" -eq 1 ] || remote_editor_window_open "$EDITOR_CMD" "$ALIAS" "$go_path"; then
+                elif [ "$_did_launch" -eq 0 ] && remote_editor_window_open "$EDITOR_CMD" "$ALIAS" "$go_path"; then
                     warn 'Cursor is on Agent/home - reopening project folder...'
                     declare -F connect_log >/dev/null 2>&1 && connect_log 'SESSION: cursor not on target folder - relaunching' 'WARN'
                     launch_remote_editor "$EDITOR_CMD" "$ALIAS" "$go_path" 0 || true
@@ -1016,7 +1085,7 @@ while [ "$exit_requested" -eq 0 ]; do
                         o) _resolved="o" ;;
                         q|$'\n'|$'\r') _resolved="q" ;;
                     esac
-                    # Non-ASCII printable (e.g. ض): ignore and keep waiting.
+                    # Non-ASCII printable (e.g. Ø¶): ignore and keep waiting.
                     if [ -z "$_resolved" ]; then
                         _ord="$(printf '%s' "$_key" | od -An -tuC | tr -s ' ' | awk '{print $1; exit}')"
                         if [ -n "$_ord" ] && [ "$_ord" -gt 127 ]; then
@@ -1141,7 +1210,7 @@ while [ "$exit_requested" -eq 0 ]; do
                 if declare -F connect_log >/dev/null 2>&1; then
                     connect_log "SESSION: disconnect project=$go_id reason=user_quit" 'INFO'
                 fi
-                clear_session_mount "$go_id" "$EDITOR_CMD" "$ALIAS" "$go_path" 0 'user_quit'
+                clear_session_mount "$go_id" "$EDITOR_CMD" "$ALIAS" "$go_path" 1 'user_quit'
                 stop_session_tunnel_cleanup 1
                 already_down=1
                 printf '    Laptop folder restored.\n'

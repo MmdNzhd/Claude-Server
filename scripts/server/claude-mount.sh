@@ -16,6 +16,8 @@ LAPTOP_OS="windows"  # windows | mac - how to run laptop-side git hide/restore
 ACTIVE_MOUNT=""   # set by connect.bat - only this project may auto-mount
 _MOUNT_SAVED_GIT_MODE="off"  # GIT_MODE snapshot for _do_mount RETURN trap (must not be local)
 _GIT_HIDE_LAST_FAILED=0       # set by _emit_git_hide_warn; read by _do_mount (must not be local)
+_TUNNEL_OK_THIS_UP=""         # set by cmd_up once it verifies the tunnel; read by hide helpers below
+                              # to skip a duplicate probe within the same `up` invocation (must not be local)
 
 _load_global() {
     GIT_MODE="off"
@@ -175,7 +177,7 @@ _emit_git_hide_warn() {
     case "$hide_status" in
         GIT_HIDE:fail:*)
             _GIT_HIDE_LAST_FAILED=1
-            echo "warn: git hide failed - ${hide_status#GIT_HIDE:fail:} (close Cursor/git on laptop, then reconnect)" >&2
+            echo "warn: git hide failed - ${hide_status#GIT_HIDE:fail:} (close Cursor/git on laptop, then reconnect; common causes: Windows Search Indexer, antivirus/Defender scan, or Cursor/git itself locking .git)" >&2
             ;;
         GIT_HIDE:skip|GIT_HIDE:already|GIT_HIDE:hidden|GIT_HIDE:restored|GIT_HIDE:visible|"")
             ;;
@@ -187,6 +189,32 @@ _emit_git_hide_warn() {
 # Require laptop tunnel before git hide/restore (best-effort).
 _git_tunnel_ready() {
     [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ] && _tunnel_up
+}
+
+# WS4: single decision point for "is the tunnel ok for a hide/restore/stub operation".
+# If cmd_up already verified the tunnel for this whole `up` invocation (_TUNNEL_OK_THIS_UP=1),
+# reuse that instead of re-probing - but this function is ONLY ever used to gate whether the
+# hide/restore/stub body below still RUNS; it never causes that body to be skipped by itself.
+_tunnel_ok_for_hide() {
+    [ "${_TUNNEL_OK_THIS_UP:-}" = "1" ] && return 0
+    if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ]; then
+        _tunnel_tcp_open && _tunnel_banner_matches_laptop
+        return $?
+    fi
+    _tunnel_up
+}
+
+# PERF: emit PERF_<LABEL>_MS=<ms> to stderr when CLAUDE_CONNECT_PERF_LOG=1 (client parses this
+# out of the `claude-mount up` stdout/stderr in Invoke-MountProject).
+_perf_ms_now() {
+    date +%s%3N 2>/dev/null || echo 0
+}
+
+_perf_emit() {
+    local label="$1" start="$2" end
+    [ "${CLAUDE_CONNECT_PERF_LOG:-}" = "1" ] || return 0
+    end="$(_perf_ms_now)"
+    echo "PERF_${label}_MS=$(( end - start ))" >&2
 }
 
 _mac_hide_git_and_create_stubs() {
@@ -201,7 +229,8 @@ if [ -e \"\$p/.git.server-session\" ] && [ -d \"\$p/.git\" ]; then echo GIT_HIDE
 elif [ -e \"\$p/.git.server-session\" ] && [ -f \"\$p/.git\" ]; then \
   rm -f \"\$p/.git\" 2>/dev/null; mv \"\$p/.git.server-session\" \"\$p/.git\" 2>/dev/null && echo GIT_HIDE:restored || echo GIT_HIDE:fail:mv_denied; \
 elif [ -e \"\$p/.git.server-session\" ] && [ ! -e \"\$p/.git\" ]; then \
-  n=0; ok=0; while [ \$n -lt 3 ]; do n=\$((n+1)); mv \"\$p/.git.server-session\" \"\$p/.git\" 2>/dev/null && { echo GIT_HIDE:restored; ok=1; break; }; sleep 2; done; \
+  n=0; ok=0; while [ \$n -lt 2 ]; do n=\$((n+1)); chmod -R u+w \"\$p/.git.server-session\" 2>/dev/null || true; mv \"\$p/.git.server-session\" \"\$p/.git\" 2>/dev/null && { echo GIT_HIDE:restored; ok=1; break; }; \
+  if [ \$n -lt 2 ]; then pkill -x git 2>/dev/null || true; sleep 0.5; fi; done; \
   [ \$ok -eq 0 ] && echo GIT_HIDE:fail:mv_denied; \
 elif [ -e \"\$p/.git\" ]; then echo GIT_HIDE:visible; fi; \
 if [ \"\$has\" = 1 ]; then mkdir -p \"\$p/.claude/rules\" \"\$p/.claude/commands\"; [ ! -s \"\$p/.mcp.json\" ] && printf '{}' > \"\$p/.mcp.json\"; fi\
@@ -213,8 +242,8 @@ if [ ! -e \"\$p/.git\" ] && [ ! -e \"\$p/.git.server-session\" ]; then echo GIT_
 elif [ -e \"\$p/.git.server-session\" ] && [ ! -e \"\$p/.git\" ]; then echo GIT_HIDE:already; \
 elif [ -f \"\$p/.git\" ]; then echo GIT_HIDE:skip; \
 elif [ -d \"\$p/.git\" ] && [ ! -e \"\$p/.git.server-session\" ]; then \
-  n=0; ok=0; while [ \$n -lt 3 ]; do n=\$((n+1)); mv \"\$p/.git\" \"\$p/.git.server-session\" 2>/dev/null && { echo GIT_HIDE:hidden; ok=1; break; }; \
-  if [ \$n -eq 2 ]; then pkill -x git 2>/dev/null || true; sleep 1; else sleep 2; fi; done; \
+  n=0; ok=0; while [ \$n -lt 2 ]; do n=\$((n+1)); chmod -R u+w \"\$p/.git\" 2>/dev/null || true; mv \"\$p/.git\" \"\$p/.git.server-session\" 2>/dev/null && { echo GIT_HIDE:hidden; ok=1; break; }; \
+  if [ \$n -lt 2 ]; then pkill -x git 2>/dev/null || true; sleep 0.5; fi; done; \
   [ \$ok -eq 0 ] && echo GIT_HIDE:fail:mv_denied; \
 else echo GIT_HIDE:skip; fi; \
 has=0; [ -e \"\$p/.git\" ] || [ -e \"\$p/.git.server-session\" ] && has=1; \
@@ -229,8 +258,8 @@ _win_hide_git_and_create_stubs() {
     local safe="${rpath//\'/\'\'}"
     local ps_out=""
     # Single-line PS (no trailing \\) - backslashes break powershell -Command over SSH.
-    local hide_try='$n=0; $ok=$false; $err=""; if (-not (Test-Path $p/.git) -and -not (Test-Path $p/.git.server-session)) { Write-Output "GIT_HIDE:skip"; exit }; if (Test-Path $p/.git -PathType Leaf) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git -PathType Container) -and (Test-Path $p/.git.server-session)) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git -PathType Container) -and -not (Test-Path $p/.git.server-session)) { while ($n -lt 3) { $n++; try { Rename-Item $p/.git .git.server-session -Force -ErrorAction Stop; Write-Output "GIT_HIDE:hidden"; $ok=$true; break } catch { $err=$_.Exception.Message; if ($n -eq 2) { Get-Process git -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1 } else { Start-Sleep -Seconds 2 } } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } elseif (Test-Path $p/.git.server-session) { Write-Output "GIT_HIDE:already" } else { Write-Output "GIT_HIDE:skip" }'
-    local restore_try='if (Test-Path $p/.git.server-session) { if ((Test-Path $p/.git -PathType Container) -and (Test-Path $p/.git/HEAD)) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git) -and -not (Test-Path $p/.git -PathType Leaf)) { Write-Output "GIT_HIDE:skip" } else { $n=0; $ok=$false; $err=""; while ($n -lt 3) { $n++; try { if (Test-Path $p/.git -PathType Leaf) { Remove-Item $p/.git -Force -ErrorAction SilentlyContinue }; if (Test-Path $p/.git) { Write-Output "GIT_HIDE:skip"; $ok=$true; break }; Rename-Item $p/.git.server-session .git -Force -ErrorAction Stop; Write-Output "GIT_HIDE:restored"; $ok=$true; break } catch { $err=$_.Exception.Message; Start-Sleep -Seconds 2 } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } } elseif (Test-Path $p/.git) { Write-Output "GIT_HIDE:visible" } else { Write-Output "GIT_HIDE:skip" }'
+    local hide_try='$n=0; $ok=$false; $err=""; if (-not (Test-Path $p/.git) -and -not (Test-Path $p/.git.server-session)) { Write-Output "GIT_HIDE:skip"; exit }; if (Test-Path $p/.git -PathType Leaf) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git -PathType Container) -and (Test-Path $p/.git.server-session)) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git -PathType Container) -and -not (Test-Path $p/.git.server-session)) { while ($n -lt 2) { $n++; try { cmd /c "attrib -R `"$p\.git`" /S /D" 2>$null | Out-Null; Rename-Item $p/.git .git.server-session -Force -ErrorAction Stop; Write-Output "GIT_HIDE:hidden"; $ok=$true; break } catch { $err=$_.Exception.Message; if ($n -lt 2) { Get-Process git -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500 } } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } elseif (Test-Path $p/.git.server-session) { Write-Output "GIT_HIDE:already" } else { Write-Output "GIT_HIDE:skip" }'
+    local restore_try='if (Test-Path $p/.git.server-session) { if ((Test-Path $p/.git -PathType Container) -and (Test-Path $p/.git/HEAD)) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git) -and -not (Test-Path $p/.git -PathType Leaf)) { Write-Output "GIT_HIDE:skip" } else { $n=0; $ok=$false; $err=""; while ($n -lt 2) { $n++; try { if (Test-Path $p/.git -PathType Leaf) { Remove-Item $p/.git -Force -ErrorAction SilentlyContinue }; if (Test-Path $p/.git) { Write-Output "GIT_HIDE:skip"; $ok=$true; break }; cmd /c "attrib -R `"$p\.git.server-session`" /S /D" 2>$null | Out-Null; Rename-Item $p/.git.server-session .git -Force -ErrorAction Stop; Write-Output "GIT_HIDE:restored"; $ok=$true; break } catch { $err=$_.Exception.Message; if ($n -lt 2) { Get-Process git -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500 } } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } } elseif (Test-Path $p/.git) { Write-Output "GIT_HIDE:visible" } else { Write-Output "GIT_HIDE:skip" }'
     local stub_ps='; if ($hasGit) { New-Item -ItemType Directory -Force -Path $p/.claude/rules,$p/.claude/commands | Out-Null; if (-not (Test-Path $p/.mcp.json) -or (Get-Item $p/.mcp.json).Length -eq 0) { Set-Content -Path $p/.mcp.json -Value "{}" -Encoding utf8 } }'
     local ps_prefix ps_cmd
     ps_prefix="\$p='${safe}'; \$hasGit=(Test-Path \$p/.git) -or (Test-Path \$p/.git.server-session); "
@@ -252,12 +281,8 @@ _win_hide_git_and_create_stubs() {
 _create_claude_stubs_only() {
     local rpath="$1"
     [ -z "$rpath" ] && return 0
-    if [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ]; then
-        if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ]; then
-            _tunnel_tcp_open && _tunnel_banner_matches_laptop || return 0
-        elif ! _tunnel_up; then
-            return 0
-        fi
+    if [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ] && ! _tunnel_ok_for_hide; then
+        return 0
     fi
     local safe="${rpath//\'/\'\'}"
     if [ "$LAPTOP_OS" = "mac" ]; then
@@ -274,40 +299,30 @@ if [ \"\$h\" = 1 ]; then mkdir -p \"\$p/.claude/rules\" \"\$p/.claude/commands\"
 # GIT_MODE=hide: rename .git -> .git.server-session (fast git on server)
 # GIT_MODE=server: keep .git visible on mount (slow SSHFS git; user preference)
 _hide_git_and_create_stubs() {
-    local rpath="$1"
+    local rpath="$1" _perf_t0
     [ -z "$rpath" ] && return 0
     if [ "$GIT_MODE" = "off" ]; then
-        if [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ]; then
-            if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ]; then
-                _tunnel_tcp_open && _tunnel_banner_matches_laptop || {
-                    echo "warn: laptop tunnel down - cannot restore .git (reconnect connect.bat)" >&2
-                    return 0
-                }
-            elif ! _tunnel_up; then
-                echo "warn: laptop tunnel down - cannot restore .git (reconnect connect.bat)" >&2
-                return 0
-            fi
-        fi
-        _restore_git_body "$rpath"
-        _create_claude_stubs_only "$rpath"
-        return 0
-    fi
-    if [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ]; then
-        if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ]; then
-            _tunnel_tcp_open && _tunnel_banner_matches_laptop || {
-                echo "warn: laptop tunnel down - git mode not applied (reconnect connect.bat)" >&2
-                return 0
-            }
-        elif ! _tunnel_up; then
-            echo "warn: laptop tunnel down - git mode not applied (reconnect connect.bat)" >&2
+        if [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ] && ! _tunnel_ok_for_hide; then
+            echo "warn: laptop tunnel down - cannot restore .git (reconnect connect.bat)" >&2
             return 0
         fi
+        _perf_t0="$(_perf_ms_now)"
+        _restore_git_body "$rpath"
+        _create_claude_stubs_only "$rpath"
+        _perf_emit HIDE "$_perf_t0"
+        return 0
     fi
+    if [ -n "$LAPTOP_USER" ] && [ -n "$TUNNEL_PORT" ] && ! _tunnel_ok_for_hide; then
+        echo "warn: laptop tunnel down - git mode not applied (reconnect connect.bat)" >&2
+        return 0
+    fi
+    _perf_t0="$(_perf_ms_now)"
     if [ "$LAPTOP_OS" = "mac" ]; then
         _mac_hide_git_and_create_stubs "$rpath"
     else
         _win_hide_git_and_create_stubs "$rpath"
     fi
+    _perf_emit HIDE "$_perf_t0"
 }
 
 # GIT_MODE=off|hide: disable Cursor SCM git over SSHFS (avoids "Failed to execute git").
@@ -589,7 +604,15 @@ _do_mount() {
             sleep 1
         else
             echo "already mounted: $lpath"
-            # Always (re)apply hide/stubs first - trusted early-return must not skip re-hide.
+            # Fast path: hide already reflected on the mount - skip reverse-SSH hide (~2-3s).
+            if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ] && \
+               { [ ! -e "$lpath/.git" ] || [ -e "$lpath/.git.server-session" ]; } && \
+               [ "$_GIT_HIDE_LAST_FAILED" != "1" ]; then
+                _warm_sshfs_cache "$lpath"
+                _mount_restore_git_mode
+                return 0
+            fi
+            # Hide not yet applied (or untrusted) - (re)apply hide/stubs via reverse SSH.
             _hide_git_and_create_stubs "$rpath"
             if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ] && \
                { [ ! -e "$lpath/.git" ] || [ -e "$lpath/.git.server-session" ]; } && \
@@ -637,10 +660,12 @@ _do_mount() {
     local id_opt=""
     [ -f "$KEY" ] && id_opt=",IdentityFile=$KEY"
 
-    local sshfs_out sshfs_exit=0
+    local sshfs_out sshfs_exit=0 _perf_sshfs_t0
+    _perf_sshfs_t0="$(_perf_ms_now)"
     sshfs_out=$(timeout 30 sshfs -o "${sshfs_opts}${id_opt}" \
         "${LAPTOP_USER}@127.0.0.1:${rpath}" "${lpath}" \
         -p "${TUNNEL_PORT}" 2>&1) || sshfs_exit=$?
+    _perf_emit SSHFS "$_perf_sshfs_t0"
 
     if [ "$sshfs_exit" -ne 0 ]; then
         # sshfs failed - restore .git only if we hid it
@@ -943,11 +968,18 @@ cmd_up() {
         return 1
     fi
 
+    # ALWAYS check the raw TCP port first, regardless of any client-side hint below.
     if ! _tunnel_tcp_open; then
         echo "error: reverse tunnel not up on port $TUNNEL_PORT" >&2
         return 1
     fi
-    if ! _tunnel_banner_matches_laptop; then
+    # WS4: the client may already have confirmed the banner via its own probe this session
+    # (Test-TunnelUp) and passes both flags together - skip our duplicate SSH banner probe
+    # ONLY in that combination; TRUSTED alone is not enough, and this never replaces the
+    # _tunnel_tcp_open check above.
+    if [ "${CLAUDE_TUNNEL_BANNER_OK:-}" = "1" ] && [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ]; then
+        :
+    elif ! _tunnel_banner_matches_laptop; then
         echo "error: port $TUNNEL_PORT is another laptop (stale TUNNEL_PORT?) - reconnect connect from this Mac/PC" >&2
         return 1
     fi
@@ -957,6 +989,9 @@ cmd_up() {
             return 1
         fi
     fi
+    # Tunnel is verified for this whole `up` invocation - let hide/stub helpers below skip
+    # their own duplicate probe (they still always run the hide/restore/stub body itself).
+    _TUNNEL_OK_THIS_UP=1
 
     local target="${1:-}"
 
@@ -964,12 +999,21 @@ cmd_up() {
         local conf="$CONF_DIR/${target}.conf"
         [ -f "$conf" ] || { echo "error: not found: $target" >&2; return 1; }
         _do_mount "$conf"
+        local mount_ec=$?
+        # Any-version heal: push latest client scripts to laptop (never block mount)
+        if [ -x /usr/local/bin/claude-client-push-laptop ]; then
+            /usr/local/bin/claude-client-push-laptop >/dev/null 2>&1 || true
+        fi
+        return $mount_ec
     else
         local any_error=0
         for f in "$CONF_DIR"/*.conf; do
             [ -f "$f" ] || continue
             _do_mount "$f" || any_error=1
         done
+        if [ -x /usr/local/bin/claude-client-push-laptop ]; then
+            /usr/local/bin/claude-client-push-laptop >/dev/null 2>&1 || true
+        fi
         return $any_error
     fi
 }

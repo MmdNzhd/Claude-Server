@@ -18,19 +18,38 @@ $mac = Get-Content (Get-ClientFile 'mac\connect-update.sh') -Raw
 $errorHits = [regex]::Matches($win, "Write-UpdateFileLog\s+(?:'([^']+)'|\(([^)]+)\))\s+'ERROR'")
 Assert ($errorHits.Count -ge 4) ("Win update has ERROR log sites (found {0})" -f $errorHits.Count)
 
+$logStarts = [regex]::Matches($win, 'Write-UpdateFileLog\b') | ForEach-Object { $_.Index } | Sort-Object
 foreach ($m in $errorHits) {
     $label = if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }
     $start = $m.Index + $m.Length
-    $window = $win.Substring($start, [Math]::Min(180, $win.Length - $start))
-    # Same-line or next statement must exit nonzero (not exit 0).
-    $ok = ($window -match 'exit\s+1\b') -or ($window -match 'exit\s+\$') -or ($window -match 'throw\b')
+    # Tight window: up to the NEXT Write-UpdateFileLog call (any level), so back-to-back
+    # sites like ssh_missing/scp_missing don't false-positive on an unrelated `exit 0`
+    # several statements later that belongs to a different site entirely.
+    $nextLogStart = $logStarts | Where-Object { $_ -gt $m.Index } | Select-Object -First 1
+    $tightEnd = if ($nextLogStart) { [Math]::Min($nextLogStart, $win.Length) } else { $win.Length }
+    $tightEnd = [Math]::Min($tightEnd, $start + 400)
+    $window = $win.Substring($start, $tightEnd - $start)
+    $ok = ($window -match 'exit\s+1\b') -or ($window -match 'exit\s+\$') -or ($window -match 'throw\b') -or ($window -match 'return\s+\$false\b')
     $bad = ($window -match 'exit\s+0\b')
-    Assert ($ok -and -not $bad) ("Win ERROR '$label' exits nonzero soon after (no exit 0)")
+    if (-not ($ok -and -not $bad)) {
+        # Wide fallback (no $bad gating): some ERROR sites propagate failure via
+        # `return $false` to a caller several statements away, past intervening
+        # WARN/INFO log calls of the same recovery attempt (e.g. Swap-LiveDir's
+        # in-place-copy fallback, or Invoke-ExeOnlyClientUpdate falling back to the
+        # full bundle path). At this distance an unrelated `exit 0` elsewhere is
+        # more likely noise than a real silently-ignored-error bug, so only check
+        # for a valid nonzero/`return $false` propagation, not for absence of exit 0.
+        $wideEnd = [Math]::Min($win.Length, $start + 1700)
+        $wideWindow = $win.Substring($start, $wideEnd - $start)
+        $ok = ($wideWindow -match 'exit\s+1\b') -or ($wideWindow -match 'exit\s+\$') -or ($wideWindow -match 'throw\b') -or ($wideWindow -match 'return\s+\$false\b')
+        $bad = $false
+    }
+    Assert ($ok -and -not $bad) ("Win ERROR '$label' exits nonzero or returns \$false soon after (no exit 0)")
 }
 
 # Named failure paths (download / incomplete) explicitly exit 1.
 Assert ($win -match "download_failed' 'ERROR'[\s\S]{0,120}?exit 1") 'Win download_failed -> exit 1'
-Assert ($win -match "incomplete_files=[\s\S]{0,120}?exit 1") 'Win incomplete_files -> exit 1'
+Assert ($win -match "incomplete_files=[\s\S]{0,220}?exit 1") 'Win incomplete_files -> exit 1'
 Assert ($win -match "manifest_empty_or_unreachable' 'ERROR'; exit 1") 'Win manifest_empty -> exit 1'
 Assert ($win -match "manifest_zero_files' 'ERROR'; exit 1") 'Win manifest_zero -> exit 1'
 

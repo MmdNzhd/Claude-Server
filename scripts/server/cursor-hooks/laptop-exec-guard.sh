@@ -9,6 +9,13 @@ trap '_allow' ERR
 input=$(cat || true)
 
 _allow() { echo '{"permission":"allow"}'; exit 0; }
+_allow_msg() {
+  local msg="$1"
+  jq -n --arg permission allow --arg agent_message "$msg" \
+    '{permission:$permission, agent_message:$agent_message}' \
+    || echo '{"permission":"allow"}'
+  exit 0
+}
 _deny() {
   local agent_msg="$1" user_msg="${2:-SSH-first: use laptop-exec}"
   jq -n --arg permission deny --arg agent_message "$agent_msg" --arg user_message "$user_msg" \
@@ -266,7 +273,8 @@ case "$event" in
     case "$tool" in
       Grep|Glob|Read|Write|Edit|EditNotebook|StrReplace|Delete|Task|Shell)
         if [[ "$tool" == Task ]]; then
-          _allow  # never block subagent spawn (multi-agent)
+          # Never block spawn, but remind parent: children need the paste block.
+          _allow_msg "Task spawn OK. Child prompt MUST paste SSH-first block (laptop-exec -p ID; no Read/Grep on /mounts/; no rg -i/-l/--glob; ≤4 parallel). See laptop-exec skill."
         fi
         if _tool_targets_mounts "$tool"; then
           hint=$(_remap_hint "$tool")

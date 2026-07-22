@@ -21,7 +21,7 @@ foreach ($name in $files) {
 . (Join-Path $pub 'connect-ui.ps1')
 . (Join-Path $pub 'cursor-auth-laptop.ps1')
 $need = @(
-    'Sanitize-SshAliasConfig', 'Acquire-TunnelPort', 'Ensure-SessionTunnel',
+    'Sanitize-SshAliasConfig', 'Acquire-TunnelPort', 'Test-TunnelPortIsForeignPeer', 'Test-TunnelPortAuthOwned', 'Ensure-SessionTunnel',
     'Push-ServerConnectConf', 'Get-GitMode', 'Launch-RemoteEditor',
     'Write-ConnectHeader', 'Sync-CursorGoldenAuth'
 )

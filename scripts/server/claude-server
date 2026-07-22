@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # claude-server - Claude Code Server management CLI
 # Usage: sudo bash scripts/server/claude-server install
 #        claude-server <command> [options]
@@ -36,6 +36,7 @@ usage() {
     echo "  sync-auth [user]     push OAuth token to all users (after token change)"
     echo "  deploy-auth <token>  install setup-token + sync + API probe + audit log"
     echo "  sync-cursor-auth [user]  push Cursor golden identity to all users"
+    echo "  sync-cursor-mcp [user]   push standard Cursor MCP pack to all users"
     echo "  import-cursor-golden-laptop <dir>  import golden from laptop server profile"
     echo "  audit-cursor-golden  deep Cursor golden metadata audit (no secrets)"
     echo "  deploy-mount-fix     redeploy claude-mount + automount (single-project fix)"
@@ -62,7 +63,7 @@ CMD="${1:-}"
 shift 2>/dev/null || true
 
 case "$CMD" in
-    install|add-user|verify|status|diagnose-auth|sync-auth|deploy-auth|sync-cursor-auth|import-cursor-golden-laptop|audit-cursor-golden|deploy-mount-fix|deploy-client-bundle|install-client-bundle|deploy-laptop-exec|deploy-laptop-exec-and-bundle|fix-all-now|update-server)
+    install|add-user|verify|status|diagnose-auth|sync-auth|deploy-auth|sync-cursor-auth|sync-cursor-mcp|import-cursor-golden-laptop|audit-cursor-golden|deploy-mount-fix|deploy-client-bundle|install-client-bundle|deploy-laptop-exec|deploy-laptop-exec-and-bundle|fix-all-now|update-server)
         if [ -z "$COMMANDS_DIR" ]; then
             echo -e "${RED}Error:${NC} commands directory not found." >&2
             echo "Run from repo: bash scripts/server/claude-server install" >&2

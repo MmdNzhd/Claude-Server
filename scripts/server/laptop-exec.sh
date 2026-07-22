@@ -217,8 +217,18 @@ _laptop_ssh() {
         ) 9>"$_lock"
 
         set +e
-        ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" "$@"
-        _rc=$?
+        if [ -n "${LAPTOP_EXEC_CMD_TIMEOUT:-}" ] && command -v timeout >/dev/null 2>&1; then
+            # Bound long searches so hung Select-String cannot pin mux slots for hours.
+            timeout --foreground "$LAPTOP_EXEC_CMD_TIMEOUT" \
+                ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" "$@"
+            _rc=$?
+            if [ "$_rc" -eq 124 ]; then
+                echo "laptop-exec: command timed out after ${LAPTOP_EXEC_CMD_TIMEOUT}s" >&2
+            fi
+        else
+            ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" "$@"
+            _rc=$?
+        fi
         set -e
         if [ "$_rc" -ne 255 ]; then
             eval "exec ${_slot_fd}>&-"
@@ -260,10 +270,35 @@ _laptop_scp_to() {
         done
         sleep 0.2
     done
+    if [ -z "$_slot_fd" ]; then
+        echo "laptop-exec: session slots full (max 8 concurrent SSH channels). Wait; do NOT open new TCP/mux." >&2
+        return 255
+    fi
+    (
+        if flock -w 8 9; then
+            if ! ssh -O check -o "ControlPath=$CONTROL_PATH" -o ControlMaster=no \
+                -o BatchMode=yes -o ConnectTimeout=1 -i "$KEY" -p "$TUNNEL_PORT" \
+                "${LAPTOP_USER}@127.0.0.1" >/dev/null 2>&1; then
+                ssh -fN -o BatchMode=yes -o ConnectTimeout=3 \
+                    -o StrictHostKeyChecking=accept-new \
+                    -o UserKnownHostsFile="$KNOWN_HOSTS" \
+                    -o ControlMaster=yes -o "ControlPath=$CONTROL_PATH" \
+                    -o ControlPersist=300 \
+                    -i "$KEY" -p "$TUNNEL_PORT" \
+                    "${LAPTOP_USER}@127.0.0.1" >/dev/null 2>&1 || true
+            fi
+        fi
+    ) 9>"$CACHE_DIR/cm.lock"
+    local _scp_t="${LAPTOP_EXEC_SCP_TIMEOUT:-120}"
     while [ "$_attempt" -le 4 ]; do
         set +e
-        scp -q "${opts[@]}" -i "$KEY" -P "$TUNNEL_PORT" \
-            "$local_file" "${LAPTOP_USER}@127.0.0.1:${rpath}/${rel_file}"
+        if [ -n "$_scp_t" ] && [ "$_scp_t" != "0" ] && command -v timeout >/dev/null 2>&1; then
+            timeout --foreground "$_scp_t" scp -q "${opts[@]}" -i "$KEY" -P "$TUNNEL_PORT" \
+                "$local_file" "${LAPTOP_USER}@127.0.0.1:${rpath}/${rel_file}"
+        else
+            scp -q "${opts[@]}" -i "$KEY" -P "$TUNNEL_PORT" \
+                "$local_file" "${LAPTOP_USER}@127.0.0.1:${rpath}/${rel_file}"
+        fi
         _rc=$?
         set -e
         if [ "$_rc" -eq 0 ]; then
@@ -377,11 +412,18 @@ _parse_project_flag() {
             -w|--workspace)
                 [ $# -ge 2 ] || _die "missing value for $1"
                 WORKSPACE_PATH="$2"; shift 2 ;;
-            --) shift; break ;;
+            --) break ;;  # leave -- for subcommands (rg dash-leading patterns)
             *) break ;;
         esac
     done
     REMAINING=("$@")
+}
+
+# Agents write: laptop-exec git -p ID -- status  → leave -- for parse, strip before invoke.
+_strip_leading_dd() {
+    if [ "${#REMAINING[@]}" -gt 0 ] && [ "${REMAINING[0]}" = "--" ]; then
+        REMAINING=("${REMAINING[@]:1}")
+    fi
 }
 
 _require_session() {
@@ -401,6 +443,7 @@ _resolve_project() {
     fi
     pid="${pid:-$ACTIVE_MOUNT}"
     [ -n "$pid" ] || _die "no project (-p ID, -w ~/mounts/ID/..., cd ~/mounts/ID, or connect session)"
+    PROJECT_ID="$pid"
     _load_project "$pid"
 }
 
@@ -495,13 +538,18 @@ _cmd_mount_status() {
 _cmd_path() { _parse_project_flag "$@"; _require_session; _resolve_project; echo "$REMOTE_PATH"; }
 
 _cmd_count() {
-    _parse_project_flag "$@"; _require_session; _resolve_project
-    if [ "$LAPTOP_OS" = "mac" ]; then _run_in_project "$REMOTE_PATH" find . -type f | wc -l
-    else _run_in_project "$REMOTE_PATH" powershell -NoProfile -Command "(Get-ChildItem -Recurse -File -EA SilentlyContinue | Measure-Object).Count"; fi
+    _parse_project_flag "$@"; _strip_leading_dd
+    _require_session; _resolve_project
+    local _t="${LAPTOP_EXEC_CMD_TIMEOUT:-120}"
+    if [ "$LAPTOP_OS" = "mac" ]; then
+        LAPTOP_EXEC_CMD_TIMEOUT="$_t" _run_in_project "$REMOTE_PATH"             find . -type f \( -path './node_modules/*' -o -path './.git/*' -o -path './dist/*' \) -prune -o -type f -print | wc -l
+    else
+        LAPTOP_EXEC_CMD_TIMEOUT="$_t" _run_in_project "$REMOTE_PATH" powershell -NoProfile -Command             "$skip=@('node_modules','.git','dist','build'); (Get-ChildItem -Recurse -File -EA SilentlyContinue | Where-Object { $p=$_.FullName; -not ($skip | Where-Object { $p -like ('*\'+$_+'\*') }) }).Count"
+    fi
 }
 
 _cmd_read() {
-    _parse_project_flag "$@"
+    _parse_project_flag "$@"; _strip_leading_dd
     [ "${#REMAINING[@]}" -eq 1 ] || _die "usage: laptop-exec read [-p PROJECT] [-w PATH] <file>"
     _require_session; _resolve_project
     local file="${REMAINING[0]}"; file="${file//\\//}"
@@ -510,7 +558,7 @@ _cmd_read() {
 }
 
 _cmd_write() {
-    _parse_project_flag "$@"
+    _parse_project_flag "$@"; _strip_leading_dd
     [ "${#REMAINING[@]}" -eq 1 ] || _die "usage: laptop-exec write [-p PROJECT] <file>  (stdin)"
     _require_session; _resolve_project
     local file="${REMAINING[0]}" tmp; file="${file//\\//}"
@@ -521,13 +569,21 @@ _cmd_write() {
 }
 
 _cmd_run() {
-    _parse_project_flag "$@"; [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec run [-p PROJECT] -- <cmd...>"
-    _require_session; _resolve_project; _run_in_project "$REMOTE_PATH" "${REMAINING[@]}"
+    _parse_project_flag "$@"; _strip_leading_dd
+    [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec run [-p PROJECT] -- <cmd...>"
+    _require_session; _resolve_project
+    local _t="${LAPTOP_EXEC_RUN_TIMEOUT:-600}"
+    if [ "$_t" = "0" ]; then _run_in_project "$REMOTE_PATH" "${REMAINING[@]}"
+    else LAPTOP_EXEC_CMD_TIMEOUT="$_t" _run_in_project "$REMOTE_PATH" "${REMAINING[@]}"; fi
 }
 
 _cmd_git() {
-    _parse_project_flag "$@"; [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec git [-p PROJECT] -- <args...>"
-    _require_session; _resolve_project; _git_invoke "$REMOTE_PATH" "${REMAINING[@]}"
+    _parse_project_flag "$@"; _strip_leading_dd
+    [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec git [-p PROJECT] -- <args...>"
+    _require_session; _resolve_project
+    local _t="${LAPTOP_EXEC_GIT_TIMEOUT:-300}"
+    if [ "$_t" = "0" ]; then _git_invoke "$REMOTE_PATH" "${REMAINING[@]}"
+    else LAPTOP_EXEC_CMD_TIMEOUT="$_t" _git_invoke "$REMOTE_PATH" "${REMAINING[@]}"; fi
 }
 
 _rg_is_regex() {
@@ -543,16 +599,33 @@ import base64, sys
 pat = sys.argv[1]
 regex = sys.argv[2] == "1"
 pat_esc = pat.replace("'", "''")
+# Prune heavy dirs DURING walk (Get-ChildItem -Recurse descends into node_modules).
+ps = r"""
+$ErrorActionPreference='SilentlyContinue'
+$skip = [System.Collections.Generic.HashSet[string]]::new(
+  [string[]]@('node_modules','.git','dist','build','coverage','.next','vendor','.venv','__pycache__','bin','obj')
+)
+$files = [System.Collections.Generic.List[string]]::new()
+function Walk([string]$dir) {
+  try {
+    foreach ($f in [System.IO.Directory]::EnumerateFiles($dir)) { [void]$files.Add($f) }
+    foreach ($d in [System.IO.Directory]::EnumerateDirectories($dir)) {
+      $name = [System.IO.Path]::GetFileName($d)
+      if ($skip.Contains($name)) { continue }
+      Walk $d
+    }
+  } catch {}
+}
+Walk (Get-Location).Path
+"""
 if regex:
-    ps = (
-        "Get-ChildItem -Recurse -File -EA SilentlyContinue | "
-        f"Select-String -Pattern '{pat_esc}' | "
+    ps += (
+        f"$files | Select-String -Pattern '{pat_esc}' | "
         "ForEach-Object { $_.Path + ':' + $_.LineNumber + ':' + $_.Line.Trim() }"
     )
 else:
-    ps = (
-        "Get-ChildItem -Recurse -File -EA SilentlyContinue | "
-        f"Select-String -SimpleMatch -Pattern '{pat_esc}' | "
+    ps += (
+        f"$files | Select-String -SimpleMatch -Pattern '{pat_esc}' | "
         "ForEach-Object { $_.Path + ':' + $_.LineNumber + ':' + $_.Line.Trim() }"
     )
 print(base64.b64encode(ps.encode("utf-16-le")).decode())
@@ -560,26 +633,98 @@ PY
 }
 
 _cmd_rg() {
-    _parse_project_flag "$@"; [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec rg [-p PROJECT] <pattern>"
+    _parse_project_flag "$@"
+    [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec rg [-p PROJECT] <pattern> [pathspec...]"
     _require_session; _resolve_project
-    local pattern="${REMAINING[0]}" git_dir="" extra=("${REMAINING[@]:1}") rc=0
+
+    # Agents often pass real-ripgrep flags (-i/-l/--glob). Those used to become the
+    # "pattern" and fall through to a full-tree Select-String that held mux slots for hours.
+    local pattern="" pathspecs=() a
+    set -- "${REMAINING[@]}"
+    while [ $# -gt 0 ]; do
+        a="$1"
+        case "$a" in
+            --)
+                # After -- : pattern (if unset) then pathspecs — allows patterns starting with -
+                shift
+                if [ -z "$pattern" ]; then
+                    [ $# -gt 0 ] || _die "usage: laptop-exec rg [-p PROJECT] -- <pattern> [pathspec...]"
+                    pattern="$1"; shift
+                fi
+                pathspecs+=("$@")
+                break
+                ;;
+            -l|--files-with-matches|-i|--ignore-case|-n|--line-number|-v|--invert-match|\
+            -w|--word-regexp|-H|--with-filename|-c|--count|-U|--multiline|--hidden|\
+            --no-ignore|--json|-S|--smart-case|--heading|--no-heading|-o|--only-matching|\
+            --files|-e|--regexp)
+                _die "rg: flag '$a' not supported. Use: laptop-exec rg [-p ID] PATTERN [pathspec...]  (no -i/-l/-n/--glob; regex via |[]()+?; pathspecs like src/ or '*.ts')"
+                ;;
+            -A|-B|-C|-g|--glob|--type|--type-add|--type-not|--type-not-add|-m|--max-count|\
+            --after-context|--before-context|--context|--iglob)
+                _die "rg: flag '$a' not supported. Use: laptop-exec rg [-p ID] PATTERN [pathspec...]  (narrow with pathspecs, not --glob)"
+                ;;
+            -*)
+                _die "rg: unknown flag '$a'. Use: laptop-exec rg [-p ID] PATTERN [pathspec...]"
+                ;;
+            *)
+                if [ -z "$pattern" ]; then
+                    pattern="$a"
+                else
+                    pathspecs+=("$a")
+                fi
+                ;;
+        esac
+        shift
+    done
+    [ -n "$pattern" ] || _die "usage: laptop-exec rg [-p PROJECT] <pattern> [pathspec...]"
+
+    local git_dir="" rc=0
+    local _rg_timeout="${LAPTOP_EXEC_RG_TIMEOUT:-90}"
+    _rg_exec() {
+        LAPTOP_EXEC_CMD_TIMEOUT="$_rg_timeout" _run_in_project "$@"
+    }
+
     if git_dir="$(_detect_git_dir_cached "$REMOTE_PATH" 2>/dev/null || true)" && [ -n "$git_dir" ]; then
         if _rg_is_regex "$pattern"; then
-            _run_in_project "$REMOTE_PATH" git --git-dir="$git_dir" --work-tree=. grep -n -E "$pattern" -- "${extra[@]}" && return 0
+            if [ "${#pathspecs[@]}" -gt 0 ]; then
+                _rg_exec "$REMOTE_PATH" git --git-dir="$git_dir" --work-tree=. grep -n -E -e "$pattern" -- "${pathspecs[@]}" && return 0
+            else
+                _rg_exec "$REMOTE_PATH" git --git-dir="$git_dir" --work-tree=. grep -n -E -e "$pattern" && return 0
+            fi
         else
-            _run_in_project "$REMOTE_PATH" git --git-dir="$git_dir" --work-tree=. grep -n -F "$pattern" -- "${extra[@]}" && return 0
+            if [ "${#pathspecs[@]}" -gt 0 ]; then
+                _rg_exec "$REMOTE_PATH" git --git-dir="$git_dir" --work-tree=. grep -n -F -e "$pattern" -- "${pathspecs[@]}" && return 0
+            else
+                _rg_exec "$REMOTE_PATH" git --git-dir="$git_dir" --work-tree=. grep -n -F -e "$pattern" && return 0
+            fi
         fi
         rc=$?
         [ "$rc" -eq 1 ] && return 1
+        [ "$rc" -eq 124 ] && return 124
+        [ "$rc" -eq 255 ] && _die "rg: SSH/mux failed (exit 255) — session slots full or tunnel issue; wait and retry"
+        # Git work tree exists: do NOT fall through to full-tree Select-String.
+        _die "rg: git grep failed (exit $rc). Fix pattern/pathspec; do not retry with -i/-l/--glob."
     fi
     if [ "$LAPTOP_OS" = "mac" ]; then
-        if command -v rg >/dev/null 2>&1; then _run_in_project "$REMOTE_PATH" rg "$pattern" "${extra[@]}"; return; fi
-        _run_in_project "$REMOTE_PATH" grep -R -n -E "$pattern" . "${extra[@]}"; return
+        if command -v rg >/dev/null 2>&1; then
+            if [ "${#pathspecs[@]}" -gt 0 ]; then
+                _rg_exec "$REMOTE_PATH" rg "$pattern" "${pathspecs[@]}"; return
+            fi
+            _rg_exec "$REMOTE_PATH" rg "$pattern"; return
+        fi
+        if [ "${#pathspecs[@]}" -gt 0 ]; then
+            _rg_exec "$REMOTE_PATH" grep -R -n -E "$pattern" "${pathspecs[@]}"; return
+        fi
+        _rg_exec "$REMOTE_PATH" grep -R -n -E "$pattern" .; return
     fi
     local enc=""
     if _rg_is_regex "$pattern"; then enc="$(_ps_search_encoded "$pattern" 1)"
     else enc="$(_ps_search_encoded "$pattern" 0)"; fi
-    _run_in_project "$REMOTE_PATH" powershell -NoProfile -EncodedCommand "$enc"
+    if [ "${#pathspecs[@]}" -gt 0 ]; then
+        echo "laptop-exec: warning: pathspecs ignored on Windows no-git Select-String fallback." >&2
+    fi
+    _rg_exec "$REMOTE_PATH" powershell -NoProfile -EncodedCommand "$enc"
 }
 
 _cmd_test() {
@@ -606,8 +751,12 @@ _cmd_test() {
     _check "read nested" laptop-exec read scripts/server/laptop-exec.sh
     _check "write roundtrip" bash -c 'printf test-%s .$$ | laptop-exec write .laptop-exec-write-test.tmp && laptop-exec read .laptop-exec-write-test.tmp | grep -q test-'
     laptop-exec run -- powershell -NoProfile -Command "Remove-Item -Force -EA SilentlyContinue .laptop-exec-write-test.tmp" >/dev/null 2>&1 || true
-    _check rg laptop-exec rg laptop-exec
+    _check rg laptop-exec rg -p claude-code-server laptop-exec
     _check "rg git-accuracy" bash -c 'laptop-exec rg -p claude-code-server "ControlPersist" scripts/server/laptop-exec.sh | grep -q ControlPersist'
+    _check "rg reject -i" bash -c 'out=$(laptop-exec rg -p claude-code-server -i foo 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -qi "not supported"'
+    _check "rg reject --glob" bash -c 'out=$(laptop-exec rg -p claude-code-server --glob "*.ts" foo 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -qi "not supported"'
+    _check "rg dash pattern" bash -c 'laptop-exec rg -p claude-code-server -- "-o ControlMaster" scripts/server/laptop-exec.sh | grep -q ControlMaster'
+    _check "rg no-fallthrough" bash -c 'out=$(laptop-exec rg -p claude-code-server "[unterminated" scripts/server/ 2>&1); echo "$out" | grep -qi "git grep failed"'
     _check dotnet laptop-exec run -- dotnet --version
     _check "multiplex warm read" bash -c 'laptop-exec read CLAUDE.md >/dev/null && laptop-exec read CLAUDE.md >/dev/null'
     echo "----"; echo "pass=$pass fail=$fail"; [ "$fail" -eq 0 ]
@@ -628,7 +777,9 @@ Project selection (first match):
   3. LAPTOP_EXEC_WORKSPACE / CURSOR workspace env / cwd
 
 Speed: shared ControlMaster + 8 session slots (capped for OpenSSH MaxSessions) + flock bring-up
-Search: git grep (tracked) -> PowerShell Select-String (all files)
+Search: git grep (tracked) -> PowerShell Select-String (excl. node_modules/.git/...)
+  rg flags -i/-l/--glob REJECTED. Dash patterns: rg -- -foo path
+  Timeouts: rg 90s, run 600s, git 300s, scp 120s (set LAPTOP_EXEC_*_TIMEOUT=0 to disable)
 EOF
 }
 

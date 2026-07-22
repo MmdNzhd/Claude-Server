@@ -125,10 +125,31 @@ Assert ($publishPs1 -match 'Assert-ClientPackage') 'publish.ps1 validates client
 Assert ($publishPs1 -notmatch 'users\\sepidz') 'publish.ps1 uses single codebase (no sepidz fork)'
 
 $pubBase = Join-Path $env:USERPROFILE 'Desktop\claude-publish'
-$main = Get-ChildItem (Join-Path $pubBase 'claude-code-client-*') -Directory -ErrorAction SilentlyContinue |
-    Sort-Object Name -Descending | Select-Object -First 1
-$sepid = Get-ChildItem (Join-Path $pubBase 'claude-code-sepidz-*') -Directory -ErrorAction SilentlyContinue |
-    Sort-Object Name -Descending | Select-Object -First 1
+# publish.ps1 now prunes the live 'claude-code-client'/'claude-code-sepidz' folders down
+# to just Claude-Connect.exe right after zipping (so a raw, un-audited copy of the
+# scripts never sits next to the ZIP as an alternate, non-client-only distribution path -
+# see "windows\ reduced to Claude-Connect.exe only" in publish.ps1's own log output).
+# The ZIP is the real shipped artifact, so extract it fresh and audit that instead of the
+# now-intentionally-thin leftover folder (also sidesteps the old dated-folder naming
+# convention entirely - ZIP filenames are stable/undated).
+$extractRoot = Join-Path $env:TEMP ("test-publish-extract-{0}" -f $PID)
+if (Test-Path -LiteralPath $extractRoot) { Remove-Item -LiteralPath $extractRoot -Recurse -Force }
+
+$main = $null
+$mainZip = Join-Path $pubBase 'claude-code-client.zip'
+if (Test-Path -LiteralPath $mainZip) {
+    $d = Join-Path $extractRoot 'main'
+    Expand-Archive -LiteralPath $mainZip -DestinationPath $d -Force
+    $main = Get-Item -LiteralPath $d
+}
+
+$sepid = $null
+$sepidZip = Join-Path $pubBase 'claude-code-sepidz.zip'
+if (Test-Path -LiteralPath $sepidZip) {
+    $d = Join-Path $extractRoot 'sepidz'
+    Expand-Archive -LiteralPath $sepidZip -DestinationPath $d -Force
+    $sepid = Get-Item -LiteralPath $d
+}
 
 if ($main) {
     Test-PackageRoot -Root $main.FullName -Label 'main publish folder'

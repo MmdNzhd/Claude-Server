@@ -66,6 +66,7 @@ mkdir -p "$STAGE"
 _extract_zip "$ZIP" "$STAGE"
 
 [ -f "$STAGE/connect.ps1" ] || fail "bundle missing connect.ps1"
+[ -f "$STAGE/connect-boot.ps1" ] || fail "bundle missing connect-boot.ps1"
 [ -f "$STAGE/connect-version.txt" ] || fail "bundle missing connect-version.txt"
 [ -f "$STAGE/mac/connect.sh" ] || fail "bundle missing mac/connect.sh"
 
@@ -79,8 +80,29 @@ for mount_script in "$STAGE/mac/claude-mount.sh" "$STAGE/server/claude-mount.sh"
 done
 
 while IFS= read -r -d '' f; do
-    _strip_crlf "$f"
+    case "$f" in
+        *.bat) ;;  # Windows batch needs CRLF
+        *.exe|*.EXE) ;;  # binary SFX / PE - never sed CRLF
+        *) _strip_crlf "$f" ;;
+    esac
 done < <(find "$STAGE" -type f -print0)
+
+# Fail install if Claude-Connect.exe present but not valid PE.
+if [ -f "$STAGE/Claude-Connect.exe" ]; then
+  if ! python3 - "$STAGE/Claude-Connect.exe" <<"ENDPE"
+import struct, sys
+f=open(sys.argv[1], "rb")
+assert f.read(2)==b"MZ"
+f.seek(0x3C)
+o=struct.unpack("<I", f.read(4))[0]
+f.seek(o)
+assert f.read(4)==b"PE"+bytes(2)
+ENDPE
+  then
+    fail "Claude-Connect.exe is corrupt (not a valid PE) - refusing install"
+  fi
+  ok "Claude-Connect.exe PE header valid"
+fi
 
 # Rename-swap: never rm -rf live while clients may be downloading.
 OLD_BUNDLE="/var/tmp/claude-client-bundle-old.$$"

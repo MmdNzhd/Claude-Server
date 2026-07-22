@@ -115,7 +115,12 @@ function Install-ServerKey([string]$pub, [bool]$ForceRestart = $false) {
 }
 
 function SshX([string]$Cmd) {
-    ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 $Alias $Cmd
+    # Base64-encode: a bare native-exe argument with embedded quotes can be mangled by
+    # PowerShell's argument marshaling to ssh.exe (seen in production as "unexpected EOF
+    # while looking for matching `""). A base64 blob has no shell-special characters.
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Cmd))
+    $wrapped = "echo $b64|base64 -d|bash"
+    ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 $Alias $wrapped
 }
 
 function Test-Tunnel {
@@ -150,9 +155,12 @@ if (Test-Path $_connectUi) {
         Initialize-ConnectLog -ScriptDir $script:ConnectScriptDir -Version 'designer'
     }
 }
-# Multi-instance: Enter-ConnectSingleInstance is a no-op (unlimited concurrent UIs).
+# Single-instance: shares Global\ClaudeConnect mutex with main connect (one UI per PC).
 if (Get-Command Enter-ConnectSingleInstance -ErrorAction SilentlyContinue) {
-    $null = Enter-ConnectSingleInstance
+    if (-not (Enter-ConnectSingleInstance)) {
+        if (Get-Command Wait-ConnectExit -ErrorAction SilentlyContinue) { Wait-ConnectExit -Reason 'single_instance' -Code 2 }
+        else { exit 2 }
+    }
 }
 
 function Test-NovncLocal {
@@ -301,7 +309,7 @@ $initOut = (SshX "id -u && (test -f ~/.ssh/claude_laptop || ssh-keygen -t ed2551
 $lines   = ($initOut -replace "`r",'') -split "`n" | Where-Object { $_.Trim() -ne '' }
 $uidStr  = ($lines | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1) -replace '\D',''
 $Port    = 20000 + [int]$uidStr
-$PubB    = ($lines | Where-Object { $_ -match '^ssh-' } | Select-Object -First 1).Trim()
+$PubB    = ([string](($lines | Where-Object { $_ -match '^ssh-' } | Select-Object -First 1) + '')).Trim()
 if ($Port -le 20000 -or $Port -gt 65535) { StepFail "could not get UID from server"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 if (-not $PubB)      { StepFail "could not read server key";     Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 StepOk "port $Port"

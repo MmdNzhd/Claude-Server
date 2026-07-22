@@ -29,21 +29,25 @@ $snapshots = @($lines | Where-Object { $_ -match 'SNAPSHOT\[' }).Count
 $launchResultAfterOk = 0
 $launchWasteAfterPoll = 0
 $verboseBeforeSkip = 0
+$falseDoubleLaunch = 0
 $seenOk = $false
 $inOpening = $false
 $pollSuccess = $false
 $launchBeginOnFolder = $false
+$seenLaunchOkInOpening = $false
 foreach ($ln in $lines) {
     if ($ln -match 'STEP begin: Opening Cursor') {
         $inOpening = $true
         $pollSuccess = $false
         $launchBeginOnFolder = $false
+        $seenLaunchOkInOpening = $false
         continue
     }
     if ($ln -match 'STEP end: Opening Cursor') {
         $inOpening = $false
         $pollSuccess = $false
         $launchBeginOnFolder = $false
+        $seenLaunchOkInOpening = $false
         continue
     }
 
@@ -56,7 +60,12 @@ foreach ($ln in $lines) {
             $ln -match 'LAUNCH_ATTEMPT_RESULT:|SNAPSHOT\[RESULT|STATE\[RESULT_') {
             $launchWasteAfterPoll++
         }
-        if ($ln -match 'LAUNCH_OK:') { $pollSuccess = $false }
+        if ($ln -match 'LAUNCH_OK:') { $pollSuccess = $false; $seenLaunchOkInOpening = $true }
+        # WS3: a "not on target folder" relaunch after LAUNCH_OK within the same Opening step
+        # is a false double-launch - the trust-path fix should suppress this entirely.
+        if ($seenLaunchOkInOpening -and $ln -match 'SESSION: cursor not on target folder') {
+            $falseDoubleLaunch++
+        }
     }
 
     if ($ln -match 'LAUNCH_OK:') { $seenOk = $true; continue }
@@ -97,6 +106,7 @@ if ($AllowSnapshots) {
 Gate ($launchResultAfterOk -eq 0) "no LAUNCH_ATTEMPT_RESULT after LAUNCH_OK (F2 tail, got $launchResultAfterOk)"
 Gate ($launchWasteAfterPoll -eq 0) "no post-poll waste before LAUNCH_OK (F2, got $launchWasteAfterPoll)"
 Gate ($verboseBeforeSkip -eq 0) "no verbose STATE/SNAPSHOT before skip when on_folder (F1, got $verboseBeforeSkip)"
+Gate ($falseDoubleLaunch -eq 0) "no false double-launch relaunch after LAUNCH_OK within Opening step (WS3, got $falseDoubleLaunch)"
 if ($null -ne $launchTotal) {
     Gate ($launchTotal -lt 8000) "launch_total < 8000 ms (got $launchTotal)"
 }

@@ -74,6 +74,23 @@ wait_pid_timeout() {
 }
 
 push_server_connect_conf() {
+    if [ -z "${LAPTOP_HOSTKEY_FP:-}" ]; then
+        LAPTOP_HOSTKEY_FP="$(get_stored_laptop_hostkey_fp || true)"
+    fi
+
+    # Never publish another peer's reverse port into ~/.claude-connect.conf.
+    if [ -n "${PORT:-}" ] && tunnel_port_is_foreign_peer "$PORT"; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "PUSH_CONF blocked: foreign_peer port=$PORT" 'ERROR'
+        fi
+        return 0
+    fi
+    if [ -n "${PORT:-}" ] && tunnel_hostkey_mismatch "$PORT"; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "PUSH_CONF blocked: hostkey_mismatch port=$PORT" 'ERROR'
+        fi
+        return 0
+    fi
     local mode os="${GIT_MODE_LAPTOP_OS:-mac}" active="${ACTIVE_MOUNT_ID:-}"
     local clear="${1:-}" clear_flag=0 prefer="" lu port mode_esc
     local dedupe_key now_ts
@@ -116,8 +133,10 @@ CLEAR='$clear_flag'
 PREFER='$prefer'
 LU='$lu'
 PORT='$port'
+SLOT='${TUNNEL_SLOT:-}'
 MODE='$mode'
 OS='$os'
+HK='${LAPTOP_HOSTKEY_FP:-}'
 if [ "\$CLEAR" = "1" ]; then
   AM=
 elif [ -n "\$PREFER" ]; then
@@ -125,7 +144,7 @@ elif [ -n "\$PREFER" ]; then
 else
   AM=\$(grep -E '^ACTIVE_MOUNT=' "\$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
 fi
-printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nGIT_MODE=%s\nLAPTOP_OS=%s\nACTIVE_MOUNT=%s\n' "\$LU" "\$PORT" "\$MODE" "\$OS" "\$AM" > "\$HOME/.claude-connect.conf"
+printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nPORT=%s\nTUNNEL_SLOT=%s\nGIT_MODE=%s\nLAPTOP_OS=%s\nACTIVE_MOUNT=%s\nLAPTOP_HOSTKEY_FP=%s\n' "\$LU" "\$PORT" "\$PORT" "\$SLOT" "\$MODE" "\$OS" "\$AM" "\$HK" > "\$HOME/.claude-connect.conf"
 chmod 600 "\$HOME/.claude-connect.conf" 2>/dev/null || true
 printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s\n' "\$CLEAR" "\$PREFER" "\$AM"
 EOF
@@ -189,10 +208,15 @@ push_remote_file_if_changed() {
         /*)         ;;
         *)          scp_dest="~/$scp_dest" ;;
     esac
-    scp -o BatchMode=yes -o ConnectTimeout=20 -q "$src" "$ALIAS:$scp_dest" 2>/dev/null || return 1
+    # These targets can be live-executed concurrently (e.g. claude-watchdog polling
+    # claude-mount, or claude-automount at login) - land in a .new sibling and mv
+    # atomically into place so a running process never reads a torn file.
+    scp -o BatchMode=yes -o ConnectTimeout=20 -q "$src" "$ALIAS:${scp_dest}.new" 2>/dev/null || return 1
     case "$scp_dest" in
         */laptop-exec|*/laptop-exec-setup|*/laptop-exec-guard.sh|*/laptop-exec-guard-wrap.sh|*/laptop-exec-shell-scan.py|*/laptop-exec-session.sh|*/claude-self-heal|*/claude-automount)
-            sshx "chmod +x $rpath" >/dev/null 2>&1 || true ;;
+            sshx "chmod +x ${rpath}.new && mv -f ${rpath}.new $rpath" >/dev/null 2>&1 || true ;;
+        *)
+            sshx "mv -f ${rpath}.new $rpath" >/dev/null 2>&1 || true ;;
     esac
     return 0
 }
@@ -254,15 +278,7 @@ resolve_server_script_dir() {
 stop_remote_editor() {
     local editor_cmd="$1" alias_name="$2" remote_path="$3"
 
-    if [ "$editor_cmd" = "cursor" ]; then
-        _stop_cursor_server_profile
-        return
-    fi
-    if [ "$editor_cmd" = "code" ]; then
-        _stop_code_server_profile
-        return
-    fi
-
+    # Path/alias scoped only â€” never kill the whole ClaudeServerCursorProfile tree from mount clear.
     _stop_remote_editor_by_uri "$alias_name" "$remote_path"
 }
 
@@ -333,13 +349,13 @@ _stop_code_server_profile() {
 }
 
 clear_session_mount() {
-    local project_id="$1" editor_cmd="${2:-}" alias_name="${3:-}" remote_path="${4:-}" skip_editor="${5:-0}" reason="${6:-}"
+    local project_id="$1" editor_cmd="${2:-}" alias_name="${3:-}" remote_path="${4:-}" skip_editor="${5:-1}" reason="${6:-}"
     local reason_part="" down_begin down_ms
     [ -n "$reason" ] && reason_part=" reason=$reason"
     if declare -F connect_log >/dev/null 2>&1; then
         connect_log "CLEAR_MOUNT project=$project_id skip_editor=$skip_editor editor=$editor_cmd path=$remote_path$reason_part" 'INFO'
     fi
-    if [ "$skip_editor" != "1" ] && [ -n "$editor_cmd" ] && [ -n "$alias_name" ] && [ -n "$remote_path" ]; then
+    if [ "$skip_editor" = "0" ] && [ -n "$editor_cmd" ] && [ -n "$alias_name" ] && [ -n "$remote_path" ]; then
         stop_remote_editor "$editor_cmd" "$alias_name" "$remote_path"
     fi
     clear_tunnel_banner_cache
@@ -685,7 +701,7 @@ tunnel_tcp_open() {
 tunnel_fetch_banner() {
     local now age_ms banner
     [ -n "${PORT:-}" ] || return 1
-    # Positive cache only ���?" never poison with empty banner for 3s.
+    # Positive cache only ï¿½ï¿½ï¿½?" never poison with empty banner for 3s.
     if [ "$_TUNNEL_BANNER_CACHE_INVALID" -eq 0 ] && [ "$_TUNNEL_BANNER_CACHE_AT" -gt 0 ] && [ "$_TUNNEL_BANNER_CACHE_UP" -eq 1 ]; then
         now="$(date +%s 2>/dev/null || printf '0')"
         age_ms=$(( (now - _TUNNEL_BANNER_CACHE_AT) * 1000 ))
@@ -1000,8 +1016,10 @@ push_claude_mount_if_changed() {
         remote_h="$(remote_claude_mount_sha256)"
         [ "$local_h" = "$remote_h" ] && return 0
     fi
-    scp -o BatchMode=yes -o ConnectTimeout=20 -q "$src" "$ALIAS:~/.local/bin/claude-mount" 2>/dev/null \
-        && sshx "chmod +x \$HOME/.local/bin/claude-mount" 2>/dev/null || true
+    # claude-mount is live-executed (claude-watchdog polls it every 30s server-side) -
+    # land in a .new sibling and mv atomically so a concurrent exec never tears it.
+    scp -o BatchMode=yes -o ConnectTimeout=20 -q "$src" "$ALIAS:~/.local/bin/claude-mount.new" 2>/dev/null \
+        && sshx "chmod +x \$HOME/.local/bin/claude-mount.new && mv -f \$HOME/.local/bin/claude-mount.new \$HOME/.local/bin/claude-mount" 2>/dev/null || true
 }
 
 prepare_server_session_parallel() {
@@ -1148,9 +1166,318 @@ tunnel_port_tcp_open() {
     [ "$out" = open ]
 }
 
+
+XRAY_SERVER_SOCKS_PORT=10808
+XRAY_SERVER_HTTP_PORT=10809
+CURSOR_SOCKS_FRONT_PORT=18999
+CURSOR_HTTP_FRONT_PORT=18998
+export CURSOR_SOCKS_FRONT_PORT CURSOR_HTTP_FRONT_PORT
+SOCKS_PROXY_PORT=""
+HTTP_PROXY_PORT=""   # session var; empty = no proxy
+CURSOR_PROXY_OWNER=""
+TUNNEL_WAIT_FAIL_STREAK=0
+TUNNEL_WAIT_BACKOFF_SEC=2
+
+cursor_proxy_owner_path() {
+    local dir="$HOME/.config/claude-connect"
+    mkdir -p "$dir" 2>/dev/null || true
+    printf '%s/cursor-proxy-owner.json' "$dir"
+}
+
+_process_alive() {
+    local pid="${1:-0}"
+    [ "$pid" -gt 0 ] 2>/dev/null || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+get_cursor_proxy_owner_info() {
+    local path pid
+    path="$(cursor_proxy_owner_path)"
+    [ -f "$path" ] || return 1
+    python3 - "$path" <<'PY' 2>/dev/null || return 1
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        json.load(f)
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+test_is_cursor_proxy_owner() {
+    local path pid_own
+    path="$(cursor_proxy_owner_path)"
+    [ -f "$path" ] || return 1
+    pid_own="$(python3 - "$path" <<'PY' 2>/dev/null || exit 1
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    d = json.load(f)
+print(int(d.get("pid", 0)))
+PY
+)" || return 1
+    _process_alive "$pid_own" || return 1
+    [ "$pid_own" -eq "$$" ]
+}
+
+claim_cursor_proxy_owner() {
+    local force="${1:-0}" path info pid_own slot socks http started
+    path="$(cursor_proxy_owner_path)"
+    if [ -f "$path" ] && [ "$force" != "1" ]; then
+        pid_own="$(python3 - "$path" <<'PY' 2>/dev/null || printf '0'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    d = json.load(f)
+print(int(d.get("pid", 0)))
+PY
+)"
+        if [ "${pid_own:-0}" -eq "$$" ]; then
+            CURSOR_PROXY_OWNER=1
+            export CURSOR_PROXY_OWNER
+            return 0
+        fi
+        if _process_alive "$pid_own"; then
+            CURSOR_PROXY_OWNER=0
+            export CURSOR_PROXY_OWNER
+            declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: skip live_owner pid=$pid_own self=$$" 'INFO'
+            return 1
+        fi
+        declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: adopt stale pid=$pid_own self=$$" 'INFO'
+    fi
+    slot="${TUNNEL_SLOT:--1}"
+    socks="$(socks_proxy_port)"
+    http="$(http_proxy_port)"
+    started="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '')"
+    if python3 - "$path" "$$" "$slot" "$socks" "$http" "$started" <<'PY'; then
+import json, sys
+path, pid, slot, socks, http, started = sys.argv[1:7]
+payload = {"pid": int(pid), "slot": int(slot), "socks": int(socks), "http": int(http), "started_utc": started}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(payload, f)
+PY
+        CURSOR_PROXY_OWNER=1
+        export CURSOR_PROXY_OWNER
+        declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: claimed pid=$$ socks=$socks" 'INFO'
+        return 0
+    fi
+    CURSOR_PROXY_OWNER=0
+    export CURSOR_PROXY_OWNER
+    declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_OWNER: claim_fail' 'WARN'
+    return 1
+}
+
+release_cursor_proxy_owner() {
+    test_is_cursor_proxy_owner || return 0
+    rm -f "$(cursor_proxy_owner_path)" 2>/dev/null || true
+    CURSOR_PROXY_OWNER=0
+    export CURSOR_PROXY_OWNER
+    declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: released pid=$$" 'INFO'
+}
+
+test_local_port_open() {
+    local port="${1:-}" timeout_ms="${2:-400}"
+    python3 - "$port" "$timeout_ms" <<'PY' 2>/dev/null
+import socket, sys
+port, ms = int(sys.argv[1]), int(sys.argv[2])
+s = socket.socket()
+s.settimeout(ms / 1000.0)
+try:
+    s.connect(("127.0.0.1", port))
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+}
+
+cursor_socks_front_port() {
+    if [ -n "${CURSOR_SOCKS_FRONT_PORT:-}" ]; then printf '%s' "$CURSOR_SOCKS_FRONT_PORT"; return; fi
+    socks_proxy_port
+}
+
+cursor_http_front_port() {
+    if [ -n "${CURSOR_HTTP_FRONT_PORT:-}" ]; then printf '%s' "$CURSOR_HTTP_FRONT_PORT"; return; fi
+    http_proxy_port
+}
+
+proxy_health() {
+    local http_port socks_port ip
+    http_port="$(cursor_http_front_port)"
+    socks_port="$(cursor_socks_front_port)"
+    if [ -z "$http_port" ] || [ "$http_port" -le 0 ] 2>/dev/null; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_HEALTH ok=0 reason=no_http_port' 'WARN'
+        return 1
+    fi
+    if ! test_local_port_open "$http_port"; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log "PROXY_HEALTH socks=$socks_port http=$http_port ok=0 reason=http_not_listening" 'WARN'
+        return 1
+    fi
+    ip="$(curl -sf --max-time 10 -x "http://127.0.0.1:${http_port}" -A claude-connect-proxy-health https://api.ipify.org 2>/dev/null | tr -d '
+' || true)"
+    if [ -z "$ip" ]; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log "PROXY_HEALTH socks=$socks_port http=$http_port ok=0 reason=empty_ip" 'WARN'
+        return 1
+    fi
+    declare -F connect_log >/dev/null 2>&1 && connect_log "PROXY_HEALTH socks=$socks_port http=$http_port ok=1 ip=$ip" 'INFO'
+    return 0
+}
+
+socks_proxy_port() {
+    printf '%s' 19080
+}
+
+http_proxy_port() {
+    printf '%s' 19180
+}
+
+local_port_free() {
+    # Return 0 if can bind 127.0.0.1:$1 (port unused). Fail closed (busy) -> return 1.
+    local port="$1"
+    python3 -c "import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',int(sys.argv[1]))); s.close()" "$port" 2>/dev/null
+}
+
+local_port_listening() {
+    # Quiet TCP probe (no nc -z noise).
+    local port="$1"
+    test_local_port_open "$port" 400
+}
+
+remote_xray_http_open() {
+    local port="${XRAY_SERVER_HTTP_PORT}"
+    local out
+    out="$(sshx "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${port} 2>/dev/null' && echo open || echo closed" 2>/dev/null | tr -d '\r\n')"
+    [ "$out" = open ]
+}
+remote_xray_socks_open() {
+    # Probe 10808 ON SERVER via sshx (defined in connect.sh). Fail closed.
+    local port="${XRAY_SERVER_SOCKS_PORT}"
+    local out
+    out="$(sshx "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${port} 2>/dev/null' && echo open || echo closed" 2>/dev/null | tr -d '\r\n')"
+    [ "$out" = open ]
+}
+
+set_socks_proxy_port_on_reuse() {
+    # Reused tunnel may predate the -L proxy leg; fail closed unless cmdline, local listen,
+    # and remote xray all check out. Keep prior ports on failure (Win parity).
+    local tunnel_pid="${1:-${bg_pid:-}}" prev_socks prev_http
+    prev_socks="${SOCKS_PROXY_PORT:-}"
+    prev_http="${HTTP_PROXY_PORT:-}"
+    [ -n "$tunnel_pid" ] || return 0
+    local socks_candidate http_candidate args fwd_needle http_needle
+    socks_candidate="$(socks_proxy_port)"
+    http_candidate="$(http_proxy_port)"
+    args="$(ps -p "$tunnel_pid" -o args= 2>/dev/null || true)"
+    fwd_needle="-L 127.0.0.1:${socks_candidate}:127.0.0.1:${XRAY_SERVER_SOCKS_PORT}"
+    http_needle="-L 127.0.0.1:${http_candidate}:127.0.0.1:${XRAY_SERVER_HTTP_PORT}"
+    case "$args" in *"$fwd_needle"*) ;; *) return 0 ;; esac
+    case "$args" in *"$http_needle"*) ;; *) return 0 ;; esac
+    if ! local_port_listening "$socks_candidate"; then
+        return 0
+    fi
+    if ! local_port_listening "$http_candidate"; then
+        return 0
+    fi
+    if ! remote_xray_socks_open; then
+        return 0
+    fi
+    if ! remote_xray_http_open; then
+        return 0
+    fi
+    SOCKS_PROXY_PORT="$socks_candidate"
+    HTTP_PROXY_PORT="$http_candidate"
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "ENSURE_TUNNEL reuse_proxy ok local=$socks_candidate remote=${XRAY_SERVER_SOCKS_PORT} http_local=$http_candidate http_remote=${XRAY_SERVER_HTTP_PORT}" 'INFO'
+    fi
+}
+
+
+tunnel_proxy_leg_state() {
+    local tunnel_pid="${1:-}"
+    local socks_candidate args fwd_needle
+    [ -n "$tunnel_pid" ] || { echo unknown; return 0; }
+    socks_candidate="$(socks_proxy_port)"
+    args="$(ps -p "$tunnel_pid" -o args= 2>/dev/null || true)"
+    [ -n "$args" ] || { echo unknown; return 0; }
+    local http_candidate http_needle
+    http_candidate="$(http_proxy_port)"
+    fwd_needle="-L 127.0.0.1:${socks_candidate}:127.0.0.1:${XRAY_SERVER_SOCKS_PORT}"
+    http_needle="-L 127.0.0.1:${http_candidate}:127.0.0.1:${XRAY_SERVER_HTTP_PORT}"
+    case "$args" in *"$fwd_needle"*)
+        case "$args" in *"$http_needle"*) echo ok; return 0 ;; esac
+        echo missing_http
+        return 0
+        ;;
+    esac
+    case "$args" in *"-D 127.0.0.1:${socks_candidate}"*) echo legacy_D; return 0 ;; esac
+    echo missing
+}
+
+
+append_http_proxy_leg() {
+    local http_candidate
+    [ -n "${SOCKS_PROXY_PORT:-}" ] || return 0
+    http_candidate="$(http_proxy_port)"
+    if ! remote_xray_http_open; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL remote_xray_http=closed port=${XRAY_SERVER_HTTP_PORT} skipping_http_proxy_leg" 'INFO'
+        return 0
+    fi
+    if ! local_port_free "$http_candidate"; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL http_port_busy port=$http_candidate skipping_http_proxy_leg" 'WARN'
+        return 0
+    fi
+    socks_args+=(-L "127.0.0.1:${http_candidate}:127.0.0.1:${XRAY_SERVER_HTTP_PORT}")
+    HTTP_PROXY_PORT="$http_candidate"
+    declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL http_proxy_leg=-L local=$http_candidate remote=${XRAY_SERVER_HTTP_PORT}" 'INFO'
+}
+tunnel_needs_proxy_reseed() {
+    local tunnel_pid="${1:-}"
+    [ -n "$tunnel_pid" ] || return 1
+    remote_xray_socks_open || return 1
+    local state
+    state="$(tunnel_proxy_leg_state "$tunnel_pid")"
+    case "$state" in
+        ok|unknown) return 1 ;;
+    esac
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "ENSURE_TUNNEL reseed_needed reason=$state pid=$tunnel_pid socks=$(socks_proxy_port)" 'WARN'
+    fi
+    return 0
+}
+
+clear_legacy_dynamic_socks_tunnels() {
+    # Free OUR socks port only when a legacy ssh -D still holds it (never mass-kill other slots).
+    local protect="${1:-}"
+    local socks="${2:-}"
+    [ -n "$socks" ] || socks="$(socks_proxy_port)"
+    local killed=0
+    local pid args needle
+    needle="-D 127.0.0.1:${socks}"
+    for pid in $(pgrep -x ssh 2>/dev/null || true); do
+        [ -n "$protect" ] && [ "$pid" = "$protect" ] && continue
+        args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+        case "$args" in
+            *' -N '*|*-N\ *) ;;
+            *) continue ;;
+        esac
+        case "$args" in *:localhost:22*) ;; *) continue ;; esac
+        case "$args" in *"$needle"*) ;; *) continue ;; esac
+        case "$args" in *"-L 127.0.0.1:${socks}:"*) continue ;; esac
+        case "$args" in *claude-server-sepidz*) continue ;; esac
+        case "$args" in *claude-server*) ;; *) continue ;; esac
+        kill "$pid" 2>/dev/null || true
+        killed=$((killed + 1))
+    done
+    if [ "$killed" -gt 0 ] && declare -F connect_log >/dev/null 2>&1; then
+        connect_log "ENSURE_TUNNEL legacy_D_cleanup killed=$killed socks=$socks" 'WARN'
+    fi
+}
+
+
 # Reuse live tunnel when possible; sets TUNNEL_REUSED=0|1 and bg_pid.
 ensure_session_tunnel() {
     TUNNEL_REUSED=0
+    _PROXY_RESEED=0
     local now_ts
     # PID loss is not authoritative: a re-parented reverse forward can remain usable.
     # Reuse valid banner/TCP evidence before any kill or stale-forward cleanup.
@@ -1161,17 +1488,24 @@ ensure_session_tunnel() {
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "ENSURE_TUNNEL reused=1 pid=$bg_pid port=$PORT reason=tunnel_up" 'DEBUG'
             fi
-            return 0
+            set_socks_proxy_port_on_reuse "$bg_pid"
+            if ! tunnel_needs_proxy_reseed "$bg_pid"; then
+                return 0
+            fi
+            TUNNEL_REUSED=0
+            _PROXY_RESEED=1
         fi
         # Banner miss + TCP open: zombie forward. Do not return success / TUNNEL_REUSED.
         # Match Windows Ensure-SessionTunnel: soft_fail then fall through to kill + reseed.
-        if tunnel_port_tcp_open "$PORT"; then
+        # Skip when we already decided to reseed for missing/legacy proxy leg.
+        if [ "${_PROXY_RESEED:-0}" != "1" ] && tunnel_port_tcp_open "$PORT"; then
             connect_log "ENSURE_TUNNEL soft_fail pid=$bg_pid port=$PORT reason=banner_miss_tcp_open action=reseed$(_tunnel_session_diag_suffix)" 'WARN'
             # Fall through unless recent_success (5s) covers brief banner flicker.
         fi
         # 5s recent_success reuse (Win parity).
         now_ts="$(date +%s 2>/dev/null || printf '0')"
-        if [ -n "${_LAST_TUNNEL_SPAWN_SUCCESS_AT:-}" ] && [ "${_LAST_TUNNEL_SPAWN_SUCCESS_AT:-0}" != "0" ] \
+        if [ "${_PROXY_RESEED:-0}" != "1" ] \
+            && [ -n "${_LAST_TUNNEL_SPAWN_SUCCESS_AT:-}" ] && [ "${_LAST_TUNNEL_SPAWN_SUCCESS_AT:-0}" != "0" ] \
             && [ -n "${_LAST_TUNNEL_SPAWN_PID:-}" ] && [ "$_LAST_TUNNEL_SPAWN_PID" = "$bg_pid" ] \
             && [ "${_LAST_TUNNEL_SPAWN_SUCCESS_PORT:-}" = "${PORT:-}" ] \
             && [ "$now_ts" != "0" ] \
@@ -1180,7 +1514,13 @@ ensure_session_tunnel() {
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "ENSURE_TUNNEL reused=1 pid=$bg_pid port=$PORT reason=recent_success" 'DEBUG'
             fi
-            return 0
+            set_socks_proxy_port_on_reuse "$bg_pid"
+            if ! tunnel_needs_proxy_reseed "$bg_pid"; then
+                return 0
+            fi
+            TUNNEL_REUSED=0
+            _PROXY_RESEED=1
+            TUNNEL_REUSED=0
         fi
     fi
     if declare -F connect_log >/dev/null 2>&1; then
@@ -1207,24 +1547,91 @@ ensure_session_tunnel() {
     clear_tunnel_banner_cache
     _LAST_FORWARD_PROBE_AT=0
     _TUNNEL_SYNC_FAIL_COUNT=0
+    SOCKS_PROXY_PORT=""
+    HTTP_PROXY_PORT=""
+    # socks port known after assignment below; cleanup runs in busy branch / after candidate
+    local socks_candidate socks_args=()
+    socks_candidate="$(socks_proxy_port)"
+    clear_legacy_dynamic_socks_tunnels "${_old_bg:-}" "$socks_candidate"
+    local _is_proxy_owner=0
+    if claim_cursor_proxy_owner; then
+        _is_proxy_owner=1
+    fi
+    if ! remote_xray_socks_open; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "ENSURE_TUNNEL remote_xray_socks=closed port=${XRAY_SERVER_SOCKS_PORT} skipping_proxy_leg" 'INFO'
+        fi
+    elif [ "$_is_proxy_owner" -eq 0 ]; then
+        if test_local_port_open "$socks_candidate" && test_local_port_open "$(http_proxy_port)"; then
+            SOCKS_PROXY_PORT="$socks_candidate"
+            HTTP_PROXY_PORT="$(http_proxy_port)"
+            declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL proxy_adopt non_owner local=$socks_candidate" 'INFO'
+        else
+            declare -F connect_log >/dev/null 2>&1 && connect_log 'ENSURE_TUNNEL proxy_skip reason=non_owner_no_listener' 'INFO'
+        fi
+    elif ! local_port_free "$socks_candidate"; then
+        if test_local_port_open "$socks_candidate"; then
+            SOCKS_PROXY_PORT="$socks_candidate"
+            HTTP_PROXY_PORT="$(http_proxy_port)"
+            if test_local_port_open "$(http_proxy_port)"; then
+                :
+            else
+                HTTP_PROXY_PORT=""
+            fi
+            declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL proxy_adopt busy_healthy local=$socks_candidate" 'INFO'
+        else
+            clear_legacy_dynamic_socks_tunnels "" "$socks_candidate"
+            if local_port_free "$socks_candidate"; then
+                socks_args=(-L "127.0.0.1:${socks_candidate}:127.0.0.1:${XRAY_SERVER_SOCKS_PORT}")
+                SOCKS_PROXY_PORT="$socks_candidate"
+                declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL proxy_leg=-L local=$socks_candidate remote=${XRAY_SERVER_SOCKS_PORT} after_legacy_cleanup" 'INFO'
+                append_http_proxy_leg
+            elif declare -F connect_log >/dev/null 2>&1; then
+                connect_log "ENSURE_TUNNEL socks_port_busy port=$socks_candidate skipping_proxy_leg" 'WARN'
+            fi
+        fi
+    else
+        socks_args=(-L "127.0.0.1:${socks_candidate}:127.0.0.1:${XRAY_SERVER_SOCKS_PORT}")
+        SOCKS_PROXY_PORT="$socks_candidate"
+        declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL proxy_leg=-L local=$socks_candidate remote=${XRAY_SERVER_SOCKS_PORT}" 'INFO'
+        append_http_proxy_leg
+    fi
     ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=5 \
-        -R "${PORT}:localhost:22" "$ALIAS" 2>/dev/null &
+        -R "${PORT}:localhost:22" "${socks_args[@]}" "$ALIAS" 2>/dev/null &
     bg_pid=$!
     if declare -F connect_log >/dev/null 2>&1; then
-        connect_log "ENSURE_TUNNEL spawned pid=$bg_pid port=$PORT slot=${TUNNEL_SLOT:-}" 'INFO'
+        connect_log "ENSURE_TUNNEL spawned pid=$bg_pid port=$PORT slot=${TUNNEL_SLOT:-} socks_port=${SOCKS_PROXY_PORT:-} http_port=${HTTP_PROXY_PORT:-}" 'INFO'
     fi
     if poll_tunnel_with_progress "$bg_pid"; then
         _LAST_TUNNEL_SPAWN_SUCCESS_AT="$(date +%s 2>/dev/null || printf '0')"
         _LAST_TUNNEL_SPAWN_SUCCESS_PORT="${PORT:-}"
         _LAST_TUNNEL_SPAWN_PID="$bg_pid"
         _TUNNEL_SYNC_FAIL_COUNT=0
+        TUNNEL_WAIT_FAIL_STREAK=0
+        TUNNEL_WAIT_BACKOFF_SEC=2
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "ENSURE_TUNNEL ok=1 pid=$bg_pid" 'INFO'
         fi
+        if declare -F proxy_health >/dev/null 2>&1; then
+            proxy_health || true
+        fi
+        if declare -F start_cursor_proxy_sidecar >/dev/null 2>&1; then
+            start_cursor_proxy_sidecar || true
+        fi
         return 0
     fi
+    TUNNEL_WAIT_FAIL_STREAK=$(( TUNNEL_WAIT_FAIL_STREAK + 1 ))
+    [ -n "${TUNNEL_WAIT_BACKOFF_SEC:-}" ] || TUNNEL_WAIT_BACKOFF_SEC=2
     if declare -F connect_log >/dev/null 2>&1; then
-        connect_log "ENSURE_TUNNEL ok=0 reason=wait_timeout pid=$bg_pid" 'WARN'
+        connect_log "ENSURE_TUNNEL ok=0 reason=wait_timeout pid=$bg_pid streak=$TUNNEL_WAIT_FAIL_STREAK backoff_sec=$TUNNEL_WAIT_BACKOFF_SEC" 'WARN'
+    fi
+    if [ "$TUNNEL_WAIT_FAIL_STREAK" -ge 6 ]; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log 'ENSURE_TUNNEL wait_timeout_budget_exhausted surfacing_ui' 'ERROR'
+    else
+        sleep "$TUNNEL_WAIT_BACKOFF_SEC" 2>/dev/null || sleep 2
+        if [ "$TUNNEL_WAIT_BACKOFF_SEC" -lt 60 ]; then
+            TUNNEL_WAIT_BACKOFF_SEC=$(( TUNNEL_WAIT_BACKOFF_SEC * 2 ))
+        fi
     fi
     kill "$bg_pid" 2>/dev/null || true
     bg_pid=""
@@ -1233,26 +1640,36 @@ ensure_session_tunnel() {
 
 
 clear_server_stale_tunnel_forward() {
-    local port="${1:-${PORT:-}}" i=0
-    [ -n "$port" ] || return 0
-    if declare -F connect_log >/dev/null 2>&1; then
-        connect_log "STALE_FORWARD: clearing server port=$port" 'DEBUG'
+    local target_port="${1:-$PORT}"
+    [ -n "$target_port" ] || return 0
+    # Never fuser-kill another laptop's reverse tunnel (Windows peer banners look foreign on Mac).
+    if tunnel_port_is_foreign_peer "$target_port"; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "STALE_FORWARD: refuse_kill_foreign port=$target_port" 'WARN'
+        fi
+        return 0
     fi
-    sshx "fuser -k ${port}/tcp 2>/dev/null || true; pkill -u \\\$USER -f '127\\.0\\.0\\.1:${port}' 2>/dev/null || true; pkill -u \\\$USER -f ' -p ${port} ' 2>/dev/null || true" 2>/dev/null || true
+    if tunnel_hostkey_mismatch "$target_port"; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "STALE_FORWARD: refuse_kill_hostkey_mismatch port=$target_port" 'WARN'
+        fi
+        return 0
+    fi
+    sshx "fuser -k ${target_port}/tcp 2>/dev/null || true; pkill -u \\\$USER -f '127\\.0\\.0\\.1:${target_port}' 2>/dev/null || true; pkill -u \\\$USER -f ' -p ${target_port} ' 2>/dev/null || true" 2>/dev/null || true
     clear_tunnel_banner_cache
     while [ "$i" -lt 8 ]; do
         i=$(( i + 1 ))
         sleep 0.25
         clear_tunnel_banner_cache
-        if ! tunnel_port_tcp_open "$port"; then
+        if ! tunnel_port_tcp_open "$target_port"; then
             if declare -F connect_log >/dev/null 2>&1; then
-                connect_log "STALE_FORWARD: port released port=$port wait=$i" 'DEBUG'
+                connect_log "STALE_FORWARD: port released port=$target_port wait=$i" 'DEBUG'
             fi
             return 0
         fi
     done
     if declare -F connect_log >/dev/null 2>&1; then
-        connect_log "STALE_FORWARD: port still busy port=$port after wait" 'WARN'
+        connect_log "STALE_FORWARD: port still busy port=$target_port after wait" 'WARN'
     fi
     return 1
 }
@@ -1310,10 +1727,39 @@ release_stale_tunnel_port() {
     [ -n "${PORT:-}" ] || return 0
     clear_tunnel_banner_cache
     banner="$(fetch_tunnel_banner 2>/dev/null || true)"
+    if tunnel_port_is_foreign_peer "$PORT"; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "STALE_FORWARD: skip_foreign_peer port=$PORT banner=$banner" 'INFO'
+        fi
+        return 0
+    fi
     if [ -n "$banner" ] && tunnel_banner_is_this_laptop "$banner"; then
+        if tunnel_port_has_local_reverse "$PORT"; then
+            return 0
+        fi
+        if tunnel_port_auth_owned "$PORT"; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "STALE_FORWARD: sticky_ours port=$PORT reclaim" 'DEBUG'
+            fi
+            clear_server_stale_tunnel_forward "$PORT" || true
+            return 0
+        fi
+        # Windows peer banners are NOT "this laptop" on Mac â€” never kill them here.
+        if tunnel_banner_is_windows "$banner"; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "STALE_FORWARD: skip_foreign_peer port=$PORT banner=$banner" 'INFO'
+            fi
+            return 0
+        fi
         return 0
     fi
     if [ -n "$banner" ] && ! tunnel_banner_is_this_laptop "$banner"; then
+        if tunnel_banner_is_windows "$banner"; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "STALE_FORWARD: skip_foreign_peer port=$PORT banner=$banner" 'INFO'
+            fi
+            return 0
+        fi
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "STALE_FORWARD: foreign banner port=$PORT banner=$banner" 'DEBUG'
         fi
@@ -1321,6 +1767,12 @@ release_stale_tunnel_port() {
         return 0
     fi
     if tunnel_port_tcp_open "$PORT"; then
+        if tunnel_port_is_foreign_peer "$PORT"; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "STALE_FORWARD: skip_foreign_peer port=$PORT tcp=open" 'INFO'
+            fi
+            return 0
+        fi
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "STALE_FORWARD: zombie port=$PORT tcp=open banner=(empty)" 'WARN'
         fi
@@ -1331,73 +1783,197 @@ release_stale_tunnel_port() {
 save_tunnel_slot() {
     [ -n "${TUNNEL_SLOT:-}" ] || return 0
     [ -f "${CFG:-}" ] || return 0
-    grep -v '^TUNNEL_SLOT=' "$CFG" > "$CFG.tmp" 2>/dev/null && mv "$CFG.tmp" "$CFG"
+    grep -vE '^(TUNNEL_SLOT|PORT|TUNNEL_PORT)=' "$CFG" > "$CFG.tmp" 2>/dev/null && mv "$CFG.tmp" "$CFG"
     echo "TUNNEL_SLOT=$TUNNEL_SLOT" >> "$CFG"
+    if [ -n "${PORT:-}" ]; then
+        echo "PORT=$PORT" >> "$CFG"
+        echo "TUNNEL_PORT=$PORT" >> "$CFG"
+    fi
 }
 
 sanitize_ssh_alias_config() {
     local alias="${ALIAS:-claude-server}"
     [ -f "$HOME/.ssh/config" ] || return 0
-    awk -v a="$alias" '
-        /^[[:space:]]*Host[[:space:]]+/ {
-            skip=0
-            for (i = 2; i <= NF; i++) if ($i == a) skip = 1
-        }
-        skip && /^[[:space:]]*RemoteForward/ { next }
-        { print }
-    ' "$HOME/.ssh/config" > "$HOME/.ssh/config.tmp.${alias}" 2>/dev/null \
-        && mv "$HOME/.ssh/config.tmp.${alias}" "$HOME/.ssh/config"
-    chmod 600 "$HOME/.ssh/config" 2>/dev/null || true
+    local tmp="$HOME/.ssh/config.tmp.${alias}.$$"
+    local i
+    for i in 1 2 3 4 5 6 7 8; do
+        if awk -v a="$alias" '
+            /^[[:space:]]*Host[[:space:]]+/ {
+                skip=0
+                for (j = 2; j <= NF; j++) if ($j == a) skip = 1
+            }
+            skip && /^[[:space:]]*RemoteForward/ { next }
+            { print }
+        ' "$HOME/.ssh/config" > "$tmp" 2>/dev/null \
+            && mv -f "$tmp" "$HOME/.ssh/config" 2>/dev/null; then
+            chmod 600 "$HOME/.ssh/config" 2>/dev/null || true
+            return 0
+        fi
+        rm -f "$tmp" 2>/dev/null || true
+        sleep 0.15
+    done
+    rm -f "$tmp" 2>/dev/null || true
+    return 0
+}
+
+
+tunnel_banner_is_windows() {
+    local banner="${1:-}"
+    [ -n "$banner" ] || return 1
+    echo "$banner" | grep -qi 'OpenSSH_for_Windows'
+}
+
+tunnel_port_has_local_reverse() {
+    local target_port="$1"
+    [ -n "$target_port" ] || return 1
+    pgrep -f "ssh.*-R ${target_port}:localhost:22" >/dev/null 2>&1
+}
+
+
+tunnel_hostkey_fp() {
+    local port="${1:-$PORT}"
+    [ -n "$port" ] || return 1
+    timeout 4 ssh-keyscan -p "$port" -T 3 -t ed25519,rsa,ecdsa 127.0.0.1 2>/dev/null \
+        | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' | head -1
+}
+
+get_stored_laptop_hostkey_fp() {
+    [ -f "${CFG:-}" ] || return 1
+    grep -E '^LAPTOP_HOSTKEY_FP=' "$CFG" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r\n '
+}
+
+save_laptop_hostkey_fp() {
+    local fp="$1"
+    [ -n "$fp" ] || return 0
+    [ -f "${CFG:-}" ] || return 0
+    grep -vE '^LAPTOP_HOSTKEY_FP=' "$CFG" > "$CFG.tmp" 2>/dev/null && mv "$CFG.tmp" "$CFG"
+    echo "LAPTOP_HOSTKEY_FP=$fp" >> "$CFG"
+}
+
+tunnel_hostkey_mismatch() {
+    local port="${1:-$PORT}" stored fp
+    stored="$(get_stored_laptop_hostkey_fp || true)"
+    [ -n "$stored" ] || return 1
+    fp="$(tunnel_hostkey_fp "$port" || true)"
+    [ -n "$fp" ] || return 1
+    [ "$fp" != "$stored" ]
+}
+
+tunnel_port_auth_owned() {
+    local target_port="$1"
+    [ -n "${LAPTOP_USER:-}" ] && [ -n "$target_port" ] || return 1
+    sshx "touch \$HOME/.ssh/known_hosts_claude_acquire 2>/dev/null; chmod 600 \$HOME/.ssh/known_hosts_claude_acquire 2>/dev/null; timeout 6 ssh -o BatchMode=yes -o ConnectTimeout=3 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=\$HOME/.ssh/known_hosts_claude_acquire -i ~/.ssh/claude_laptop -p ${target_port} ${LAPTOP_USER}@127.0.0.1 true" >/dev/null 2>&1
+}
+
+# Foreign peer: server has a listen/banner but this Mac has no local -R and auth fails.
+tunnel_port_is_foreign_peer() {
+    local target_port="$1" banner="" saved_port="${PORT:-}"
+    [ -n "$target_port" ] || return 1
+    PORT=$target_port
+    clear_tunnel_banner_cache
+    banner="$(fetch_tunnel_banner 2>/dev/null || true)"
+    if ! tunnel_port_tcp_open "$target_port" && ! tunnel_banner_is_windows "$banner"; then
+        PORT=$saved_port
+        return 1
+    fi
+    if tunnel_hostkey_mismatch "$target_port"; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "ACQUIRE_SKIP: foreign_peer hostkey port=$target_port" 'INFO'
+        fi
+        PORT=$saved_port
+        return 0
+    fi
+    if tunnel_port_has_local_reverse "$target_port"; then
+        PORT=$saved_port
+        return 1
+    fi
+    if tunnel_port_auth_owned "$target_port"; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "TUNNEL_OWNERSHIP port=$target_port sticky_ours=1" 'DEBUG'
+        fi
+        PORT=$saved_port
+        return 1
+    fi
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "ACQUIRE_SKIP: foreign_peer port=$target_port banner=$banner" 'INFO'
+    fi
+    PORT=$saved_port
+    return 0
+}
+
+# Non-overlapping 10-port block per user, instead of the old `20000 + uid + slot(0-9)`
+# scheme. That old formula overlapped by up to 6 of 10 ports between any two users with
+# adjacent UIDs - true for this whole team, since Ubuntu assigns sequential UIDs from 1000.
+# That overlap was the entire reason the foreign-peer/hostkey-mismatch/auth-owned
+# verification chain below is needed so often: a port could genuinely be ambiguous between
+# two different users' ranges. With disjoint ranges a port outside your own block is
+# unambiguously someone else's, and a port inside your own block that isn't yours locally is
+# unambiguously your own stale zombie. The verification chain itself is left fully in place
+# as defense-in-depth - this only fixes the formula that made it so frequently necessary.
+tunnel_port_user_base() {
+    local uid_str="$1" base="${CONNECT_PORT_BASE:-20000}" offset=0
+    case "$uid_str" in
+        ''|*[!0-9]*) echo "$base"; return ;;
+    esac
+    offset=$(( uid_str - 1000 ))
+    [ "$offset" -lt 0 ] && offset=0
+    echo $(( base + offset * 10 ))
 }
 
 acquire_tunnel_port() {
-    local uid_str="$1" port_base="${CONNECT_PORT_BASE:-20000}" slot=0 port="" banner="" preferred=""
+    local uid_str="$1" port_base slot=0 port="" banner="" preferred="" try_slots="" s
+    port_base="$(tunnel_port_user_base "$uid_str")"
     [ -n "$uid_str" ] || return 1
     if [ -f "${CFG:-}" ]; then
         preferred="$(grep -E '^TUNNEL_SLOT=' "$CFG" 2>/dev/null | tail -1 | cut -d= -f2- | tr -dc '0-9')"
     fi
+    try_slots=""
     if [ -n "$preferred" ] && [ "$preferred" -le 9 ] 2>/dev/null; then
-        slot=$preferred
-        port=$(( port_base + uid_str + slot ))
-        remove_local_orphan_tunnel "$port" || true
-        if [ "$port" -le 65535 ]; then
-            PORT=$port
+        try_slots="$preferred"
+    fi
+    for s in $(seq 0 9); do
+        [ "$s" = "$preferred" ] && continue
+        try_slots="$try_slots $s"
+    done
+    for slot in $try_slots; do
+        port=$(( port_base + slot ))
+        [ "$port" -gt 65535 ] && continue
+        if tunnel_port_is_foreign_peer "$port"; then
+            continue
+        fi
+        PORT=$port
+        clear_tunnel_banner_cache
+        banner="$(fetch_tunnel_banner 2>/dev/null || true)"
+        if [ -n "$banner" ] && ! tunnel_banner_is_this_laptop "$banner" && ! tunnel_banner_is_windows "$banner"; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "ACQUIRE_STALE: foreign_banner port=$port banner=$banner" 'DEBUG'
+            fi
+            clear_server_stale_tunnel_forward "$port" || true
             clear_tunnel_banner_cache
             banner="$(fetch_tunnel_banner 2>/dev/null || true)"
-            if [ -n "$banner" ] && ! tunnel_banner_is_this_laptop "$banner"; then
-                banner=""
-            elif [ -z "$banner" ] && tunnel_port_tcp_open "$port"; then
+            if tunnel_port_is_foreign_peer "$port"; then
+                continue
+            fi
+        fi
+        if [ -z "$banner" ] && tunnel_port_tcp_open "$port"; then
+            if tunnel_port_auth_owned "$port"; then
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "ACQUIRE_STALE: sticky_ours port=$port reclaim" 'DEBUG'
+                fi
+                clear_server_stale_tunnel_forward "$port" || true
+                clear_tunnel_banner_cache
+                banner="$(fetch_tunnel_banner 2>/dev/null || true)"
+            elif tunnel_port_is_foreign_peer "$port"; then
+                continue
+            else
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "ACQUIRE_STALE: zombie port=$port tcp=open banner=(empty)" 'WARN'
+                fi
                 clear_server_stale_tunnel_forward "$port" || true
                 clear_tunnel_banner_cache
                 banner="$(fetch_tunnel_banner 2>/dev/null || true)"
             fi
-            if [ -z "$banner" ] || tunnel_banner_is_this_laptop "$banner"; then
-                if [ -z "$banner" ] && tunnel_port_tcp_open "$port"; then
-                    :
-                else
-                    TUNNEL_SLOT=$slot
-                    save_tunnel_slot
-                    push_server_connect_conf
-                    return 0
-                fi
-            fi
-        fi
-    fi
-    for slot in $(seq 0 9); do
-        [ "$slot" = "$preferred" ] && continue
-        port=$(( port_base + uid_str + slot ))
-        [ "$port" -gt 65535 ] && continue
-        PORT=$port
-        clear_tunnel_banner_cache
-        banner="$(fetch_tunnel_banner 2>/dev/null || true)"
-        if [ -n "$banner" ] && ! tunnel_banner_is_this_laptop "$banner"; then
-            continue
-        fi
-        if [ -z "$banner" ] && tunnel_port_tcp_open "$port"; then
-            clear_server_stale_tunnel_forward "$port" || true
-            clear_tunnel_banner_cache
-            banner="$(fetch_tunnel_banner 2>/dev/null || true)"
-            if [ -n "$banner" ] && ! tunnel_banner_is_this_laptop "$banner"; then
+            if tunnel_port_is_foreign_peer "$port"; then
                 continue
             fi
             if [ -z "$banner" ] && tunnel_port_tcp_open "$port"; then
@@ -1405,17 +1981,23 @@ acquire_tunnel_port() {
             fi
         fi
         if [ -z "$banner" ] || tunnel_banner_is_this_laptop "$banner"; then
+            if [ -n "$banner" ] && ! tunnel_port_has_local_reverse "$port" && ! tunnel_port_auth_owned "$port"; then
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "ACQUIRE_SKIP: unauth_windows port=$port slot=$slot" 'INFO'
+                fi
+                continue
+            fi
             TUNNEL_SLOT=$slot
+            PORT=$port
             save_tunnel_slot
             push_server_connect_conf
             return 0
         fi
     done
-    PORT=$(( port_base + uid_str ))
+    PORT=$port_base
     TUNNEL_SLOT=0
     return 1
 }
-
 verify_laptop_reverse_ssh() {
     [ -n "${PORT:-}" ] && [ -n "${LAPTOP_USER:-}" ] || return 1
     tunnel_banner_is_this_laptop || return 1
@@ -1627,7 +2209,8 @@ initialize_server_session() {
     local script_dir="$1"
     local port_base="${CONNECT_PORT_BASE:-20000}"
     local port_min="$port_base" _init uid_str pub_b server_dir
-    local src="" git_src="" scp_pids="" push_ok=1 pid _chmod
+    local src="" git_src="" push_ok=1 _chmod
+    local mount_pid="" git_pid="" mount_pushed=0 git_pushed=0
     INIT_SERVER_SESSION_ERROR=""
 
     _init="$(sshx "id -u && (test -f \$HOME/.ssh/claude_laptop || ssh-keygen -t ed25519 -N "" -f \$HOME/.ssh/claude_laptop -q) && cat \$HOME/.ssh/claude_laptop.pub" 2>/dev/null)"
@@ -1644,7 +2227,7 @@ initialize_server_session() {
         return 1
     fi
     if ! acquire_tunnel_port "$uid_str"; then
-        PORT=$(( port_base + uid_str ))
+        PORT="$(tunnel_port_user_base "$uid_str")"
         TUNNEL_SLOT=0
     fi
     if [ -z "${PORT:-}" ] || [ "$PORT" -le "$port_min" ] || [ "$PORT" -gt 65535 ]; then
@@ -1663,13 +2246,16 @@ initialize_server_session() {
         [ -f "$server_dir/claude-mount.sh" ] && src="$server_dir/claude-mount.sh"
         [ -f "$server_dir/claude-git-setup.sh" ] && git_src="$server_dir/claude-git-setup.sh"
         sshx "mkdir -p \$HOME/.local/bin" >/dev/null 2>&1 || true
+        # claude-mount/claude-git-setup are live-executed (claude-watchdog polls
+        # claude-mount every 30s server-side) - scp to a .new sibling below and mv
+        # atomically into place once finished, so a concurrent exec never tears it.
         if [ -n "$src" ]; then
             local local_h remote_h
             local_h="$(local_file_sha256 "$src" 2>/dev/null || true)"
             remote_h="$(remote_claude_mount_sha256 2>/dev/null || true)"
             if [ -z "$local_h" ] || [ "$local_h" != "$remote_h" ]; then
-                scp -o BatchMode=yes -o ConnectTimeout=30 -q "$src" "$ALIAS:~/.local/bin/claude-mount" &
-                scp_pids="$scp_pids $!"
+                scp -o BatchMode=yes -o ConnectTimeout=30 -q "$src" "$ALIAS:~/.local/bin/claude-mount.new" &
+                mount_pid=$!
             fi
         fi
         if [ -n "$git_src" ]; then
@@ -1677,8 +2263,8 @@ initialize_server_session() {
             git_local="$(local_file_sha256 "$git_src" 2>/dev/null || true)"
             git_remote="$(sshx "sha256sum \$HOME/.local/bin/claude-git-setup 2>/dev/null | awk '{print \$1}'" 2>/dev/null | tr -d '\r\n')"
             if [ -z "$git_local" ] || [ "$git_local" != "$git_remote" ]; then
-                scp -o BatchMode=yes -o ConnectTimeout=30 -q "$git_src" "$ALIAS:~/.local/bin/claude-git-setup" &
-                scp_pids="$scp_pids $!"
+                scp -o BatchMode=yes -o ConnectTimeout=30 -q "$git_src" "$ALIAS:~/.local/bin/claude-git-setup.new" &
+                git_pid=$!
             fi
         fi
         push_laptop_exec_bundle "$server_dir"
@@ -1707,20 +2293,36 @@ EOF
     sanitize_ssh_alias_config
     push_server_connect_conf
 
-    for pid in $scp_pids; do
-        [ -z "$pid" ] && continue
-        if ! wait_pid_timeout "$pid" server_scripts 30; then
+    if [ -n "$mount_pid" ]; then
+        if wait_pid_timeout "$mount_pid" server_scripts 30; then
+            mount_pushed=1
+        else
             push_ok=0
             warn "server script push failed (continuing; server already has scripts)"
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "SCP: server_scripts failed (non-fatal)" 'WARN'
             fi
         fi
-    done
-    if [ -n "$server_dir" ] && { [ -n "$src" ] || [ -n "$git_src" ]; }; then
+    fi
+    if [ -n "$git_pid" ]; then
+        if wait_pid_timeout "$git_pid" server_scripts 30; then
+            git_pushed=1
+        else
+            push_ok=0
+            warn "server script push failed (continuing; server already has scripts)"
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "SCP: server_scripts failed (non-fatal)" 'WARN'
+            fi
+        fi
+    fi
+    # Finalize each .new file (chmod) then mv atomically onto the live path as the
+    # last step, so a concurrently-executing claude-mount/claude-git-setup never
+    # observes a partially-written file (claude-watchdog polls claude-mount every 30s).
+    if [ -n "$server_dir" ] && { [ "$mount_pushed" = "1" ] || [ -n "$src" ] || [ "$git_pushed" = "1" ]; }; then
         _chmod=""
-        [ -n "$src" ] && _chmod="chmod +x \$HOME/.local/bin/claude-mount; grep -q 'CLAUDE_LOCAL_BIN_PATH' \$HOME/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=\$HOME/.local/bin:\$PATH\n' >> \$HOME/.bashrc"
-        [ -n "$git_src" ] && _chmod="${_chmod:+"$_chmod; "}chmod +x \$HOME/.local/bin/claude-git-setup"
+        [ "$mount_pushed" = "1" ] && _chmod="chmod +x \$HOME/.local/bin/claude-mount.new && mv -f \$HOME/.local/bin/claude-mount.new \$HOME/.local/bin/claude-mount"
+        [ -n "$src" ] && _chmod="${_chmod:+"$_chmod; "}grep -q 'CLAUDE_LOCAL_BIN_PATH' \$HOME/.bashrc || printf '\n# CLAUDE_LOCAL_BIN_PATH\nexport PATH=\$HOME/.local/bin:\$PATH\n' >> \$HOME/.bashrc"
+        [ "$git_pushed" = "1" ] && _chmod="${_chmod:+"$_chmod; "}chmod +x \$HOME/.local/bin/claude-git-setup.new && mv -f \$HOME/.local/bin/claude-git-setup.new \$HOME/.local/bin/claude-git-setup"
         [ -n "$_chmod" ] && sshx "$_chmod" 2>/dev/null || true
     fi
 
@@ -2373,6 +2975,17 @@ write_cursor_profile_machineid() {
     return 0
 }
 
+# Lightweight (no SSH) machineid heal: read storage.serviceMachineId straight out of the
+# local SQLite db. write_cursor_profile_machineid() still falls back to an sshx golden read
+# only when this local read comes back empty - Windows parity for the outer/stamp skip paths.
+heal_cursor_profile_machineid_from_local() {
+    local db="$1" mid=""
+    if [ -f "$db" ] && declare -F cursor_sqlite3_available >/dev/null 2>&1 && cursor_sqlite3_available; then
+        mid="$(sqlite3 "$db" "SELECT value FROM ItemTable WHERE key='storage.serviceMachineId' LIMIT 1;" 2>/dev/null | tr -d '\r\n' || true)"
+    fi
+    write_cursor_profile_machineid "${mid:-}"
+}
+
 merge_cursor_auth_into_local_db() {
     local gs="$1" payload="$2" attempt db="${1}/state.vscdb" pairs_file mid=""
     [ -n "$payload" ] || return 1
@@ -2522,8 +3135,7 @@ sync_cursor_golden_auth_status() {
     # Even on skip, heal Electron machineid file (SQLite-complete profiles can still drift).
     if [ "$force" != "1" ] && [ "$golden_current" -eq 1 ] && [ -f "$db" ] && local_cursor_auth_complete "$db"; then
         # Prefer local SQLite machine id (already golden); fall back to server file.
-        _skip_mid="$(sqlite3 "$db" "SELECT value FROM ItemTable WHERE key='storage.serviceMachineId' LIMIT 1;" 2>/dev/null | tr -d '\r\n' || true)"
-        write_cursor_profile_machineid "${_skip_mid:-}" || true
+        heal_cursor_profile_machineid_from_local "$db" || true
         CURSOR_AUTH_SYNC_RESULT=ok
         declare -F connect_log >/dev/null 2>&1 && connect_log "AUTH_SYNC: skip already_complete golden_exported_at=$golden_exported (machineid healed)" 'DEBUG'
         return 0

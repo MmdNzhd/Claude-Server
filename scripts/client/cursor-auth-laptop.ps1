@@ -69,6 +69,9 @@ public static class CursorAuthSqlite
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int sqlite3_column_int(IntPtr stmt, int iCol);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate IntPtr sqlite3_column_text(IntPtr stmt, int iCol);
+
     private static IntPtr _module = IntPtr.Zero;
     private static bool _ready;
     private static sqlite3_open _open;
@@ -79,6 +82,7 @@ public static class CursorAuthSqlite
     private static sqlite3_step _step;
     private static sqlite3_finalize _finalize;
     private static sqlite3_column_int _columnInt;
+    private static sqlite3_column_text _columnText;
 
     private static T GetDelegate<T>(string name) where T : class
     {
@@ -105,9 +109,11 @@ public static class CursorAuthSqlite
         _step = GetDelegate<sqlite3_step>("sqlite3_step");
         _finalize = GetDelegate<sqlite3_finalize>("sqlite3_finalize");
         _columnInt = GetDelegate<sqlite3_column_int>("sqlite3_column_int");
+        _columnText = GetDelegate<sqlite3_column_text>("sqlite3_column_text");
 
         if (_open == null || _close == null || _prepare == null || _bindText == null ||
-            _step == null || _finalize == null || _busyTimeout == null || _columnInt == null)
+            _step == null || _finalize == null || _busyTimeout == null || _columnInt == null ||
+            _columnText == null)
         {
             return false;
         }
@@ -192,6 +198,53 @@ public static class CursorAuthSqlite
         }
     }
 
+    private static string PtrToUtf8String(IntPtr ptr)
+    {
+        // Marshal.PtrToStringUTF8 is not available on the .NET Framework that
+        // powershell.exe (5.1) hosts Add-Type against - decode manually instead.
+        if (ptr == IntPtr.Zero) { return null; }
+        int len = 0;
+        while (Marshal.ReadByte(ptr, len) != 0) { len++; }
+        if (len == 0) { return string.Empty; }
+        byte[] buffer = new byte[len];
+        Marshal.Copy(ptr, buffer, 0, len);
+        return Encoding.UTF8.GetString(buffer);
+    }
+
+    private static string GetValue(IntPtr db, string key)
+    {
+        IntPtr stmt = IntPtr.Zero;
+        try
+        {
+            string sql = "SELECT value FROM ItemTable WHERE key=? LIMIT 1";
+            IntPtr tail;
+            if (_prepare(db, sql, -1, out stmt, out tail) != SQLITE_OK) { return null; }
+            byte[] keyBytes = Encoding.UTF8.GetBytes(key);
+            if (_bindText(stmt, 1, keyBytes, keyBytes.Length, SQLITE_TRANSIENT) != SQLITE_OK) { return null; }
+            if (_step(stmt) != SQLITE_ROW) { return null; }
+            return PtrToUtf8String(_columnText(stmt, 0));
+        }
+        finally
+        {
+            if (stmt != IntPtr.Zero) { _finalize(stmt); }
+        }
+    }
+
+    // Public single-key read (opens its own short-lived session).
+    public static string GetValue(string dbPath, string key)
+    {
+        IntPtr db;
+        if (!OpenDb(dbPath, 5000, out db)) { return null; }
+        try
+        {
+            return GetValue(db, key);
+        }
+        finally
+        {
+            if (db != IntPtr.Zero) { _close(db); }
+        }
+    }
+
     public static bool MergeAuthValues(string dbPath, IDictionary<string, string> values)
     {
         if (values == null || values.Count == 0) { return false; }
@@ -248,6 +301,30 @@ public static class CursorAuthSqlite
                 && ValueLength(db, "cursorAuth/cachedEmail") > 0
                 && ValueLength(db, "cursorAuth/stripeMembershipType") > 0
                 && ValueLength(db, "storage.serviceMachineId") > 0;
+        }
+        finally
+        {
+            if (db != IntPtr.Zero) { _close(db); }
+        }
+    }
+
+    // Single OpenDb session for both the completeness gate and the serviceMachineId
+    // read used to heal Electron's machineid file - avoids opening the DB twice.
+    public static bool TryGetAuthState(string dbPath, out bool complete, out string serviceMachineId)
+    {
+        complete = false;
+        serviceMachineId = null;
+        IntPtr db;
+        if (!OpenDb(dbPath, 5000, out db)) { return false; }
+        try
+        {
+            bool tokensComplete = ValueLength(db, "cursorAuth/accessToken") > 0
+                && ValueLength(db, "cursorAuth/refreshToken") > 0
+                && ValueLength(db, "cursorAuth/cachedEmail") > 0
+                && ValueLength(db, "cursorAuth/stripeMembershipType") > 0;
+            serviceMachineId = GetValue(db, "storage.serviceMachineId");
+            complete = tokensComplete && !string.IsNullOrEmpty(serviceMachineId);
+            return true;
         }
         finally
         {
@@ -541,6 +618,119 @@ function Test-LocalCursorAuthComplete {
     }
 }
 
+# Reads completeness + storage.serviceMachineId in one SQLite session (single OpenDb),
+# so callers that need both (skip-gate + machineid heal) don't open the DB twice.
+function Get-LocalCursorAuthState {
+    param([Parameter(Mandatory)][string]$DbPath)
+    $result = [PSCustomObject]@{ Ok = $false; Complete = $false; ServiceMachineId = $null }
+    if (-not (Test-Path $DbPath)) { return $result }
+    if (-not (Initialize-CursorAuthSqlite)) { return $result }
+    try {
+        $complete = $false
+        $mid = $null
+        $ok = [CursorAuthSqlite]::TryGetAuthState($DbPath, [ref]$complete, [ref]$mid)
+        return [PSCustomObject]@{ Ok = $ok; Complete = $complete; ServiceMachineId = $mid }
+    } catch {
+        return $result
+    }
+}
+
+# Lightweight (no SSH, no scp) machineid heal from the local SQLite copy. Reuses an
+# already-fetched Get-LocalCursorAuthState result when the caller has one (single session).
+function Heal-CursorProfileMachineIdFromLocal {
+    param(
+        [Parameter(Mandatory)][string]$DbPath,
+        [PSCustomObject]$KnownState
+    )
+    $state = $KnownState
+    if (-not $state) { $state = Get-LocalCursorAuthState -DbPath $DbPath }
+    if ($state -and $state.ServiceMachineId) {
+        Write-CursorProfileMachineId -MachineId $state.ServiceMachineId | Out-Null
+        return $true
+    }
+    return $false
+}
+
+# Server admin has not run cursor-auth-export yet (/etc/cursor-auth/golden/ absent) - a
+# fully expected day-1 state, but every connect was still paying a full SSH round trip
+# (plus 2 more inside Test-CursorAuthNeedsRefresh) to rediscover "still missing" each time.
+# Cache the negative result locally with a short TTL so repeat connects skip the probe
+# entirely; the TTL keeps it self-healing once the admin actually bootstraps golden auth.
+$script:CursorGoldenMissingTtlMin = 15
+function Test-CursorGoldenKnownMissing {
+    $gs = Get-LocalCursorGlobalStorage
+    $path = Join-Path $gs 'golden-missing-checked-at.txt'
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    try {
+        $ageMin = ((Get-Date) - (Get-Item -LiteralPath $path).LastWriteTime).TotalMinutes
+        return ($ageMin -ge 0 -and $ageMin -lt $script:CursorGoldenMissingTtlMin)
+    } catch { return $false }
+}
+function Set-CursorGoldenMissingCache {
+    $gs = Get-LocalCursorGlobalStorage
+    try {
+        if (-not (Test-Path -LiteralPath $gs)) { $null = New-Item -ItemType Directory -Force -Path $gs }
+        Set-Content -LiteralPath (Join-Path $gs 'golden-missing-checked-at.txt') -Value (Get-Date -Format 'o') -Encoding UTF8
+    } catch {}
+}
+function Clear-CursorGoldenMissingCache {
+    $gs = Get-LocalCursorGlobalStorage
+    Remove-Item -LiteralPath (Join-Path $gs 'golden-missing-checked-at.txt') -Force -ErrorAction SilentlyContinue
+}
+
+function Get-CursorGoldenExportedAtStamp {
+    param([Parameter(Mandatory)][string]$Alias)
+    if (-not $script:CursorGoldenStampCache) {
+        $script:CursorGoldenStampCache = @{ Stamp = ''; At = $null }
+    }
+    $cache = $script:CursorGoldenStampCache
+    if ($cache.At -and $cache.Stamp -and ((Get-Date) - $cache.At).TotalMinutes -lt 45) {
+        return [string]$cache.Stamp
+    }
+    if (-not (Get-Command SshX -ErrorAction SilentlyContinue)) { return '' }
+    $stamp = ((SshX "cat /etc/cursor-auth/golden/exported-at 2>/dev/null") -join '').Trim()
+    if ($stamp) {
+        $cache.Stamp = $stamp
+        $cache.At = Get-Date
+    }
+    return $stamp
+}
+
+# Stamp-first check: one SSH fetch of exported-at compared against the local
+# golden-synced-at.txt stamp. When it matches (and auth is already complete),
+# callers can skip the heavier Test-CursorAuthNeedsRefresh (machineid + exported-at
+# re-checks -> 2 more SSH round trips) since the stamp match already proves currency.
+function Test-CursorAuthStampCurrent {
+    param(
+        [Parameter(Mandatory)][string]$DbPath,
+        [Parameter(Mandatory)][string]$Alias
+    )
+    $gs = Split-Path -Parent $DbPath
+    $syncedAtPath = Join-Path $gs 'golden-synced-at.txt'
+    $syncedAt = if (Test-Path -LiteralPath $syncedAtPath) {
+        (Get-Content -LiteralPath $syncedAtPath -Raw -ErrorAction SilentlyContinue).Trim()
+    } else { '' }
+    # Local-first: if we synced recently, skip the SSH cat of exported-at (~0.5-3s).
+    if ($syncedAt -and (Test-Path -LiteralPath $syncedAtPath)) {
+        $ageMin = ((Get-Date) - (Get-Item -LiteralPath $syncedAtPath).LastWriteTime).TotalMinutes
+        if ($ageMin -ge 0 -and $ageMin -lt 60) {
+            return [PSCustomObject]@{
+                Current          = $true
+                SyncedAt         = $syncedAt
+                GoldenExportedAt = $syncedAt
+                Source           = 'local_ttl'
+            }
+        }
+    }
+    $goldenExportedAt = Get-CursorGoldenExportedAtStamp -Alias $Alias
+    return [PSCustomObject]@{
+        Current          = [bool]($goldenExportedAt -and ($syncedAt -eq $goldenExportedAt))
+        SyncedAt         = $syncedAt
+        GoldenExportedAt = $goldenExportedAt
+        Source           = 'ssh'
+    }
+}
+
 function Test-CursorAuthNeedsRefresh {
     param([string]$DbPath = '')
     $reasons = @()
@@ -571,7 +761,14 @@ function Test-CursorAuthNeedsRefresh {
         $reasons += 'serviceMachineId_check_failed'
     }
 
+    # Golden known-missing (cached, short TTL) - skip both remaining SSH round trips.
+    # With no golden bundle there is nothing to compare machineid/exported-at against,
+    # so these checks can never contribute a reason anyway; they were just re-proving
+    # "still missing" on every single connect at full SSH round-trip cost.
+    $goldenKnownMissing = Test-CursorGoldenKnownMissing
+
     # Electron machineid file must match golden (login breaks when it drifts).
+    if (-not $goldenKnownMissing) {
     try {
         $profileDir = Get-CursorRemoteProfileDir
         $fileMid = ''
@@ -590,8 +787,10 @@ function Test-CursorAuthNeedsRefresh {
     } catch {
         $reasons += 'machineid_file_check_failed'
     }
+    }
 
     # Golden token rotates ~6h; skip-forever when editor open must still detect stale stamp.
+    if (-not $goldenKnownMissing) {
     try {
         $gs = Split-Path -Parent $DbPath
         $syncedAtPath = Join-Path $gs 'golden-synced-at.txt'
@@ -608,6 +807,7 @@ function Test-CursorAuthNeedsRefresh {
         }
     } catch {
         $reasons += 'golden_stale_check_failed'
+    }
     }
 
     $personalMain = 0
@@ -672,27 +872,37 @@ function Sync-CursorGoldenAuth {
     $walBytes = if (Test-Path "$dbPath-wal") { (Get-Item "$dbPath-wal").Length } else { 0 }
 
     Write-AuthSyncLog "AUTH_SYNC: begin force=$Force db_bytes=$dbBytes wal_bytes=$walBytes alias=$Alias remote_path=$RemotePath" 'INFO'
+    if (-not $Force -and (Test-CursorGoldenKnownMissing)) {
+        Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=true reason=golden_missing_cached db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
+        $authTotalSw.Stop()
+        Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra 'path=skip_golden_missing_cached'
+        return $skipped
+    }
+    # AUTH_SYNC_BATCH_PROBE: one SSH for golden existence + exported-at (was 2 round-trips).
     $swProbe = [System.Diagnostics.Stopwatch]::StartNew()
-    $probe = (SshX "test -f /etc/cursor-auth/golden/auth.json && echo yes" 2>$null) -join ''
+    $probeRaw = (SshX @'
+if [ -f /etc/cursor-auth/golden/auth.json ]; then
+  echo YES
+  cat /etc/cursor-auth/golden/exported-at 2>/dev/null
+else
+  echo NO
+fi
+'@ 2>$null) -join "`n"
     $swProbe.Stop()
-    Write-AuthPerfLog -Mark 'auth_ssh_probe' -Ms $swProbe.ElapsedMilliseconds -Extra "golden_exists=$($probe -match 'yes')"
-    if ($probe -notmatch 'yes') {
+    $probeLines = @($probeRaw -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $probe = if ($probeLines.Count -gt 0 -and $probeLines[0] -eq 'YES') { 'yes' } else { 'no' }
+    $goldenExportedAt = if ($probe -eq 'yes' -and $probeLines.Count -gt 1) { $probeLines[1] } else { '' }
+    Write-AuthPerfLog -Mark 'auth_ssh_probe' -Ms $swProbe.ElapsedMilliseconds -Extra "golden_exists=$($probe -eq 'yes') batched=1"
+    if ($probe -ne 'yes') {
+        Set-CursorGoldenMissingCache
         Write-AuthSyncLog 'skip golden auth.json missing on server' 'DEBUG'
         Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=true reason=golden_missing db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
         $authTotalSw.Stop()
         Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra 'path=skip_golden_missing'
         return $skipped
     }
-    $swGoldenMeta = [System.Diagnostics.Stopwatch]::StartNew()
-    $goldenExportedAt = ((SshX "cat /etc/cursor-auth/golden/exported-at 2>/dev/null") -join '').Trim()
-    $swGoldenMeta.Stop()
-    Write-AuthPerfLog -Mark 'auth_ssh_golden_meta' -Ms $swGoldenMeta.ElapsedMilliseconds
-
-    Write-AuthSyncLog 'server cursor-auth-sync --force' 'TRACE'
-    $swServerSync = [System.Diagnostics.Stopwatch]::StartNew()
-    SshX "cursor-auth-sync --force 2>&1" 2>$null | Out-Null
-    $swServerSync.Stop()
-    Write-AuthPerfLog -Mark 'auth_ssh_server_sync' -Ms $swServerSync.ElapsedMilliseconds
+    Clear-CursorGoldenMissingCache
+    Write-AuthPerfLog -Mark 'auth_ssh_golden_meta' -Ms 0 -Extra 'batched_into_probe'
 
     Write-AuthSyncLog "local_gs=$localGs db=$dbPath db_exists=$(Test-Path $dbPath)" 'DEBUG'
 
@@ -700,23 +910,30 @@ function Sync-CursorGoldenAuth {
     # the time still goes stale once the server issues a new token, since OAuth refresh_token
     # rotation invalidates the old accessToken/refreshToken pair. Presence alone can't detect
     # that, so also require the local copy to be stamped with the CURRENT golden export.
+    # IMPORTANT: check already-complete BEFORE cursor-auth-sync --force (was wasting ~3-5s).
     $syncedAt = if (Test-Path $syncedAtPath) { (Get-Content $syncedAtPath -Raw -ErrorAction SilentlyContinue).Trim() } else { '' }
     $goldenCurrent = $goldenExportedAt -and ($syncedAt -eq $goldenExportedAt)
-    if (-not $Force -and $goldenCurrent -and (Test-LocalCursorAuthComplete -DbPath $dbPath)) {
-        # Heal Electron machineid even when SQLite auth is already complete.
-        $midHeal = $null
-        try {
-            $goldMidDir = Join-Path (Get-CursorAuthTempRoot) ("claude-golden-mid-" + [guid]::NewGuid().ToString('N'))
-            New-Item -ItemType Directory -Force -Path $goldMidDir | Out-Null
-            $goldMidFile = Join-Path $goldMidDir 'machine-id.txt'
-            scp -o BatchMode=yes -o ConnectTimeout=10 -q "${Alias}:/etc/cursor-auth/golden/machine-id.txt" $goldMidFile 2>$null
-            if (($LASTEXITCODE -eq 0) -and (Test-Path -LiteralPath $goldMidFile)) {
-                $midHeal = (Get-Content -LiteralPath $goldMidFile -Raw -ErrorAction SilentlyContinue).Trim()
-            }
-            Remove-CursorAuthTempDir -Path $goldMidDir
-        } catch { }
-        if ($midHeal) { Write-CursorProfileMachineId -MachineId $midHeal | Out-Null }
-        Write-AuthSyncLog "skip already complete golden_exported_at=$goldenExportedAt (machineid healed)" 'DEBUG'
+    # Single OpenDb session gives us both the completeness gate and serviceMachineId
+    # in one read (Get-LocalCursorAuthState) instead of two separate SQLite opens.
+    $localAuthState = Get-LocalCursorAuthState -DbPath $dbPath
+    if (-not $Force -and $goldenCurrent -and $localAuthState.Complete) {
+        # Heal Electron machineid from the local SQLite value already fetched above -
+        # only fall back to an scp of golden machine-id.txt when the local read is empty.
+        $midHealed = Heal-CursorProfileMachineIdFromLocal -DbPath $dbPath -KnownState $localAuthState
+        if (-not $midHealed) {
+            try {
+                $goldMidDir = Join-Path (Get-CursorAuthTempRoot) ("claude-golden-mid-" + [guid]::NewGuid().ToString('N'))
+                New-Item -ItemType Directory -Force -Path $goldMidDir | Out-Null
+                $goldMidFile = Join-Path $goldMidDir 'machine-id.txt'
+                scp -o BatchMode=yes -o ConnectTimeout=10 -q "${Alias}:/etc/cursor-auth/golden/machine-id.txt" $goldMidFile 2>$null
+                if (($LASTEXITCODE -eq 0) -and (Test-Path -LiteralPath $goldMidFile)) {
+                    $fallbackMid = (Get-Content -LiteralPath $goldMidFile -Raw -ErrorAction SilentlyContinue).Trim()
+                    if ($fallbackMid) { Write-CursorProfileMachineId -MachineId $fallbackMid | Out-Null; $midHealed = $true }
+                }
+                Remove-CursorAuthTempDir -Path $goldMidDir
+            } catch { }
+        }
+        Write-AuthSyncLog "skip already complete golden_exported_at=$goldenExportedAt (machineid healed local=$midHealed)" 'DEBUG'
         Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=true skipped=true already_complete=true db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
         $authTotalSw.Stop()
         Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra 'path=skip_already_complete'
@@ -726,6 +943,12 @@ function Sync-CursorGoldenAuth {
             AlreadyComplete = $true
         }
     }
+
+    Write-AuthSyncLog 'server cursor-auth-sync --force' 'TRACE'
+    $swServerSync = [System.Diagnostics.Stopwatch]::StartNew()
+    SshX "cursor-auth-sync --force 2>&1" 2>$null | Out-Null
+    $swServerSync.Stop()
+    Write-AuthPerfLog -Mark 'auth_ssh_server_sync' -Ms $swServerSync.ElapsedMilliseconds
 
     $swGoldenScp = [System.Diagnostics.Stopwatch]::StartNew()
     $authValues = Get-RemoteCursorAuthFromGolden -Alias $Alias

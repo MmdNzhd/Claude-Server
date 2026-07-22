@@ -26,21 +26,28 @@ $InstallScriptRel = 'scripts\server\commands\install-client-bundle.sh'
 
 $WinBundleFiles = @(
     'connect.bat',
+    'connect-boot.ps1',
+    'connect-heal.ps1',
+    'connect-bootstrap.ps1',
     'connect-version.txt',
     'connect.ps1',
     'connect-rider.bat',
     'connect-update.ps1',
+    'cursor-proxy-sidecar.ps1',
     'connect-ui.ps1',
     'connect-diagnostic.ps1',
     'editor-launch.ps1',
     'git-mode.ps1',
-    'cursor-auth-laptop.ps1'
+    'cursor-auth-laptop.ps1',
+    'windows-mcp-laptop.ps1',
+    'Claude-Connect.exe'
 )
 
 $MacBundleFiles = @(
     'connect.sh',
     'connect-update.sh',
     'connect-version.txt',
+    'cursor-proxy-sidecar.sh',
     'git-mode.sh',
     'connect-ui.sh',
     'editor-launch.sh',
@@ -128,8 +135,18 @@ function Build-AutoUpdateBundleStage {
 
     foreach ($name in $WinBundleFiles) {
         $src = Join-Path $ClientRoot "windows\$name"
-        if (-not (Test-Path $src)) { throw "Missing published file: $src" }
+        if (-not (Test-Path $src)) {
+            if ($name -eq 'Claude-Connect.exe') {
+                Write-DeployWarn "Missing $name in publish windows\ - bat users will not auto-receive EXE this deploy"
+                continue
+            }
+            throw "Missing published file: $src"
+        }
         Copy-PublishedFile -Src $src -Dst (Join-Path $StageDir $name)
+    }
+    $policySrc = Join-Path $ProjectRoot 'scripts\server\client-update-policy.json'
+    if (Test-Path -LiteralPath $policySrc) {
+        Copy-PublishedFile -Src $policySrc -Dst (Join-Path $StageDir 'client-update-policy.json')
     }
 
     foreach ($name in $MacBundleFiles) {
@@ -147,6 +164,9 @@ function Build-AutoUpdateBundleStage {
     $manifestLines = New-Object System.Collections.Generic.List[string]
     foreach ($name in $WinBundleFiles) {
         if (Test-Path (Join-Path $StageDir $name)) { $manifestLines.Add($name) | Out-Null }
+    }
+    if (Test-Path (Join-Path $StageDir 'client-update-policy.json')) {
+        $manifestLines.Add('client-update-policy.json') | Out-Null
     }
     foreach ($name in $MacBundleFiles) {
         if (Test-Path (Join-Path $StageDir "mac\$name")) { $manifestLines.Add("mac/$name") | Out-Null }
@@ -182,6 +202,55 @@ function Test-RemoteVersionMatches {
     if (-not $ExpectedVersion) { return $true }
     return ($RemoteVer -eq $ExpectedVersion)
 }
+
+function Invoke-SshTimed {
+    param([string]$Target, [string]$RemoteCmd, [int]$TimeoutSec = 60)
+    $out = [System.IO.Path]::GetTempFileName()
+    $err = "$out.err"
+    $p = Start-Process -FilePath ssh -ArgumentList @(
+        '-o','BatchMode=yes','-o','ConnectTimeout=15','-o','ConnectionAttempts=1',
+        '-o','ControlMaster=no','-o','IdentitiesOnly=yes','-o','IdentityAgent=none',
+        '-o','ServerAliveInterval=5','-o','ServerAliveCountMax=6',
+        $Target, $RemoteCmd
+    ) -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+    if (-not $p.WaitForExit([Math]::Max(1000, $TimeoutSec * 1000))) {
+        try { $p.Kill() } catch {}
+        try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+        return @{ Code = 124; Out = ''; Err = 'TIMEOUT' }
+    }
+    try { $p.Refresh() } catch {}
+    $o = ((Get-Content $out -Raw -ErrorAction SilentlyContinue) + '')
+    $e = ((Get-Content $err -Raw -ErrorAction SilentlyContinue) + '')
+    # PS 5.1 quirk: ExitCode on Start-Process -PassThru can be $null even when HasExited
+    $code = 0
+    try {
+        if ($null -ne $p.ExitCode) { $code = [int]$p.ExitCode }
+        elseif ($e.Trim().Length -gt 0 -and $e -notmatch 'Warning:') { $code = 1 }
+    } catch { $code = 1 }
+    return @{ Code = $code; Out = $o; Err = $e }
+}
+
+function Invoke-ScpTimed {
+    param([int]$TimeoutSec = 120, [Parameter(Mandatory)][string[]]$ArgumentList)
+    $out = [System.IO.Path]::GetTempFileName()
+    $err = "$out.err"
+    $p = Start-Process -FilePath scp -ArgumentList $ArgumentList -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+    if (-not $p.WaitForExit([Math]::Max(1000, $TimeoutSec * 1000))) {
+        try { $p.Kill() } catch {}
+        try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+        return @{ Code = 124; Out = ''; Err = 'TIMEOUT' }
+    }
+    try { $p.Refresh() } catch {}
+    $o = ((Get-Content $out -Raw -ErrorAction SilentlyContinue) + '')
+    $e = ((Get-Content $err -Raw -ErrorAction SilentlyContinue) + '')
+    $code = 0
+    try {
+        if ($null -ne $p.ExitCode) { $code = [int]$p.ExitCode }
+        elseif ($e.Trim().Length -gt 0 -and $e -notmatch 'Warning:') { $code = 1 }
+    } catch { $code = 1 }
+    return @{ Code = $code; Out = $o; Err = $e }
+}
+
 function Invoke-RemoteBundleInstall {
     param(
         [Parameter(Mandatory)][string]$ServerTarget,
@@ -193,40 +262,29 @@ function Invoke-RemoteBundleInstall {
     )
 
     Write-DeployStep "$Label : uploading bundle to $ServerTarget..."
-    & ssh -o BatchMode=yes -o ConnectTimeout=15 -o ControlMaster=no -o IdentitiesOnly=yes -o IdentityAgent=none $ServerTarget "mkdir -p ~/$RemoteDeployDir"
-    if ($LASTEXITCODE -ne 0) { throw "SSH mkdir failed for $Label ($ServerTarget)" }
+    $mk = Invoke-SshTimed -Target $ServerTarget -RemoteCmd "mkdir -p ~/$RemoteDeployDir" -TimeoutSec 45
+    if ([int]$mk.Code -ne 0) { throw "SSH mkdir failed for $Label ($ServerTarget) exit=$($mk.Code) err=$($mk.Err)" }
 
-    & scp -o BatchMode=yes -o ConnectTimeout=30 -o ControlMaster=no -o IdentitiesOnly=yes -o IdentityAgent=none -q $BundleZip "${ServerTarget}:~/$RemoteDeployDir/bundle.zip"
-    if ($LASTEXITCODE -ne 0) { throw "SCP bundle failed for $Label ($ServerTarget)" }
+    $scpBundle = Invoke-ScpTimed -TimeoutSec 180 -ArgumentList @(
+        '-o','BatchMode=yes','-o','ConnectTimeout=20','-o','ControlMaster=no','-o','IdentitiesOnly=yes','-o','IdentityAgent=none',
+        '-o','ServerAliveInterval=5','-o','ServerAliveCountMax=6',
+        '-q', $BundleZip, "${ServerTarget}:~/$RemoteDeployDir/bundle.zip"
+    )
+    if ([int]$scpBundle.Code -ne 0) { throw "SCP bundle failed for $Label ($ServerTarget) exit=$($scpBundle.Code) err=$($scpBundle.Err)" }
 
     $instTxt = [IO.File]::ReadAllText($InstallScript).Replace("`r`n", "`n").Replace("`r", "`n")
     $instTmp = Join-Path $env:TEMP ("install-client-bundle-{0}.sh" -f $Label)
     [IO.File]::WriteAllBytes($instTmp, [Text.Encoding]::UTF8.GetBytes($instTxt))
-    & scp -o BatchMode=yes -o ConnectTimeout=30 -o ControlMaster=no -o IdentitiesOnly=yes -o IdentityAgent=none -q $instTmp "${ServerTarget}:~/$RemoteDeployDir/install-client-bundle.sh"
-    if ($LASTEXITCODE -ne 0) { throw "SCP install script failed for $Label ($ServerTarget)" }
+    $scpInst = Invoke-ScpTimed -TimeoutSec 60 -ArgumentList @(
+        '-o','BatchMode=yes','-o','ConnectTimeout=20','-o','ControlMaster=no','-o','IdentitiesOnly=yes','-o','IdentityAgent=none',
+        '-o','ServerAliveInterval=5','-o','ServerAliveCountMax=6',
+        '-q', $instTmp, "${ServerTarget}:~/$RemoteDeployDir/install-client-bundle.sh"
+    )
+    if ([int]$scpInst.Code -ne 0) { throw "SCP install script failed for $Label ($ServerTarget) exit=$($scpInst.Code) err=$($scpInst.Err)" }
 
     Write-DeployStep "$Label : installing (non-interactive, timed; never prompts)..."
     if (-not $SudoPassword) {
         throw "$Label : no stored sudo password. Put it in publish/*-deploy.local.ps1. Interactive sudo is disabled."
-    }
-
-    function Invoke-SshTimed([string]$Target, [string]$RemoteCmd, [int]$TimeoutSec) {
-        $out = [System.IO.Path]::GetTempFileName()
-        $err = "$out.err"
-        $p = Start-Process -FilePath ssh -ArgumentList @(
-            '-o','BatchMode=yes','-o','ConnectTimeout=15','-o','ControlMaster=no','-o','IdentitiesOnly=yes','-o','IdentityAgent=none',
-            '-o','ServerAliveInterval=5','-o','ServerAliveCountMax=12',
-            $Target, $RemoteCmd
-        ) -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
-        if (-not $p.WaitForExit($TimeoutSec * 1000)) {
-            try { $p.Kill() } catch {}
-            return @{ Code = 124; Out = ''; Err = 'TIMEOUT' }
-        }
-        return @{
-            Code = $p.ExitCode
-            Out = ((Get-Content $out -Raw -ErrorAction SilentlyContinue) + '')
-            Err = ((Get-Content $err -Raw -ErrorAction SilentlyContinue) + '')
-        }
     }
 
     $pwB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($SudoPassword))
@@ -253,8 +311,12 @@ function Invoke-RemoteBundleInstall {
     )
     $wrapPath = Join-Path $env:TEMP ("remote-install-{0}.sh" -f $Label)
     [IO.File]::WriteAllBytes($wrapPath, [Text.Encoding]::UTF8.GetBytes((($lines -join "`n") + "`n")))
-    & scp -o BatchMode=yes -o ConnectTimeout=30 -o ControlMaster=no -o IdentitiesOnly=yes -o IdentityAgent=none -q $wrapPath "${ServerTarget}:/tmp/remote-install-$Label.sh"
-    if ($LASTEXITCODE -ne 0) { throw "SCP remote install wrap failed for $Label" }
+    $scpWrap = Invoke-ScpTimed -TimeoutSec 60 -ArgumentList @(
+        '-o','BatchMode=yes','-o','ConnectTimeout=20','-o','ControlMaster=no','-o','IdentitiesOnly=yes','-o','IdentityAgent=none',
+        '-o','ServerAliveInterval=5','-o','ServerAliveCountMax=6',
+        '-q', $wrapPath, "${ServerTarget}:/tmp/remote-install-$Label.sh"
+    )
+    if ([int]$scpWrap.Code -ne 0) { throw "SCP remote install wrap failed for $Label exit=$($scpWrap.Code) err=$($scpWrap.Err)" }
 
     $res = Invoke-SshTimed -Target $ServerTarget -RemoteCmd "bash /tmp/remote-install-$Label.sh" -TimeoutSec 300
     $sudoExit = [int]$res.Code

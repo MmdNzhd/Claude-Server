@@ -2,7 +2,8 @@
 # claude-self-heal — idempotent per-user repair for known connect/mount/git footguns.
 # Safe to run on login, cron, or manually: claude-self-heal [--quiet]
 # Covers: stale/zombie mounts, empty ACTIVE_MOUNT, orphan sshfs, stuck connect log bufs,
-# CRLF bins, Cursor git-off, tunnel-up remount of active project.
+# CRLF bins, Cursor git-off, tunnel-up remount of active project,
+# unowned/foreign TUNNEL_PORT (hostkey/auth) without killing peer tunnels.
 
 set -u
 
@@ -22,18 +23,98 @@ LAST_ACTIVE="$HOME/.cache/claude-last-active-mount"
 TUNNEL_PORT=""
 GIT_MODE=""
 ACTIVE_MOUNT=""
+LAPTOP_USER=""
+LAPTOP_HOSTKEY_FP=""
+LAPTOP_OS=""
 
 if [ -f "$CONNECT_CONF" ]; then
     while IFS='=' read -r k v || [ -n "$k" ]; do
         v="${v#\"}"; v="${v%\"}"
         v="$(printf '%s' "$v" | tr -d '\r')"
         case "$k" in
-            TUNNEL_PORT) TUNNEL_PORT="$v" ;;
+            TUNNEL_PORT|PORT) TUNNEL_PORT="$v" ;;
             GIT_MODE|git_mode) GIT_MODE="$v" ;;
             ACTIVE_MOUNT|active_mount) ACTIVE_MOUNT="$v" ;;
+            LAPTOP_USER) LAPTOP_USER="$v" ;;
+            LAPTOP_HOSTKEY_FP) LAPTOP_HOSTKEY_FP="$v" ;;
+            LAPTOP_OS) LAPTOP_OS="$v" ;;
         esac
     done < "$CONNECT_CONF"
 fi
+
+
+_clear_unowned_tunnel_port() {
+    local reason="${1:-unowned}" old="${TUNNEL_PORT:-}"
+    [ -n "$old" ] || return 0
+    # Never fuser-kill — may be another laptop's live reverse tunnel.
+    if [ -f "$CONNECT_CONF" ]; then
+        grep -vE '^(TUNNEL_PORT|PORT|TUNNEL_SLOT)=' "$CONNECT_CONF" > "$CONNECT_CONF.tmp" 2>/dev/null \
+            && mv "$CONNECT_CONF.tmp" "$CONNECT_CONF" \
+            || true
+        chmod 600 "$CONNECT_CONF" 2>/dev/null || true
+    fi
+    TUNNEL_PORT=""
+    _log "cleared unowned TUNNEL_PORT=$old ($reason) — connect will reacquire"
+}
+
+_tunnel_hostkey_fp() {
+    local port="${1:-$TUNNEL_PORT}"
+    [ -n "$port" ] || return 1
+    timeout 4 ssh-keyscan -p "$port" -T 3 -t ed25519,rsa,ecdsa 127.0.0.1 2>/dev/null \
+        | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' | head -1
+}
+
+_tunnel_auth_owned() {
+    local port="${1:-$TUNNEL_PORT}" lu="${LAPTOP_USER:-}" remote_cmd="true" os_lc
+    [ -n "$port" ] && [ -n "$lu" ] || return 1
+    [ -f "$HOME/.ssh/claude_laptop" ] || return 1
+    os_lc="$(printf '%s' "${LAPTOP_OS:-}" | tr '[:upper:]' '[:lower:]' | tr -d '\r\n ')"
+    case "$os_lc" in
+        win|windows) remote_cmd="cmd /c exit 0" ;;
+        mac|darwin) remote_cmd="true" ;;
+        *)
+            # Prefer Windows probe when unknown — Smart fleet is mostly Windows; mac still accepts true.
+            remote_cmd="cmd /c exit 0"
+            ;;
+    esac
+    local kh="$HOME/.ssh/known_hosts_claude_selfheal"
+    touch "$kh" 2>/dev/null || true
+    chmod 600 "$kh" 2>/dev/null || true
+    timeout 6 ssh -o BatchMode=yes -o ConnectTimeout=3 -o IdentitiesOnly=yes \
+        -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$kh" \
+        -i "$HOME/.ssh/claude_laptop" -p "$port" "${lu}@127.0.0.1" $remote_cmd >/dev/null 2>&1
+}
+
+# Self-heal: poisoned TUNNEL_PORT pointing at another laptop (same Windows banner).
+_heal_tunnel_ownership() {
+    [ -n "${TUNNEL_PORT:-}" ] || return 0
+    if ! timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/${TUNNEL_PORT}" 2>/dev/null; then
+        return 0
+    fi
+    local hostkey_matched=0
+    if [ -n "${LAPTOP_HOSTKEY_FP:-}" ]; then
+        local fp
+        fp="$(_tunnel_hostkey_fp "$TUNNEL_PORT" || true)"
+        if [ -n "$fp" ] && [ "$fp" != "$LAPTOP_HOSTKEY_FP" ]; then
+            _clear_unowned_tunnel_port "hostkey_mismatch want=$LAPTOP_HOSTKEY_FP got=$fp"
+            return 0
+        fi
+        if [ -n "$fp" ] && [ "$fp" = "$LAPTOP_HOSTKEY_FP" ]; then
+            hostkey_matched=1
+        fi
+    fi
+    # Auth probe distinguishes peers when hostkey pin is missing. If hostkey already
+    # matched, never clear on auth probe failure (Windows `true` vs cmd footguns).
+    if [ "$hostkey_matched" -eq 1 ]; then
+        return 0
+    fi
+    if [ -n "${LAPTOP_USER:-}" ] && [ -f "$HOME/.ssh/claude_laptop" ]; then
+        if ! _tunnel_auth_owned "$TUNNEL_PORT"; then
+            _clear_unowned_tunnel_port "auth_denied user=$LAPTOP_USER"
+            return 0
+        fi
+    fi
+}
 
 _tunnel_up() {
     [ -n "$TUNNEL_PORT" ] || return 1
@@ -148,13 +229,20 @@ _heal_connect_conf() {
 _heal_laptop_exec_crlf() {
     local sys="/usr/local/bin/laptop-exec"
     local dst="$HOME/.local/bin/laptop-exec"
+    local tmp
     mkdir -p "$HOME/.local/bin" 2>/dev/null || true
     if [ -x "$sys" ]; then
         if [ ! -f "$dst" ] || [ "$sys" -nt "$dst" ] || grep -q $'\r' "$dst" 2>/dev/null; then
-            cp -f "$sys" "$dst" 2>/dev/null || true
-            chmod 755 "$dst" 2>/dev/null || true
-            sed -i 's/\r$//' "$dst" 2>/dev/null || true
-            _log "refreshed laptop-exec (CRLF-safe)"
+            # dst may be live-executed right now (laptop-exec is invoked constantly) -
+            # build the new copy in a temp file and mv it into place atomically so a
+            # concurrent exec never reads a torn mix of old and new bytes.
+            tmp="$dst.new.$$"
+            if cp -f "$sys" "$tmp" 2>/dev/null; then
+                chmod 755 "$tmp" 2>/dev/null || true
+                sed -i 's/\r$//' "$tmp" 2>/dev/null || true
+                mv -f "$tmp" "$dst" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+                _log "refreshed laptop-exec (CRLF-safe)"
+            fi
         else
             sed -i 's/\r$//' "$dst" 2>/dev/null || true
         fi
@@ -164,16 +252,20 @@ _heal_laptop_exec_crlf() {
 }
 
 _heal_missing_user_bins() {
-    local name sys dst
+    local name sys dst tmp
     mkdir -p "$HOME/.local/bin" 2>/dev/null || true
     for name in laptop-exec laptop-exec-setup claude-self-heal claude-automount claude-mount claude-watchdog; do
         sys="/usr/local/bin/$name"
         [ -x "$sys" ] || continue
         dst="$HOME/.local/bin/$name"
         if [ ! -f "$dst" ] || [ "$sys" -nt "$dst" ] || grep -q $'\r' "$dst" 2>/dev/null; then
-            cp -f "$sys" "$dst" 2>/dev/null || true
-            chmod 755 "$dst" 2>/dev/null || true
-            sed -i 's/\r$//' "$dst" 2>/dev/null || true
+            # These binaries can be live-executed concurrently (claude-watchdog polls
+            # claude-mount every 30s) - build in a temp file, mv atomically into place.
+            tmp="$dst.new.$$"
+            cp -f "$sys" "$tmp" 2>/dev/null || continue
+            chmod 755 "$tmp" 2>/dev/null || true
+            sed -i 's/\r$//' "$tmp" 2>/dev/null || true
+            mv -f "$tmp" "$dst" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
             _log "refreshed $name"
         fi
     done
@@ -405,6 +497,7 @@ _heal_bashrc_timeout() {
 
 # Run
 _heal_connect_conf
+_heal_tunnel_ownership
 _heal_laptop_exec_crlf
 _heal_missing_user_bins
 _heal_bin_crlf_all

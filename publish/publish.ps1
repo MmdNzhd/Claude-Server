@@ -1,10 +1,12 @@
 #Requires -Version 5.1
 # publish.ps1 - Client-only distributable packages (windows/ + mac/ + README).
 # Run: double-click publish.bat  (or: powershell -File publish\publish.ps1)
-# Server scripts and deploy tools stay in the repo Ã¢â‚¬â€ NOT shipped in ZIPs.
+# Output is ALWAYS Desktop\claude-publish\claude-code-client (and claude-code-sepidz) —
+# replace-in-place; no dated folder per run. Server scripts stay in the repo Ã¢â‚¬â€ NOT shipped in ZIPs.
 
 param(
     [switch]$NoZip,
+    [switch]$NoExe,
     [switch]$SkipVersionBump,
     [switch]$SkipServerDeploy,
     [switch]$SmartOnly,
@@ -24,9 +26,10 @@ if (-not $SkipVersionBump) {
     $ConnectVersion = Get-RepoConnectVersion -ProjectRoot $ProjectRoot
     Write-Host "  Client version: v$ConnectVersion (no bump)" -ForegroundColor DarkGray
 }
-$Version     = Get-Date -Format 'yyyyMMdd'
-$PackageName = "claude-code-client-$Version"
-$OutBase     = Join-Path $env:USERPROFILE "Desktop\claude-publish"
+# Stable output dirs: always replace the same folder (no dated copies that go stale).
+$Version     = Get-Date -Format 'yyyyMMdd'   # retained for log/display only
+$PackageName = 'claude-code-client'
+$OutBase     = Join-Path $env:USERPROFILE 'Desktop\claude-publish'
 $OutDir      = Join-Path $OutBase $PackageName
 
 $SmartIp = '192.168.210.240'
@@ -34,13 +37,18 @@ $SepidIp = '192.168.250.70'
 
 $ClientFiles = @(
     @{ Src = "scripts\client\windows\connect.bat";       Dst = "windows\connect.bat";       PatchIp = $false }
+    @{ Src = "scripts\client\windows\connect-boot.ps1";  Dst = "windows\connect-boot.ps1";  PatchIp = $false }
+    @{ Src = "scripts\client\windows\connect-heal.ps1";  Dst = "windows\connect-heal.ps1";  PatchIp = $false }
+    @{ Src = "scripts\client\windows\connect-bootstrap.ps1"; Dst = "windows\connect-bootstrap.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\windows\connect-version.txt"; Dst = "windows\connect-version.txt"; PatchIp = $false }
     @{ Src = "scripts\client\windows\connect-update.ps1"; Dst = "windows\connect-update.ps1"; PatchIp = $false }
+    @{ Src = "scripts\client\windows\cursor-proxy-sidecar.ps1"; Dst = "windows\cursor-proxy-sidecar.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\windows\connect.ps1";       Dst = "windows\connect.ps1";       PatchIp = $true  }
     @{ Src = "scripts\client\windows\connect-rider.bat"; Dst = "windows\connect-rider.bat"; PatchIp = $false }
     @{ Src = "scripts\client\editor-launch.ps1";         Dst = "windows\editor-launch.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\git-mode.ps1";              Dst = "windows\git-mode.ps1";      PatchIp = $false }
     @{ Src = "scripts\client\cursor-auth-laptop.ps1";    Dst = "windows\cursor-auth-laptop.ps1"; PatchIp = $false }
+    @{ Src = "scripts\client\windows\windows-mcp-laptop.ps1"; Dst = "windows\windows-mcp-laptop.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\connect-ui.ps1";            Dst = "windows\connect-ui.ps1";            PatchIp = $false }
     # connect-diagnostic.ps1: dot-sourced by connect.ps1; verdict lines go to server ~/.claude/logs/
     @{ Src = "scripts\client\connect-diagnostic.ps1";    Dst = "windows\connect-diagnostic.ps1";  PatchIp = $false }
@@ -50,6 +58,7 @@ $ClientFiles = @(
     @{ Src = "scripts\client\git-mode.sh";               Dst = "mac\git-mode.sh";           PatchIp = $false }
     @{ Src = "scripts\client\connect-ui.sh";             Dst = "mac\connect-ui.sh";         PatchIp = $false }
     @{ Src = "scripts\client\editor-launch.sh";          Dst = "mac\editor-launch.sh";      PatchIp = $false }
+    @{ Src = "scripts\client\mac\cursor-proxy-sidecar.sh"; Dst = "mac\cursor-proxy-sidecar.sh"; PatchIp = $false }
     @{ Src = "scripts\server\claude-mount.sh";           Dst = "mac\claude-mount.sh";       PatchIp = $false }
 
     @{ Src = "scripts\server\claude-self-heal.sh";       Dst = "mac\claude-self-heal.sh";   PatchIp = $false }
@@ -69,7 +78,7 @@ $DesignerFiles = @(
     @{ Src = "scripts\client\git-mode.sh";                Dst = "mac\git-mode.sh";    PatchIp = $false }
 )
 
-$SepidName = "claude-code-sepidz-$Version"
+$SepidName = 'claude-code-sepidz'
 $SepidDir  = Join-Path $OutBase $SepidName
 
 function Write-Step([string]$Msg) { Write-Host "  $Msg" -ForegroundColor Cyan }
@@ -181,6 +190,44 @@ function Remove-PublishLogArtifacts {
         }
 }
 
+function Clear-PublishedWindowsToExeOnly {
+    param(
+        [Parameter(Mandatory)][string]$ClientRoot,
+        [string]$ExePath = ''
+    )
+    $win = Join-Path $ClientRoot 'windows'
+    if (-not (Test-Path -LiteralPath $win)) { return }
+    if (-not $ExePath -or -not (Test-Path -LiteralPath $ExePath)) {
+        $ExePath = Join-Path $win 'Claude-Connect.exe'
+    }
+    if (-not (Test-Path -LiteralPath $ExePath)) {
+        Write-Host '  warn: skip windows EXE-only strip (Claude-Connect.exe missing)' -ForegroundColor DarkYellow
+        return
+    }
+    Get-ChildItem -LiteralPath $win -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.Name -in @('Claude-Connect.exe', 'READ-ME.txt')) { return }
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Copy-Item -LiteralPath $ExePath -Destination (Join-Path $win 'Claude-Connect.exe') -Force
+    $readme = @"
+Claude Connect - do not run from this folder
+===========================================
+This publish folder is not for end users.
+
+Give users:
+  Desktop\Claude-Connect.exe
+
+Live install after first run:
+  Desktop\Claude-Connect\
+"@
+    [IO.File]::WriteAllText(
+        (Join-Path $win 'READ-ME.txt'),
+        ($readme -replace "`n", "`r`n"),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Write-Ok 'windows\ reduced to Claude-Connect.exe only (ZIP/deploy already used full tree)'
+}
+
 function New-ClientZipFromDirectory {
     param(
         [Parameter(Mandatory)][string]$SourceDir,
@@ -240,6 +287,35 @@ Remove-PublishLogArtifacts -Root $OutDir
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+# Build EXE BEFORE server deploy so auto-update bundle includes it for existing bat users.
+if (-not $NoExe) {
+    Write-Step "Creating Claude-Connect.exe (single-file SFX)..."
+    $exePath = Join-Path $OutBase 'Claude-Connect.exe'
+    $exeScript = Join-Path $PSScriptRoot 'build-windows-exe.ps1'
+    if (-not (Test-Path -LiteralPath $exeScript)) {
+        Write-Err "build-windows-exe.ps1 missing next to publish.ps1"
+    }
+    & $exeScript `
+        -WindowsDir (Join-Path $OutDir 'windows') `
+        -OutExe $exePath `
+        -FriendlyName 'Claude Connect'
+    if (-not (Test-Path -LiteralPath $exePath)) {
+        Write-Err "Windows EXE build failed (use -NoExe to skip)"
+    }
+    # Ship inside windows\ so server bundle + bat auto-update drops EXE beside connect.bat
+    Copy-Item -LiteralPath $exePath -Destination (Join-Path $OutDir 'windows\Claude-Connect.exe') -Force
+    Write-Ok ("claude-publish\Claude-Connect.exe + windows\Claude-Connect.exe ({0:N0} bytes)" -f (Get-Item -LiteralPath $exePath).Length)
+    try {
+        $deskExe = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect.exe'
+        $deskSetup = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect-Setup.exe'
+        Copy-Item -LiteralPath $exePath -Destination $deskExe -Force
+        Copy-Item -LiteralPath $exePath -Destination $deskSetup -Force
+        Write-Ok 'Desktop\Claude-Connect.exe (+ Setup copy)'
+    } catch {
+        Write-Host ("  warn: could not copy EXE to Desktop: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow
+    }
+}
+
 if (-not $NoZip) {
     Write-Step "Creating main ZIP..."
     $ZipPath = Join-Path $OutBase "$PackageName.zip"
@@ -253,7 +329,12 @@ if (-not $NoZip) {
         & (Join-Path $PSScriptRoot 'deploy-smart-bundle.ps1') -ProjectRoot $ProjectRoot -SmartClientRoot $OutDir
         if ($LASTEXITCODE -ne 0) { Write-Err "Smart server deploy failed (use -SkipServerDeploy to skip)" }
     }
+
+    if (-not $NoExe) {
+        Clear-PublishedWindowsToExeOnly -ClientRoot $OutDir -ExePath (Join-Path $OutBase 'Claude-Connect.exe')
+    }
 }
+
 
 }
 
@@ -306,6 +387,22 @@ if (Test-Path $designerReadme) {
 Assert-ClientPackage -Root $SepidDir -Label 'Sepidz package'
 Remove-PublishLogArtifacts -Root $SepidDir
 
+if (-not $NoExe) {
+    Write-Step "Creating Sepidz Claude-Connect.exe..."
+    $sepidWin = Join-Path $SepidDir 'claude-code\windows'
+    $sepidExe = Join-Path $OutBase 'Claude-Connect-Sepidz.exe'
+    & (Join-Path $PSScriptRoot 'build-windows-exe.ps1') `
+        -WindowsDir $sepidWin `
+        -OutExe $sepidExe `
+        -FriendlyName 'Claude Connect (Sepidz)'
+    if (Test-Path -LiteralPath $sepidExe) {
+        Copy-Item -LiteralPath $sepidExe -Destination (Join-Path $sepidWin 'Claude-Connect.exe') -Force
+        Write-Ok 'claude-publish\Claude-Connect-Sepidz.exe (+ in sepidz windows\)'
+    } else {
+        Write-Host '  warn: Sepidz EXE build failed - bundle without EXE' -ForegroundColor DarkYellow
+    }
+}
+
 if (-not $NoZip) {
     Write-Step "Creating Sepidz ZIP..."
     $SepidZip = Join-Path $OutBase "$SepidName.zip"
@@ -331,9 +428,27 @@ Write-Host "Done." -ForegroundColor Green
 if (-not $SepidzOnly) {
     Write-Host "  Main (Smart IP)  : Desktop\claude-publish\$PackageName" -ForegroundColor Green
     if (-not $NoZip) { Write-Host "  Main ZIP         : Desktop\claude-publish\$PackageName.zip" -ForegroundColor Green }
+    if (-not $NoExe) { Write-Host "  Main EXE         : Desktop\claude-publish\Claude-Connect.exe" -ForegroundColor Green }
 }
 if (-not $SmartOnly) {
     Write-Host "  Sepidz (IP patch): Desktop\claude-publish\$SepidName" -ForegroundColor Green
     if (-not $NoZip) { Write-Host "  Sepidz ZIP       : Desktop\claude-publish\$SepidName.zip" -ForegroundColor Green }
 }
+
+# Remove legacy dated publish folders/zips so only the stable replace-in-place dirs remain.
+try {
+    $patterns = @()
+    if (-not $SepidzOnly) { $patterns += '^claude-code-client-\d{8}(\.zip)?$' }
+    if (-not $SmartOnly) { $patterns += '^claude-code-sepidz-\d{8}(\.zip)?$' }
+    if ($patterns.Count -gt 0) {
+        $re = ($patterns -join '|')
+        Get-ChildItem -LiteralPath $OutBase -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match $re
+        } | ForEach-Object {
+            Write-Host "  Removing stale $($_.Name)..." -ForegroundColor DarkYellow
+            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+} catch {}
+
 Write-Host ""

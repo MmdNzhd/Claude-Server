@@ -156,3 +156,13 @@ if [ -x "$WATCHDOG" ]; then
 fi
 
 
+
+# windows-mcp-forward (optional; Windows hybrid)
+# Quietly ensure localhost forward when this user has windows-mcp env + tunnel.
+if [ -f "$HOME/.config/windows-mcp/env" ]; then
+    if [ -x "$HOME/.local/bin/windows-mcp-forward" ]; then
+        "$HOME/.local/bin/windows-mcp-forward" start >/dev/null 2>&1 || true
+    elif [ -x /usr/local/bin/windows-mcp-forward ]; then
+        /usr/local/bin/windows-mcp-forward start >/dev/null 2>&1 || true
+    fi
+fi

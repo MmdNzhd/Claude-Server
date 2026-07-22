@@ -3,7 +3,7 @@ Claude Code Server - Client Package (Sepidz)
 
 Site: Sepidz
 Server IP (baked into connect scripts): 192.168.250.70
-Current connect scripts: v20260720.1
+Current connect scripts: v20260722.24
 
 This ZIP contains two products:
 
@@ -23,7 +23,7 @@ WINDOWS
   3. Double-click connect.bat
 
   Header must show:
-    claude-server  |  192.168.250.70  |  v20260720.1
+    claude-server  |  192.168.250.70  |  v20260722.24
 
 MAC
   1. In Terminal:
@@ -32,7 +32,7 @@ MAC
      claude-mount.sh
 
   Header must show:
-    claude-server  |  192.168.250.70  |  v20260720.1
+    claude-server  |  192.168.250.70  |  v20260722.24
 
   Mac Remote Login: System Settings -> Sharing -> Remote Login must allow
   your Mac account (whoami) or All users. Separate from Linux server username.
@@ -50,7 +50,15 @@ Preference files (laptop):
   Windows: %USERPROFILE%\.config\claude-connect\editor.conf
   Mac:     ~/.config/claude-connect/editor.conf
 
-SINGLE PROJECT: only one ACTIVE_MOUNT per session (v20260720.1+).
+
+ONE CONNECT PER PC
+------------------
+  Run only ONE connect window at a time on this laptop (developer OR designer).
+  Second launch: [X] Another Claude Connect is already running.
+  Orphan tunnel cleanup never kills the live session ssh -R (peer safety).
+
+
+SINGLE PROJECT: only one ACTIVE_MOUNT per session (v20260722.24+).
 
 DESIGNER CLIENT (designer\)
 ---------------------------
@@ -71,15 +79,20 @@ TROUBLESHOOTING
 
 CURSOR AUTH: server golden tokens + profile machineid; use [Claude Server] window only.
 
-LOGS (server only, v20260720.1+)
----------------------------------
-  No durable connect.log on the laptop. Logs live on the Sepidz server account:
+LOGS (durable on laptop + synced to server, v20260722.24+)
+----------------------------------------------------------------
+  Connect keeps a durable local day log on your laptop AND syncs it to
+  the Sepidz server account:
 
-    ~/.claude/logs/connect-YYYYMMDD.log
-    ~/.claude/logs/laptop-ssh-diag-latest.txt
+    Laptop: %USERPROFILE%\.config\claude-connect\logs\connect-YYYYMMDD.log
+            ~/.config/claude-connect/logs/connect-YYYYMMDD.log  (Mac)
+    Server: ~/.claude/logs/connect-YYYYMMDD.log
+    Server: ~/.claude/logs/laptop-ssh-diag-latest.txt   (after laptop SSH failures)
 
-  Temp buffer on laptop (%TEMP% / /tmp) is deleted when connect exits.
-  Retention: 1 day on server (hourly cleanup).
+  WARN lines append locally immediately; the server copy may lag up to 5s
+  (coalesced sync). ERROR lines and session end always force-sync right
+  away. The laptop copy is never deleted on session end; server copies
+  are retained for 1 day (hourly cleanup cron).
 
 REQUIREMENTS
 ------------

@@ -121,7 +121,7 @@ ui_project_table() {
         fi
         active_tag=""
         os_tag=""
-        [ -n "${ACTIVE_MOUNT_ID:-}" ] && [ "$mid" = "$ACTIVE_MOUNT_ID" ] && active_tag=' (active)'
+        [ -n "${ACTIVE_MOUNT_ID:-}" ] && [ "$mid" = "$ACTIVE_MOUNT_ID" ] && active_tag=' (mounted)'
         if declare -f laptop_rpath_exists >/dev/null 2>&1 && ! laptop_rpath_exists "$mrpath"; then
             os_tag=' [missing]'
         fi
@@ -202,6 +202,10 @@ ui_mark_bootstrap_done() {
     date -u +%Y-%m-%dT%H:%M:%SZ > "$cfg_dir/bootstrap.done" 2>/dev/null || true
 }
 # Durable local day logs under ~/.config/claude-connect/logs/ plus sync to server.
+CONNECT_LOG_SYNC_NEEDED=0
+CONNECT_LOG_WARN_UNTIL=0
+CONNECT_LOG_DRAINER_PID=""
+CONNECT_LOG_ASYNC_STALL_SINCE=0
 
 
 connect_prompt() {
@@ -214,6 +218,83 @@ connect_prompt() {
 connect_decision() {
     local what="$1" value="$2" level="${3:-INFO}"
     connect_log "DECISION: ${what}=${value}" "$level"
+}
+
+_connect_log_async_drainer_loop() {
+    # Bounded background drain (parity with Windows Ensure-ConnectLogAsyncTimer, no Start-Job/subshell leaks).
+    local guard=0
+    while [ "$guard" -lt 20 ]; do
+        guard=$((guard + 1))
+        if declare -F _connect_log_unsynced_bytes >/dev/null 2>&1; then
+            unsynced="$(_connect_log_unsynced_bytes)"
+            if [ "${unsynced:-0}" -gt 262144 ] 2>/dev/null; then
+                if [ "${CONNECT_LOG_ASYNC_STALL_SINCE:-0}" -eq 0 ] 2>/dev/null; then
+                    CONNECT_LOG_ASYNC_STALL_SINCE="$(date +%s)"
+                elif [ "$(($(date +%s) - CONNECT_LOG_ASYNC_STALL_SINCE))" -ge 120 ] 2>/dev/null; then
+                    sync_connect_log_to_server force || true
+                    CONNECT_LOG_ASYNC_STALL_SINCE=0
+                    sleep 1.5
+                    continue
+                fi
+            else
+                CONNECT_LOG_ASYNC_STALL_SINCE=0
+            fi
+        fi
+        sync_connect_log_to_server || true
+        sleep 1.5
+    done
+}
+
+_ensure_connect_log_async_drainer() {
+    if [ -n "${CONNECT_LOG_DRAINER_PID:-}" ] && kill -0 "${CONNECT_LOG_DRAINER_PID}" 2>/dev/null; then
+        return 0
+    fi
+    _connect_log_async_drainer_loop &
+    CONNECT_LOG_DRAINER_PID=$!
+    disown "${CONNECT_LOG_DRAINER_PID}" 2>/dev/null || true
+}
+
+request_connect_log_sync() {
+    # $1=force -> barrier (stop drainer, coalesce, then Force sync). Else: coalesce + background drain.
+    local force="${1:-}"
+    if [ "$force" = "force" ]; then
+        complete_connect_log_async_drain force
+        return 0
+    fi
+    local already_needed="${CONNECT_LOG_SYNC_NEEDED:-0}"
+    CONNECT_LOG_SYNC_NEEDED=1
+    if declare -F _connect_log_unsynced_bytes >/dev/null 2>&1; then
+        unsynced="$(_connect_log_unsynced_bytes)"
+        if [ "${unsynced:-0}" -gt 262144 ] 2>/dev/null; then
+            if [ "${CONNECT_LOG_ASYNC_STALL_SINCE:-0}" -eq 0 ] 2>/dev/null; then
+                CONNECT_LOG_ASYNC_STALL_SINCE="$(date +%s)"
+            fi
+        else
+            CONNECT_LOG_ASYNC_STALL_SINCE=0
+        fi
+    fi
+    if [ "$already_needed" != "1" ] && declare -F connect_log >/dev/null 2>&1; then
+        connect_log "LOG_SYNC_ASYNC scheduled=1" 'DEBUG'
+    fi
+    _ensure_connect_log_async_drainer
+}
+
+complete_connect_log_async_drain() {
+    # $1=force -> after draining Needed/WARN coalesce, also run a final Force sync.
+    local force="${1:-}"
+    if [ -n "${CONNECT_LOG_DRAINER_PID:-}" ]; then
+        kill "${CONNECT_LOG_DRAINER_PID}" 2>/dev/null || true
+        wait "${CONNECT_LOG_DRAINER_PID}" 2>/dev/null || true
+        CONNECT_LOG_DRAINER_PID=""
+    fi
+    if [ "${CONNECT_LOG_SYNC_NEEDED:-0}" = "1" ] || [ "${CONNECT_LOG_WARN_UNTIL:-0}" -gt 0 ] 2>/dev/null; then
+        sync_connect_log_to_server || true
+    fi
+    CONNECT_LOG_SYNC_NEEDED=0
+    CONNECT_LOG_WARN_UNTIL=0
+    if [ "$force" = "force" ]; then
+        sync_connect_log_to_server force || true
+    fi
 }
 
 connect_log_ts() {
@@ -251,23 +332,51 @@ connect_log() {
         if [ "$level" = "TRACE" ] && printf '%s' "$msg" | grep -q 'TUNNEL_'; then
             CONNECT_LOG_LINES_SINCE_SYNC=$(( ${CONNECT_LOG_LINES_SINCE_SYNC:-0} + 1 ))
             if printf '%s' "$msg" | grep -Eq 'soft_fail|TUNNEL_DROP|TUNNEL_EXIT' || [ "${CONNECT_LOG_LINES_SINCE_SYNC:-0}" -ge 25 ]; then
-                sync_connect_log_to_server || true
+                if declare -F request_connect_log_sync >/dev/null 2>&1; then
+                    request_connect_log_sync || true
+                else
+                    sync_connect_log_to_server || true
+                fi
             fi
         fi
         return 0
     fi
     CONNECT_LOG_LINES_SINCE_SYNC=$(( ${CONNECT_LOG_LINES_SINCE_SYNC:-0} + 1 ))
-    if [ "$level" = "ERROR" ] || [ "$level" = "WARN" ]; then
+    if [ "$level" = "ERROR" ]; then
         # Force: do not stick behind TRACE-only path or nonblocking flock miss.
-        sync_connect_log_to_server force || true
+        if declare -F complete_connect_log_async_drain >/dev/null 2>&1; then
+            complete_connect_log_async_drain force || true
+        else
+            sync_connect_log_to_server force || true
+        fi
+    elif [ "$level" = "WARN" ]; then
+        # Coalesce: warn-only bursts get a 5s grace window instead of an immediate Force sync.
+        CONNECT_LOG_WARN_UNTIL=$(( $(date +%s) + 5 ))
+        CONNECT_LOG_SYNC_NEEDED=1
+        if declare -F request_connect_log_sync >/dev/null 2>&1; then
+            request_connect_log_sync || true
+        else
+            sync_connect_log_to_server force || true
+        fi
     elif [ "${CONNECT_LOG_LINES_SINCE_SYNC:-0}" -ge 25 ]; then
-        sync_connect_log_to_server || true
+        if declare -F request_connect_log_sync >/dev/null 2>&1; then
+            request_connect_log_sync || true
+        else
+            sync_connect_log_to_server || true
+        fi
     fi
 }
 
 
 invoke_connect_silent_update_check() {
     declare -F connect_log >/dev/null 2>&1 || return 0
+
+    if declare -F tunnel_up >/dev/null 2>&1; then
+        if ! tunnel_up; then
+            connect_log "UPDATE_SILENT skip reason=tunnel_down" 'DEBUG'
+            return 0
+        fi
+    fi
 
     local cfg_dir="$HOME/.config/claude-connect"
     local state_file="$cfg_dir/.last-update-check"
@@ -306,23 +415,61 @@ invoke_connect_silent_update_check() {
 
     if [ ! -f "$update_sh" ]; then
         connect_log "UPDATE_SILENT age_min=$age_min result=fail exit=1 pending_restart=0 reason=no_script path=$update_sh" 'ERROR'
+        return 0
+    fi
+
+    set +e
+    CLAUDE_CONNECT_UPDATE_QUIET=1 bash "$update_sh"
+    exit_code=$?
+    case "$exit_code" in
+        0) result='ok'; level='INFO' ;;
+        1) result='fail'; level='ERROR' ;;
+        2)
+            result='applied'
+            pending=1
+            level='WARN'
+            CONNECT_UPDATE_PENDING_RESTART=1
+            export CONNECT_UPDATE_PENDING_RESTART
+            ;;
+        *) result='fail'; level='ERROR' ;;
+    esac
+
+    if [ "$exit_code" -eq 2 ]; then
+        connect_log "UPDATE_SILENT pending_restart=1 age_min=$age_min result=$result exit=$exit_code note=restart_connect_after_session" "$level"
     else
-        set +e
-        CLAUDE_CONNECT_UPDATE_QUIET=1 bash "$update_sh"
-        exit_code=$?
-        case "$exit_code" in
-            0) result='ok'; level='INFO' ;;
-            1) result='fail'; level='ERROR' ;;
-            2) result='applied'; pending=1; level='WARN' ;;
-            *) result='fail'; level='ERROR' ;;
-        esac
         connect_log "UPDATE_SILENT age_min=$age_min result=$result exit=$exit_code pending_restart=$pending" "$level"
     fi
 
-    mkdir -p "$cfg_dir" 2>/dev/null || true
-    if ! printf '%s' "$now" > "$state_file" 2>/dev/null; then
-        connect_log "UPDATE_SILENT stamp_fail" 'ERROR'
+    if [ "$exit_code" -eq 0 ] || [ "$exit_code" -eq 2 ]; then
+        mkdir -p "$cfg_dir" 2>/dev/null || true
+        if ! printf '%s' "$now" > "$state_file" 2>/dev/null; then
+            connect_log "UPDATE_SILENT stamp_fail" 'ERROR'
+        fi
     fi
+}
+
+test_connect_remote_log_needs_rebuild() {
+    local local_size="$1" remote_size="$2" offset="$3"
+    [ -z "$remote_size" ] && remote_size=0
+    [ -z "$local_size" ] && local_size=0
+    [ -z "$offset" ] && offset=0
+    if [ "$offset" -eq 0 ] && [ "$remote_size" -gt "$local_size" ] 2>/dev/null; then return 0; fi
+    if [ "$local_size" -gt 0 ] && [ "$remote_size" -gt $((local_size * 2)) ] 2>/dev/null; then return 0; fi
+    if [ "$remote_size" -gt $((local_size + 1048576)) ] 2>/dev/null; then return 0; fi
+    return 1
+}
+
+_connect_log_unsynced_bytes() {
+    local lp="${CONNECT_LOG_PATH:-}" off=0 sz=0
+    [ -n "$lp" ] && [ -f "$lp" ] || { printf '0'; return 0; }
+    if [ -f "${lp}.sync-offset" ]; then
+        off="$(tr -dc '0-9' < "${lp}.sync-offset")"
+    fi
+    : "${off:=0}"
+    sz="$(wc -c < "$lp" | tr -dc '0-9')"
+    : "${sz:=0}"
+    if [ "$off" -gt "$sz" ] 2>/dev/null; then printf '%s' "$sz"; return 0; fi
+    printf '%s' $((sz - off))
 }
 
 _server_logs_cleanup_cmd() {
@@ -345,7 +492,7 @@ sync_connect_log_to_server() {
     if [ "$force" = "force" ]; then
         flock -w 5 8 || return 0
     else
-        flock -n 8 || return 0
+        flock -n 8 || { CONNECT_LOG_SYNC_NEEDED=1; return 0; }
     fi
 
     # Re-read watermark under lock (avoid offset-reset races).
@@ -394,6 +541,90 @@ sync_connect_log_to_server() {
     fi
     take="$actual"
 
+    remote_before=0
+    if declare -F sshx >/dev/null 2>&1; then
+        remote_before="$(sshx "stat -c%s \"\$HOME/${remote_day}\" 2>/dev/null || echo 0" 2>/dev/null | tr -dc '0-9')"
+    else
+        remote_before="$(ssh -o BatchMode=yes -o ConnectTimeout=6 "$ALIAS" "stat -c%s \"\$HOME/${remote_day}\" 2>/dev/null || echo 0" 2>/dev/null | tr -dc '0-9')"
+    fi
+    : "${remote_before:=0}"
+    if declare -F test_connect_remote_log_needs_rebuild >/dev/null 2>&1 && test_connect_remote_log_needs_rebuild "$size" "$remote_before" "$off"; then
+        rm -f "${CONNECT_LOG_PATH}.sync-pending" "${CONNECT_LOG_PATH}.chunk" 2>/dev/null || true
+        if declare -F sshx >/dev/null 2>&1; then
+            sshx "$(_server_logs_cleanup_cmd)" >/dev/null 2>&1 || true
+        fi
+        if scp -o BatchMode=yes -o ConnectTimeout=20 -q "$CONNECT_LOG_PATH" "${ALIAS}:${remote_tmp}" 2>/dev/null; then
+            rep_ok=0
+            if declare -F sshx >/dev/null 2>&1; then
+                if sshx "cat \"\$HOME/${remote_tmp}\" > \"\$HOME/${remote_day}\"; ec=\$?; rm -f \"\$HOME/${remote_tmp}\"; chmod 600 \"\$HOME/${remote_day}\" 2>/dev/null; exit \$ec" >/dev/null 2>&1; then
+                    rep_ok=1
+                fi
+            else
+                if ssh -o BatchMode=yes -o ConnectTimeout=12 "$ALIAS" "cat \"\$HOME/${remote_tmp}\" > \"\$HOME/${remote_day}\"; ec=\$?; rm -f \"\$HOME/${remote_tmp}\"; chmod 600 \"\$HOME/${remote_day}\" 2>/dev/null; exit \$ec" >/dev/null 2>&1; then
+                    rep_ok=1
+                fi
+            fi
+            if [ "$rep_ok" = 1 ]; then
+                CONNECT_LOG_SYNC_OFF="$size"
+                printf '%s' "$CONNECT_LOG_SYNC_OFF" > "${CONNECT_LOG_PATH}.sync-offset" 2>/dev/null || true
+                CONNECT_LOG_LINES_SINCE_SYNC=0
+                CONNECT_LOG_SYNC_NEEDED=0
+                CONNECT_LOG_ASYNC_STALL_SINCE=0
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "LOG_SYNC_REBUILD local=$size remote_was=$remote_before off=$off (replaced remote day log)" 'INFO'
+                fi
+                flock -u 8 2>/dev/null || true
+                return 0
+            fi
+        fi
+    fi
+
+    # --- LOG_SYNC_RECONCILE (parity with Windows): pending + size verify + tail hash ---
+    pending_file="${CONNECT_LOG_PATH}.sync-pending"
+    remote_before=0
+    if [ -f "$pending_file" ]; then
+        IFS='|' read -r pend_off pend_take pend_r0 < "$pending_file" || true
+        if [ "$pend_off" = "$off" ] && [ "$pend_take" = "$take" ]; then
+            r_now=0
+            if declare -F sshx >/dev/null 2>&1; then
+                r_now="$(sshx "stat -c%s \"\$HOME/${remote_day}\" 2>/dev/null || echo 0" 2>/dev/null | tr -dc '0-9')"
+            else
+                r_now="$(ssh -o BatchMode=yes -o ConnectTimeout=6 "$ALIAS" "stat -c%s \"\$HOME/${remote_day}\" 2>/dev/null || echo 0" 2>/dev/null | tr -dc '0-9')"
+            fi
+            : "${r_now:=0}"
+            need=$((pend_r0 + pend_take))
+            if [ "$r_now" -ge "$need" ] 2>/dev/null; then
+                CONNECT_LOG_SYNC_OFF=$((off + take))
+                printf '%s' "$CONNECT_LOG_SYNC_OFF" > "${CONNECT_LOG_PATH}.sync-offset" 2>/dev/null || true
+                rm -f "$pending_file" "${CONNECT_LOG_PATH}.chunk"
+                flock -u 8 2>/dev/null || true
+                return 0
+            fi
+        fi
+    fi
+    local_hash="$(sha256sum "${CONNECT_LOG_PATH}.chunk" 2>/dev/null | awk '{print $1}')"
+    if [ -n "$local_hash" ]; then
+        if declare -F sshx >/dev/null 2>&1; then
+            remote_hash="$(sshx "f=\"\$HOME/${remote_day}\"; [ -f \"\$f\" ] || { echo none; exit 0; }; sz=\$(stat -c%s \"\$f\" 2>/dev/null || echo 0); [ \"\$sz\" -ge ${take} ] || { echo short; exit 0; }; tail -c ${take} \"\$f\" | sha256sum | awk '{print \$1}'" 2>/dev/null | tr -dc 'a-f0-9')"
+        else
+            remote_hash="$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$ALIAS" "f=\"\$HOME/${remote_day}\"; [ -f \"\$f\" ] || { echo none; exit 0; }; sz=\$(stat -c%s \"\$f\" 2>/dev/null || echo 0); [ \"\$sz\" -ge ${take} ] || { echo short; exit 0; }; tail -c ${take} \"\$f\" | sha256sum | awk '{print \$1}'" 2>/dev/null | tr -dc 'a-f0-9')"
+        fi
+        if [ -n "$remote_hash" ] && [ "$remote_hash" = "$local_hash" ]; then
+            CONNECT_LOG_SYNC_OFF=$((off + take))
+            printf '%s' "$CONNECT_LOG_SYNC_OFF" > "${CONNECT_LOG_PATH}.sync-offset" 2>/dev/null || true
+            rm -f "$pending_file" "${CONNECT_LOG_PATH}.chunk"
+            flock -u 8 2>/dev/null || true
+            return 0
+        fi
+    fi
+    if declare -F sshx >/dev/null 2>&1; then
+        remote_before="$(sshx "stat -c%s \"\$HOME/${remote_day}\" 2>/dev/null || echo 0" 2>/dev/null | tr -dc '0-9')"
+    else
+        remote_before="$(ssh -o BatchMode=yes -o ConnectTimeout=6 "$ALIAS" "stat -c%s \"\$HOME/${remote_day}\" 2>/dev/null || echo 0" 2>/dev/null | tr -dc '0-9')"
+    fi
+    : "${remote_before:=0}"
+    printf '%s|%s|%s' "$off" "$take" "$remote_before" > "$pending_file" 2>/dev/null || true
+
     if declare -F sshx >/dev/null 2>&1; then
         sshx "$(_server_logs_cleanup_cmd)" >/dev/null 2>&1 || true
     fi
@@ -410,9 +641,23 @@ sync_connect_log_to_server() {
                 cat_ok=1
             fi
         fi
+        if [ "$cat_ok" != 1 ]; then
+            # Timeout/false-negative: confirm append via remote size growth.
+            if declare -F sshx >/dev/null 2>&1; then
+                remote_after="$(sshx "stat -c%s \"\$HOME/${remote_day}\" 2>/dev/null || echo 0" 2>/dev/null | tr -dc '0-9')"
+            else
+                remote_after="$(ssh -o BatchMode=yes -o ConnectTimeout=6 "$ALIAS" "stat -c%s \"\$HOME/${remote_day}\" 2>/dev/null || echo 0" 2>/dev/null | tr -dc '0-9')"
+            fi
+            : "${remote_after:=0}"
+            need=$((remote_before + take))
+            if [ "$remote_after" -ge "$need" ] 2>/dev/null; then
+                cat_ok=1
+            fi
+        fi
         if [ "$cat_ok" = 1 ]; then
             CONNECT_LOG_SYNC_OFF=$((off + take))
             printf '%s' "$CONNECT_LOG_SYNC_OFF" > "${CONNECT_LOG_PATH}.sync-offset" 2>/dev/null || true
+            rm -f "$pending_file" 2>/dev/null || true
             CONNECT_LOG_LINES_SINCE_SYNC=0
             # Force drain remaining chunks on exit/ERROR flush.
             if [ "$force" = "force" ] && [ "$CONNECT_LOG_SYNC_OFF" -lt "$size" ]; then
@@ -451,7 +696,11 @@ flush_connect_log_to_server() {
         # Direct append to avoid recursion through connect_log sync path mid-flush.
         printf '[%s] [INFO] [%s] %s\n' "$(connect_log_ts)" "${CONNECT_SESSION_ID:--}" '======== session end ========' >> "$CONNECT_LOG_PATH" 2>/dev/null || true
     fi
-    sync_connect_log_to_server force || true
+    if declare -F complete_connect_log_async_drain >/dev/null 2>&1; then
+        complete_connect_log_async_drain force || true
+    else
+        sync_connect_log_to_server force || true
+    fi
     # Keep durable local day log (do not delete).
     rm -f "${CONNECT_LOG_PATH}.chunk" 2>/dev/null || true
     CONNECT_LOG_PATH=""
@@ -461,15 +710,32 @@ flush_connect_log_to_server() {
 
 
 enter_connect_single_instance() {
-    # Unlimited concurrent connect UIs. Tunnel slots + session IDs isolate tunnels/logs.
-    CONNECT_LOCK_HELD=0
-    connect_log "MULTI_INSTANCE: allowed pid=$$ (no flock)" 'INFO'
+    # One connect UI per machine via flock on lock file.
+    # connect.sh may already hold fd 9 (early flock before update).
+    if [ "${CONNECT_LOCK_HELD:-0}" = 1 ]; then
+        connect_log "SINGLE_INSTANCE: acquired pid=$$ via=early_flock" 'INFO'
+        return 0
+    fi
+    local lockdir="${HOME}/.config/claude-connect"
+    local lockfile="${lockdir}/connect.lock"
+    mkdir -p "$lockdir" 2>/dev/null || true
+    exec 9>"$lockfile" || return 1
+    if ! flock -n 9; then
+        connect_log "SINGLE_INSTANCE: blocked pid=$$" 'ERROR'
+        printf '\n  [X] Another Claude Connect is already running.\n\n' >&2
+        return 1
+    fi
+    CONNECT_LOCK_HELD=1
+    connect_log "SINGLE_INSTANCE: acquired pid=$$" 'INFO'
     return 0
 }
 
 exit_connect_single_instance() {
-    # No-op: multi-instance mode does not hold a process-wide flock.
-    CONNECT_LOCK_HELD=0
+    if [ "${CONNECT_LOCK_HELD:-0}" = 1 ]; then
+        flock -u 9 2>/dev/null || true
+        exec 9>&- 2>/dev/null || true
+        CONNECT_LOCK_HELD=0
+    fi
 }
 
 connect_session_id() {
@@ -487,9 +753,11 @@ connect_session_id() {
 init_connect_log() {
     local script_dir="$1" version="$2" day log_dir wm project
     # Zero-loss offline-first: durable local day file + watermark sync-offset + server flush.
+    # Retention: purge local logs older than 1 day (parity with server cron / Windows Clear-ConnectLocalLogsOlderThan).
     day="$(date +%Y%m%d)"
     log_dir="$HOME/.config/claude-connect/logs"
     mkdir -p "$log_dir" 2>/dev/null || true
+    find "$log_dir" -type f -mtime +1 ! -name 'sessions.index' -delete 2>/dev/null || true
     CONNECT_LOG_PATH="$log_dir/connect-${day}.log"
     if [ -n "${CLAUDE_CONNECT_RUN_ID:-}" ] && [ "${#CLAUDE_CONNECT_RUN_ID}" -ge 8 ]; then
         CONNECT_SESSION_ID="$CLAUDE_CONNECT_RUN_ID"
@@ -510,6 +778,10 @@ init_connect_log() {
     touch "$CONNECT_LOG_PATH" 2>/dev/null || true
     chmod 600 "$CONNECT_LOG_PATH" 2>/dev/null || true
     CONNECT_LOG_LINES_SINCE_SYNC=0
+    CONNECT_LOG_SYNC_NEEDED=0
+    CONNECT_LOG_WARN_UNTIL=0
+    CONNECT_LOG_DRAINER_PID=""
+    CONNECT_LOG_ASYNC_STALL_SINCE=0
     project="${ACTIVE_MOUNT_ID:-${ACTIVE_MOUNT:-}}"
     [ -n "$project" ] || project='-'
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -517,7 +789,7 @@ init_connect_log() {
         "$(hostname 2>/dev/null || echo ?)" "$version" "$project" \
         >> "$log_dir/sessions.index" 2>/dev/null || true
     connect_log "======== session start v$version user=$USER pid=$$ session=$CONNECT_SESSION_ID ========"
-    connect_log "log sink: local:$CONNECT_LOG_PATH watermark=$CONNECT_LOG_SYNC_OFF + server:~/.claude/logs/ (nightly purge)" 'INFO'
+    connect_log "log sink: local:$CONNECT_LOG_PATH watermark=$CONNECT_LOG_SYNC_OFF + server:~/.claude/logs/ (local+server purge mtime+1)" 'INFO'
     connect_log "script_dir: $script_dir connect_version: $version" 'DEBUG'
     connect_log "SESSION_FILTER: grep \"[$CONNECT_SESSION_ID]\" $CONNECT_LOG_PATH (index: $log_dir/sessions.index)" 'INFO'
 }
@@ -552,7 +824,26 @@ log_session_context() {
         conf_snip="$(tr '\n' ' ' < "$CFG" 2>/dev/null | head -c 400)"
         connect_log "local_cfg: $conf_snip" 'DEBUG'
     fi
-    if declare -F sync_connect_log_to_server >/dev/null 2>&1; then
+    if [ "$phase" = "session_end" ]; then
+        if declare -F complete_connect_log_async_drain >/dev/null 2>&1; then
+            complete_connect_log_async_drain force || true
+        else
+            sync_connect_log_to_server force || true
+        fi
+    elif declare -F request_connect_log_sync >/dev/null 2>&1; then
+        request_connect_log_sync || true
+    elif declare -F sync_connect_log_to_server >/dev/null 2>&1; then
         sync_connect_log_to_server || true
     fi
+}
+
+# macOS proxy parity stub (Windows implements Get-WindowsSystemProxy in connect-ui.ps1).
+# Future: read networksetup/scutil for HTTP/HTTPS proxy and export HTTP_PROXY for update downloads.
+get_mac_system_proxy() {
+    echo "enabled=0 source=none"
+}
+
+apply_connect_proxy_environment() {
+    : "${SERVER_IP:=}"
+    connect_log "PROXY: enabled=0 source=mac_stub" "DEBUG"
 }

@@ -18,11 +18,11 @@ Assert ((Format-TruncLabel 'Automation Preivew' 14) -eq 'Automation ...') 'trunc
 $mounts = @(
     [PSCustomObject]@{ Id = 'ai'; Label = 'Ai'; Rpath = 'D:/Personnal/ai'; Active = $false }
     [PSCustomObject]@{ Id = 'ccs'; Label = 'Claude Code Server'; Rpath = 'D:/Smart/Claude-Code-Server'; Active = $false }
-    [PSCustomObject]@{ Id = 'auto'; Label = 'Automation Preivew'; Rpath = 'D:/Smart/Automation-Preivew'; Active = $true }
+    [PSCustomObject]@{ Id = 'auto'; Label = 'Automation Preivew'; Rpath = 'D:/Smart/Automation-Preivew'; Active = $true; Mounted = $true }
 )
 Assert ((Get-ProjectNameColWidth -Mounts $mounts -TerminalWidth 80 -PathMax 36) -ge 27) 'name col fits longest label plus active tag'
-$line = ("    {0,2}  {1,-27}  {2}" -f 4, 'Automation Preivew (active)', 'D:/Smart/Automation-Preivew')
-Assert ($line -match 'Automation Preivew \(active\)\s+D:') 'format keeps name and path columns apart'
+$line = ("    {0,2}  {1,-27}  {2}" -f 4, 'Automation Preivew (mounted)', 'D:/Smart/Automation-Preivew')
+Assert ($line -match 'Automation Preivew \(mounted\)\s+D:') 'format keeps name and path columns apart'
 
 $src = Get-Content (Join-Path $ClientRoot 'connect-ui.ps1') -Raw
 $connectUiSh = Get-Content (Join-Path $ClientRoot 'connect-ui.sh') -Raw

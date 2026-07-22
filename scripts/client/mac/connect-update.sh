@@ -195,6 +195,57 @@ _update_file_log() {
     printf '[%s] [%s] [%s] UPDATE: %s\n' "$ts" "$level" "$sid" "$msg" >> "$(_update_log_path)" 2>/dev/null || true
 }
 
+_local_matches_remote_checksums() {
+    # Same version can still mean drifted files; compare live install to server checksums.
+    local checksum_text="$1" line want rel got fp
+    local bad=0 sample=""
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line//$'\r'/}"
+        [ -n "$line" ] || continue
+        case "$line" in \#*) continue ;; esac
+        want="$(printf '%s\n' "$line" | awk '{print tolower($1)}')"
+        rel="$(printf '%s\n' "$line" | awk '{print substr($0, index($0,$2))}' | sed 's/^\*//; s/^\.\///')"
+        [ -n "$want" ] && [ -n "$rel" ] || continue
+        case "$rel" in
+            checksums.txt|manifest.txt) continue ;;
+        esac
+        if [[ "$rel" == mac/* ]]; then
+            [ -n "${MAC_DIR:-}" ] && [ -d "$MAC_DIR" ] || continue
+            fp="$MAC_DIR/${rel#mac/}"
+        else
+            # Windows-side files live next to mac/ under package root, or in ROOT when flat.
+            if [ -d "$ROOT_DIR/windows" ]; then
+                fp="$ROOT_DIR/windows/$rel"
+            else
+                fp="$ROOT_DIR/$rel"
+            fi
+        fi
+        if [ ! -f "$fp" ]; then
+            bad=$((bad + 1))
+            [ -z "$sample" ] && sample="missing:$rel"
+            continue
+        fi
+        if command -v shasum >/dev/null 2>&1; then
+            got="$(shasum -a 256 "$fp" | awk '{print tolower($1)}')"
+        elif command -v sha256sum >/dev/null 2>&1; then
+            got="$(sha256sum "$fp" | awk '{print tolower($1)}')"
+        else
+            _update_file_log "local_checksum_skip no_hasher" WARN
+            return 0
+        fi
+        if [ "$got" != "$want" ]; then
+            bad=$((bad + 1))
+            [ -z "$sample" ] && sample="mismatch:$rel"
+        fi
+    done <<< "$checksum_text"
+    if [ "$bad" -gt 0 ]; then
+        _update_file_log "local_checksum_drift count=$bad sample=$sample" WARN
+        return 1
+    fi
+    _update_file_log "local_checksum_ok"
+    return 0
+}
+
 _verify_checksums() {
     local root="$1" sumfile="$1/checksums.txt" line want rel got
     if [ ! -f "$sumfile" ]; then
@@ -277,12 +328,96 @@ main() {
             [ -n "$remote_ver" ] && target="$fb"
         fi
     fi
-    if [ -z "$remote_ver" ]; then _update_file_log "unreachable target=$target" WARN; exit 0; fi
-    _remote_version_newer "$remote_ver" "$local_ver" || exit 0
+        if [ -z "$remote_ver" ]; then _update_file_log "unreachable target=$target" WARN; exit 0; fi
 
-    _update_msg '  Client update available: v%s -> v%s\n' "$local_ver" "$remote_ver"
+    version_newer=0
+    content_drift=0
+    if _remote_version_newer "$remote_ver" "$local_ver"; then
+        version_newer=1
+    else
+        remote_sums="$(_ssh_cat "$target" "$REMOTE_BUNDLE/checksums.txt")"
+        if [ -n "$remote_sums" ]; then
+            if ! _local_matches_remote_checksums "$remote_sums"; then
+                content_drift=1
+            fi
+        else
+            _update_file_log "local_checksum_skip remote_checksums_unreachable" WARN
+        fi
+    fi
 
-    manifest="$(_ssh_cat "$target" "$REMOTE_BUNDLE/manifest.txt")"
+    if [ "$version_newer" -eq 0 ] && [ "$content_drift" -eq 0 ]; then
+        _update_file_log "up_to_date v$local_ver"
+        exit 0
+    fi
+
+    if [ "$content_drift" -eq 1 ]; then
+        _update_msg '  Client files out of sync with server (v%s) - repairing...\n' "$local_ver"
+        _update_file_log "content_mismatch repair local_ver=$local_ver remote_ver=$remote_ver"
+    else
+        _update_msg '  Client update available: v%s -> v%s\n' "$local_ver" "$remote_ver"
+        _update_file_log "available v$local_ver -> v$remote_ver"
+    fi
+
+    
+    # Optional/Force policy (Phase D) — Quiet/silent never auto-applies optional
+    policy_mode=optional
+    defer_hours=48
+    policy_file="${HOME}/.config/claude-connect/update-policy.json"
+    remote_policy="$(_ssh_cat "$target" "$REMOTE_BUNDLE/client-update-policy.json" 2>/dev/null || true)"
+    if [ -n "$remote_policy" ]; then
+        echo "$remote_policy" > "${HOME}/.config/claude-connect/update-policy.json" 2>/dev/null || true
+        policy_file="${HOME}/.config/claude-connect/update-policy.json"
+    fi
+    if [ -f "$policy_file" ]; then
+        mode_line="$(grep -E '"mode"' "$policy_file" 2>/dev/null | head -1 || true)"
+        case "$mode_line" in *force*) policy_mode=force ;; esac
+        force_min="$(grep -E 'force_min_version' "$policy_file" 2>/dev/null | head -1 | sed 's/.*:.*"\([^"]*\)".*/\1/' || true)"
+        if [ -n "$force_min" ] && [ "$force_min" != "null" ] && _remote_version_newer "$force_min" "$local_ver"; then
+            policy_mode=force
+        fi
+    fi
+    if [ "$policy_mode" != "force" ]; then
+        if [ "${UPDATE_QUIET:-0}" = "1" ] || [ -n "${CLAUDE_CONNECT_UPDATE_QUIET:-}" ]; then
+            _update_file_log "UPDATE_OPTIONAL_SKIP reason=silent local=$local_ver remote=$remote_ver"
+            exit 0
+        fi
+        defer_file="${HOME}/.config/claude-connect/update-defer.txt"
+        if [ -f "$defer_file" ]; then
+            dver="$(grep '^version=' "$defer_file" | cut -d= -f2-)"
+            duntil="$(grep '^until=' "$defer_file" | cut -d= -f2-)"
+            if [ "$dver" = "$remote_ver" ] && [ -n "$duntil" ]; then
+                # crude: if until still in future (string compare on ISO often works for same format)
+                now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                if [[ "$duntil" > "$now" ]]; then
+                    _update_msg '  Optional update deferred - continuing\n'
+                    _update_file_log "UPDATE_OPTIONAL_SKIP reason=defer local=$local_ver remote=$remote_ver"
+                    exit 0
+                fi
+            fi
+        fi
+        _update_msg '  Optional update available (v%s -> v%s). Update now? [Y/n/D]:\n' "$local_ver" "$remote_ver"
+        ans=Y
+        if [ -t 0 ]; then read -r ans || ans=Y; fi
+        ans="$(printf '%s' "$ans" | tr '[:lower:]' '[:upper:]')"
+        case "$ans" in
+            N|NO)
+                _update_file_log "UPDATE_OPTIONAL_SKIP reason=user_no local=$local_ver remote=$remote_ver"
+                exit 0
+                ;;
+            D|DEFER)
+                mkdir -p "${HOME}/.config/claude-connect"
+                until="$(date -u -v+48H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+48 hours' +%Y-%m-%dT%H:%M:%SZ)"
+                printf 'version=%s\nuntil=%s\n' "$remote_ver" "$until" > "$defer_file"
+                _update_file_log "UPDATE_DEFER saved until=$until ver=$remote_ver"
+                exit 0
+                ;;
+        esac
+    else
+        _update_msg '  Required Claude Connect update will be applied now.\n'
+        _update_file_log "UPDATE_FORCE applying local=$local_ver remote=$remote_ver"
+    fi
+
+manifest="$(_ssh_cat "$target" "$REMOTE_BUNDLE/manifest.txt")"
     if [ -z "$manifest" ]; then
         _update_file_log "manifest_empty_or_unreachable" ERROR
         exit 1

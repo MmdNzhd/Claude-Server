@@ -40,6 +40,7 @@ if [ -d "$PUB" ]; then
         "scripts/client/editor-launch.ps1:windows/editor-launch.ps1" \
         "scripts/client/cursor-auth-laptop.ps1:windows/cursor-auth-laptop.ps1" \
         "scripts/client/windows/connect.bat:windows/connect.bat" \
+        "scripts/client/windows/connect-boot.ps1:windows/connect-boot.ps1" \
         "scripts/client/windows/connect-rider.bat:windows/connect-rider.bat"; do
         a="$ROOT/${pair%%:*}"
         b="$PUB/${pair##*:}"

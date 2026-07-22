@@ -53,6 +53,7 @@ _stage_repo_from_laptop() {
         scripts/client/editor-launch.ps1
         scripts/client/git-mode.ps1
         scripts/client/cursor-auth-laptop.ps1
+        scripts/client/windows/windows-mcp-laptop.ps1
         scripts/client/mac/connect.sh
         scripts/client/mac/connect-update.sh
         scripts/client/connect-ui.sh
@@ -66,6 +67,7 @@ _stage_repo_from_laptop() {
         scripts/server/skills/laptop-exec/SKILL.md
         scripts/server/cursor-hooks/laptop-exec-guard.sh
         scripts/server/cursor-hooks/hooks-user.json
+        scripts/server/client-update-policy.json
     )
     for rel in "${paths[@]}"; do
         _pull "$rel" || warn "staging skip $rel"
@@ -127,6 +129,7 @@ BUNDLE_ROOT="$STAGE_BUNDLE"
 
 win_files=(
     connect.bat
+    connect-boot.ps1
     connect-version.txt
     connect.ps1
     connect-rider.bat
@@ -136,6 +139,8 @@ win_files=(
     editor-launch.ps1
     git-mode.ps1
     cursor-auth-laptop.ps1
+    windows-mcp-laptop.ps1
+    Claude-Connect.exe
 )
 
 for name in "${win_files[@]}"; do
@@ -153,7 +158,11 @@ for name in "${win_files[@]}"; do
         continue
     fi
     install -m 644 "$src" "$BUNDLE_ROOT/$name"
-    _strip_crlf "$BUNDLE_ROOT/$name"
+    case "$name" in
+        connect.bat|connect-rider.bat) ;;  # Windows batch needs CRLF
+        Claude-Connect.exe) ;;  # binary SFX
+        *) _strip_crlf "$BUNDLE_ROOT/$name" ;;
+    esac
     ok "$name"
 done
 
@@ -262,6 +271,10 @@ find "$BUNDLE_ROOT" -type f -exec chmod 644 {} \;
 chmod 755 "$BUNDLE_ROOT"/mac/*.sh 2>/dev/null || true
 
 # SHA-256 checksums for client post-scp verify (exclude checksums.txt itself).
+if [[ -f "${REPO_DIR:-}/scripts/server/client-update-policy.json" ]]; then
+  install -m 644 "$REPO_DIR/scripts/server/client-update-policy.json" "${BUNDLE_ROOT}/client-update-policy.json" || true
+  ok "client-update-policy.json"
+fi
 (
     cd "$BUNDLE_ROOT" || exit 1
     if command -v sha256sum >/dev/null 2>&1; then

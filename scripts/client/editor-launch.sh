@@ -81,6 +81,144 @@ get_code_server_profile_dir() {
     printf '%s' "$HOME/Library/Application Support/ClaudeServerCodeProfile"
 }
 
+
+
+cursor_profile_process_count() {
+    local profile_dir n=0 cmd line
+    profile_dir="$(get_cursor_server_profile_dir)"
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        cmd="${line#* }"
+        case "$cmd" in *"$profile_dir"*) n=$(( n + 1 )) ;; esac
+    done < <(ps ax -o pid=,command= 2>/dev/null || true)
+    printf '%s' "$n"
+}
+
+test_may_clear_cursor_proxy_settings() {
+    local allow="${1:-0}"
+    if [ -n "${CURSOR_PROXY_OWNER:-}" ] && [ "${CURSOR_PROXY_OWNER}" = "0" ]; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR_SKIP: reason=non_owner' 'WARN'
+        return 1
+    fi
+    local n
+    n="$(cursor_profile_process_count)"
+    if [ "${n:-0}" -gt 0 ]; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR_SKIP: reason=windows_open' 'WARN'
+        return 1
+    fi
+    if [ "$allow" != "1" ]; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR_SKIP: reason=no_allow_clear' 'DEBUG'
+        return 1
+    fi
+    return 0
+}
+
+_resolve_cursor_proxy_ports() {
+    # stdout: socks_port http_port (for CLI and settings)
+    local socks="${SOCKS_PROXY_PORT:-}" http="${HTTP_PROXY_PORT:-}"
+    if [ -n "${CURSOR_SOCKS_FRONT_PORT:-}" ]; then
+        socks="${CURSOR_SOCKS_FRONT_PORT}"
+    fi
+    if [ -n "${CURSOR_HTTP_FRONT_PORT:-}" ]; then
+        http="${CURSOR_HTTP_FRONT_PORT}"
+    fi
+    printf '%s %s' "${socks:-}" "${http:-}"
+}
+
+set_cursor_proxy_settings() {
+    local socks_port="${1:-}" http_port="${2:-${HTTP_PROXY_PORT:-}}" profile settings proxy_url changed_out resolved
+    resolved="$(_resolve_cursor_proxy_ports)"
+    socks_port="${resolved%% *}"
+    http_port="${resolved#* }"
+    if [ -n "$http_port" ]; then
+        proxy_url="http://127.0.0.1:${http_port}"
+    elif [ -n "$socks_port" ]; then
+        # Never write socks5 into settings.json (Node/MCP rejects it). CLI keeps socks5.
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "CURSOR_PROXY_SET: skip_settings no_http_leg socks=${socks_port} (CLI socks only)" 'WARN'
+        fi
+        return 1
+    else
+        return 1
+    fi
+    command -v python3 >/dev/null 2>&1 || return 1
+    profile="$(get_cursor_server_profile_dir)"
+    settings="$profile/User/settings.json"
+    mkdir -p "$profile/User" 2>/dev/null || true
+    changed_out="$(python3 - "$settings" "$proxy_url" <<'PY'
+import json, sys
+path, proxy_url = sys.argv[1], sys.argv[2]
+keys = {
+    "http.proxy": proxy_url,
+    "https.proxy": proxy_url,
+    "http.proxyStrictSSL": False,
+    "http.proxySupport": "override",
+    "cursor.general.proxyMode": "custom",
+    "cursor.general.disableHttp2": True,
+}
+try:
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, json.JSONDecodeError):
+    data = {}
+changed = False
+for key, val in keys.items():
+    if data.get(key) != val:
+        data[key] = val
+        changed = True
+if changed:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    print("1")
+PY
+)"
+    if [ "$changed_out" = "1" ] && declare -F connect_log >/dev/null 2>&1; then
+        connect_log "CURSOR_PROXY_SET: proxy=$proxy_url changed=1" 'INFO'
+    fi
+    [ "$changed_out" = "1" ]
+}
+
+clear_cursor_proxy_settings() {
+    local profile settings changed_out
+    command -v python3 >/dev/null 2>&1 || return 1
+    profile="$(get_cursor_server_profile_dir)"
+    settings="$profile/User/settings.json"
+    [ -f "$settings" ] || return 0
+    changed_out="$(python3 - "$settings" <<'PY'
+import json, sys
+path = sys.argv[1]
+keys = [
+    "http.proxy",
+    "https.proxy",
+    "http.proxyStrictSSL",
+    "http.proxySupport",
+    "cursor.general.proxyMode",
+    "cursor.general.disableHttp2",
+]
+try:
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+except (OSError, json.JSONDecodeError):
+    sys.exit(0)
+changed = False
+for key in keys:
+    if key in data:
+        del data[key]
+        changed = True
+if changed:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    print("1")
+PY
+)"
+    if [ "$changed_out" = "1" ] && declare -F connect_log >/dev/null 2>&1; then
+        connect_log 'CURSOR_PROXY_CLEAR: removed proxy keys changed=1' 'INFO'
+    fi
+    [ "$changed_out" = "1" ]
+}
+
 remote_editor_running() {
     local editor_cmd="$1" alias_name="$2" remote_path="$3"
     remote_editor_on_correct_folder "$editor_cmd" "$alias_name" "$remote_path" \
@@ -182,6 +320,35 @@ launch_remote_editor() {
             init_cursor_server_profile
         fi
 
+        local _proxy_socks _proxy_http _is_owner=1
+        if [ -n "${CURSOR_PROXY_OWNER:-}" ] && [ "${CURSOR_PROXY_OWNER}" = "0" ]; then
+            _is_owner=0
+        fi
+        read -r _proxy_socks _proxy_http <<EOF
+$(_resolve_cursor_proxy_ports)
+EOF
+
+        # Write proxy settings but NEVER soft-stop (preserves N open windows).
+        if [ "$_is_owner" -eq 0 ]; then
+            declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_SET_SKIP: reason=non_owner' 'DEBUG'
+        elif [ -n "${SOCKS_PROXY_PORT:-}" ] || [ -n "$_proxy_http" ]; then
+            if set_cursor_proxy_settings "$SOCKS_PROXY_PORT" "$HTTP_PROXY_PORT"; then
+                declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_SET: preserved_open_windows socks=${_proxy_socks:-} http=${_proxy_http:-} (no soft-stop)" 'INFO'
+            fi
+        else
+            if test_may_clear_cursor_proxy_settings; then
+                if clear_cursor_proxy_settings; then
+                    declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR: no_windows (no soft-stop)' 'INFO'
+                fi
+            fi
+        fi
+
+        # Chromium flags: Cursor 3.9.x always-local-singleton can ignore settings.json proxy.
+        _proxy_args=()
+        if [ -n "$_proxy_socks" ]; then
+            _proxy_args=(--proxy-server="socks5://127.0.0.1:${_proxy_socks}" --disable-http2)
+        fi
+
         if [ "$known_on_folder" = "1" ]; then
             on_folder=1
         else
@@ -189,43 +356,38 @@ launch_remote_editor() {
         fi
         remote_editor_in_agent_home "$alias" "$remote_path" && agent_home=1
         profile_main="$(cursor_profile_main_count)"
+        local profile_all
+        profile_all="$(cursor_profile_process_count)"
 
         if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "LAUNCH_BEGIN editor=cursor on_folder=$on_folder agent_home=$agent_home profile_main=$profile_main auth_relaunch=${CURSOR_AUTH_RELAUNCH:-0}"
+            connect_log "LAUNCH_BEGIN editor=cursor on_folder=$on_folder agent_home=$agent_home profile_main=$profile_main profile_all=$profile_all auth_relaunch=${CURSOR_AUTH_RELAUNCH:-0}"
         fi
 
-        # Auth just written to disk - must not reuse a long-lived logged-out process.
-        _auth_relaunch_done=0
-        if [ "${CURSOR_AUTH_RELAUNCH:-0}" = "1" ] && [ "$profile_main" -gt 0 ]; then
-            declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_KILL: auth_relaunch soft-stop profile'
-            stop_cursor_profile_soft
-            on_folder=0
-            agent_home=0
-            profile_main=0
-            _auth_relaunch_done=1
+        if [ "${CURSOR_AUTH_RELAUNCH:-0}" = "1" ] && [ "${profile_all:-0}" -gt 0 ]; then
+            declare -F connect_log >/dev/null 2>&1 && connect_log "LAUNCH_KILL_SKIP: reason=auth_relaunch_never_kill profile_count=$profile_all main=$profile_main" 'WARN'
         fi
 
-        if [ "$on_folder" -eq 1 ] && [ "$agent_home" -eq 0 ] && [ "$_auth_relaunch_done" -eq 0 ]; then
+        if [ "$on_folder" -eq 1 ] && [ "$agent_home" -eq 0 ]; then
             declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_SKIP: already on correct folder'
             return 0
         fi
 
         # Match Windows: new window when agent home or profile already open; do NOT soft-kill on agent_home.
-        if [ "$agent_home" -eq 1 ] || [ "$profile_main" -gt 0 ] || [ "$_auth_relaunch_done" -eq 1 ]; then
+        if [ "$agent_home" -eq 1 ] || [ "$profile_main" -gt 0 ]; then
             use_new=1
         fi
 
         if [ "$use_new" -eq 1 ]; then
             declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_PLAN: --new-window'
             # Prefer classic+new-window, fall back to folder-uri
-            cursor --user-data-dir "$profile" --new-window --classic --folder-uri "$uri" >/dev/null 2>&1 &
+            cursor --user-data-dir "$profile" "${_proxy_args[@]}" --new-window --classic --folder-uri "$uri" >/dev/null 2>&1 &
             sleep 0.8
             if ! remote_editor_on_correct_folder cursor "$alias" "$remote_path"; then
-                cursor --user-data-dir "$profile" --new-window --folder-uri "$uri" >/dev/null 2>&1 &
+                cursor --user-data-dir "$profile" "${_proxy_args[@]}" --new-window --folder-uri "$uri" >/dev/null 2>&1 &
             fi
         else
             declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_PLAN: cold --reuse-window'
-            cursor --user-data-dir "$profile" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
+            cursor --user-data-dir "$profile" "${_proxy_args[@]}" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
         fi
         return 0
     fi

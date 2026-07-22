@@ -22,6 +22,20 @@ warn() { echo -e "  ${YELLOW}!${NC} $1"; }
 fail() { echo -e "  ${RED}x${NC} $1"; exit 1; }
 step() { echo -e "\n${BOLD}=== $1 ===${NC}"; }
 
+# atomic_install MODE SRC DST [OWNER] [GROUP]
+# Installs SRC to DST via a same-directory temp file + rename so a process already
+# executing DST (e.g. claude-watchdog polling claude-mount every 30s) never observes
+# a partially-written file.
+atomic_install() {
+    local mode="$1" src="$2" dst="$3" owner="${4:-}" group="${5:-}" tmp="${3}.new.$$"
+    if [ -n "$owner" ]; then
+        install -m "$mode" -o "$owner" -g "$group" "$src" "$tmp" || return 1
+    else
+        install -m "$mode" "$src" "$tmp" || return 1
+    fi
+    mv -f "$tmp" "$dst"
+}
+
 [ "$EUID" -ne 0 ] && fail "must run as root: sudo claude-server install"
 
 echo ""
@@ -90,7 +104,7 @@ done
 step "5 - helper scripts"
 
 if [ -f "$SERVER_DIR/claude-automount.sh" ]; then
-    install -m 755 "$SERVER_DIR/claude-automount.sh" /usr/local/bin/claude-automount
+    atomic_install 755 "$SERVER_DIR/claude-automount.sh" /usr/local/bin/claude-automount
     ok "claude-automount -> /usr/local/bin/"
 fi
 if [ -f "$SERVER_DIR/claude-auth-sync.sh" ]; then
@@ -115,7 +129,7 @@ if [ -x /usr/local/bin/claude-auth-probe ]; then
     cat > /etc/cron.d/claude-auth-probe <<'CRON'
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-*/30 * * * * root /usr/local/bin/claude-auth-probe cron >> /var/log/claude-auth.log 2>&1
+*/30 * * * * root /usr/local/bin/claude-auth-probe cron >/dev/null 2>&1
 CRON
     chmod 644 /etc/cron.d/claude-auth-probe
     ok "claude-auth-probe cron -> every 30 min"
@@ -127,22 +141,20 @@ if [ -f "$SERVER_DIR/claude-mount.sh" ]; then
     mkdir -p /usr/local/lib/claude-server
     install -m 644 "$SERVER_DIR/claude-mount.sh" /usr/local/lib/claude-server/claude-mount.sh
     [ -f "$SERVER_DIR/claude-automount.sh" ] && install -m 644 "$SERVER_DIR/claude-automount.sh" /usr/local/lib/claude-server/claude-automount.sh
-    install -m 755 "$SERVER_DIR/claude-mount.sh" /usr/local/lib/claude-mount
+    atomic_install 755 "$SERVER_DIR/claude-mount.sh" /usr/local/lib/claude-mount
     ok "claude-mount -> /usr/local/lib/claude-mount"
     ln -sf /usr/local/lib/claude-mount /usr/local/bin/claude-mount 2>/dev/null || true
     for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
         [ -d "/home/$u" ] || continue
         mkdir -p "/home/$u/.local/bin"
-        install -m 755 /usr/local/lib/claude-mount "/home/$u/.local/bin/claude-mount"
-        chown "$u:$u" "/home/$u/.local/bin/claude-mount"
+        atomic_install 755 /usr/local/lib/claude-mount "/home/$u/.local/bin/claude-mount" "$u" "$u"
     done
     ok "claude-mount -> all users ~/.local/bin/"
     if [ -x /usr/local/bin/claude-automount ]; then
         for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
             [ -d "/home/$u" ] || continue
             mkdir -p "/home/$u/.local/bin"
-            install -m 755 /usr/local/bin/claude-automount "/home/$u/.local/bin/claude-automount"
-            chown "$u:$u" "/home/$u/.local/bin/claude-automount"
+            atomic_install 755 /usr/local/bin/claude-automount "/home/$u/.local/bin/claude-automount" "$u" "$u"
             br="/home/$u/.bashrc"
             if [ -f "$br" ] && grep -q 'claude-automount' "$br" && ! grep -q '.local/bin/claude-automount' "$br"; then
                 sed -i 's|/usr/local/bin/claude-automount 2>/dev/null|"$HOME/.local/bin/claude-automount" 2>/dev/null \|\| /usr/local/bin/claude-automount 2>/dev/null|' "$br"
@@ -151,24 +163,55 @@ if [ -f "$SERVER_DIR/claude-mount.sh" ]; then
         ok "claude-automount -> all users ~/.local/bin/ + bashrc"
     fi
 fi
+# Fleet heal: push client bundle to laptops with live reverse tunnels (any old connect version)
+if [ -f "$SERVER_DIR/claude-client-push-laptop.sh" ]; then
+    if ! bash -n "$SERVER_DIR/claude-client-push-laptop.sh" 2>/dev/null; then
+        fail "claude-client-push-laptop.sh syntax error"
+    fi
+    install -m 755 "$SERVER_DIR/claude-client-push-laptop.sh" /usr/local/bin/claude-client-push-laptop
+    ok "claude-client-push-laptop -> /usr/local/bin/"
+fi
+if [ -f "$SERVER_DIR/claude-client-push-fleet.sh" ]; then
+    if ! bash -n "$SERVER_DIR/claude-client-push-fleet.sh" 2>/dev/null; then
+        fail "claude-client-push-fleet.sh syntax error"
+    fi
+    install -m 755 "$SERVER_DIR/claude-client-push-fleet.sh" /usr/local/bin/claude-client-push-fleet
+    cat > /etc/cron.d/claude-client-push <<'CRON'
+# Push latest client scripts to any laptop with an open reverse tunnel (every minute).
+# Heals dated publish folders + Desktop\Claude-Connect even when local connect-update is broken.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+* * * * * root /usr/local/bin/claude-client-push-fleet >/dev/null 2>&1
+CRON
+    chmod 644 /etc/cron.d/claude-client-push
+    ok "claude-client-push-fleet cron -> every minute"
+fi
+
 if [ -f "$SERVER_DIR/claude-git-setup.sh" ]; then
-    install -m 755 "$SERVER_DIR/claude-git-setup.sh" /usr/local/bin/claude-git-setup
+    atomic_install 755 "$SERVER_DIR/claude-git-setup.sh" /usr/local/bin/claude-git-setup
     ok "claude-git-setup -> /usr/local/bin/"
     for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
         [ -d "/home/$u" ] || continue
         mkdir -p "/home/$u/.local/bin"
-        install -m 755 /usr/local/bin/claude-git-setup "/home/$u/.local/bin/claude-git-setup"
-        chown "$u:$u" "/home/$u/.local/bin/claude-git-setup"
+        atomic_install 755 /usr/local/bin/claude-git-setup "/home/$u/.local/bin/claude-git-setup" "$u" "$u"
     done
     ok "claude-git-setup -> all users ~/.local/bin/"
 fi
 if [ -f "$SERVER_DIR/laptop-exec.sh" ]; then
     install -m 755 "$SERVER_DIR/laptop-exec.sh" /usr/local/bin/laptop-exec
     ok "laptop-exec -> /usr/local/bin/"
+    if [ -f "$SERVER_DIR/windows-mcp-forward.sh" ]; then
+        install -m 755 "$SERVER_DIR/windows-mcp-forward.sh" /usr/local/bin/windows-mcp-forward
+        ok "windows-mcp-forward -> /usr/local/bin/"
+    fi
     if [ -f "$SERVER_DIR/skills/laptop-exec/SKILL.md" ]; then
         mkdir -p /usr/local/lib/claude-server/skills/laptop-exec
         install -m 644 "$SERVER_DIR/skills/laptop-exec/SKILL.md" \
             /usr/local/lib/claude-server/skills/laptop-exec/SKILL.md
+        if [ -f "$SERVER_DIR/skills/laptop-exec/reference-windows-mcp.md" ]; then
+            install -m 644 "$SERVER_DIR/skills/laptop-exec/reference-windows-mcp.md" \
+                /usr/local/lib/claude-server/skills/laptop-exec/reference-windows-mcp.md
+        fi
         ok "laptop-exec skill -> /usr/local/lib/claude-server/skills/"
     fi
     if [ -f "$SERVER_DIR/cursor-rules/laptop-exec.mdc" ]; then
@@ -179,8 +222,11 @@ if [ -f "$SERVER_DIR/laptop-exec.sh" ]; then
     fi
     if [ -d "$SERVER_DIR/cursor-hooks" ]; then
         mkdir -p /usr/local/lib/claude-server/cursor-hooks
-        install -m 755 "$SERVER_DIR/cursor-hooks/laptop-exec-guard.sh" \
-            /usr/local/lib/claude-server/cursor-hooks/laptop-exec-guard.sh
+        for _hf in laptop-exec-guard.sh laptop-exec-guard-wrap.sh laptop-exec-shell-scan.py laptop-exec-session.sh; do
+            [ -f "$SERVER_DIR/cursor-hooks/$_hf" ] || continue
+            install -m 755 "$SERVER_DIR/cursor-hooks/$_hf" \
+                "/usr/local/lib/claude-server/cursor-hooks/$_hf"
+        done
         install -m 644 "$SERVER_DIR/cursor-hooks/hooks-user.json" \
             /usr/local/lib/claude-server/cursor-hooks/hooks-user.json
         install -m 644 "$SERVER_DIR/cursor-hooks/hooks-project.json" \
@@ -192,11 +238,20 @@ if [ -f "$SERVER_DIR/laptop-exec.sh" ]; then
         mkdir -p "/home/$u/.local/bin"
         chown "$u:$u" "/home/$u/.local/bin" 2>/dev/null || true
         install -m 755 /usr/local/bin/laptop-exec "/home/$u/.local/bin/laptop-exec"
+        if [ -x /usr/local/bin/windows-mcp-forward ]; then
+            install -m 755 /usr/local/bin/windows-mcp-forward "/home/$u/.local/bin/windows-mcp-forward"
+            chown "$u:$u" "/home/$u/.local/bin/windows-mcp-forward"
+        fi
+
         chown "$u:$u" "/home/$u/.local/bin/laptop-exec"
         if [ -f "$SERVER_DIR/skills/laptop-exec/SKILL.md" ]; then
             mkdir -p "/home/$u/.cursor/skills/laptop-exec"
             install -m 644 "$SERVER_DIR/skills/laptop-exec/SKILL.md" \
                 "/home/$u/.cursor/skills/laptop-exec/SKILL.md"
+            if [ -f "$SERVER_DIR/skills/laptop-exec/reference-windows-mcp.md" ]; then
+                install -m 644 "$SERVER_DIR/skills/laptop-exec/reference-windows-mcp.md" \
+                    "/home/$u/.cursor/skills/laptop-exec/reference-windows-mcp.md"
+            fi
             chown -R "$u:$u" "/home/$u/.cursor/skills/laptop-exec"
             chown "$u:$u" "/home/$u/.cursor/skills" 2>/dev/null || true
         fi
@@ -267,6 +322,55 @@ if [ -f "$SERVER_DIR/cursor-auth-sync.sh" ]; then
     install -m 755 "$SERVER_DIR/cursor-auth-sync.sh" /usr/local/bin/cursor-auth-sync
     ok "cursor-auth-sync -> /usr/local/bin/"
 fi
+if [ -f "$SERVER_DIR/mcp-via-xray.sh" ]; then
+    install -m 755 "$SERVER_DIR/mcp-via-xray.sh" /usr/local/bin/mcp-via-xray
+    mkdir -p /usr/local/lib/claude-server
+    install -m 755 "$SERVER_DIR/mcp-via-xray.sh" /usr/local/lib/claude-server/mcp-via-xray.sh
+    ok "mcp-via-xray -> /usr/local/bin/ (server-side HTTP MCP via xray)"
+fi
+if [ -f "$SERVER_DIR/cursor-mcp-template.json" ]; then
+    mkdir -p /usr/local/lib/claude-server
+    install -m 644 "$SERVER_DIR/cursor-mcp-template.json" /usr/local/lib/claude-server/cursor-mcp-template.json
+    ok "cursor-mcp-template.json -> /usr/local/lib/claude-server/"
+fi
+if [ -f "$SERVER_DIR/cursor-mcp-sync.sh" ]; then
+    mkdir -p /usr/local/lib/claude-server
+    install -m 755 "$SERVER_DIR/cursor-mcp-sync.sh" /usr/local/bin/cursor-mcp-sync
+    install -m 755 "$SERVER_DIR/cursor-mcp-sync.sh" /usr/local/lib/claude-server/cursor-mcp-sync.sh
+    ok "cursor-mcp-sync -> /usr/local/bin/ + /usr/local/lib/claude-server/"
+fi
+if [ -f "$SERVER_DIR/skills/context7/SKILL.md" ]; then
+    mkdir -p /usr/local/lib/claude-server/skills/context7
+    install -m 644 "$SERVER_DIR/skills/context7/SKILL.md"         /usr/local/lib/claude-server/skills/context7/SKILL.md
+    ok "context7 skill -> /usr/local/lib/claude-server/skills/"
+fi
+for rule in figma-design backend-agent mcp-memory; do
+    if [ -f "$SERVER_DIR/cursor-rules/${rule}.mdc" ]; then
+        mkdir -p /usr/local/lib/claude-server/cursor-rules
+        install -m 644 "$SERVER_DIR/cursor-rules/${rule}.mdc"             "/usr/local/lib/claude-server/cursor-rules/${rule}.mdc"
+        ok "${rule} cursor rule -> /usr/local/lib/claude-server/cursor-rules/"
+    fi
+done
+if [ -f "$SERVER_DIR/skills/context7/SKILL.md" ] || [ -f "$SERVER_DIR/cursor-rules/figma-design.mdc" ] || [ -f "$SERVER_DIR/cursor-rules/backend-agent.mdc" ] || [ -f "$SERVER_DIR/cursor-rules/mcp-memory.mdc" ]; then
+    for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
+        [ -d "/home/$u" ] || continue
+        if [ -f "$SERVER_DIR/skills/context7/SKILL.md" ]; then
+            mkdir -p "/home/$u/.cursor/skills/context7"
+            install -m 644 "$SERVER_DIR/skills/context7/SKILL.md"                 "/home/$u/.cursor/skills/context7/SKILL.md"
+            chown -R "$u:$u" "/home/$u/.cursor/skills/context7"
+            chown "$u:$u" "/home/$u/.cursor/skills" 2>/dev/null || true
+        fi
+        for rule in figma-design backend-agent mcp-memory; do
+            if [ -f "$SERVER_DIR/cursor-rules/${rule}.mdc" ]; then
+                mkdir -p "/home/$u/.cursor/rules"
+                install -m 644 "$SERVER_DIR/cursor-rules/${rule}.mdc"                     "/home/$u/.cursor/rules/${rule}.mdc"
+                chown "$u:$u" "/home/$u/.cursor/rules/${rule}.mdc"
+                chown "$u:$u" "/home/$u/.cursor/rules" 2>/dev/null || true
+            fi
+        done
+    done
+    ok "context7 skill + MCP cursor rules (incl. mcp-memory) -> all users ~/.cursor/"
+fi
 if [ -f "$SERVER_DIR/cursor-auth-refresh.sh" ]; then
     install -m 755 "$SERVER_DIR/cursor-auth-refresh.sh" /usr/local/bin/cursor-auth-refresh
     ok "cursor-auth-refresh -> /usr/local/bin/"
@@ -293,11 +397,12 @@ chmod 644 /etc/cron.d/claude-connect-logs
 
 
 mkdir -p /etc/cursor-auth/golden
+chmod 700 /etc/cursor-auth
 chmod 700 /etc/cursor-auth/golden
 # Harden any pre-existing secret files (legacy 644 from older installs/refresh).
 chmod 600 /etc/cursor-auth/golden/* 2>/dev/null || true
 # New secrets written 0600 by cursor-auth-export / refresh; root cron + add-user sync.
-ok "/etc/cursor-auth/golden ready (0700; secret files 0600)"
+ok "/etc/cursor-auth ready (0700); golden secret files 0600"
 
 touch /var/log/cursor-auth-refresh.log
 chmod 644 /var/log/cursor-auth-refresh.log
@@ -489,6 +594,10 @@ ok "commands -> /usr/local/lib/claude-server/"
 
 # OAuth store: root-only dir + file (never leave token in world-readable /etc/environment 644).
 mkdir -p /etc/claude-code
+
+# Remind ops: MCP golden secrets are not in git — place before sync is useful
+#   /etc/claude-code/sqlserver.env   (SQLSERVER_HOST/USER/PASSWORD, mode 0600)
+#   /etc/claude-code/figma-mcp.env   (FIGMA_MCP_ACCESS_TOKEN=figu_..., mode 0600)
 chmod 700 /etc/claude-code
 if [ -f /etc/claude-code/oauth.env ]; then
     chmod 600 /etc/claude-code/oauth.env
@@ -527,6 +636,11 @@ if [ -f /etc/cursor-auth/golden/auth.json ] && [ -x /usr/local/bin/cursor-auth-s
     ok "Cursor golden identity synced to all users"
 fi
 
+if [ -x /usr/local/bin/cursor-mcp-sync ]; then
+    cursor-mcp-sync --all || warn "cursor-mcp-sync --all failed (non-fatal)"
+    ok "Cursor MCP pack synced to all users"
+fi
+
 DEPLOY_BUNDLE=""
 for _dcb in "$SERVER_DIR/deploy-client-bundle.sh" "$SERVER_DIR/commands/deploy-client-bundle.sh"; do
     [ -f "$_dcb" ] && DEPLOY_BUNDLE="$_dcb" && break
@@ -563,6 +677,9 @@ echo "  Cursor golden auth (one-time bootstrap):"
 echo "       agent login   # or connect once via Remote SSH to populate ~/.config/Cursor/"
 echo "       sudo cursor-auth-export --from-user smart"
 echo "       sudo claude-server sync-cursor-auth"
+echo ""
+echo "  Cursor MCP pack (figma, context7, playwright, sequential-thinking, memory, sqlserver, ...):"
+echo "       sudo claude-server sync-cursor-mcp"
 echo ""
 
 

@@ -13,6 +13,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 grep -q 'Ensure-SessionTunnel' "$GIT" || fail 'missing Ensure-SessionTunnel'
 grep -q 'Acquire-TunnelPort' "$GIT" || fail 'missing Acquire-TunnelPort'
+grep -q 'Test-TunnelPortIsForeignPeer' "$GIT" || fail 'missing Test-TunnelPortIsForeignPeer'
+grep -q 'foreign_peer' "$GIT" || fail 'missing foreign_peer skip'
 grep -q 'Sanitize-SshAliasConfig' "$GIT" || fail 'missing Sanitize-SshAliasConfig'
 grep -q 'Release-StaleTunnelPort' "$GIT" || fail 'missing Release-StaleTunnelPort'
 grep -q 'Ensure-LaptopReverseSshCached' "$GIT" || fail 'missing Ensure-LaptopReverseSshCached'

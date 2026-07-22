@@ -23,18 +23,27 @@ Write-Host '=== Claude Connect - full desktop sync ===' -ForegroundColor White
 Write-Host ''
 
 Write-Step 'Publishing packages...'
-& $PublishScript -SkipVersionBump
+if ($DeployServer) {
+    & $PublishScript -SkipVersionBump
+} else {
+    # User/ops: laptop Desktop sync must NOT push /usr/local/share/claude-client
+    & $PublishScript -SkipVersionBump -SkipServerDeploy
+}
 Write-Ok 'publish complete'
 
-$pub = Get-ChildItem (Join-Path $env:USERPROFILE 'Desktop\claude-publish\claude-code-client-*') -Directory |
-    Sort-Object Name -Descending | Select-Object -First 1
-if (-not $pub) { throw 'Publish folder not found under Desktop\claude-publish' }
+$pubPath = Join-Path $env:USERPROFILE 'Desktop\claude-publish\claude-code-client'
+if (-not (Test-Path -LiteralPath $pubPath)) { throw 'Publish folder not found: Desktop\claude-publish\claude-code-client (run publish.bat)' }
+$pub = Get-Item -LiteralPath $pubPath
 
 Write-Step "Syncing Desktop\Claude-Connect from $($pub.Name) (client only)..."
 $maps = @(
     @{ S = 'windows\connect.bat'; D = 'connect.bat' },
+    @{ S = 'windows\connect-boot.ps1'; D = 'connect-boot.ps1' },
+    @{ S = 'windows\connect-heal.ps1'; D = 'connect-heal.ps1' },
+    @{ S = 'windows\connect-bootstrap.ps1'; D = 'connect-bootstrap.ps1' },
     @{ S = 'windows\connect-version.txt'; D = 'connect-version.txt' },
     @{ S = 'windows\connect-update.ps1'; D = 'connect-update.ps1' },
+    @{ S = 'windows\cursor-proxy-sidecar.ps1'; D = 'cursor-proxy-sidecar.ps1' },
     @{ S = 'windows\connect.ps1'; D = 'connect.ps1' },
     @{ S = 'windows\connect-rider.bat'; D = 'connect-rider.bat' },
     @{ S = 'windows\editor-launch.ps1'; D = 'editor-launch.ps1' },
@@ -57,6 +66,7 @@ Copy-Item (Join-Path $pub.FullName 'mac\connect-version.txt') (Join-Path $macDir
 Copy-Item (Join-Path $pub.FullName 'mac\git-mode.sh') (Join-Path $macDir 'git-mode.sh') -Force
 Copy-Item (Join-Path $pub.FullName 'mac\connect-ui.sh') (Join-Path $macDir 'connect-ui.sh') -Force
 Copy-Item (Join-Path $pub.FullName 'mac\editor-launch.sh') (Join-Path $macDir 'editor-launch.sh') -Force
+Copy-Item (Join-Path $pub.FullName 'mac\cursor-proxy-sidecar.sh') (Join-Path $macDir 'cursor-proxy-sidecar.sh') -Force
 Copy-Item (Join-Path $pub.FullName 'mac\claude-mount.sh') (Join-Path $macDir 'claude-mount.sh') -Force
 Copy-Item (Join-Path $PSScriptRoot 'deploy-server-mount-fix.ps1') (Join-Path $Desk 'deploy-server-mount-fix.ps1') -Force
 Copy-Item (Join-Path $PSScriptRoot 'deploy-server-mount-fix.bat') (Join-Path $Desk 'deploy-server-mount-fix.bat') -Force

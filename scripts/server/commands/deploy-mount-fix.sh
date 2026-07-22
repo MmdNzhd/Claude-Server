@@ -15,6 +15,20 @@ ok()   { printf "  ${GREEN}ok${NC}    %s\n" "$1"; }
 warn() { printf "  ${YELLOW}warn${NC}  %s\n" "$1"; }
 fail() { printf "  ${RED}FAIL${NC}  %s\n" "$1"; exit 1; }
 
+# atomic_install MODE SRC DST [OWNER] [GROUP]
+# Installs SRC to DST via a same-directory temp file + rename so a process already
+# executing DST (e.g. claude-watchdog polling claude-mount every 30s) never observes
+# a partially-written file.
+atomic_install() {
+    local mode="$1" src="$2" dst="$3" owner="${4:-}" group="${5:-}" tmp="${3}.new.$$"
+    if [ -n "$owner" ]; then
+        install -m "$mode" -o "$owner" -g "$group" "$src" "$tmp" || return 1
+    else
+        install -m "$mode" "$src" "$tmp" || return 1
+    fi
+    mv -f "$tmp" "$dst"
+}
+
 if [ "$EUID" -ne 0 ]; then
     fail "run as root: sudo claude-server deploy-mount-fix"
 fi
@@ -72,20 +86,22 @@ echo -e "${BOLD}Deploy mount + automount fix${NC}"
 echo -e "  ${BOLD}source${NC}  $MOUNT_SRC"
 echo ""
 
-install -m 755 "$AUTO_SRC" /usr/local/bin/claude-automount
+atomic_install 755 "$AUTO_SRC" /usr/local/bin/claude-automount
 ok "claude-automount -> /usr/local/bin/"
 if [ -f "$SERVER_DIR/claude-self-heal.sh" ]; then
-  install -m 755 "$SERVER_DIR/claude-self-heal.sh" /usr/local/bin/claude-self-heal
-  sed -i 's/\r$//' /usr/local/bin/claude-self-heal 2>/dev/null || true
+  heal_tmp="/usr/local/bin/claude-self-heal.new.$$"
+  install -m 755 "$SERVER_DIR/claude-self-heal.sh" "$heal_tmp"
+  sed -i 's/\r$//' "$heal_tmp" 2>/dev/null || true
+  mv -f "$heal_tmp" /usr/local/bin/claude-self-heal
   ok "claude-self-heal -> /usr/local/bin/"
 fi
 
-install -m 755 "$MOUNT_SRC" /usr/local/lib/claude-mount
+atomic_install 755 "$MOUNT_SRC" /usr/local/lib/claude-mount
 ok "claude-mount -> /usr/local/lib/claude-mount"
 ln -sf /usr/local/lib/claude-mount /usr/local/bin/claude-mount 2>/dev/null || true
 
 if [ -f "$WATCH_SRC" ]; then
-    install -m 755 "$WATCH_SRC" /usr/local/bin/claude-watchdog
+    atomic_install 755 "$WATCH_SRC" /usr/local/bin/claude-watchdog
     ok "claude-watchdog -> /usr/local/bin/"
 fi
 
@@ -94,7 +110,7 @@ grep -q 'EncodedCommand' /usr/local/lib/claude-mount || fail "claude-mount missi
 grep -q '_force_unmount_project' /usr/local/lib/claude-mount || fail "claude-mount missing force unmount"
 grep -q 'up "$ACTIVE_MOUNT"' /usr/local/bin/claude-automount || fail "claude-automount missing ACTIVE_MOUNT"
 if [ -f /usr/local/bin/claude-watchdog ]; then
-    grep -q '_load_active_mount' /usr/local/bin/claude-watchdog || fail "claude-watchdog missing ACTIVE_MOUNT guard"
+    grep -q '_load_conf' /usr/local/bin/claude-watchdog || fail "claude-watchdog missing ACTIVE_MOUNT guard"
 fi
 
 _patch_bashrc() {
@@ -112,13 +128,12 @@ for home in /home/*/; do
     [ "$u" = "lost+found" ] && continue
     id "$u" >/dev/null 2>&1 || continue
     mkdir -p "$home/.local/bin"
-    install -m 755 /usr/local/lib/claude-mount "$home/.local/bin/claude-mount"
-    install -m 755 /usr/local/bin/claude-automount "$home/.local/bin/claude-automount"
-    chown "$u:$u" "$home/.local/bin/claude-mount" "$home/.local/bin/claude-automount"
+    atomic_install 755 /usr/local/lib/claude-mount "$home/.local/bin/claude-mount" "$u" "$u"
+    atomic_install 755 /usr/local/bin/claude-automount "$home/.local/bin/claude-automount" "$u" "$u"
     _patch_bashrc "$home/.bashrc"
     ok "$u ~/.local/bin/claude-mount + claude-automount"
 done
 
 echo ""
-echo -e "${GREEN}Done.${NC} Users should reconnect connect.bat (v20260720.1+)."
+echo -e "${GREEN}Done.${NC} Users should reconnect connect.bat (v20260722.24+)."
 echo ""

@@ -61,10 +61,10 @@ Index rows are TSV (not bracket log lines) — acceptable; contract item is pres
 
 | Path | Mechanism | Verdict |
 |------|-----------|:-------:|
-| **Win Write-ConnectLog** | `ERROR` → `Sync-ConnectLogToServer -Force`; `WARN` → `-Force` (`connect-ui.ps1:484-487`) | **PASS** |
-| **Mac connect_log** | `ERROR`/`WARN` → `sync_connect_log_to_server force` (`connect-ui.sh:252-254`) | **PASS** |
-| **Win Wait-ConnectExit / Close-ConnectLog / trap** | Force sync on non-zero exit and session end | **PASS** |
-| **Mac flush_connect_log_to_server / EXIT+ERR traps** | Force sync (`connect-ui.sh:446`, `connect.sh:234-236`) | **PASS** |
+| **Win Write-ConnectLog** | `ERROR` → `Complete-ConnectLogAsyncDrain -Force`; `WARN` → `Request-ConnectLogSync` coalesce ≤5s (`connect-ui.ps1`) | **PASS*** |
+| **Mac connect_log** | `ERROR` → `complete_connect_log_async_drain force`; `WARN` → `request_connect_log_sync` coalesce ≤5s (`connect-ui.sh`) | **PASS*** |
+| **Win Wait-ConnectExit / Close-ConnectLog / trap** | `Complete-ConnectLogAsyncDrain -Force` on session end (drains coalesced WARN) | **PASS** |
+| **Mac flush_connect_log_to_server / EXIT+ERR traps** | `complete_connect_log_async_drain force` via flush + ERR/EXIT traps (`connect-ui.sh`, `connect.sh`) | **PASS** |
 | **Win Write-UpdateFileLog** | Append local only; **no** per-line sync | **FAIL** |
 | **Mac _update_file_log** | Append local only; **no** sync at all | **FAIL** |
 | **connect.bat inline ERROR** | Local append only; ships later when `connect.ps1` calls `Sync-ConnectLogToServer` after SSH config (~`:1055`) | **PARTIAL** — not immediate |
@@ -72,6 +72,8 @@ Index rows are TSV (not bracket log lines) — acceptable; contract item is pres
 | **Mac connect-update** | No server ship block anywhere | **FAIL** |
 
 **Sub-verdict:** Connect-session logging **PASS**; UPDATE-phase ERROR/WARN **FAIL** immediate force-sync contract.
+
+**Amendment (Connect Speed Pack v2):** the "PASS" for connect-session WARN above is now implemented as a **debounced coalesce**, not a per-line immediate `-Force` sync — `Write-ConnectLog`/`connect_log` schedule WARN via `Request-ConnectLogSync`/`request_connect_log_sync`, which drains within a **5s** async window (`ConnectLogWarnPendingUntil` / `CONNECT_LOG_WARN_UNTIL`) instead of blocking the caller. This debounce is contract-compliant **iff and only if** every session-end path (`Wait-ConnectExit`, `Close-ConnectLog`, `flush_connect_log_to_server`, EXIT/ERR traps) unconditionally calls the Force drain (`Complete-ConnectLogAsyncDrain -Force` / `sync_connect_log_to_server force`) so no coalesced WARN is ever left stranded on the laptop past session end. ERROR is unaffected and still force-syncs immediately on every path.
 
 ---
 

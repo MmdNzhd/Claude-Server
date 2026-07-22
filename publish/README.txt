@@ -3,11 +3,27 @@ Claude Code Server - Client Package (Smart)
 
 Site: Smart
 Server IP (baked into connect scripts): 192.168.210.240
-Current connect scripts: v20260720.1
+Current connect scripts: v20260722.24
 
 WINDOWS
 -------
-1. Copy the extracted folder (claude-code-client-YYYYMMDD) somewhere convenient.
+
+HOW TO GIVE TO OTHERS (Windows)
+-------------------------------
+1. Run publish\publish.bat on your PC (builds + deploys server bundle).
+2. Give users ONLY: Desktop\Claude-Connect.exe  (single file).
+3. User double-clicks the EXE once -> installs to Desktop\Claude-Connect
+   and starts connect.bat.
+4. Later versions: you publish again (server auto-update). Users do NOT
+   need a new EXE/ZIP — their connect.bat pulls the new client on launch.
+5. Send a new EXE only for a brand-new laptop / first-time install.
+
+Option A (single file — preferred for users): Desktop\Claude-Connect.exe
+  Double-click once. Installs into Desktop\Claude-Connect and launches
+  connect.bat. After that, updates come from the server automatically.
+
+Option B (folder / ZIP — for you/dev only):
+1. Copy the extracted folder (claude-code-client) somewhere convenient.
 2. Open the windows\ folder.
 
    Required files (all must be in the same folder):
@@ -29,7 +45,7 @@ WINDOWS
    optionally set git mode (g) or IDE (c), Cursor or VS Code opens via Remote SSH.
 
    Header must show:
-     claude-server  |  192.168.210.240  |  v20260720.1
+     claude-server  |  192.168.210.240  |  v20260722.24
 
    Project menu must include:  g git
 
@@ -51,7 +67,7 @@ MAC
 3. Same flow as Windows (project table, git banner, session keys).
 
    Header must show:
-     claude-server  |  192.168.210.240  |  v20260720.1
+     claude-server  |  192.168.210.240  |  v20260722.24
 
    After disconnect: 10s countdown, default M = project menu.
 
@@ -73,9 +89,17 @@ Preference saved in:
   Windows: %USERPROFILE%\.config\claude-connect\editor.conf
   Mac:     ~/.config/claude-connect/editor.conf
 
+
+ONE CONNECT PER PC (important)
+------------------------------
+  Run only ONE connect.bat / connect.sh window at a time on this laptop.
+  A second launch shows: [X] Another Claude Connect is already running.
+  Close designer connect before starting developer connect (and vice versa).
+  Orphan tunnel cleanup skips the live session ssh -R (peer safety).
+
 SINGLE PROJECT (important)
 --------------------------
-  Only ONE project is mounted per session. Requires connect scripts v20260720.1+
+  Only ONE project is mounted per session. Requires connect scripts v20260722.24+
   and server-side mount fix (admin deploys from repo - not included in this ZIP).
 
 SESSION KEYS
@@ -97,7 +121,7 @@ If selecting a project shows "Join-Path ChildPath" prompt:
   - connect.bat blocks outdated folders automatically
 
 If connect.bat says OUTDATED:
-  - Missing connect-ui.ps1 or version is not v20260720.1
+  - Missing connect-ui.ps1 or version is not v20260722.24
 
 Do NOT use old folders from previous ZIP dates or stale Desktop copies.
 Do NOT mix this Smart package with a Sepidz ZIP (different server IP).
@@ -126,16 +150,20 @@ TWO CURSOR PROFILES (no conflict)
 
 CURSOR AUTH: server golden tokens + profile machineid; use [Claude Server] window only.
 
-LOGS (server only, v20260720.1+)
----------------------------------
-  No durable connect.log on the laptop. Session logs are uploaded to the
+LOGS (durable on laptop + synced to server, v20260722.24+)
+------------------------------------------------------------
+  Connect keeps a durable local day log on your laptop AND syncs it to the
   server account:
 
-    ~/.claude/logs/connect-YYYYMMDD.log
-    ~/.claude/logs/laptop-ssh-diag-latest.txt   (after laptop SSH failures)
+    Laptop: %USERPROFILE%\.config\claude-connect\logs\connect-YYYYMMDD.log
+    Server: ~/.claude/logs/connect-YYYYMMDD.log
+    Server: ~/.claude/logs/laptop-ssh-diag-latest.txt   (after laptop SSH failures)
 
-  Laptop uses a temp buffer only (%TEMP% / /tmp); it is deleted when connect
-  exits. Server retains logs for 1 day (hourly cleanup cron).
+  WARN lines append locally immediately; the server copy may lag up to 5s
+  (coalesced sync). ERROR lines and session end always force-sync right
+  away. The laptop copy is never deleted on session end (offline / failed-
+  SSH sessions stay auditable); server copies are retained for 1 day
+  (hourly cleanup cron).
 
   Ask admin to read your server logs if Cursor opens Agent home or reverse
   SSH (Mac Remote Login) fails.

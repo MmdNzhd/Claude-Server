@@ -247,6 +247,7 @@ def write_golden_bundle(
     require_profile_metadata: bool = False,
 ) -> None:
     GOLDEN_DIR.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(GOLDEN_DIR.parent, 0o700)
     os.chmod(GOLDEN_DIR, 0o700)
 
     auth_payload = {

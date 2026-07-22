@@ -43,7 +43,7 @@ if [ -n "$uid" ]; then
     if acquire_tunnel_port "$uid"; then
         pass "acquire_tunnel_port PORT=$PORT slot=${TUNNEL_SLOT:-0} (uid=$uid)"
     else
-        PORT=$((20000 + uid))
+        PORT="$(tunnel_port_user_base "$uid")"
         fail "acquire_tunnel_port fell back to PORT=$PORT (all slots busy?)"
     fi
 else

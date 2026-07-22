@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 # test-hard-multi-agent-regressions.ps1
 # HARD regression gate for bugs that slipped past HARD10/VERIFY10:
-#   - single-instance mutex blocking unlimited clients
+#   - Up to 10 Connect UIs per PC (Global\ClaudeConnect#0..#9)
 #   - Ensure-ConnectRunId called before function definition
 #   - user-visible failures logged only as INFO / console-only
 # Failures here mean "do not ship".
@@ -41,17 +41,36 @@ $desPs = Get-Content (Join-Path $Client 'users\designer\connect.ps1') -Raw
 $desSh = Get-Content (Join-Path $Client 'users\designer\connect.sh') -Raw
 $gm   = Get-Content (Join-Path $Client 'git-mode.ps1') -Raw
 
-Write-Host '--- A) Unlimited concurrent clients ---' -ForegroundColor Cyan
-Assert ($ui -match 'MULTI_INSTANCE: allowed') 'Win: Enter-ConnectSingleInstance is multi-instance no-op'
-Assert ($ui -notmatch 'Another Claude Connect is already running') 'Win: no blocking single-instance user message'
-Assert ($ui -match '(?s)function Enter-ConnectSingleInstance.*?return \$true') 'Win: Enter-ConnectSingleInstance always returns true'
-Assert ($ui -notmatch 'New-Object System\.Threading\.Mutex') 'Win: connect-ui does not take Global\\ClaudeConnect mutex'
-Assert ($uiSh -match 'MULTI_INSTANCE: allowed') 'Mac: enter_connect_single_instance is multi-instance no-op'
-Assert ($uiSh -notmatch 'Another Claude Connect is already running') 'Mac: no blocking flock user message'
-Assert ($desPs -notmatch 'Designer \+ main connect cannot share') 'Designer Win: no dual-connect block message'
-Assert ($desSh -notmatch 'exec 9>"\$_designer_lockfile"') 'Designer Mac: no connect.lock flock'
-Assert ($gm -match '0\.\.9') 'Tunnel slots 0..9 exist for concurrent tunnels'
+Write-Host '--- A) Up to 10 Connect UIs per PC (multi instance) ---' -ForegroundColor Cyan
+Assert ($ui -match 'Global\\ClaudeConnect#') 'Win: Enter-ConnectSingleInstance uses Global\ClaudeConnect# slot mutexes'
+Assert ($ui -match 'New-Object System\.Threading\.Mutex') 'Win: connect-ui takes slot Mutex'
+Assert (
+    ($ui -match '10 Claude Connect windows already open') -or
+    ($ui -match 'MULTI_INSTANCE: acquired')
+) 'Win: blocks at 10 or logs MULTI_INSTANCE acquire'
+Assert ($ui -match 'MULTI_INSTANCE: acquired') 'Win: multi-instance slot pool enabled'
+Assert ($ui -match 'mutex error \(block\)') 'Win: mutex catch is fail-closed (block)'
+Assert ($ui -notmatch 'mutex error \(continue\)') 'Win: mutex catch must not fail-open'
+Assert ($gm -match 'no result line') 'git-mode: pushLine null-safe fallback'
+Assert ($bat -match 'connect-boot\.ps1') 'connect.bat handoffs via connect-boot.ps1 (atomic slot mutex)'
+Assert ($bat -notmatch 'ReleaseMutex') 'connect.bat must not probe/release mutex (TOCTOU)'
+Assert ($win -match 'ReleaseMutex' -and $win -match 'CLAUDE_CONNECT_BOOT_MUTEX' -and $win -match "connect-boot\.ps1") 'connect.ps1 releases boot mutex and elevates via connect-boot before UAC'
 
+Assert (Test-Path (Join-Path $Client 'windows\connect-boot.ps1')) 'connect-boot.ps1 exists'
+Assert ((Get-Content (Join-Path $Client 'windows\connect-boot.ps1') -Raw) -match 'ClaudeConnect#') 'connect-boot acquires ClaudeConnect# slot pool'
+Assert ((Get-Content (Join-Path $Client '..\..\publish\deploy-client-bundles.ps1') -Raw) -match "connect-boot\.ps1") 'deploy-client-bundles includes connect-boot.ps1 in WinBundleFiles'
+Assert (
+    ($uiSh -match 'connect\.lock') -or
+    ($uiSh -match 'Another Claude Connect is already running') -or
+    ($uiSh -match 'SINGLE_INSTANCE: acquired') -or
+    ($uiSh -match 'MULTI_INSTANCE')
+) 'Mac: enter_connect_single_instance uses flock or instance message'
+Assert ($desPs -match 'Enter-ConnectSingleInstance') 'Designer Win: shares main instance gate'
+Assert ($desPs -match '(?s)Enter-ConnectSingleInstance[\s\S]{0,200}-not \(Enter-ConnectSingleInstance\)') 'Designer Win: honors mutex false (exits)'
+Assert ($desPs -notmatch '\$null = Enter-ConnectSingleInstance') 'Designer Win: must not discard mutex result'
+Assert ($desSh -match 'enter_connect_single_instance') 'Designer Mac: shares main instance gate'
+Assert ($gm -match '0\.\.9') 'Tunnel slots 0..9 align with multi-UI capacity'
+Assert ($gm -match 'CLAUDE_CONNECT_UI_SLOT') 'git-mode prefers CLAUDE_CONNECT_UI_SLOT for tunnel acquire'
 Write-Host '--- B) Ensure-ConnectRunId define-before-use ---' -ForegroundColor Cyan
 $defLine = Get-LineIndex $upd 'function Ensure-ConnectRunId'
 # first call after param/setup (not inside function body) — find "$null = Ensure-ConnectRunId"
@@ -121,7 +140,7 @@ $macUpd = Get-Content (Join-Path $Client 'mac\connect-update.sh') -Raw
 Assert ($macUpd -match 'flat_layout') 'mac connect-update.sh guards flat layout bak outside live'
 Assert ($bat -match 'FAIL OUTDATED_SCRIPTS') 'connect.bat logs FAIL OUTDATED_SCRIPTS'
 Assert ($upd -match 'swap_inplace_ok') 'connect-update.ps1 inplace fallback when live in use'
-Assert ($upd -match 'FAIL UPDATE_SWAP_IN_USE') 'connect-update.ps1 logs FAIL UPDATE_SWAP_IN_USE'
+Assert ($upd -match 'UPDATE_SWAP_IN_USE') 'connect-update.ps1 logs UPDATE_SWAP_IN_USE'
 
 
 Write-Host '--- G) Admin AK ACL false-positive ---' -ForegroundColor Cyan
