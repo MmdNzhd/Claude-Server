@@ -60,9 +60,9 @@ echo   !RELAUNCH_DIR!\connect.bat
 echo.
 set "CLAUDE_CONNECT_SKIP_HEAL=1"
 set "CLAUDE_CONNECT_SKIP_BOOTSTRAP=1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $dir='!RELAUNCH_DIR!'; if (-not $dir) { $dir=Join-Path $env:USERPROFILE 'Desktop\Claude-Connect' }; $bat=Join-Path $dir 'connect.bat'; if (-not (Test-Path -LiteralPath $bat)) { throw 'missing bat' }; $p=Start-Process -FilePath $bat -WorkingDirectory $dir -PassThru -WindowStyle Normal; if (-not $p) { throw 'Start-Process null' }; exit 0 } catch { exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $dir='!RELAUNCH_DIR!'; if (-not $dir) { $dir=Join-Path $env:USERPROFILE 'Desktop\Claude-Connect' }; $bat=Join-Path $dir 'connect.bat'; if (-not (Test-Path -LiteralPath $bat)) { throw 'missing bat' }; $p=Start-Process -FilePath $bat -WorkingDirectory $dir -PassThru -WindowStyle Hidden; if (-not $p) { throw 'Start-Process null' }; exit 0 } catch { exit 1 }"
 if errorlevel 1 (
-    start "Claude Connect" /D "%USERPROFILE%\Desktop\Claude-Connect" cmd /c ""%USERPROFILE%\Desktop\Claude-Connect\connect.bat" %*"
+    start /MIN "Claude Connect" /D "%USERPROFILE%\Desktop\Claude-Connect" cmd /c ""%USERPROFILE%\Desktop\Claude-Connect\connect.bat" %*"
 )
 exit
 
@@ -87,7 +87,7 @@ if exist "%HERE%connect-update.ps1" (
         if exist "%USERPROFILE%\Desktop\Claude-Connect\connect.bat" (
             set "CLAUDE_CONNECT_SKIP_HEAL=1"
             set "CLAUDE_CONNECT_SKIP_BOOTSTRAP=1"
-            powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $dir=Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'; $bat=Join-Path $dir 'connect.bat'; Start-Process -FilePath $bat -WorkingDirectory $dir -WindowStyle Normal; exit 0 } catch { exit 1 }"
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $dir=Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'; $bat=Join-Path $dir 'connect.bat'; Start-Process -FilePath $bat -WorkingDirectory $dir -WindowStyle Hidden; exit 0 } catch { exit 1 }"
             if not errorlevel 1 exit
         )
     )
@@ -104,11 +104,11 @@ if exist "%HERE%connect-update.ps1" (
             echo.
             REM Self-heal: Start-Process the updated bat (cmd `start` can silently fail).
             REM HERE_NOTRAIL: trailing backslash breaks /D quoting (Aria: exit=2, no BOOTSTRAP).
-            powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $bat='%~f0'; $dir='%HERE_NOTRAIL%'; $d=Join-Path $env:USERPROFILE '.config\claude-connect\logs'; New-Item -ItemType Directory -Force -Path $d|Out-Null; $f=Join-Path $d ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd')); $sid=$env:CLAUDE_CONNECT_RUN_ID; if (-not $sid) { $sid='-' }; Start-Sleep -Seconds 2; $p=Start-Process -FilePath $bat -WorkingDirectory $dir -PassThru -WindowStyle Normal; if (-not $p) { throw 'Start-Process returned null' }; $ts=Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; $line=('[{0}] [INFO] [{1}] UPDATE: bat_relaunch depth={2} dir={3} pid={4} via=Start-Process' -f $ts, $sid, $env:CLAUDE_CONNECT_UPDATE_DEPTH, $dir, $p.Id); [IO.File]::AppendAllText($f, $line+[Environment]::NewLine, [Text.UTF8Encoding]::new($false)); exit 0 } catch { try { $d=Join-Path $env:USERPROFILE '.config\claude-connect\logs'; New-Item -ItemType Directory -Force -Path $d|Out-Null; $f=Join-Path $d ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd')); $ts=Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; $sid=$env:CLAUDE_CONNECT_RUN_ID; if (-not $sid) { $sid='-' }; $line=('[{0}] [ERROR] [{1}] FAIL BAT_RELAUNCH: {2}' -f $ts, $sid, ($_.Exception.Message -replace '[\r\n]',' ')); [IO.File]::AppendAllText($f, $line+[Environment]::NewLine, [Text.UTF8Encoding]::new($false)) } catch {}; exit 1 }"
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $bat='%~f0'; $dir='%HERE_NOTRAIL%'; $d=Join-Path $env:USERPROFILE '.config\claude-connect\logs'; New-Item -ItemType Directory -Force -Path $d|Out-Null; $f=Join-Path $d ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd')); $sid=$env:CLAUDE_CONNECT_RUN_ID; if (-not $sid) { $sid='-' }; Start-Sleep -Seconds 2; $p=Start-Process -FilePath $bat -WorkingDirectory $dir -PassThru -WindowStyle Hidden; if (-not $p) { throw 'Start-Process returned null' }; $ts=Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; $line=('[{0}] [INFO] [{1}] UPDATE: bat_relaunch depth={2} dir={3} pid={4} via=Start-Process' -f $ts, $sid, $env:CLAUDE_CONNECT_UPDATE_DEPTH, $dir, $p.Id); [IO.File]::AppendAllText($f, $line+[Environment]::NewLine, [Text.UTF8Encoding]::new($false)); exit 0 } catch { try { $d=Join-Path $env:USERPROFILE '.config\claude-connect\logs'; New-Item -ItemType Directory -Force -Path $d|Out-Null; $f=Join-Path $d ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd')); $ts=Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; $sid=$env:CLAUDE_CONNECT_RUN_ID; if (-not $sid) { $sid='-' }; $line=('[{0}] [ERROR] [{1}] FAIL BAT_RELAUNCH: {2}' -f $ts, $sid, ($_.Exception.Message -replace '[\r\n]',' ')); [IO.File]::AppendAllText($f, $line+[Environment]::NewLine, [Text.UTF8Encoding]::new($false)) } catch {}; exit 1 }"
             if errorlevel 1 (
                 REM Fallback if Start-Process failed
                 ping -n 2 127.0.0.1 >nul
-                start "Claude Connect" /D "%HERE_NOTRAIL%" cmd /c ""%~f0" %*"
+                start /MIN "Claude Connect" /D "%HERE_NOTRAIL%" cmd /c ""%~f0" %*"
             )
             REM Close THIS console (double-click / leftover /K windows should die here).
             exit
@@ -150,7 +150,7 @@ if "%OUTDATED%"=="1" (
         echo  [X] OUTDATED scripts in this folder - opening Desktop\Claude-Connect ...
         echo.
         set "CLAUDE_CONNECT_SKIP_HEAL=1"
-        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $dir=Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'; $bat=Join-Path $dir 'connect.bat'; Start-Process -FilePath $bat -WorkingDirectory $dir -WindowStyle Normal; exit 0 } catch { exit 1 }"
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $dir=Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'; $bat=Join-Path $dir 'connect.bat'; Start-Process -FilePath $bat -WorkingDirectory $dir -WindowStyle Hidden; exit 0 } catch { exit 1 }"
         if not errorlevel 1 exit /b 0
     )
     echo.
