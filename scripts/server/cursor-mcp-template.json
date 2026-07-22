@@ -1,0 +1,47 @@
+{
+  "mcpServers": {
+    "figma": {
+      "command": "/usr/local/bin/mcp-via-xray",
+      "args": [
+        "https://mcp.figma.com/mcp"
+      ],
+      "env": {
+        "XRAY_HTTP_PROXY": "http://127.0.0.1:10809"
+      }
+    },
+    "context7": {
+      "command": "/usr/local/bin/mcp-via-xray",
+      "args": [
+        "https://mcp.context7.com/mcp"
+      ],
+      "env": {
+        "XRAY_HTTP_PROXY": "http://127.0.0.1:10809"
+      }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest"
+      ]
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ]
+    },
+    "memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ]
+    },
+    "sqlserver": {
+      "command": "/usr/bin/mcp-sqlserver",
+      "args": []
+    }
+  }
+}

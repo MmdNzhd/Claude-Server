@@ -1,0 +1,30 @@
+---
+description: >-
+  When the user pastes a figma.com URL, shares a Figma frame/link, or asks to
+  implement or design UI from a Figma file — use Figma MCP and related skills.
+alwaysApply: false
+---
+
+# Figma design implementation
+
+Apply this rule when UI work is driven by a Figma design (link, frame, or component spec).
+
+## Figma MCP
+
+1. Use **Figma MCP** tools to inspect the file: frames, components, typography, colors, spacing, and export hints.
+2. Prefer accurate layout tokens from Figma over guessing from screenshots alone.
+3. If Figma MCP is unavailable, say so and ask the user to connect OAuth or reload Cursor after MCP sync.
+
+## Skills and plugins
+
+- Prefer **`/add-plugin figma`** (Figma plugin/skills bundle) when starting Figma-driven UI tasks — it adds structured workflows for design-to-code.
+- Reuse existing design-system components in the repo before creating one-off styles.
+
+## After implementation
+
+- When feasible, run a **Playwright** (or browser MCP) check: key screens render, critical interactions work, and layout matches the design at a reasonable breakpoint.
+- Playwright verification is recommended, not required on every small tweak — use judgment for scope.
+
+## Scope
+
+This rule is **not** mandatory every chat — only when Figma links or explicit design-from-Figma requests appear.

@@ -1,0 +1,47 @@
+---
+description: >-
+  Persistent MCP Memory (user-memory / knowledge graph). Agents MUST use it to
+  recall and store durable project facts — not optional trivia.
+alwaysApply: true
+---
+
+# MCP Memory (mandatory)
+
+Server id in Cursor: `user-memory` (pack key `memory`).
+Tools: `search_nodes`, `open_nodes`, `read_graph`, `create_entities`,
+`create_relations`, `add_observations`, `delete_*`.
+
+If `GetMcpTools` / CallMcpTool cannot see `user-memory` → tell user to
+**Reload Window** after `sudo claude-server sync-cursor-mcp`. Do not invent memory.
+
+## When to READ (before guessing)
+
+Call `search_nodes` (or `open_nodes` / `read_graph`) when the task involves:
+
+- Prior decisions, ports, IPs, auth, proxy, tunnel, MCP wiring, user prefs
+- "How did we set X up?", "what was the fix?", recurring infra
+- Multi-session continuity (Smart proxy, windows-mcp, laptop-exec, GIT_MODE)
+
+Skip only for pure one-off code edits with no durable context.
+
+## When to WRITE (after learning)
+
+Call `create_entities` / `add_observations` / `create_relations` when you learn
+facts that should survive this chat:
+
+- Ports, paths, package versions, deploy commands that worked
+- Root causes + fixes (e.g. proxy 18998 sidecar, CLI sticky 18999)
+- User preferences and project conventions
+
+Keep observations short, factual, English. Prefer entity types:
+`project`, `service`, `preference`, `incident`, `convention`.
+
+## Do NOT store
+
+Secrets, tokens, passwords, full auth keys, raw OAuth, sqlserver passwords.
+
+## Habit
+
+1. Early in a non-trivial task → `search_nodes` with a few keywords.
+2. After a solid fix/decision → `add_observations` or `create_entities`.
+3. Prefer Memory MCP over re-deriving the same infra facts from scratch.

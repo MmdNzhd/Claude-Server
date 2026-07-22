@@ -1,0 +1,691 @@
+# windows-mcp-laptop.ps1 - Ensure Windows-MCP on the laptop during connect.
+# Dot-sourced by windows/connect.ps1 only (not Mac / not designer).
+# Fail-soft + background: never block/abort connect UI.
+#
+# Precise bootstrap (fresh Windows, no Python required in the happy path):
+#
+#   A. windows-mcp.exe already on PATH / known dirs  -> skip package install
+#   B. else ensure uv.exe (standalone; does NOT need system Python):
+#        B1. winget astral-sh.uv  (works when connect is elevated)
+#        B2. https://astral.sh/uv/install.ps1
+#        B3. ONLY if B1+B2 fail: winget Python.Python.3.12/3.13, then pip install --user uv
+#   C. uv python install 3.12   (uv-managed CPython; no system Python)
+#   D. uv tool install --managed-python windows-mcp   (retry x3)
+#   E. last resort: pip install --user windows-mcp (needs system Python from B3)
+#   F. auth --force + install scheduled task + schtasks /Run + listen :8000
+#   G. SSH sync auth -> server ~/.config/windows-mcp/env + mcp.json + forward
+#
+# Notes:
+# - Background child inherits connect.ps1 elevation (UAC at connect start).
+# - Never treat WindowsApps\python*.exe stubs as real Python.
+# - Secrets: auth_key in config.toml (auth.key mirrored when present); Bearer sync over SSH alias.
+
+function Update-WindowsMcpPath {
+    try {
+        $parts = New-Object System.Collections.Generic.List[string]
+        foreach ($chunk in @(
+            [Environment]::GetEnvironmentVariable('Path', 'Machine')
+            [Environment]::GetEnvironmentVariable('Path', 'User')
+            (Join-Path $env:USERPROFILE '.local\bin')
+            (Join-Path $env:USERPROFILE '.cargo\bin')
+            (Join-Path $env:LOCALAPPDATA 'Programs\uv')
+            (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312')
+            (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\Scripts')
+            (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313')
+            (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\Scripts')
+            (Join-Path $env:APPDATA 'Python\Python312\Scripts')
+            (Join-Path $env:APPDATA 'Python\Python313\Scripts')
+        )) {
+            if ([string]::IsNullOrWhiteSpace($chunk)) { continue }
+            foreach ($p in ($chunk -split ';' | Where-Object { $_ -and $_.Trim() })) {
+                if (-not $parts.Contains($p)) { [void]$parts.Add($p) }
+            }
+        }
+        $env:Path = ($parts -join ';')
+    } catch { }
+}
+
+function Ensure-WindowsMcpUserPathEntry {
+    # Persist ~/.local/bin on User PATH so scheduled task / new shells find windows-mcp.
+    $localBin = Join-Path $env:USERPROFILE '.local\bin'
+    try {
+        if (-not (Test-Path -LiteralPath $localBin)) {
+            New-Item -ItemType Directory -Force -Path $localBin | Out-Null
+        }
+        $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        if (-not $userPath) { $userPath = '' }
+        $parts = @($userPath -split ';' | Where-Object { $_ -and $_.Trim() })
+        if ($parts -notcontains $localBin) {
+            $newPath = if ($userPath.Trim()) { "$userPath;$localBin" } else { $localBin }
+            [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+            Write-WindowsMcpEnsureLog ("user_path_added {0}" -f $localBin)
+        }
+    } catch {
+        Write-WindowsMcpEnsureLog ("user_path_update_failed {0}" -f $_.Exception.Message) 'WARN'
+    }
+    Update-WindowsMcpPath
+}
+
+function Write-WindowsMcpHost {
+    param([string]$Message)
+    if ($env:WINDOWS_MCP_ENSURE_QUIET -eq '1') { return }
+    Write-Host $Message -ForegroundColor DarkGray
+}
+
+function Write-WindowsMcpEnsureLog {
+    param([string]$Message, [string]$Level = 'INFO')
+    try {
+        $dir = Join-Path $env:USERPROFILE '.config\claude-connect\logs'
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
+        $path = Join-Path $dir 'windows-mcp-ensure.log'
+        $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+        Add-Content -LiteralPath $path -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+    } catch { }
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog ("WINDOWS_MCP: {0}" -f $Message) $Level
+    }
+}
+
+function Test-WindowsMcpIsAdmin {
+    try {
+        $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $p = New-Object Security.Principal.WindowsPrincipal($id)
+        return [bool]$p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { return $false }
+}
+
+function Get-WindowsMcpExe {
+    Update-WindowsMcpPath
+    $candidates = @(
+        (Join-Path $env:USERPROFILE '.local\bin\windows-mcp.exe')
+        (Join-Path $env:USERPROFILE '.cargo\bin\windows-mcp.exe')
+        (Join-Path $env:APPDATA 'Python\Python313\Scripts\windows-mcp.exe')
+        (Join-Path $env:APPDATA 'Python\Python312\Scripts\windows-mcp.exe')
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\Scripts\windows-mcp.exe')
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\Scripts\windows-mcp.exe')
+    )
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path -LiteralPath $c)) { return $c }
+    }
+    $cmd = Get-Command windows-mcp -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source -and ($cmd.Source -notmatch 'WindowsApps\\')) { return $cmd.Source }
+    return $null
+}
+
+function Get-UvExe {
+    Update-WindowsMcpPath
+    $candidates = @(
+        (Join-Path $env:USERPROFILE '.local\bin\uv.exe')
+        (Join-Path $env:USERPROFILE '.cargo\bin\uv.exe')
+        (Join-Path $env:LOCALAPPDATA 'Programs\uv\uv.exe')
+        (Join-Path $env:APPDATA 'Python\Python313\Scripts\uv.exe')
+        (Join-Path $env:APPDATA 'Python\Python312\Scripts\uv.exe')
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\Scripts\uv.exe')
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\Scripts\uv.exe')
+    )
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path -LiteralPath $c)) { return $c }
+    }
+    $cmd = Get-Command uv -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source -and ($cmd.Source -notmatch 'WindowsApps\\')) { return $cmd.Source }
+    return $null
+}
+
+function Test-RealPythonExe {
+    param([string]$Exe)
+    if (-not $Exe -or -not (Test-Path -LiteralPath $Exe)) { return $false }
+    if ($Exe -match 'WindowsApps\\python') { return $false }
+    try {
+        $ver = & $Exe --version 2>&1 | Out-String
+        return [bool]($ver -match 'Python\s+3\.\d+')
+    } catch { return $false }
+}
+
+function Get-PythonLauncher {
+    Update-WindowsMcpPath
+    # Prefer py -3 launcher (real) over Store stubs.
+    $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyLauncher -and $pyLauncher.Source -notmatch 'WindowsApps\\') {
+        try {
+            $exe = (& $pyLauncher.Source -3 -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1)
+            if (Test-RealPythonExe $exe) { return $exe.Trim() }
+        } catch { }
+    }
+    foreach ($name in @('python', 'python3')) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd -and (Test-RealPythonExe $cmd.Source)) { return $cmd.Source }
+    }
+    foreach ($c in @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\python.exe')
+        (Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe')
+        'C:\Python313\python.exe'
+        'C:\Python312\python.exe'
+    )) {
+        if (Test-RealPythonExe $c) { return $c }
+    }
+    return $null
+}
+
+function Test-WindowsMcpListening {
+    try {
+        $c = @(Get-NetTCPConnection -State Listen -LocalPort 8000 -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1', '0.0.0.0') })
+        return ($c.Count -gt 0)
+    } catch {
+        $ns = cmd /c 'netstat -ano | findstr "LISTENING" | findstr ":8000"' 2>$null
+        return [bool]$ns
+    }
+}
+
+function Invoke-WindowsMcpWingetInstall {
+    param([Parameter(Mandatory)][string]$PackageId)
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if (-not $winget) {
+        Write-WindowsMcpEnsureLog 'winget_missing'
+        return $false
+    }
+    Write-WindowsMcpEnsureLog ("winget_install id={0} admin={1}" -f $PackageId, [int](Test-WindowsMcpIsAdmin))
+    try {
+        $args = @(
+            'install', '--id', $PackageId, '-e', '--source', 'winget',
+            '--accept-source-agreements', '--accept-package-agreements',
+            '--disable-interactivity'
+        )
+        # Bounded wait, not blind -Wait: winget can hang indefinitely (observed once on
+        # this machine - a single install sat for 2h17m) waiting on a Store/Update-service
+        # lock with no visible prompt. This whole ensure already runs in a background,
+        # non-interactive process, so an unbounded hang here just burns CPU/network for
+        # hours and - since it never reaches winget_exit - lets every subsequent connect
+        # spawn ANOTHER stuck winget process on top of it (same leaked-process class as
+        # the ClaudeServerEditorLaunch scheduled-task issue). 10 min is generous for a
+        # small CLI tool; kill and fail closed past that instead of hanging forever.
+        $p = Start-Process -FilePath $winget.Source -ArgumentList $args -PassThru -WindowStyle Hidden
+        if (-not $p.WaitForExit(600000)) {
+            Write-WindowsMcpEnsureLog ("winget_timeout id={0} killing" -f $PackageId) 'WARN'
+            try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+            return $false
+        }
+        Write-WindowsMcpEnsureLog ("winget_exit id={0} code={1}" -f $PackageId, $p.ExitCode)
+        return ($p.ExitCode -eq 0 -or $p.ExitCode -eq -1978335189) # already installed common code
+    } catch {
+        Write-WindowsMcpEnsureLog ("winget_throw id={0} err={1}" -f $PackageId, $_.Exception.Message) 'WARN'
+        return $false
+    }
+}
+
+function Install-PythonIfMissing {
+    $py = Get-PythonLauncher
+    if ($py) {
+        Write-WindowsMcpEnsureLog ("python_present {0}" -f $py)
+        return $py
+    }
+    Write-WindowsMcpHost '      -> installing system Python (winget fallback)...'
+    foreach ($id in @('Python.Python.3.12', 'Python.Python.3.13')) {
+        [void](Invoke-WindowsMcpWingetInstall -PackageId $id)
+        Update-WindowsMcpPath
+        $py = Get-PythonLauncher
+        if ($py) {
+            Write-WindowsMcpEnsureLog ("python_installed {0}" -f $py)
+            return $py
+        }
+    }
+    Write-WindowsMcpEnsureLog 'python_install_failed' 'WARN'
+    return $null
+}
+
+function Install-UvViaPip {
+    param([string]$PythonExe)
+    if (-not $PythonExe) { return $null }
+    Write-WindowsMcpHost '      -> installing uv via pip (last resort)...'
+    Write-WindowsMcpEnsureLog ("pip_install_uv python={0}" -f $PythonExe)
+    try {
+        & $PythonExe -m pip install --upgrade pip 2>&1 | Out-Null
+        & $PythonExe -m pip install --user uv 2>&1 | Out-Null
+    } catch {
+        Write-WindowsMcpEnsureLog ("pip_uv_failed {0}" -f $_.Exception.Message) 'WARN'
+    }
+    Update-WindowsMcpPath
+    return (Get-UvExe)
+}
+
+function Install-UvIfMissing {
+    Update-WindowsMcpPath
+    $uv = Get-UvExe
+    if ($uv) {
+        Write-WindowsMcpEnsureLog ("uv_present {0}" -f $uv)
+        return $uv
+    }
+
+    Write-WindowsMcpHost '      -> installing uv (standalone; no system Python needed)...'
+    Write-WindowsMcpEnsureLog 'installing_uv'
+
+    # B1 winget
+    if (Invoke-WindowsMcpWingetInstall -PackageId 'astral-sh.uv') {
+        Update-WindowsMcpPath
+        $uv = Get-UvExe
+        if ($uv) {
+            Write-WindowsMcpEnsureLog ("uv_installed_winget {0}" -f $uv)
+            return $uv
+        }
+    }
+
+    # B2 official standalone installer (no Python)
+    try {
+        $env:UV_NO_MODIFY_PATH = '0'
+        Write-WindowsMcpEnsureLog 'uv_install_script astral.sh'
+        irm https://astral.sh/uv/install.ps1 | iex
+        Update-WindowsMcpPath
+        Ensure-WindowsMcpUserPathEntry
+        $uv = Get-UvExe
+        if ($uv) {
+            Write-WindowsMcpEnsureLog ("uv_installed_script {0}" -f $uv)
+            return $uv
+        }
+    } catch {
+        Write-WindowsMcpEnsureLog ("uv_script_failed {0}" -f $_.Exception.Message) 'WARN'
+    }
+
+    # B3 system Python + pip (only if standalone uv failed)
+    $py = Install-PythonIfMissing
+    if ($py) {
+        $uv = Install-UvViaPip -PythonExe $py
+        if ($uv) {
+            Write-WindowsMcpEnsureLog ("uv_installed_pip {0}" -f $uv)
+            return $uv
+        }
+    }
+
+    Write-WindowsMcpEnsureLog 'uv_install_exhausted' 'WARN'
+    return $null
+}
+
+function Ensure-UvManagedPython {
+    param([Parameter(Mandatory)][string]$UvExe)
+    Write-WindowsMcpEnsureLog 'uv_python_install 3.12'
+    try {
+        $out = & $UvExe python install 3.12 2>&1 | Out-String
+        $clip = (($out -replace '\s+', ' ').Trim())
+        if ($clip.Length -gt 240) { $clip = $clip.Substring(0, 240) }
+        Write-WindowsMcpEnsureLog ("uv_python_install_out {0}" -f $clip)
+    } catch {
+        Write-WindowsMcpEnsureLog ("uv_python_install_err {0}" -f $_.Exception.Message) 'WARN'
+    }
+    try {
+        $find = & $UvExe python find 3.12 2>&1 | Out-String
+        Write-WindowsMcpEnsureLog ("uv_python_find {0}" -f (($find -replace '\s+', ' ').Trim()))
+    } catch { }
+}
+
+function Install-WindowsMcpPackage {
+    param([string]$UvExe)
+    $existing = Get-WindowsMcpExe
+    if ($existing) { return $existing }
+    if (-not $UvExe) { return $null }
+
+    Ensure-WindowsMcpUserPathEntry
+    Ensure-UvManagedPython -UvExe $UvExe
+
+    Write-WindowsMcpHost '      -> installing windows-mcp (uv tool, managed Python)...'
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Write-WindowsMcpEnsureLog ("uv_tool_install attempt={0}" -f $attempt)
+        try {
+            # --managed-python: do not depend on system Python
+            $out = & $UvExe tool install --managed-python windows-mcp 2>&1 | Out-String
+            $clip = (($out -replace '\s+', ' ').Trim())
+            if ($clip.Length -gt 300) { $clip = $clip.Substring(0, 300) }
+            Write-WindowsMcpEnsureLog ("uv_tool_install_out {0}" -f $clip)
+        } catch {
+            Write-WindowsMcpEnsureLog ("uv_tool_install_err {0}" -f $_.Exception.Message) 'WARN'
+        }
+        try { & $UvExe tool update-shell 2>&1 | Out-Null } catch { }
+        Update-WindowsMcpPath
+        Ensure-WindowsMcpUserPathEntry
+        $exe = Get-WindowsMcpExe
+        if ($exe) {
+            Write-WindowsMcpEnsureLog ("windows_mcp_installed {0}" -f $exe)
+            return $exe
+        }
+        # fallback without flag (older uv)
+        try {
+            $out2 = & $UvExe tool install windows-mcp 2>&1 | Out-String
+            $leg = (($out2 -replace '\s+', ' ').Trim())
+            if ($leg.Length -gt 300) { $leg = $leg.Substring(0, 300) }
+            Write-WindowsMcpEnsureLog ("uv_tool_install_legacy_out {0}" -f $leg)
+        } catch { }
+        Update-WindowsMcpPath
+        $exe = Get-WindowsMcpExe
+        if ($exe) { return $exe }
+        Start-Sleep -Seconds (3 * $attempt)
+    }
+
+    $py = Get-PythonLauncher
+    if (-not $py) { $py = Install-PythonIfMissing }
+    if ($py) {
+        Write-WindowsMcpEnsureLog ("pip_install_windows_mcp python={0}" -f $py)
+        try { & $py -m pip install --user windows-mcp 2>&1 | Out-Null } catch {
+            Write-WindowsMcpEnsureLog ("pip_windows_mcp_failed {0}" -f $_.Exception.Message) 'WARN'
+        }
+        Update-WindowsMcpPath
+        $exe = Get-WindowsMcpExe
+        if ($exe) {
+            Write-WindowsMcpEnsureLog ("windows_mcp_installed_pip {0}" -f $exe)
+            return $exe
+        }
+    }
+
+    Write-WindowsMcpEnsureLog 'windows_mcp_install_failed' 'WARN'
+    return $null
+}
+
+function Get-WindowsMcpAuthKeyFromToml {
+    param([string]$TomlPath)
+    if (-not (Test-Path -LiteralPath $TomlPath)) { return $null }
+    $toml = ((Get-Content -LiteralPath $TomlPath -Raw -ErrorAction SilentlyContinue) + '')
+    if ($toml -match 'auth_key\s*=\s*"([^"]+)"') {
+        $k = ($Matches[1] + '').Trim()
+        if ($k.Length -ge 32) { return $k }
+    }
+    return $null
+}
+
+function Ensure-WindowsMcpAuth {
+    param([string]$WmExe, [string]$CfgDir)
+    $authPath = Join-Path $CfgDir 'auth.key'
+    $tomlPath = Join-Path $CfgDir 'config.toml'
+    # Legacy auth.key (older windows-mcp); current CLI only writes config.toml.
+    if (Test-Path -LiteralPath $authPath) {
+        $k = ((Get-Content -LiteralPath $authPath -Raw -ErrorAction SilentlyContinue) + '').Trim()
+        if ($k.Length -ge 32) { return $k }
+    }
+    $fromToml = Get-WindowsMcpAuthKeyFromToml -TomlPath $tomlPath
+    if ($fromToml) { return $fromToml }
+    if (-not $WmExe) { return $null }
+    Write-WindowsMcpHost '      -> generating windows-mcp auth...'
+    Write-WindowsMcpEnsureLog 'generating auth'
+    $script:WindowsMcpAuthRotated = $true
+    try {
+        # CLI may exit 1 after save (UnicodeEncodeError on cp1252) — key still written to config.toml.
+        & $WmExe auth --transport streamable-http --host 127.0.0.1 --port 8000 --force 2>&1 | Out-Null
+    } catch {
+        Write-WindowsMcpEnsureLog ("auth_failed {0}" -f $_.Exception.Message) 'WARN'
+    }
+    if (Test-Path -LiteralPath $authPath) {
+        $k = ((Get-Content -LiteralPath $authPath -Raw -ErrorAction SilentlyContinue) + '').Trim()
+        if ($k.Length -ge 32) { return $k }
+    }
+    $fromToml = Get-WindowsMcpAuthKeyFromToml -TomlPath $tomlPath
+    if ($fromToml) {
+        try {
+            Set-Content -LiteralPath $authPath -Value $fromToml -Encoding ascii -NoNewline -ErrorAction SilentlyContinue
+        } catch { }
+        return $fromToml
+    }
+    Write-WindowsMcpEnsureLog 'auth_missing_after_generate' 'WARN'
+    return $null
+}
+
+
+function Ensure-WindowsMcpTask {
+    param([string]$WmExe)
+    $task = Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue
+    if ($task) { return $true }
+    if (-not $WmExe) { return $false }
+    Write-WindowsMcpHost '      -> registering windows-mcp login task...'
+    Write-WindowsMcpEnsureLog 'registering scheduled task'
+    try {
+        & $WmExe install --transport streamable-http --host 127.0.0.1 --port 8000 --force 2>&1 | Out-Null
+        return [bool](Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue)
+    } catch {
+        Write-WindowsMcpEnsureLog ("install_task_failed {0}" -f $_.Exception.Message) 'WARN'
+        return $false
+    }
+}
+
+
+function Restart-WindowsMcpServer {
+    Write-WindowsMcpEnsureLog 'restarting_server_after_auth_rotate'
+    try { schtasks /End /TN 'windows-mcp-server' 2>&1 | Out-Null } catch { }
+    Start-Sleep -Seconds 1
+    # Kill stray listeners on :8000 (task End can leave orphan python)
+    try {
+        Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue |
+            ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
+    } catch { }
+    Start-Sleep -Seconds 1
+    try { schtasks /Run /TN 'windows-mcp-server' 2>&1 | Out-Null } catch { }
+    $cmd = Join-Path $env:USERPROFILE '.windows-mcp\start-server.cmd'
+    if (-not (Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $cmd)) {
+        try { Start-Process -FilePath $cmd -WindowStyle Hidden | Out-Null } catch { }
+    }
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Seconds 1
+        if (Test-WindowsMcpListening) { return $true }
+    }
+    return (Test-WindowsMcpListening)
+}
+
+function Start-WindowsMcpIfNeeded {
+    if (Test-WindowsMcpListening) { return $true }
+    Write-WindowsMcpHost '      -> starting windows-mcp-server task...'
+    Write-WindowsMcpEnsureLog 'starting scheduled task'
+    try { schtasks /Run /TN 'windows-mcp-server' 2>&1 | Out-Null } catch { }
+    if (-not (Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue)) {
+        $cmd = Join-Path $env:USERPROFILE '.windows-mcp\start-server.cmd'
+        if (Test-Path -LiteralPath $cmd) {
+            try {
+                Start-Process -FilePath $cmd -WindowStyle Hidden | Out-Null
+                Write-WindowsMcpEnsureLog 'started_via_start-server.cmd'
+            } catch {
+                Write-WindowsMcpEnsureLog ("start_cmd_failed {0}" -f $_.Exception.Message) 'WARN'
+            }
+        }
+    }
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Seconds 1
+        if (Test-WindowsMcpListening) { return $true }
+    }
+    return (Test-WindowsMcpListening)
+}
+
+function Sync-WindowsMcpAuthToServer {
+    param([string]$AuthKey)
+    if (-not $AuthKey) { return $false }
+    if (-not (Get-Command SshX -ErrorAction SilentlyContinue)) { return $false }
+    if ($AuthKey -notmatch '^[A-Za-z0-9_\-=]+$') {
+        Write-WindowsMcpEnsureLog 'auth_key_charset_rejected' 'WARN'
+        return $false
+    }
+    $pyLines = @(
+        'import json, pathlib, os',
+        "auth = os.environ.get('WMCP_AUTH','')",
+        'home = pathlib.Path.home()',
+        "envd = home / '.config' / 'windows-mcp'",
+        'envd.mkdir(parents=True, exist_ok=True)',
+        "envf = envd / 'env'",
+        'envf.write_text(',
+        "    'WINDOWS_MCP_AUTH_KEY=' + auth + chr(10) +",
+        "    'WINDOWS_MCP_LOCAL_PORT=8000' + chr(10) +",
+        "    'WINDOWS_MCP_FORWARD_PORT=18000' + chr(10) +",
+        "    'WINDOWS_MCP_URL=http://127.0.0.1:18000/mcp' + chr(10),",
+        "    encoding='utf-8')",
+        'os.chmod(envf, 0o600)',
+        "p = home / '.cursor' / 'mcp.json'",
+        'cfg = {}',
+        'if p.exists():',
+        '    try:',
+        "        cfg = json.loads(p.read_text(encoding='utf-8'))",
+        '    except Exception:',
+        '        cfg = {}',
+        "cfg.setdefault('mcpServers', {})",
+        "cfg['mcpServers']['windows-mcp'] = {",
+        "    'url': 'http://127.0.0.1:18000/mcp',",
+        "    'headers': {'Authorization': 'Bearer ' + auth},",
+        '}',
+        'p.parent.mkdir(parents=True, exist_ok=True)',
+        "p.write_text(json.dumps(cfg, indent=2) + chr(10), encoding='utf-8')",
+        "print('mcp_json_ok')"
+    )
+    $py = ($pyLines -join "`n")
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($py))
+    $remote = "export WMCP_AUTH='$AuthKey'; echo $b64 | base64 -d | python3 -; " +
+              'F="$HOME/.local/bin/windows-mcp-forward"; G=/usr/local/bin/windows-mcp-forward; ' +
+              'if [ -x "$F" ]; then "$F" start >/dev/null 2>&1 || true; elif [ -x "$G" ]; then "$G" start >/dev/null 2>&1 || true; fi; ' +
+              'echo WMCP_SYNC_OK'
+    try {
+        $out = ((SshX $remote) -join "`n")
+        if ($out -match 'WMCP_SYNC_OK') { return $true }
+        $clip = ($out -replace '\s+', ' ')
+        if ($clip.Length -gt 200) { $clip = $clip.Substring(0, 200) }
+        Write-WindowsMcpEnsureLog ("server_sync_unexpected {0}" -f $clip) 'WARN'
+        return $false
+    } catch {
+        Write-WindowsMcpEnsureLog ("server_sync_failed {0}" -f $_.Exception.Message) 'WARN'
+        return $false
+    }
+}
+
+function Ensure-WindowsMcp {
+    $result = [pscustomobject]@{
+        Ok        = $false
+        Summary   = ''
+        AuthKey   = $null
+        Listening = $false
+        Synced    = $false
+        Installed = $false
+    }
+    try {
+        Update-WindowsMcpPath
+        Write-WindowsMcpEnsureLog ("ensure_begin admin={0}" -f [int](Test-WindowsMcpIsAdmin))
+        $cfgDir = Join-Path $env:USERPROFILE '.windows-mcp'
+        if (-not (Test-Path -LiteralPath $cfgDir)) {
+            New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+        }
+        $exe = Get-WindowsMcpExe
+        if (-not $exe) {
+            Write-WindowsMcpEnsureLog 'bootstrap_begin package_missing'
+            $uv = Install-UvIfMissing
+            if (-not $uv) {
+                $result.Summary = 'uv bootstrap failed (need network; winget or astral script)'
+                Write-WindowsMcpEnsureLog $result.Summary 'WARN'
+                return $result
+            }
+            $exe = Install-WindowsMcpPackage -UvExe $uv
+            if ($exe) { $result.Installed = $true }
+        }
+        if (-not $exe) {
+            $result.Summary = 'windows-mcp missing after bootstrap'
+            Write-WindowsMcpEnsureLog $result.Summary 'WARN'
+            return $result
+        }
+        Ensure-WindowsMcpUserPathEntry
+        $auth = Ensure-WindowsMcpAuth -WmExe $exe -CfgDir $cfgDir
+        $result.AuthKey = $auth
+        $null = Ensure-WindowsMcpTask -WmExe $exe
+        $listening = Start-WindowsMcpIfNeeded
+        if ($script:WindowsMcpAuthRotated) {
+            $listening = Restart-WindowsMcpServer
+            $script:WindowsMcpAuthRotated = $false
+        }
+        $result.Listening = [bool]$listening
+        if ($auth -and (Get-Command SshX -ErrorAction SilentlyContinue)) {
+            $result.Synced = [bool](Sync-WindowsMcpAuthToServer -AuthKey $auth)
+        }
+        if ($listening) {
+            $result.Ok = $true
+            $bits = New-Object System.Collections.Generic.List[string]
+            if ($result.Installed) { [void]$bits.Add('installed') }
+            [void]$bits.Add('listening :8000')
+            if ($result.Synced) { [void]$bits.Add('server sync ok') }
+            $result.Summary = ($bits -join ', ')
+        } else {
+            $result.Ok = $false
+            $result.Summary = 'installed but not listening (unlock interactive desktop / Session 0)'
+        }
+        Write-WindowsMcpEnsureLog ("done ok={0} listening={1} synced={2} installed={3} summary={4}" -f `
+            $result.Ok, $result.Listening, $result.Synced, $result.Installed, $result.Summary)
+        return $result
+    } catch {
+        $result.Summary = $_.Exception.Message
+        Write-WindowsMcpEnsureLog ("ensure_exception {0}" -f $_.Exception.Message) 'WARN'
+        return $result
+    }
+}
+
+function Start-WindowsMcpEnsureBackground {
+    param(
+        [Parameter(Mandatory)][string]$ModulePath,
+        [string]$SshAlias = 'claude-server'
+    )
+    if ($script:WindowsMcpBgStarted) { return $true }
+    if (-not (Test-Path -LiteralPath $ModulePath)) {
+        Write-WindowsMcpEnsureLog ("background_skip module_missing {0}" -f $ModulePath) 'WARN'
+        return $false
+    }
+
+    $runnerDir = Join-Path $env:TEMP 'claude-connect-wmcp'
+    if (-not (Test-Path -LiteralPath $runnerDir)) {
+        New-Item -ItemType Directory -Force -Path $runnerDir | Out-Null
+    }
+    $runnerPath = Join-Path $runnerDir 'ensure-bg.ps1'
+
+    $runner = @'
+param(
+    [Parameter(Mandatory)][string]$ModulePath,
+    [string]$SshAlias = 'claude-server'
+)
+$ErrorActionPreference = "Continue"
+$env:WINDOWS_MCP_ENSURE_QUIET = "1"
+try {
+    . $ModulePath
+} catch {
+    $msg = "dot_source_failed $($_.Exception.Message)"
+    try {
+        $dir = Join-Path $env:USERPROFILE ".config\claude-connect\logs"
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        Add-Content -LiteralPath (Join-Path $dir "windows-mcp-ensure.log") -Value ("{0} [ERROR] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg) -Encoding UTF8
+    } catch { }
+    exit 1
+}
+function SshX([string]$Cmd) {
+    if ([string]::IsNullOrWhiteSpace($SshAlias)) { return @() }
+    $out = &(Get-Command ssh).Source @("-n","-o","BatchMode=yes","-o","ConnectTimeout=20",$SshAlias,$Cmd) 2>&1
+    return @($out | ForEach-Object { "$_" })
+}
+try {
+    $r = Ensure-WindowsMcp
+    if ($r -and $r.Ok) { exit 0 }
+    exit 2
+} catch {
+    if (Get-Command Write-WindowsMcpEnsureLog -ErrorAction SilentlyContinue) {
+        Write-WindowsMcpEnsureLog ("background_throw {0}" -f $_.Exception.Message) "WARN"
+    }
+    exit 1
+}
+'@
+    Set-Content -LiteralPath $runnerPath -Value $runner -Encoding UTF8
+
+    try {
+        $argList = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-WindowStyle', 'Hidden',
+            '-File', $runnerPath,
+            '-ModulePath', $ModulePath,
+            '-SshAlias', $SshAlias
+        )
+        # Inherit elevation from connect.ps1 (already RunAs at start) — do NOT use -Verb RunAs here
+        # (would pop a second UAC and break non-interactive background).
+        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList `
+            -WindowStyle Hidden -PassThru -ErrorAction Stop
+        $script:WindowsMcpBgStarted = $true
+        $script:WindowsMcpBgProcId = if ($p) { $p.Id } else { 0 }
+        Write-WindowsMcpEnsureLog ("background_started pid={0} alias={1} admin={2}" -f `
+            $script:WindowsMcpBgProcId, $SshAlias, [int](Test-WindowsMcpIsAdmin))
+        return $true
+    } catch {
+        Write-WindowsMcpEnsureLog ("background_start_failed {0}" -f $_.Exception.Message) 'WARN'
+        return $false
+    }
+}

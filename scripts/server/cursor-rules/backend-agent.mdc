@@ -1,0 +1,37 @@
+---
+description: >-
+  Backend API, database, and server-side work — ECC skills, sqlserver MCP
+  (read-only), and structured planning for multi-step changes.
+alwaysApply: false
+---
+
+# Backend agent guidance
+
+Use when the task involves REST/GraphQL APIs, database schema, migrations, queries, or server-side business logic.
+
+## ECC skills (prefer in order)
+
+| Skill | Use for |
+|---|---|
+| `backend-patterns` | Layering, DTOs, error handling, service boundaries |
+| `database-migrations` | Schema changes, rollbacks, safe migration workflow |
+| `api-design` | Routes, versioning, pagination, auth, OpenAPI shape |
+
+Read the skill file before large changes — match project conventions already in the codebase.
+
+## SQL Server MCP (`sqlserver`)
+
+- Available for **read-only** exploration when configured (see [`docs/cursor-mcp-pack.md`](../../docs/cursor-mcp-pack.md)).
+- Use **`SELECT`** and metadata queries to understand schema and sample data — do not **`INSERT`/`UPDATE`/`DELETE`/`DROP`** via MCP unless the user explicitly requests writes and accepts risk.
+- Never paste or log production passwords; connection env lives in `~/.config/cursor-mcp/sqlserver.env` on the server profile.
+
+## Complex multi-step plans
+
+For non-trivial backend work (multi-table migrations + API surface + auth):
+
+- Use **Sequential Thinking** MCP when available to break down steps, dependencies, and rollback points.
+- Keep diffs minimal; one logical change per commit when the user asks for commits.
+
+## Scope
+
+Not mandatory every chat — activate for API/DB/backend tasks or when the user mentions sqlserver, migrations, or endpoint design.
