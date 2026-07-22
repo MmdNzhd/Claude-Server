@@ -1,7 +1,7 @@
 {
   "mode": "optional",
   "latest": "20260722.24",
-  "force_min_version": null,
+  "force_min_version": "20260721.58",
   "message_optional": "A newer Claude Connect is available. Update now?",
   "message_force": "A required Claude Connect update will be applied now.",
   "defer_hours": 48
