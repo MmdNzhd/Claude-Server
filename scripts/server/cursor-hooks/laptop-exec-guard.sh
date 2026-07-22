@@ -8,9 +8,34 @@ set -uo pipefail
 trap '_allow' ERR
 input=$(cat || true)
 
-_allow() { echo '{"permission":"allow"}'; exit 0; }
+# Durable multi-agent audit (same sink as laptop-exec CLI).
+for _LE_AUDIT_SRC in \
+    "$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd)/laptop-exec-audit-log.sh" \
+    "${HOME}/.cursor/hooks/laptop-exec-audit-log.sh" \
+    "/usr/local/lib/claude-server/cursor-hooks/laptop-exec-audit-log.sh"; do
+  if [[ -f "$_LE_AUDIT_SRC" ]]; then
+    # shellcheck source=/dev/null
+    . "$_LE_AUDIT_SRC"
+    break
+  fi
+done
+unset _LE_AUDIT_SRC
+if ! declare -F _le_audit_log >/dev/null 2>&1; then
+  _le_audit_log() { :; }
+  _le_audit_trunc() { printf '%s' "$1"; }
+  _le_audit_slots_busy() { printf '0'; }
+  _le_audit_session_fields() { printf 'tunnel_port=?'; }
+fi
+
+_allow() {
+  echo '{"permission":"allow"}'
+  exit 0
+}
 _allow_msg() {
   local msg="$1"
+  _le_audit_log INFO HOOK_ALLOW_MSG "msg=$(_le_audit_trunc "$msg" 300)" \
+    "event=${event:-?}" "tool=${tool:-?}" "$(_le_audit_session_fields)" \
+    "slots_busy=$(_le_audit_slots_busy)/8"
   jq -n --arg permission allow --arg agent_message "$msg" \
     '{permission:$permission, agent_message:$agent_message}' \
     || echo '{"permission":"allow"}'
@@ -18,6 +43,23 @@ _allow_msg() {
 }
 _deny() {
   local agent_msg="$1" user_msg="${2:-SSH-first: use laptop-exec}"
+  local _cmd="" _cwd="" _paths="" _pid="" _tool="${tool:-Shell}"
+  _cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // .command // empty' 2>/dev/null || true)
+  _cwd=$(printf '%s' "$input" | jq -r '.tool_input.working_directory // .cwd // empty' 2>/dev/null || true)
+  if declare -F _tool_path_blob >/dev/null 2>&1; then
+    _paths=$(_tool_path_blob 2>/dev/null | tr '\n' ',' || true)
+  fi
+  if declare -F _guess_project_id >/dev/null 2>&1; then
+    _pid=$(_guess_project_id "$_tool" 2>/dev/null || true)
+  fi
+  _le_audit_log ERROR HOOK_DENY "tool=${_tool}" "hook_event=${event:-?}" \
+    "project=${_pid:-?}" "cwd=$(_le_audit_trunc "${_cwd:-}" 200)" \
+    "paths=$(_le_audit_trunc "${_paths:-}" 300)" \
+    "cmd=$(_le_audit_trunc "${_cmd:-}" 400)" \
+    "agent_msg=$(_le_audit_trunc "$agent_msg" 400)" \
+    "user_msg=$(_le_audit_trunc "$user_msg" 200)" \
+    "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8" \
+    "hint=Expected SSH-first deny. Agent must run NEXT: laptop-exec -p PROJECT — do NOT retry the blocked tool."
   jq -n --arg permission deny --arg agent_message "$agent_msg" --arg user_message "$user_msg" \
     '{permission:$permission,agent_message:$agent_message,user_message:$user_message}' 2>/dev/null \
     || echo '{"permission":"deny","agent_message":"SSH-first blocked","user_message":"Use laptop-exec"}'
@@ -261,11 +303,22 @@ case "$event" in
     cmd=$(printf '%s' "$input" | jq -r '.command // empty' 2>/dev/null) || _allow
     cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null) || _allow
     [[ -n "$cmd" ]] || _allow
+    tool=Shell
     if _shell_should_block "$cmd" "$cwd"; then
       hint=$(_remap_hint Shell)
       _deny \
         "SSH-first BLOCKED shell on /mounts/ (expected). Do NOT retry the same shell. $hint" \
         "Use laptop-exec. Do not retry."
+    fi
+    if [[ "$cmd" == *"laptop-exec"* ]]; then
+      _le_audit_log INFO HOOK_SHELL_LAPTOP_EXEC "cwd=$(_le_audit_trunc "$cwd" 200)" \
+        "cmd=$(_le_audit_trunc "$cmd" 400)" "project=$(_guess_project_id Shell 2>/dev/null || echo '?')" \
+        "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8"
+    elif _touches_mounts "$cwd"; then
+      _le_audit_log INFO HOOK_SHELL_ALLOW_ON_MOUNTS "reason=light_or_non_heavy" \
+        "cwd=$(_le_audit_trunc "$cwd" 200)" "cmd=$(_le_audit_trunc "$cmd" 300)" \
+        "project=$(_guess_project_id Shell 2>/dev/null || echo '?')" \
+        "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8"
     fi
     _allow ;;
   preToolUse)
@@ -274,6 +327,13 @@ case "$event" in
       Grep|Glob|Read|Write|Edit|EditNotebook|StrReplace|Delete|Task|Shell)
         if [[ "$tool" == Task ]]; then
           # Never block spawn, but remind parent: children need the paste block.
+          _tdesc=$(printf '%s' "$input" | jq -r '.tool_input.description // .input.description // empty' 2>/dev/null || true)
+          _tsub=$(printf '%s' "$input" | jq -r '.tool_input.subagent_type // .input.subagent_type // empty' 2>/dev/null || true)
+          _le_audit_log WARN HOOK_TASK_SPAWN "subagent_type=${_tsub:-?}" \
+            "description=$(_le_audit_trunc "${_tdesc:-}" 200)" \
+            "project=$(_guess_project_id Task 2>/dev/null || echo '?')" \
+            "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8" \
+            "hint=Child does NOT inherit SSH-first. Prompt MUST paste laptop-exec block. Prefer ≤4 parallel (hard cap 8 slots)."
           _allow_msg "Task spawn OK. Child prompt MUST paste SSH-first block (laptop-exec -p ID; no Read/Grep on /mounts/; no rg -i/-l/--glob; ≤4 parallel). See laptop-exec skill."
         fi
         if _tool_targets_mounts "$tool"; then

@@ -15,7 +15,33 @@ SSHFS_CACHE_TTL=45
 LAPTOP_USER="" TUNNEL_PORT="" LAPTOP_OS="windows" ACTIVE_MOUNT="" GIT_MODE="off"
 PROJECT_ID="" WORKSPACE_PATH="" REMOTE_PATH="" LOCAL_PATH=""
 
-_die() { echo "laptop-exec: $*" >&2; exit 1; }
+# Durable multi-agent audit log (hooks share the same helper).
+_LE_AUDIT_SRC=""
+for _LE_AUDIT_SRC in \
+    "${HOME}/.cursor/hooks/laptop-exec-audit-log.sh" \
+    "/usr/local/lib/claude-server/cursor-hooks/laptop-exec-audit-log.sh"; do
+    if [ -f "$_LE_AUDIT_SRC" ]; then
+        # shellcheck source=/dev/null
+        . "$_LE_AUDIT_SRC"
+        break
+    fi
+done
+unset _LE_AUDIT_SRC
+if ! declare -F _le_audit_log >/dev/null 2>&1; then
+    _le_audit_log() { :; }
+    _le_audit_trunc() { printf '%s' "$1"; }
+    _le_audit_slots_busy() { printf '0'; }
+    _le_audit_session_fields() { printf 'tunnel_port=?'; }
+fi
+
+_die() {
+    local msg="$*"
+    _le_audit_log ERROR DIE "msg=$(_le_audit_trunc "$msg" 300)" \
+        "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)" \
+        "slots_busy=$(_le_audit_slots_busy)/8" "argv=$(_le_audit_trunc "$*" 200)"
+    echo "laptop-exec: $msg" >&2
+    exit 1
+}
 
 _expand_home() {
     local p="$1"
@@ -178,8 +204,12 @@ _laptop_ssh() {
         sleep 0.2
     done
     if [ -z "$_slot_fd" ]; then
+        _le_audit_log ERROR SLOT_FULL "max=8" "waited_rounds=240" "waited_ms=48000"             "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)"             "caller=_laptop_ssh" "hint=Wait; do NOT open new TCP/mux. Prefer ≤4 parallel agents."
         echo "laptop-exec: session slots full (max 8 concurrent SSH channels). Wait; do NOT open new TCP/mux." >&2
         return 255
+    fi
+    if [ "${_round:-1}" -gt 5 ]; then
+        _le_audit_log WARN SLOT_WAIT "rounds=${_round}" "waited_ms=$((_round * 200))"             "slots_busy=$(_le_audit_slots_busy)/8" "project=${PROJECT_ID:-?}"             "$(_le_audit_session_fields)" "caller=_laptop_ssh"
     fi
 
     # Cleanup dead sockets only (never delete cm.lock / slot-*.lock).
@@ -223,6 +253,7 @@ _laptop_ssh() {
                 ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" "$@"
             _rc=$?
             if [ "$_rc" -eq 124 ]; then
+                _le_audit_log ERROR CMD_TIMEOUT "timeout_s=${LAPTOP_EXEC_CMD_TIMEOUT}"                     "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)"                     "slots_busy=$(_le_audit_slots_busy)/8" "attempt=${_attempt}"                     "hint=Hung remote cmd pinned a mux slot; reduce parallel agents or narrow pathspecs."
                 echo "laptop-exec: command timed out after ${LAPTOP_EXEC_CMD_TIMEOUT}s" >&2
             fi
         else
@@ -238,12 +269,15 @@ _laptop_ssh() {
         if ! ssh -O check -o "ControlPath=$CONTROL_PATH" -o ControlMaster=no \
             -o BatchMode=yes -o ConnectTimeout=1 -i "$KEY" -p "$TUNNEL_PORT" \
             "${LAPTOP_USER}@127.0.0.1" >/dev/null 2>&1; then
+            _le_audit_log WARN MUX_RECREATE "attempt=${_attempt}" "rc=${_rc}"                 "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)"                 "slots_busy=$(_le_audit_slots_busy)/8" "hint=ControlMaster dead; wiping stale cm-* sockets (not slot locks)."
             shopt -s nullglob
             for _s in "$CACHE_DIR"/cm-*; do
                 case "$_s" in *.lock) continue ;; esac
                 rm -f "$_s" 2>/dev/null || true
             done
             shopt -u nullglob
+        else
+            _le_audit_log WARN SSH_RETRY "attempt=${_attempt}" "rc=255"                 "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)"                 "mux=alive" "hint=Exit 255 with live mux — usually slot pressure or remote sshd flake; do NOT kill mux."
         fi
         sleep "0.$((5 + RANDOM % 5))"
         _attempt=$((_attempt + 1))
@@ -271,8 +305,12 @@ _laptop_scp_to() {
         sleep 0.2
     done
     if [ -z "$_slot_fd" ]; then
+        _le_audit_log ERROR SLOT_FULL "max=8" "waited_rounds=240" "waited_ms=48000"             "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)"             "caller=_laptop_scp_to" "hint=Wait; do NOT open new TCP/mux."
         echo "laptop-exec: session slots full (max 8 concurrent SSH channels). Wait; do NOT open new TCP/mux." >&2
         return 255
+    fi
+    if [ "${_round:-1}" -gt 5 ]; then
+        _le_audit_log WARN SLOT_WAIT "rounds=${_round}" "waited_ms=$((_round * 200))"             "slots_busy=$(_le_audit_slots_busy)/8" "project=${PROJECT_ID:-?}"             "$(_le_audit_session_fields)" "caller=_laptop_scp_to"
     fi
     (
         if flock -w 8 9; then
@@ -461,6 +499,7 @@ _cmd_status() {
         exit 1
     fi
     if _tunnel_up; then echo "tunnel:       UP"; else
+        _le_audit_log ERROR TUNNEL_DOWN "project=${ACTIVE_MOUNT:-?}" "$(_le_audit_session_fields)"             "hint=User must run connect.bat/sh; agents must stop issuing laptop-exec until UP."
         echo "tunnel:       DOWN"; echo "prefer:       run connect.bat/sh"; exit 1
     fi
     if [ -n "$ACTIVE_MOUNT" ] && [ -f "$CONF_DIR/${ACTIVE_MOUNT}.conf" ]; then
@@ -658,13 +697,16 @@ _cmd_rg() {
             -w|--word-regexp|-H|--with-filename|-c|--count|-U|--multiline|--hidden|\
             --no-ignore|--json|-S|--smart-case|--heading|--no-heading|-o|--only-matching|\
             --files|-e|--regexp)
+                _le_audit_log ERROR RG_FLAG_REJECTED "flag=$a" "project=${PROJECT_ID:-?}" "hint=Never pass -i/-l/-n/--glob; use pathspecs / regex alternation."
                 _die "rg: flag '$a' not supported. Use: laptop-exec rg [-p ID] PATTERN [pathspec...]  (no -i/-l/-n/--glob; regex via |[]()+?; pathspecs like src/ or '*.ts')"
                 ;;
             -A|-B|-C|-g|--glob|--type|--type-add|--type-not|--type-not-add|-m|--max-count|\
             --after-context|--before-context|--context|--iglob)
+                _le_audit_log ERROR RG_FLAG_REJECTED "flag=$a" "project=${PROJECT_ID:-?}" "hint=Use pathspecs not --glob."
                 _die "rg: flag '$a' not supported. Use: laptop-exec rg [-p ID] PATTERN [pathspec...]  (narrow with pathspecs, not --glob)"
                 ;;
             -*)
+                _le_audit_log ERROR RG_FLAG_REJECTED "flag=$a" "project=${PROJECT_ID:-?}" "hint=Unknown rg flag."
                 _die "rg: unknown flag '$a'. Use: laptop-exec rg [-p ID] PATTERN [pathspec...]"
                 ;;
             *)
@@ -801,6 +843,15 @@ main() {
     if [ "${#global_args[@]}" -gt 0 ]; then
         set -- "${global_args[@]}" "$@"
     fi
+    local _t0 _ms _rc=0 _argv
+    _t0=$(date +%s%3N 2>/dev/null || date +%s)
+    _argv=$(_le_audit_trunc "$cmd $*" 350)
+    # Resolve project early for log context when -p present in args
+    case " $* " in
+        *" -p "*|*" --project "*) ;;
+    esac
+    _le_audit_log INFO CMD_BEGIN "cmd=${cmd}" "argv=${_argv}"         "project=${PROJECT_ID:-${ACTIVE_MOUNT:-?}}" "$(_le_audit_session_fields)"         "slots_busy=$(_le_audit_slots_busy)/8" "parent_cmd=$(_le_audit_trunc "${SSH_ORIGINAL_COMMAND:-${CURSOR_TRACE_ID:-n/a}}" 80)"
+    set +e
     case "$cmd" in
         status) _cmd_status "$@" ;;
         health) _cmd_health "$@" ;;
@@ -819,6 +870,19 @@ main() {
         -h|--help|help) _usage ;;
         *) _die "unknown command '$cmd' (try: laptop-exec --help)" ;;
     esac
+    _rc=$?
+    set -e
+    _ms=$(( $(date +%s%3N 2>/dev/null || date +%s) - _t0 ))
+    if [ "$_rc" -eq 0 ]; then
+        _le_audit_log INFO CMD_END "cmd=${cmd}" "exit=0" "ms=${_ms}"             "project=${PROJECT_ID:-${ACTIVE_MOUNT:-?}}" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8"
+    elif [ "$_rc" -eq 1 ] && [ "$cmd" = "rg" ]; then
+        _le_audit_log INFO CMD_END "cmd=rg" "exit=1" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "meaning=no_matches" "$(_le_audit_session_fields)"
+    elif [ "$_rc" -eq 255 ]; then
+        _le_audit_log ERROR CMD_END "cmd=${cmd}" "exit=255" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8" "hint=SSH/mux failure or SLOT_FULL — check prior SLOT_*/MUX_* lines."
+    else
+        _le_audit_log WARN CMD_END "cmd=${cmd}" "exit=${_rc}" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8"
+    fi
+    return "$_rc"
 }
 main "$@"
 

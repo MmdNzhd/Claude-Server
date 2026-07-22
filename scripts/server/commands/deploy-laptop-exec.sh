@@ -131,7 +131,7 @@ if [ -f "$SERVER_DIR/claude-mount.sh" ]; then
 fi
 [ -f "$SERVER_DIR/claude-git-setup.sh" ] && atomic_install 755 "$SERVER_DIR/claude-git-setup.sh" /usr/local/lib/claude-git-setup && ok "claude-git-setup -> /usr/local/lib/"
 
-for f in cursor-rules/laptop-exec.mdc skills/laptop-exec/SKILL.md cursor-hooks/laptop-exec-guard.sh cursor-hooks/laptop-exec-guard-wrap.sh cursor-hooks/laptop-exec-shell-scan.py cursor-hooks/laptop-exec-session.sh cursor-hooks/hooks-user.json cursor-hooks/hooks-project.json; do
+for f in cursor-rules/laptop-exec.mdc skills/laptop-exec/SKILL.md cursor-hooks/laptop-exec-audit-log.sh cursor-hooks/laptop-exec-guard.sh cursor-hooks/laptop-exec-guard-wrap.sh cursor-hooks/laptop-exec-shell-scan.py cursor-hooks/laptop-exec-session.sh cursor-hooks/hooks-user.json cursor-hooks/hooks-project.json; do
   [ -f "$SERVER_DIR/$f" ] || continue
   dst="/usr/local/lib/claude-server/$f"
   src="$SERVER_DIR/$f"
@@ -169,7 +169,7 @@ getent passwd | awk -F: '$3 >= 1000 && $1 != "nobody" && $1 != "nfsnobody" { pri
   [ -f "$SERVER_DIR/claude-git-setup.sh" ] && atomic_install 755 "$SERVER_DIR/claude-git-setup.sh" "$h/.local/bin/claude-git-setup" "$u" "$u"
   install -m 644 -o "$u" -g "$u" "$SERVER_DIR/cursor-rules/laptop-exec.mdc" "$h/.cursor/rules/laptop-exec.mdc"
   install -m 644 -o "$u" -g "$u" "$SERVER_DIR/skills/laptop-exec/SKILL.md" "$h/.cursor/skills/laptop-exec/SKILL.md"
-  for _hf in laptop-exec-guard.sh laptop-exec-guard-wrap.sh laptop-exec-shell-scan.py laptop-exec-session.sh; do
+  for _hf in laptop-exec-audit-log.sh laptop-exec-guard.sh laptop-exec-guard-wrap.sh laptop-exec-shell-scan.py laptop-exec-session.sh; do
     [ -f "$SERVER_DIR/cursor-hooks/$_hf" ] || continue
     install -m 755 -o "$u" -g "$u" "$SERVER_DIR/cursor-hooks/$_hf" "$h/.cursor/hooks/$_hf"
   done
