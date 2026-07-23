@@ -2143,18 +2143,19 @@ $script:WindowsMcpEnsured = $false
                         Write-ConnectLog "AUTH_DECISION needs_refresh reason=$($refreshCheck.Reasons -join ',')" 'DEBUG'
                     }
                 }
-                if (Get-Command Test-PersonalCursorDominant -ErrorAction SilentlyContinue) {
-                    if (Test-PersonalCursorDominant) {
-                        Warn 'Personal Cursor is open - close it or use [Claude Server] profile windows'
-                        Write-ConnectLog 'AUTH_WARN personal_cursor_dominant' 'WARN'
-                    }
-                }
                 $skipAuth = $false
                 if (-not $script:ForceCursorAuthSync -and -not $script:PostTunnelRecovery -and -not $authNeedsRefresh) {
                     if ($stampCurrent) { $skipAuth = $true }
                     elseif ($cursorRunning -and $authComplete) { $skipAuth = $true }
                 }
                 Write-ConnectLog "AUTH_DECISION skip=$skipAuth force=$($script:ForceCursorAuthSync) post_recovery=$($script:PostTunnelRecovery) cursor_running=$cursorRunning auth_complete=$authComplete stamp_current=$stampCurrent"
+                # Skip process enum when auth sync itself is skipped (stamp current / editor open).
+                if (-not $skipAuth -and (Get-Command Test-PersonalCursorDominant -ErrorAction SilentlyContinue)) {
+                    if (Test-PersonalCursorDominant) {
+                        Warn 'Personal Cursor is open - close it or use [Claude Server] profile windows'
+                        Write-ConnectLog 'AUTH_WARN personal_cursor_dominant' 'WARN'
+                    }
+                }
                 if ($skipAuth) {
                     # Outer skip still heals machineid - lightweight, local SQLite only, no SSH/scp.
                     if (Get-Command Heal-CursorProfileMachineIdFromLocal -ErrorAction SilentlyContinue) {

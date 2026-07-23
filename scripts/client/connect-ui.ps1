@@ -529,7 +529,7 @@ function Sync-ConnectLogToServer {
                 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                 $sid = Get-ConnectSessionId
                 if ($script:ConnectLogWriter) {
-                    $script:ConnectLogWriter.WriteLine("[$ts] [INFO] [$sid] LOG_SYNC_SKIP reason=forbid_shrink local=$fileLen remote_was=$remoteBeforeProbe off=$off (append/merge only)")
+                    $script:ConnectLogWriter.WriteLine("[$ts] [DEBUG] [$sid] LOG_SYNC_SKIP reason=forbid_shrink local=$fileLen remote_was=$remoteBeforeProbe off=$off (append/merge only)")
                 }
             } catch { }
         }

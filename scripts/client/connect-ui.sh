@@ -576,7 +576,7 @@ sync_connect_log_to_server() {
     : "${remote_before:=0}"
     if [ "$size" -lt "$remote_before" ] 2>/dev/null; then
         if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "LOG_SYNC_SKIP reason=forbid_shrink local=$size remote_was=$remote_before off=$off (append/merge only)" 'INFO'
+            connect_log "LOG_SYNC_SKIP reason=forbid_shrink local=$size remote_was=$remote_before off=$off (append/merge only)" 'DEBUG'
         fi
     fi
     if declare -F test_connect_remote_log_needs_rebuild >/dev/null 2>&1 && test_connect_remote_log_needs_rebuild "$size" "$remote_before" "$off"; then

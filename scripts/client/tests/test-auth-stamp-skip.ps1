@@ -3,8 +3,8 @@
 # Source-level contract for writing-plans Task 2 (#6 + #7v1):
 #   #6   Windows Test-CursorAuthNeedsRefresh must not flag `personal_without_profile`
 #        (personalMain>=1, profileMain==0) when auth is already complete.
-#        AUTH_WARN personal_cursor_dominant (>=3 threshold, separate function) is
-#        UNCHANGED and must still fire unconditionally.
+#        AUTH_WARN personal_cursor_dominant (>=3 threshold) still exists but is
+#        gated on -not $skipAuth (skip process enum when stamp/auth skip).
 #   #7v1 Windows connect.ps1 must short-circuit straight to $authNeedsRefresh=$true
 #        on a real stamp MISMATCH (SyncedAt/GoldenExportedAt both non-empty and
 #        different) + authComplete, WITHOUT calling the heavier
@@ -34,8 +34,8 @@
 #     different) gated on $authComplete, which sets $authNeedsRefresh = $true and
 #     logs the exact DEBUG string:
 #       AUTH_DECISION stamp_mismatch_skip_needs_refresh_check
-#   - AUTH_WARN personal_cursor_dominant stays unconditional (no $authComplete
-#     coupling) - regression guard.
+#   - AUTH_WARN personal_cursor_dominant runs only when -not $skipAuth
+#     (Task 6: skip process enum on stamp-current auth skip).
 #   - Sync must never be skipped on stamp mismatch: no naive
 #       if ($stampCurrent -eq $false) { ... $skipAuth = $true ... }
 #     pattern, and the existing `-not $authNeedsRefresh` guard on $skipAuth stays.
@@ -127,10 +127,11 @@ Assert (
 ) 'personal_without_profile reason gated by "-and -not $AuthComplete" (exact token sequence)'
 Assert ($authFuncBlock -match "'personal_without_profile'") 'personal_without_profile reason string still added when the gate condition is met'
 
-Write-Host '--- #6 Windows: AUTH_WARN personal_cursor_dominant unaffected (regression guard) ---' -ForegroundColor Cyan
-Assert ($win -match "Write-ConnectLog 'AUTH_WARN personal_cursor_dominant' 'WARN'") 'connect.ps1 still logs AUTH_WARN personal_cursor_dominant unconditionally'
+Write-Host '--- #6 Windows: AUTH_WARN personal_cursor_dominant gated on -not skipAuth ---' -ForegroundColor Cyan
+Assert ($win -match "Write-ConnectLog 'AUTH_WARN personal_cursor_dominant' 'WARN'") 'connect.ps1 still logs AUTH_WARN personal_cursor_dominant'
+Assert ($win -match '(?s)\$skipAuth = \$false.*?-not \$skipAuth -and \(Get-Command Test-PersonalCursorDominant') 'personal_cursor_dominant gated on -not skipAuth (skip process enum when stamp current)'
 $dominantBlock = ''
-if ($win -match '(?s)if \(Get-Command Test-PersonalCursorDominant.*?AUTH_WARN personal_cursor_dominant[^\r\n]*\r?\n\s*\}\r?\n\s*\}') {
+if ($win -match '(?s)if \(-not \$skipAuth -and \(Get-Command Test-PersonalCursorDominant.*?AUTH_WARN personal_cursor_dominant[^\r\n]*\r?\n\s*\}\r?\n\s*\}') {
     $dominantBlock = $Matches[0]
 }
 Assert ($dominantBlock.Length -gt 20) 'extracted Test-PersonalCursorDominant warn block'
