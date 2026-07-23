@@ -148,7 +148,7 @@ Every user gets these MCP servers wired into `~/.claude/settings.json` automatic
 
 | MCP Server | Purpose | Install |
 |---|---|---|
-| `codegraph` | Code knowledge graph — fewer tool calls, cheaper sessions | step 9 in `install.sh` |
+| `codebase-memory-mcp` | Code knowledge graph — fewer tool calls, cheaper sessions (158-language tree-sitter + Hybrid LSP; replaced `codegraph` 2026-07-23, see `docs/superpowers/plans/2026-07-23-codebase-memory-mcp-rollout.md`) | per-user `install.sh` in `add-user.sh` (step 4b) |
 | `headroom` | Context compression — reduces tokens sent to LLM | `pip3 install headroom-ai[mcp]` (step 10) |
 | `sqlserver` | SQL Server query access via MCP | `npm install -g @bilims/mcp-sqlserver` |
 
@@ -161,9 +161,9 @@ sudo claude-server sync-cursor-mcp USER     # one user
 
 To change the shared DB login: edit `/etc/claude-code/sqlserver.env`, then re-run sync (do not sed passwords into homedirs by hand).
 
-**CodeGraph per-project indexing** — runs automatically on login via `claude-automount`. Manual trigger:
+**codebase-memory-mcp indexing** — not auto-triggered on login (unlike the old codegraph). Manual trigger inside a project:
 ```bash
-codegraph init   # run inside project dir if .codegraph/ is missing
+codebase-memory-mcp cli index_repository --repo-path "$(pwd)"
 ```
 
 ## Plugins (installed per-user via add-user.sh)
@@ -279,7 +279,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | Both EXIT and SIGTERM traps | mac:444-445 | `kill <pid>` won't trigger EXIT alone |
 | `[Console]::Key` + `KeyChar` checks | win:610,728,784 | Physical key check so R/Q/C/X work under Persian/Arabic keyboard layouts |
 | `[Uri]::EscapeDataString` for Gateway URL | win:695 | PS5.1+PS7 safe; avoids `System.Web` dependency |
-| `$script:ConnectVersion = '20260723.3'` | win connect.ps1 | Must match connect.bat guard |
+| `$script:ConnectVersion = '20260723.9'` | win connect.ps1 | Must match connect.bat guard |
 | `@(Choose-Project -Mounts $mounts)[-1]` | win connect.ps1 | Prevents pipeline leak → Join-Path ChildPath prompt |
 | `@(Resolve-EditorChoice -CfgDir $CfgDir)[-1]` | win connect.ps1 | Same pipeline-safe capture |
 | `return ,($obj)` in Choose-Project | win connect.ps1 | Unary comma suppresses pipeline output |
@@ -287,7 +287,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | connect.bat guards | windows/connect.bat | Requires git-mode.ps1, Path.Combine, @(Choose-Project, version |
 | Dot-source git-mode.ps1 / git-mode.sh | all Windows/Mac launchers | GIT_MODE must not be duplicated in forks |
 | Push GIT_MODE to ~/.claude-connect.conf | connect.ps1/sh | Server claude-mount reads hide vs server |
-| `CONNECT_VERSION='20260723.3'` | mac connect.sh | Must match published client version |
+| `CONNECT_VERSION='20260723.9'` | mac connect.sh | Must match published client version |
 | Dot-source `connect-ui.ps1` / source `connect-ui.sh` | all launchers | UI tables, header, session box |
 | Always elevate at start of connect.ps1 (UAC) unless already admin | win | Non-admin relaunches via `RunAs`; `-AdminFix` is the elevated child / repair path; `Ensure-LaptopSshReady` still used mid-session |
 | Publish client package **12 files** | publish.ps1 | +connect-ui, editor-launch.sh (mac) |

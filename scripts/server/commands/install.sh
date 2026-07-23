@@ -508,15 +508,6 @@ else
     rm -f /tmp/chrome.deb
 fi
 
-# --- Step 9: CodeGraph (code intelligence MCP) ------------------------------
-step "9 - CodeGraph"
-if command -v codegraph &>/dev/null; then
-    ok "CodeGraph: already installed ($(codegraph --version 2>/dev/null || echo 'ok'))"
-else
-    curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh
-    ok "CodeGraph installed"
-fi
-
 # --- Step 10: Headroom (context compression MCP) -----------------------------
 step "10 - Headroom"
 if command -v headroom &>/dev/null; then

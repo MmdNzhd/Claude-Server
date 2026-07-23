@@ -173,11 +173,6 @@ cat > "/home/$USERNAME/.claude/settings.json" << 'SETTINGS'
     "Stop":             [{"hooks": [{"type": "command", "command": "/usr/local/bin/claude-hook-stop.sh"}]}]
   },
   "mcpServers": {
-    "codegraph": {
-      "type": "stdio",
-      "command": "codegraph",
-      "args": ["serve", "--mcp"]
-    },
     "headroom": {
       "type": "stdio",
       "command": "headroom",
@@ -215,6 +210,11 @@ SETTINGS
 chown "$USERNAME:$USERNAME" "/home/$USERNAME/.claude"
 chown "$USERNAME:$USERNAME" "/home/$USERNAME/.claude/settings.json"
 ok "~/.claude/settings.json written"
+
+step "4b - codebase-memory-mcp"
+runuser -l "$USERNAME" -c "curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash" > "/tmp/cbm-install-$USERNAME.log" 2>&1 \
+    && ok "codebase-memory-mcp installed for $USERNAME" \
+    || warn "codebase-memory-mcp install failed for $USERNAME - see /tmp/cbm-install-$USERNAME.log, or run manually: runuser -l $USERNAME -c \"curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash\""
 
 if [ -x /usr/local/bin/claude-auth-sync ]; then
     if [ -f /etc/claude-code/oauth.env ] || grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null; then
