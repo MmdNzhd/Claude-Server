@@ -49,6 +49,7 @@ $SepidIp = '192.168.250.70'
 $ClientFiles = @(
     @{ Src = "scripts\client\windows\connect.bat";       Dst = "windows\connect.bat";       PatchIp = $false }
     @{ Src = "scripts\client\windows\connect-boot.ps1";  Dst = "windows\connect-boot.ps1";  PatchIp = $false }
+    @{ Src = "scripts\client\windows\connect-preflight.ps1"; Dst = "windows\connect-preflight.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\windows\connect-heal.ps1";  Dst = "windows\connect-heal.ps1";  PatchIp = $false }
     @{ Src = "scripts\client\windows\connect-bootstrap.ps1"; Dst = "windows\connect-bootstrap.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\windows\connect-version.txt"; Dst = "windows\connect-version.txt"; PatchIp = $false }

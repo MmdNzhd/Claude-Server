@@ -54,7 +54,10 @@ Assert ($ui -notmatch 'mutex error \(continue\)') 'Win: mutex catch must not fai
 Assert ($gm -match 'no result line') 'git-mode: pushLine null-safe fallback'
 Assert ($bat -match 'connect-boot\.ps1') 'connect.bat handoffs via connect-boot.ps1 (atomic slot mutex)'
 Assert ($bat -notmatch 'ReleaseMutex') 'connect.bat must not probe/release mutex (TOCTOU)'
-Assert ($win -match 'ReleaseMutex' -and $win -match 'CLAUDE_CONNECT_BOOT_MUTEX' -and $win -match "connect-boot\.ps1") 'connect.ps1 releases boot mutex and elevates via connect-boot before UAC'
+$boot = Get-Content (Join-Path $Client 'windows\connect-boot.ps1') -Raw
+Assert ($boot -match 'ReleaseMutex' -and $boot -match 'CLAUDE_CONNECT_BOOT_MUTEX' -and $boot -match 'ClaudeConnect#') 'connect-boot owns slot mutex release (not cold-start UAC in connect.ps1)'
+Assert ($win -match 'Elevate-when-needed') 'connect.ps1 elevate-when-needed (no always-elevate before UAC)'
+Assert ($win -match 'Invoke-LaptopAdminOps' -and $win -match 'Start-Process powershell\.exe -Verb RunAs') 'on-demand AdminFix RunAs still present'
 
 Assert (Test-Path (Join-Path $Client 'windows\connect-boot.ps1')) 'connect-boot.ps1 exists'
 Assert ((Get-Content (Join-Path $Client 'windows\connect-boot.ps1') -Raw) -match 'ClaudeConnect#') 'connect-boot acquires ClaudeConnect# slot pool'

@@ -50,6 +50,19 @@ Assert ($isMounted.Length -gt 20) '_is_mounted exists'
 Assert ($isMounted -match 'timeout\s+-k\s+') '_is_mounted kills timed-out probe after grace'
 Assert ($isMounted -notmatch '(?m)^\s*timeout\s+2\s+ls\b') '_is_mounted does not use bare timeout 2 ls'
 
+
+Write-Host ''
+Write-Host '=== Recover / force-unmount ls probes must use timeout -k ===' -ForegroundColor White
+Assert ($mount -match 'timeout -k 1 2') 'claude-mount.sh has timeout -k 1 2 probes'
+Assert ($mount -notmatch '(?m)(?<!-k )\btimeout 2 ls\b') 'no bare timeout 2 ls left (recover/force-unmount)'
+$recover = Get-ShellFunctionSource $mount 'cmd_recover'
+if (-not $recover) {
+    $i = $mount.IndexOf('cmd_recover()')
+    if ($i -ge 0) { $recover = $mount.Substring($i, [Math]::Min(2500, $mount.Length - $i)) }
+}
+Assert ($recover.Length -gt 20) 'extracted cmd_recover'
+Assert ($recover -notmatch '(?<!-k )\btimeout 2 ls\b') 'cmd_recover has no bare timeout 2 ls'
+
 Write-Host ''
 Write-Host "Passed: $passed  Failed: $failed" -ForegroundColor $(if ($failed -eq 0) { 'Green' } else { 'Red' })
 if ($failed -gt 0) { exit 1 }

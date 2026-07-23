@@ -535,7 +535,7 @@ _force_unmount_project() {
         [ -n "$rpath" ] && _restore_git "$rpath"
         return 0
     fi
-    if timeout 2 ls "$lpath" >/dev/null 2>&1; then
+    if timeout -k 1 2 ls "$lpath" >/dev/null 2>&1; then
         _do_unmount "$lpath"
     else
         local lpath_esc
@@ -949,7 +949,7 @@ cmd_recover() {
         if [ -n "$lpath" ] && [ -n "$rpath" ]; then
             if ! _in_proc_mounts "$lpath"; then
                 [ "$tunnel_ok" -eq 1 ] && _restore_git_body "$rpath"
-            elif ! timeout 2 ls "$lpath" >/dev/null 2>&1; then
+            elif ! timeout -k 1 2 ls "$lpath" >/dev/null 2>&1; then
                 lpath_esc=$(printf '%s' "$lpath" | sed 's/[[\.*^$(){}+?|]/\\&/g')
                 pkill -u "$USER" -f "sshfs .*${lpath_esc}" 2>/dev/null || true
                 sleep 1

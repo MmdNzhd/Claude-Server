@@ -38,6 +38,10 @@ $suites = @(
     @{ Name = 'log-sync-contracts';     Script = 'test-log-sync-contracts.ps1' }
     @{ Name = 'log-sync-forbid-shrink'; Script = 'test-log-sync-forbid-shrink.ps1' }
     @{ Name = 'error-flush-contract';   Script = 'test-error-flush-contract.ps1' }
+    @{ Name = 'mount-failfast'; Script = 'test-mount-failfast.ps1' }
+    @{ Name = 'elevate-when-needed'; Script = 'test-elevate-when-needed.ps1' }
+    @{ Name = 'save-connect-conf-key'; Script = 'test-save-connect-conf-key.ps1' }
+    @{ Name = 'hard-connect-ux-20260723'; Script = 'test-hard-connect-ux-20260723.ps1' }
     @{ Name = 'hard-multi-agent-regressions'; Script = 'test-hard-multi-agent-regressions.ps1' }
     @{ Name = 'p0-connect-fixes'; Script = 'test-p0-connect-fixes.ps1' }
     @{ Name = 'windows-mcp-no-orphan-cmd'; Script = 'test-windows-mcp-no-orphan-cmd.ps1' }
