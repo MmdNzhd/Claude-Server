@@ -180,6 +180,8 @@
 
 ### Task 7: Version bump, publish, verify
 
+**Version bumped in repo to `20260723.13`.** User still runs `publish\\publish.bat` on the Smart laptop and does manual acceptance.
+
 - [ ] **Step 1: Bump** `CONNECT_VERSION` / `$script:ConnectVersion` / bat guard in lockstep (e.g. `20260723.13` or next date stamp).
 
 - [ ] **Step 2: Publish** on smart laptop: `publish\publish.bat`.
