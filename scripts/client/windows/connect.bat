@@ -18,7 +18,7 @@ REM Stage 6: when connect-preflight.ps1 exists, happy path uses one PS preflight
 REM (skips scattered bootstrap/heal/update PS starts). Sepidz / OUTDATED / error paths unchanged.
 if exist "%HERE%connect-preflight.ps1" (
     if not defined CLAUDE_CONNECT_UPDATE_DEPTH set "CLAUDE_CONNECT_UPDATE_DEPTH=0"
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%connect-preflight.ps1" -Here "%HERE_NOTRAIL%"
+    powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%HERE%connect-preflight.ps1" -Here "%HERE_NOTRAIL%"
     set "PRE_EC=!errorlevel!"
     if exist "%TEMP%\claude-connect-run-id.txt" (
         for /f "usebackq delims=" %%I in ("%TEMP%\claude-connect-run-id.txt") do set "CLAUDE_CONNECT_RUN_ID=%%I"
@@ -54,13 +54,13 @@ REM setlocal env vars inherit to child powershell -File (connect-update.ps1, con
 
 if not defined CLAUDE_CONNECT_RUN_ID (
 
-  for /f %%I in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString('N').Substring(0,12)"') do set "CLAUDE_CONNECT_RUN_ID=%%I"
+  for /f %%I in ('powershell -NoProfile -WindowStyle Hidden -Command "[guid]::NewGuid().ToString('N').Substring(0,12)"') do set "CLAUDE_CONNECT_RUN_ID=%%I"
 
 )
 
 REM Log double-click immediately (before update) - durable local day log (BOM-less)
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $d=Join-Path $env:USERPROFILE '.config\claude-connect\logs'; New-Item -ItemType Directory -Force -Path $d|Out-Null; $f=Join-Path $d ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd')); $ts=Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; $sid=$env:CLAUDE_CONNECT_RUN_ID; if (-not $sid) { $sid='-' }; $line=('[{0}] [INFO] [{1}] BOOTSTRAP: connect.bat start here={2}' -f $ts, $sid, '%HERE%'); [IO.File]::AppendAllText($f, $line+[Environment]::NewLine, [Text.UTF8Encoding]::new($false)) } catch {}" 2>nul
+powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "try { $d=Join-Path $env:USERPROFILE '.config\claude-connect\logs'; New-Item -ItemType Directory -Force -Path $d|Out-Null; $f=Join-Path $d ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd')); $ts=Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; $sid=$env:CLAUDE_CONNECT_RUN_ID; if (-not $sid) { $sid='-' }; $line=('[{0}] [INFO] [{1}] BOOTSTRAP: connect.bat start here={2}' -f $ts, $sid, '%HERE%'); [IO.File]::AppendAllText($f, $line+[Environment]::NewLine, [Text.UTF8Encoding]::new($false)) } catch {}" 2>nul
 
 
 if not defined CLAUDE_CONNECT_UPDATE_DEPTH set "CLAUDE_CONNECT_UPDATE_DEPTH=0"
@@ -69,17 +69,17 @@ REM 1) Server bootstrap pull (works even if local connect-update is broken)
 REM    If connect-bootstrap.ps1 is missing (ancient folders), try Claude-Connect copy first, else skip.
 set "BOOT_EC=0"
 if exist "%HERE%connect-bootstrap.ps1" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%connect-bootstrap.ps1" -Here "%HERE_NOTRAIL%" -Quiet
+    powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%HERE%connect-bootstrap.ps1" -Here "%HERE_NOTRAIL%" -Quiet
     set "BOOT_EC=!errorlevel!"
 ) else if "!HERE_IS_SEPIDZ!"=="1" (
     REM Never pull/copy Smart Claude-Connect bootstrap into a Sepidz tree.
     set "BOOT_EC=0"
 ) else if exist "%USERPROFILE%\Desktop\Claude-Connect\connect-bootstrap.ps1" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\Desktop\Claude-Connect\connect-bootstrap.ps1" -Here "%HERE_NOTRAIL%" -Quiet
+    powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%USERPROFILE%\Desktop\Claude-Connect\connect-bootstrap.ps1" -Here "%HERE_NOTRAIL%" -Quiet
     set "BOOT_EC=!errorlevel!"
 ) else (
     REM Ancient bat/folder: detect broken update and force-copy bootstrap from stable publish if present
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $here='%HERE_NOTRAIL%'; $upd=Join-Path $here 'connect-update.ps1'; $broken=$false; if(Test-Path $upd){ $r=Get-Content -LiteralPath $upd -Raw -EA SilentlyContinue; if($r -match 'UpdateEndpointTarget'){ $broken=$true } }; $stable=Join-Path $env:USERPROFILE 'Desktop\claude-publish\claude-code-client\windows'; $canon=Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'; $src=$null; foreach($c in @($canon,$stable)){ if(Test-Path (Join-Path $c 'connect-bootstrap.ps1')){ $src=$c; break } }; if($broken -and $src){ foreach($n in @('connect-bootstrap.ps1','connect-heal.ps1','connect-update.ps1','connect.bat','cursor-proxy-sidecar.ps1','connect-version.txt')){ $s=Join-Path $src $n; if(Test-Path $s){ Copy-Item -Force $s (Join-Path $here $n) } }; if(Test-Path (Join-Path $here 'connect-bootstrap.ps1')){ $p=Start-Process -FilePath powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $here 'connect-bootstrap.ps1'),'-Here',$here,'-Quiet','-Force') -Wait -PassThru -WindowStyle Hidden; if($p -and $p.ExitCode -eq 2){ exit 2 } } }; exit 0 } catch { exit 0 }"
+    powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "try { $here='%HERE_NOTRAIL%'; $upd=Join-Path $here 'connect-update.ps1'; $broken=$false; if(Test-Path $upd){ $r=Get-Content -LiteralPath $upd -Raw -EA SilentlyContinue; if($r -match 'UpdateEndpointTarget'){ $broken=$true } }; $stable=Join-Path $env:USERPROFILE 'Desktop\claude-publish\claude-code-client\windows'; $canon=Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'; $src=$null; foreach($c in @($canon,$stable)){ if(Test-Path (Join-Path $c 'connect-bootstrap.ps1')){ $src=$c; break } }; if($broken -and $src){ foreach($n in @('connect-bootstrap.ps1','connect-heal.ps1','connect-update.ps1','connect.bat','cursor-proxy-sidecar.ps1','connect-version.txt')){ $s=Join-Path $src $n; if(Test-Path $s){ Copy-Item -Force $s (Join-Path $here $n) } }; if(Test-Path (Join-Path $here 'connect-bootstrap.ps1')){ $p=Start-Process -FilePath powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $here 'connect-bootstrap.ps1'),'-Here',$here,'-Quiet','-Force') -Wait -PassThru -WindowStyle Hidden; if($p -and $p.ExitCode -eq 2){ exit 2 } } }; exit 0 } catch { exit 0 }"
     set "BOOT_EC=!errorlevel!"
 )
 if "!BOOT_EC!"=="2" (
@@ -91,13 +91,13 @@ if "!BOOT_EC!"=="2" (
 REM 2) Local heal / redirect away from dated publish folders
 set "HEAL_EC=0"
 if exist "%HERE%connect-heal.ps1" (
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%connect-heal.ps1" -Here "%HERE_NOTRAIL%"
+    powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%HERE%connect-heal.ps1" -Here "%HERE_NOTRAIL%"
     set "HEAL_EC=!errorlevel!"
 ) else if "!HERE_IS_SEPIDZ!"=="1" (
     REM Never inline-copy Smart Claude-Connect into a Sepidz tree.
     set "HEAL_EC=0"
 ) else (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $here='%HERE_NOTRAIL%'; $canon=Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'; $stable=Join-Path $env:USERPROFILE 'Desktop\claude-publish\claude-code-client\windows'; $legacy=($here -match 'claude-code-client-\d{8}' -or $here -match 'claude-code-sepidz-\d{8}' -or $here -match '[\\/]claude-publish[\\/]'); function Good($d){ if(-not (Test-Path (Join-Path $d 'connect.bat'))){return $false}; if(-not (Test-Path (Join-Path $d 'cursor-proxy-sidecar.ps1'))){return $false}; $u=Join-Path $d 'connect-update.ps1'; if(-not (Test-Path $u)){return $false}; $r=Get-Content -LiteralPath $u -Raw -EA SilentlyContinue; if($r -match 'UpdateEndpointTarget'){return $false}; return $true }; $src=$null; foreach($c in @($canon,$stable)){ if(Good $c){ $src=$c; break } }; if(-not $src){ exit 0 }; $names=@('connect.bat','connect-boot.ps1','connect-bootstrap.ps1','connect-heal.ps1','connect.ps1','connect-update.ps1','cursor-proxy-sidecar.ps1','connect-ui.ps1','connect-diagnostic.ps1','editor-launch.ps1','git-mode.ps1','cursor-auth-laptop.ps1','windows-mcp-laptop.ps1','connect-version.txt'); if(-not (Good $canon)){ New-Item -ItemType Directory -Force -Path $canon|Out-Null; foreach($n in $names){ $s=Join-Path $src $n; if(Test-Path $s){ Copy-Item -Force $s (Join-Path $canon $n) } } }; $need=(-not (Good $here)); if($need){ foreach($n in $names){ $s=Join-Path $canon $n; if(Test-Path $s){ Copy-Item -Force $s (Join-Path $here $n) } } }; if($legacy -and (Good $canon) -and ($here -ne $canon)){ Set-Content -LiteralPath (Join-Path $env:TEMP 'claude-connect-relaunch.dir') -Value $canon -Encoding ASCII; exit 2 }; exit 0 } catch { exit 1 }"
+    powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "try { $here='%HERE_NOTRAIL%'; $canon=Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'; $stable=Join-Path $env:USERPROFILE 'Desktop\claude-publish\claude-code-client\windows'; $legacy=($here -match 'claude-code-client-\d{8}' -or $here -match 'claude-code-sepidz-\d{8}' -or $here -match '[\\/]claude-publish[\\/]'); function Good($d){ if(-not (Test-Path (Join-Path $d 'connect.bat'))){return $false}; if(-not (Test-Path (Join-Path $d 'cursor-proxy-sidecar.ps1'))){return $false}; $u=Join-Path $d 'connect-update.ps1'; if(-not (Test-Path $u)){return $false}; $r=Get-Content -LiteralPath $u -Raw -EA SilentlyContinue; if($r -match 'UpdateEndpointTarget'){return $false}; return $true }; $src=$null; foreach($c in @($canon,$stable)){ if(Good $c){ $src=$c; break } }; if(-not $src){ exit 0 }; $names=@('connect.bat','connect-boot.ps1','connect-bootstrap.ps1','connect-heal.ps1','connect.ps1','connect-update.ps1','cursor-proxy-sidecar.ps1','connect-ui.ps1','connect-diagnostic.ps1','editor-launch.ps1','git-mode.ps1','cursor-auth-laptop.ps1','windows-mcp-laptop.ps1','connect-version.txt'); if(-not (Good $canon)){ New-Item -ItemType Directory -Force -Path $canon|Out-Null; foreach($n in $names){ $s=Join-Path $src $n; if(Test-Path $s){ Copy-Item -Force $s (Join-Path $canon $n) } } }; $need=(-not (Good $here)); if($need){ foreach($n in $names){ $s=Join-Path $canon $n; if(Test-Path $s){ Copy-Item -Force $s (Join-Path $here $n) } } }; if($legacy -and (Good $canon) -and ($here -ne $canon)){ Set-Content -LiteralPath (Join-Path $env:TEMP 'claude-connect-relaunch.dir') -Value $canon -Encoding ASCII; exit 2 }; exit 0 } catch { exit 1 }"
     set "HEAL_EC=!errorlevel!"
 )
 if "!HEAL_EC!"=="2" (
@@ -158,10 +158,10 @@ if exist "%HERE%connect-update.ps1" (
             echo   [!] Update failed - pulling latest from server into Desktop\Claude-Connect ...
             echo.
             if exist "%HERE%connect-bootstrap.ps1" (
-                powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%connect-bootstrap.ps1" -Here "%HERE_NOTRAIL%" -Quiet -Force
+                powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%HERE%connect-bootstrap.ps1" -Here "%HERE_NOTRAIL%" -Quiet -Force
             ) else (
                 if exist "%USERPROFILE%\Desktop\Claude-Connect\connect-bootstrap.ps1" (
-                    powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\Desktop\Claude-Connect\connect-bootstrap.ps1" -Here "%HERE_NOTRAIL%" -Quiet -Force
+                    powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%USERPROFILE%\Desktop\Claude-Connect\connect-bootstrap.ps1" -Here "%HERE_NOTRAIL%" -Quiet -Force
                 )
             )
             set "SKIP_SMART_RELAUNCH=0"
@@ -232,9 +232,9 @@ if defined EXPECT_VER findstr /C:"ConnectVersion = '!EXPECT_VER!'" "%HERE%connec
 if "%OUTDATED%"=="1" (
     powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $d=Join-Path $env:USERPROFILE '.config\claude-connect\logs'; New-Item -ItemType Directory -Force -Path $d|Out-Null; $f=Join-Path $d ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd')); $ts=Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; $sid=$env:CLAUDE_CONNECT_RUN_ID; if (-not $sid) { $sid='-' }; $here='%HERE%'; $line=('[{0}] [ERROR] [{1}] FAIL OUTDATED_SCRIPTS: folder incomplete or mismatched version here={2}' -f $ts, $sid, $here); [IO.File]::AppendAllText($f, $line+[Environment]::NewLine, [Text.UTF8Encoding]::new($false)) } catch {}" 2>nul
     if exist "%HERE%connect-bootstrap.ps1" (
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%connect-bootstrap.ps1" -Here "%HERE_NOTRAIL%" -Quiet -Force
+        powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%HERE%connect-bootstrap.ps1" -Here "%HERE_NOTRAIL%" -Quiet -Force
     ) else if not "!HERE_IS_SEPIDZ!"=="1" if exist "%USERPROFILE%\Desktop\Claude-Connect\connect-bootstrap.ps1" (
-        powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\Desktop\Claude-Connect\connect-bootstrap.ps1" -Here "%HERE_NOTRAIL%" -Quiet -Force
+        powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%USERPROFILE%\Desktop\Claude-Connect\connect-bootstrap.ps1" -Here "%HERE_NOTRAIL%" -Quiet -Force
     )
     set "SKIP_SMART_RELAUNCH=0"
     echo.%HERE%| find /I "claude-code-sepidz" >nul && set "SKIP_SMART_RELAUNCH=1"
