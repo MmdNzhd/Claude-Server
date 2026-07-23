@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # connect.sh - Claude Code launcher for Mac/Linux.
 # Usage:  bash connect.sh          (normal)
 #         bash connect.sh --setup  (reconfigure)
@@ -50,7 +50,7 @@ if [ -f "$_update_script" ]; then
     fi
 fi
 
-CONNECT_VERSION='20260723.8'
+CONNECT_VERSION='20260723.10'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).
@@ -80,6 +80,9 @@ step() {
     CURRENT_STEP_NAME="$*"
     CURRENT_STEP_START=$SECONDS
     if declare -F connect_log >/dev/null 2>&1; then connect_log "STEP begin: $*"; fi
+    # Quiet-repeat: routine step lines only paint the console on the first session-loop
+    # pass; recovery re-passes still log the full detail to the day-log file only.
+    [ "${STEP_CONSOLE_QUIET:-0}" = "1" ] && return 0
     printf '%s' "$s"
     local i; for ((i=${#s}; i<46; i++)); do printf '.'; done
 }
@@ -105,6 +108,7 @@ step_ok()   {
     if declare -F connect_log >/dev/null 2>&1 && [ -n "${CURRENT_STEP_NAME:-}" ]; then
         connect_log "STEP end: $CURRENT_STEP_NAME ok ms=$ms detail=$detail"
     fi
+    [ "${STEP_CONSOLE_QUIET:-0}" = "1" ] && return 0
     if [ -n "${1:-}" ]; then printf ' %s\n' "$*"; else printf ' ok\n'; fi
 }
 step_fail() {
@@ -765,6 +769,9 @@ while [ "$exit_requested" -eq 0 ]; do
         while [ "$session_done" -eq 0 ]; do
             already_down=0
             SESSION_LOOP_ITER=$(( SESSION_LOOP_ITER + 1 ))
+            # Quiet-repeat: only the FIRST session-loop pass (the initial connect) shows
+            # routine step "ok" lines on console; recovery re-passes stay file-only.
+            if [ "$SESSION_LOOP_ITER" -gt 1 ]; then STEP_CONSOLE_QUIET=1; else STEP_CONSOLE_QUIET=0; fi
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "SESSION_LOOP begin iter=$SESSION_LOOP_ITER recovery_gen=${RECOVERY_GENERATION:-0} post_recovery=${POST_TUNNEL_RECOVERY:-0} force_auth=${CURSOR_AUTH_FORCE:-0}"
         if declare -F log_session_context >/dev/null 2>&1; then log_session_context 'session_loop'; fi

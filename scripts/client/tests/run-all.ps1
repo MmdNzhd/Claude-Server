@@ -54,6 +54,7 @@ $suites = @(
     @{ Name = 'sidecar-job-object'; Script = 'test-sidecar-job-object.ps1' }
     @{ Name = 'windows-shadow-canon'; Script = 'test-windows-shadow-canon.ps1' }
     @{ Name = 'skip-12-fingerprint-hold'; Script = 'test-skip-12-fingerprint-hold.ps1' }
+    @{ Name = 'step-console-quiet'; Script = 'test-step-console-quiet.ps1' }
 )
 
 $fail = 0

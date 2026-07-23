@@ -130,10 +130,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260723.8'
+$script:ConnectVersion = '20260723.10'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = '761e7af1-b8d1-4f2d-8289-6e94308ceb8b'
+$script:ConnectBuildId = '68b698a8-ce85-4b29-a621-12d28cc954ef'
 $CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
@@ -188,7 +188,9 @@ function Step($m) {
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
         Write-ConnectLog "STEP begin: $m"
     }
-    Write-Host ("    " + $m).PadRight(46, '.') -NoNewline -ForegroundColor DarkCyan
+    if (-not $script:StepConsoleQuiet) {
+        Write-Host ("    " + $m).PadRight(46, '.') -NoNewline -ForegroundColor DarkCyan
+    }
 }
 function StepOk  {
     param([string]$d='')
@@ -205,14 +207,24 @@ function StepOk  {
     }
     # Print UI result FIRST. Request-ConnectLogSync may inline-sync a multi-MB day log
     # over SSH (40s+) and used to run before Write-Host - so the step looked hung forever.
-    if ($d) { Write-Host " $d" -ForegroundColor Green } else { Write-Host " ok" -ForegroundColor Green }
+    # #Quiet-repeat: routine "ok" announcements only show console-side on the first
+    # session-loop pass (StepConsoleQuiet=false); every recovery re-pass still logs the
+    # full detail to the day log file, it just does not repaint the console with the same
+    # "Verifying laptop SSH key...ok / Mounting files...ok / Syncing Cursor auth...ok"
+    # burst every time a soft tunnel hiccup silently self-heals. Failures (StepFail) are
+    # never gated - those must always be visible.
+    if (-not $script:StepConsoleQuiet) {
+        if ($d) { Write-Host " $d" -ForegroundColor Green } else { Write-Host " ok" -ForegroundColor Green }
+    }
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
         $detail = if ($d) { $d } else { 'ok' }
         Write-ConnectLog "STEP end: $($script:currentStepName) ok ms=$ms detail=$detail"
     }
     # Timer-only drain - never inline sync here (blocks Loading projects -> project menu).
     if (Get-Command Request-ConnectLogSync -ErrorAction SilentlyContinue) { Request-ConnectLogSync -NoInline }
-    foreach ($fx in $script:pendingFixes) { Write-Host "      -> fixed: $fx" -ForegroundColor DarkGray }
+    if (-not $script:StepConsoleQuiet) {
+        foreach ($fx in $script:pendingFixes) { Write-Host "      -> fixed: $fx" -ForegroundColor DarkGray }
+    }
     $script:pendingFixes = @()
     $script:currentStepStartedAt = $null
 }
@@ -235,6 +247,7 @@ function StepFail {
 $script:pendingFixes = @()
 $script:currentStepName = ''
 $script:currentStepStartedAt = $null
+$script:StepConsoleQuiet = $false
 
 $script:ConnectScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 
@@ -1760,6 +1773,9 @@ $script:WindowsMcpEnsured = $false
     try {
         :sessionLoop while ($true) {
             $script:SessionLoopIter++
+            # #Quiet-repeat: only the FIRST session-loop pass (the initial connect)
+            # shows routine step "ok" lines on console; recovery re-passes stay file-only.
+            $script:StepConsoleQuiet = ($script:SessionLoopIter -gt 1)
             if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
                 Write-ConnectLog "SESSION_LOOP begin iter=$($script:SessionLoopIter) recovery_gen=$($script:RecoveryGeneration) post_recovery=$($script:PostTunnelRecovery) force_auth=$($script:ForceCursorAuthSync)"
     if (Get-Command Write-ConnectSessionContext -ErrorAction SilentlyContinue) {
