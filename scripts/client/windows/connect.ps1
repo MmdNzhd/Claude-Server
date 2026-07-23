@@ -130,10 +130,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260723.10'
+$script:ConnectVersion = '20260723.12'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = '68b698a8-ce85-4b29-a621-12d28cc954ef'
+$script:ConnectBuildId = '93ea481d-7d8d-49f5-a1ad-68f5dda8f97a'
 $CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
