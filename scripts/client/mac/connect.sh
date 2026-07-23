@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 # connect.sh - Claude Code launcher for Mac/Linux.
 # Usage:  bash connect.sh          (normal)
 #         bash connect.sh --setup  (reconfigure)
@@ -50,7 +50,7 @@ if [ -f "$_update_script" ]; then
     fi
 fi
 
-CONNECT_VERSION='20260722.24'
+CONNECT_VERSION='20260723.8'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).
@@ -119,8 +119,8 @@ step_fail() {
 
 sshx() {
     local orig_cmd="$*" remote_cmd ec=0 ms=0 trunc_cmd out b64
-    # Base64-wrap so nested quotes survive Mac ssh â†’ server.
-    # Old: bash -lc '$esc' broke on any single quote (grep -E '^X=', ssh-keygen -N '', â€¦)
+    # Base64-wrap so nested quotes survive Mac ssh Ã¢â€ â€™ server.
+    # Old: bash -lc '$esc' broke on any single quote (grep -E '^X=', ssh-keygen -N '', Ã¢â‚¬Â¦)
     # and made warn_foreign_server_session show "unexpected EOF" instead of the real laptop name.
     if ! printf '%s' "$orig_cmd" | grep -qE '^[[:space:]]*timeout[[:space:]]'; then
         b64="$(printf '%s' "$orig_cmd" | base64 | tr -d '\n\n')"
@@ -152,7 +152,18 @@ sshx() {
     [ -z "$trunc_out" ] && trunc_out='(empty)'
     [ "${#trunc_out}" -gt 300 ] && trunc_out="${trunc_out:0:300}..."
     if declare -F connect_log >/dev/null 2>&1; then
-        connect_log "SSH_END exit=$ec ms=$ms out=$trunc_out"
+        _ssh_level=INFO
+        if [ "$ec" -eq 124 ]; then
+            _ssh_level=ERROR
+        elif [ "$ec" -ne 0 ]; then
+            # #18: expected need_mount from check before up is TRACE, not WARN.
+            if printf '%s' "$trunc_out" | grep -Eqi 'need_mount'                 && ! printf '%s' "$trunc_out" | grep -Eqi 'Permission denied|Connection refused|Could not resolve|No route to host|Connection timed out|error:'; then
+                _ssh_level=TRACE
+            else
+                _ssh_level=WARN
+            fi
+        fi
+        connect_log "SSH_END exit=$ec ms=$ms out=$trunc_out" "$_ssh_level"
     fi
     printf '%s' "$out"
     return "$ec"
@@ -278,7 +289,7 @@ if declare -F enter_connect_single_instance >/dev/null 2>&1; then
 fi
 if declare -F log_session_context >/dev/null 2>&1; then log_session_context 'startup'; fi
 # Upload+wipe temp log on any early exit (before session cleanup_session trap).
-# CONNECT_LOG_EARLY_FLUSH â€” nonzero exit: ERROR then force flush (set -u/pipefail has no ERR without -e).
+# CONNECT_LOG_EARLY_FLUSH Ã¢â‚¬â€ nonzero exit: ERROR then force flush (set -u/pipefail has no ERR without -e).
 trap 'ec=$?; if [ "$ec" -ne 0 ] && [ -n "${CONNECT_LOG_PATH:-}" ] && declare -F connect_log >/dev/null 2>&1; then connect_log "FAIL UNHANDLED: exit=$ec" "ERROR"; connect_log "FAIL EXIT reason=trap_exit code=$ec" "ERROR" || true; fi; if declare -F flush_connect_log_to_server >/dev/null 2>&1; then flush_connect_log_to_server || true; fi' EXIT
 # Unexpected error flush (fires if errexit enabled later / in sourced helpers).
 trap 'ec=$?; if declare -F connect_log >/dev/null 2>&1; then connect_log "FAIL UNHANDLED: exit=$ec line=$LINENO cmd=$BASH_COMMAND" "ERROR" || true; fi; if declare -F flush_connect_log_to_server >/dev/null 2>&1; then flush_connect_log_to_server || true; fi' ERR
@@ -365,38 +376,83 @@ fi
 
 if [ -n "$needs_key" ]; then
     echo ""
-    printf '    \033[0;33mEnter server password (one time only):\033[0m\n'
-    if command -v ssh-copy-id >/dev/null 2>&1; then
-        ssh-copy-id -o StrictHostKeyChecking=accept-new -i "$HOME/.ssh/id_ed25519.pub" "$REMOTE_USER@$SERVER_IP"
-    else
-        ssh -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$SERVER_IP" \
-            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" \
-            < "$HOME/.ssh/id_ed25519.pub"
-    fi
-    step "Verifying connection"
-    if ! ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=15 "$ALIAS" true 2>/dev/null; then
+    max_fix_attempts=2
+    fix_attempts_used=0
+    auth_ok=""
+    while [ -z "$auth_ok" ]; do
+        printf '    \033[0;33mEnter server password (one time only):\033[0m\n'
+        if command -v ssh-copy-id >/dev/null 2>&1; then
+            ssh-copy-id -o StrictHostKeyChecking=accept-new -i "$HOME/.ssh/id_ed25519.pub" "$REMOTE_USER@$SERVER_IP"
+        else
+            ssh -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$SERVER_IP" \
+                "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" \
+                < "$HOME/.ssh/id_ed25519.pub"
+        fi
+        step "Verifying connection"
+        if ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=15 "$ALIAS" true 2>/dev/null; then
+            auth_ok=1
+            break
+        fi
         step_fail "still cannot connect"
         warn "Cannot connect - user=$REMOTE_USER  host=$SERVER_IP"
         echo ""
         printf '    \033[0;90mCurrent username: %s\033[0m\n' "$REMOTE_USER"
-        if declare -F connect_prompt >/dev/null 2>&1; then fix="$(connect_prompt "    Username changed? Enter new username (or Enter to exit): " "SSH_USER_FIX")"; else read -rp "    Username changed? Enter new username (or Enter to exit): " fix; fi
-        if [ -n "$fix" ]; then
-            printf 'REMOTE_USER=%s\nLAPTOP_USER=%s\n' "$fix" "$(whoami)" > "$CFG"
-            awk -v a="$ALIAS" '
-                /^[[:space:]]*Host[[:space:]]+/ { skip=0; for(i=2;i<=NF;i++) if($i==a) skip=1 }
-                !skip
-            ' "$HOME/.ssh/config" > "$HOME/.ssh/config.tmp.${ALIAS}" 2>/dev/null && mv "$HOME/.ssh/config.tmp.${ALIAS}" "$HOME/.ssh/config"
-            chmod 600 "$HOME/.ssh/config"
-            echo ""
-            printf '    \033[0;32mSaved. Re-run connect.sh.\033[0m\n'
+        if [ "$fix_attempts_used" -ge "$max_fix_attempts" ]; then
             if declare -F connect_log >/dev/null 2>&1; then
-                connect_log "FAIL SETUP_RERUN: username saved - user must re-run connect.sh" 'ERROR'
+                connect_log "FAIL SSH_USER_FIX_EXHAUSTED attempts=$fix_attempts_used/$max_fix_attempts remote_user=$REMOTE_USER" 'ERROR'
             fi
+            echo ""; exit 1
         fi
-        echo ""; exit 1
-    fi
+        while true; do
+            if declare -F connect_prompt >/dev/null 2>&1; then
+                fix="$(connect_prompt "    If server username is wrong, enter it (or Enter to exit): " "SSH_USER_FIX")"
+            else
+                read -rp "    If server username is wrong, enter it (or Enter to exit): " fix
+            fi
+            fix="$(printf '%s' "$fix" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            if [ -z "$fix" ]; then
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "SSH_USER_FIX empty_exit remote_user=$REMOTE_USER" 'WARN'
+                fi
+                echo ""; exit 1
+            fi
+            case "$fix" in
+                *@*|*/*|*\\*)
+                    warn "Invalid username (must not contain @ / \\): $fix"
+                    if declare -F connect_log >/dev/null 2>&1; then
+                        connect_log "SSH_USER_FIX_INVALID user=$fix" 'WARN'
+                    fi
+                    continue
+                    ;;
+            esac
+            break
+        done
+        fix_attempts_used=$((fix_attempts_used + 1))
+        REMOTE_USER="$fix"
+        printf 'REMOTE_USER=%s\nLAPTOP_USER=%s\n' "$REMOTE_USER" "$(whoami)" > "$CFG"
+        awk -v a="$ALIAS" '
+            /^[[:space:]]*Host[[:space:]]+/ { skip=0; for(i=2;i<=NF;i++) if($i==a) skip=1 }
+            !skip
+        ' "$HOME/.ssh/config" > "$HOME/.ssh/config.tmp.${ALIAS}" 2>/dev/null && mv "$HOME/.ssh/config.tmp.${ALIAS}" "$HOME/.ssh/config"
+        chmod 600 "$HOME/.ssh/config"
+        cat >> "$HOME/.ssh/config" <<EOF
+
+Host $ALIAS
+    HostName $SERVER_IP
+    User $REMOTE_USER
+    IdentityFile ~/.ssh/id_ed25519
+    StrictHostKeyChecking accept-new
+EOF
+        sanitize_ssh_alias_config
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "SSH_USER_FIX_RETRY in-process attempt=$fix_attempts_used/$max_fix_attempts remote_user=$REMOTE_USER"
+        fi
+        echo ""
+        printf '    \033[0;32mRetrying in-process with user=%s (attempt %d/%d)...\033[0m\n' "$REMOTE_USER" "$fix_attempts_used" "$max_fix_attempts"
+    done
     step_ok "$REMOTE_USER@$SERVER_IP"
 fi
+
 
 _script_dir="$(cd "$(dirname "$0")" && pwd)"
 if ! warn_foreign_server_session; then
@@ -764,7 +820,7 @@ while [ "$exit_requested" -eq 0 ]; do
 
             recover_mounts_if_needed "$go_id" "$(( TUNNEL_REUSED ^ 1 ))"
 
-            # Win Test-TunnelUp parity â€” banner/TCP, not PID-only.
+            # Win Test-TunnelUp parity Ã¢â‚¬â€ banner/TCP, not PID-only.
             if ! tunnel_up; then
                 printf '      -> tunnel dropped during recover, restarting...\n'
                 LAPTOP_SSH_VERIFIED=0
@@ -879,9 +935,11 @@ while [ "$exit_requested" -eq 0 ]; do
 
             if [ "$EDITOR_CMD" = "cursor" ] && declare -F sync_cursor_golden_auth_status >/dev/null 2>&1; then
                 _cursor_gs="$(get_cursor_remote_profile_dir)/User/globalStorage/state.vscdb"
+                _auth_complete=0
+                [ -f "$_cursor_gs" ] && local_cursor_auth_complete "$_cursor_gs" && _auth_complete=1
                 _auth_needs_refresh=0
                 if declare -F cursor_auth_needs_refresh >/dev/null 2>&1; then
-                    cursor_auth_needs_refresh "$_cursor_gs" && _auth_needs_refresh=1
+                    cursor_auth_needs_refresh "$_cursor_gs" "$_auth_complete" && _auth_needs_refresh=1
                 fi
                 if declare -F test_personal_cursor_dominant >/dev/null 2>&1 && test_personal_cursor_dominant; then
                     warn 'Personal Cursor is open - close it or use [Claude Server] profile windows'
@@ -975,7 +1033,7 @@ while [ "$exit_requested" -eq 0 ]; do
                         _editor_seen_open=1
                         export CURSOR_AUTH_RELAUNCH=0
                         if [ "$EDITOR_CMD" = "cursor" ]; then
-                            printf '      -> \033[0;33mIf Cursor asks to log in: [Claude Server] window â†’ Developer â†’ Reload Window\033[0m\n'
+                            printf '      -> \033[0;33mIf Cursor asks to log in: [Claude Server] window Ã¢â€ â€™ Developer Ã¢â€ â€™ Reload Window\033[0m\n'
                             printf '      -> \033[0;90mDo NOT use a personal login in that window\033[0m\n'
 
                             printf '      -> \033[0;90mServer profile [Claude Server] - personal Cursor is separate\033[0m\n'
@@ -1006,6 +1064,7 @@ while [ "$exit_requested" -eq 0 ]; do
                 # re-probe (possibly stale) state here, which was causing a false "not on
                 # target folder" relaunch (double launch) right after a successful open.
                 _editor_opened=1
+                if declare -F write_connect_scorecard >/dev/null 2>&1; then write_connect_scorecard boot; fi
                 _editor_seen_open=1
                 declare -F connect_log >/dev/null 2>&1 && connect_log 'SESSION: trusting launch result (did_launch+launch_ok) - skip relaunch check' 'DEBUG'
             elif declare -F remote_editor_on_correct_folder >/dev/null 2>&1; then
@@ -1085,7 +1144,7 @@ while [ "$exit_requested" -eq 0 ]; do
                         o) _resolved="o" ;;
                         q|$'\n'|$'\r') _resolved="q" ;;
                     esac
-                    # Non-ASCII printable (e.g. Ø¶): ignore and keep waiting.
+                    # Non-ASCII printable (e.g. Ã˜Â¶): ignore and keep waiting.
                     if [ -z "$_resolved" ]; then
                         _ord="$(printf '%s' "$_key" | od -An -tuC | tr -s ' ' | awk '{print $1; exit}')"
                         if [ -n "$_ord" ] && [ "$_ord" -gt 127 ]; then

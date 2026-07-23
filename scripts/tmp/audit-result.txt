@@ -1,4 +1,0 @@
-﻿=== Smart ===
-SSH: FAIL (-1)
-=== Sepidz ===
-SSH: FAIL (1)

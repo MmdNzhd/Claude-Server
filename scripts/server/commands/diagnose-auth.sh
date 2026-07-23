@@ -388,6 +388,27 @@ PY
 else
     warn "no golden Cursor auth - optional until Cursor IDE is used"
     info "Bootstrap: agent login (or Remote SSH once), then sudo cursor-auth-export --from-user <name>"
+    QREASON="/etc/cursor-auth/golden.quarantine-reason"
+    if [ -f "$QREASON" ]; then
+        q_email="$(python3 - "$QREASON" <<'PY' 2>/dev/null || true
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    d = json.load(f)
+print(d.get("email", ""), end="")
+PY
+)"
+        q_reason="$(python3 - "$QREASON" <<'PY' 2>/dev/null || true
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    d = json.load(f)
+print(d.get("reason", ""), end="")
+PY
+)"
+        fail "golden missing after personal-email quarantine (email=${q_email:-unknown} reason=${q_reason:-unknown})"
+        note_fail
+        info "Do NOT restore /etc/cursor-auth/golden.quarantined-personal â€” re-export from a work/team account"
+        info "Override only with: sudo cursor-auth-export --from-user <name> --allow-personal"
+    fi
 fi
 
 [ -x /usr/local/bin/cursor-auth-sync ] && ok "cursor-auth-sync installed" || warn "cursor-auth-sync missing - run: sudo claude-server install"

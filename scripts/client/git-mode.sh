@@ -41,8 +41,10 @@ _TUNNEL_BANNER_CACHE_BANNER=''
 _TUNNEL_BANNER_CACHE_UP=0
 _TUNNEL_BANNER_CACHE_INVALID=0
 _LAST_FORWARD_PROBE_AT=0
+_TUNNEL_FORWARD_PROBE_INTERVAL_SEC=45
 _TUNNEL_SYNC_FAIL_COUNT=0
 _TUNNEL_SOFT_FAIL_COUNT=0
+_TUNNEL_BANNER_DEFER_COUNT=0
 _LAST_TUNNEL_SPAWN_SUCCESS_AT=0
 _LAST_TUNNEL_SPAWN_SUCCESS_PORT=
 _LAST_TUNNEL_SPAWN_PID=
@@ -817,7 +819,8 @@ log_tunnel_drop() {
     fi
 }
 
-# When bg tunnel process is alive, probe forward every 30s (zombie forward detection).
+# When bg tunnel process is alive, probe forward every _TUNNEL_FORWARD_PROBE_INTERVAL_SEC
+# (45s; zombie forward detection). A healthy banner cache may defer one probe in a row.
 sync_session_tunnel_forward() {
     local bg_pid="${1:-}" now probe_up
     local fail_threshold="${TUNNEL_FORWARD_FAIL_THRESHOLD:-3}"
@@ -832,9 +835,9 @@ sync_session_tunnel_forward() {
             _TUNNEL_SYNC_FAIL_COUNT=0
             _TUNNEL_SOFT_FAIL_COUNT=$(( ${_TUNNEL_SOFT_FAIL_COUNT:-0} + 1 ))
             if declare -F connect_log >/dev/null 2>&1; then
-                connect_log "TUNNEL_SYNC soft_fail count=$_TUNNEL_SOFT_FAIL_COUNT/6 pid=$bg_pid port=$PORT reason=no_ssh_proc_tcp_open$(_tunnel_session_diag_suffix)" 'WARN'
+                connect_log "TUNNEL_SYNC soft_fail count=$_TUNNEL_SOFT_FAIL_COUNT/4 pid=$bg_pid port=$PORT reason=no_ssh_proc_tcp_open$(_tunnel_session_diag_suffix)" 'WARN'
             fi
-            if [ "$_TUNNEL_SOFT_FAIL_COUNT" -lt 6 ]; then
+            if [ "$_TUNNEL_SOFT_FAIL_COUNT" -lt 4 ]; then
                 return 0
             fi
             if declare -F connect_log >/dev/null 2>&1; then
@@ -864,10 +867,23 @@ sync_session_tunnel_forward() {
         _LAST_FORWARD_PROBE_AT="$now"
         return 0
     fi
-    if [ $(( now - _LAST_FORWARD_PROBE_AT )) -lt 30 ]; then
+    if [ $(( now - _LAST_FORWARD_PROBE_AT )) -lt "$_TUNNEL_FORWARD_PROBE_INTERVAL_SEC" ]; then
         return 0
     fi
     _LAST_FORWARD_PROBE_AT="$now"
+    # Keepalive defer: when the tunnel is already healthy (no soft-fails, banner
+    # cache still positive) and we have not deferred the previous probe, skip
+    # this active check once to cut needless SSH round-trips. A soft-fail
+    # streak or an already-used defer must fall through to a real probe.
+    if [ "${_TUNNEL_SOFT_FAIL_COUNT:-0}" -eq 0 ] && [ "${_TUNNEL_BANNER_DEFER_COUNT:-0}" -eq 0 ] \
+        && { [ "${_TUNNEL_BANNER_CACHE_UP:-0}" -eq 1 ] || [ -n "${_TUNNEL_BANNER_CACHE_BANNER:-}" ]; }; then
+        _TUNNEL_BANNER_DEFER_COUNT=$(( ${_TUNNEL_BANNER_DEFER_COUNT:-0} + 1 ))
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "TUNNEL_SYNC probe_deferred pid=$bg_pid port=$PORT reason=keepalive_banner_fresh$(_tunnel_session_diag_suffix)" 'TRACE'
+        fi
+        return 0
+    fi
+    _TUNNEL_BANNER_DEFER_COUNT=0
     clear_tunnel_banner_cache
     if tunnel_up; then
         probe_up=1
@@ -881,9 +897,9 @@ sync_session_tunnel_forward() {
             _TUNNEL_SOFT_FAIL_COUNT=$(( ${_TUNNEL_SOFT_FAIL_COUNT:-0} + 1 ))
             _TUNNEL_SYNC_FAIL_COUNT=0
             if declare -F connect_log >/dev/null 2>&1; then
-                connect_log "TUNNEL_SYNC soft_fail count=$_TUNNEL_SOFT_FAIL_COUNT/6 pid=$bg_pid port=$PORT reason=banner_miss_tcp_open$(_tunnel_session_diag_suffix)" 'WARN'
+                connect_log "TUNNEL_SYNC soft_fail count=$_TUNNEL_SOFT_FAIL_COUNT/4 pid=$bg_pid port=$PORT reason=banner_miss_tcp_open$(_tunnel_session_diag_suffix)" 'WARN'
             fi
-            if [ "$_TUNNEL_SOFT_FAIL_COUNT" -ge 6 ]; then
+            if [ "$_TUNNEL_SOFT_FAIL_COUNT" -ge 4 ]; then
                 if declare -F connect_log >/dev/null 2>&1; then
                     LAST_TUNNEL_SYNC_DROP_REASON=banner_miss_tcp_open_budget
                     log_tunnel_drop banner_miss_tcp_open_budget "${ACTIVE_PROJECT_ID:-?}" false "${_editor_opened:-0}" "${_editor_seen_open:-0}" "${RECOVERY_GENERATION:-0}"
@@ -1301,6 +1317,74 @@ cursor_http_front_port() {
     http_proxy_port
 }
 
+
+get_cursor_proxy_mode() {
+    # sidecar | xray | server_direct (Win Get-CursorProxyMode parity)
+    local front_s front_h back_s back_h
+    front_s="$(cursor_socks_front_port)"
+    front_h="$(cursor_http_front_port)"
+    back_s="${SOCKS_PROXY_PORT:-$(socks_proxy_port)}"
+    back_h="${HTTP_PROXY_PORT:-$(http_proxy_port)}"
+    if [ -n "$front_s" ] && [ -n "$front_h" ] \
+        && test_local_port_open "$front_s" && test_local_port_open "$front_h" \
+        && [ -n "$back_s" ] && [ -n "$back_h" ] \
+        && test_local_port_open "$back_s" && test_local_port_open "$back_h"; then
+        printf '%s' sidecar
+        return 0
+    fi
+    if [ -n "$back_s" ] && [ -n "$back_h" ] \
+        && test_local_port_open "$back_s" && test_local_port_open "$back_h"; then
+        printf '%s' xray
+        return 0
+    fi
+    printf '%s' server_direct
+}
+
+complete_cursor_proxy_after_tunnel() {
+    # Win Complete-CursorProxyAfterTunnel parity: heal sidecar, health-check,
+    # clear dead 18998 on failure, log PROXY_FALLBACK / CURSOR_PROXY_MODE.
+    local health_ok=0 front_h front_up=0 mode
+    if declare -F start_cursor_proxy_sidecar >/dev/null 2>&1; then
+        start_cursor_proxy_sidecar || true
+    fi
+    if declare -F proxy_health >/dev/null 2>&1; then
+        if proxy_health; then health_ok=1; fi
+    fi
+    front_h="$(cursor_http_front_port)"
+    if [ -n "$front_h" ] && test_local_port_open "$front_h"; then
+        front_up=1
+    fi
+    if [ "$health_ok" -eq 0 ]; then
+        if [ "$front_up" -eq 0 ]; then
+            if declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
+                if declare -F test_may_clear_cursor_proxy_settings >/dev/null 2>&1; then
+                    if test_may_clear_cursor_proxy_settings 1; then
+                        clear_cursor_proxy_settings || true
+                    else
+                        declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR_SKIP: reason=windows_open_or_non_owner action=reload_for_server_direct' 'WARN'
+                    fi
+                else
+                    clear_cursor_proxy_settings || true
+                fi
+            fi
+            declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail_front_down' 'WARN'
+        else
+            if declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
+                if declare -F test_may_clear_cursor_proxy_settings >/dev/null 2>&1; then
+                    if test_may_clear_cursor_proxy_settings 1; then
+                        clear_cursor_proxy_settings || true
+                    fi
+                else
+                    clear_cursor_proxy_settings || true
+                fi
+            fi
+            declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail' 'WARN'
+        fi
+    fi
+    mode="$(get_cursor_proxy_mode)"
+    declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_MODE mode=$mode" 'INFO'
+}
+
 proxy_health() {
     local http_port socks_port ip
     http_port="$(cursor_http_front_port)"
@@ -1431,13 +1515,35 @@ append_http_proxy_leg() {
     declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL http_proxy_leg=-L local=$http_candidate remote=${XRAY_SERVER_HTTP_PORT}" 'INFO'
 }
 tunnel_needs_proxy_reseed() {
+    # Return 0 when reseed is needed; non-zero means keep/reuse (no reseed).
+    # Callers: if ! tunnel_needs_proxy_reseed; then return 0; fi
     local tunnel_pid="${1:-}"
     [ -n "$tunnel_pid" ] || return 1
     remote_xray_socks_open || return 1
-    local state
+    local state socks_candidate http_candidate socks_front http_front
     state="$(tunnel_proxy_leg_state "$tunnel_pid")"
     case "$state" in
         ok|unknown) return 1 ;;
+    esac
+    # Adopted proxy: this pid has no -L (or only SOCKS), but another process already
+    # serves fixed backends 19080/19180 or front doors 18998/18999 — do not reseed.
+    # legacy_D still needs reseed (clears stale -D binding).
+    case "$state" in
+        missing|missing_http)
+            socks_candidate="$(socks_proxy_port)"
+            http_candidate="$(http_proxy_port)"
+            socks_front="$(cursor_socks_front_port)"
+            http_front="$(cursor_http_front_port)"
+            if { test_local_port_open "$socks_candidate" && test_local_port_open "$http_candidate"; } \
+                || { test_local_port_open "$socks_front" && test_local_port_open "$http_front"; }; then
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "ENSURE_TUNNEL reseed_skip reason=proxy_adopted_elsewhere state=$state pid=$tunnel_pid" 'INFO'
+                fi
+                [ -n "${SOCKS_PROXY_PORT:-}" ] || SOCKS_PROXY_PORT="$socks_candidate"
+                [ -n "${HTTP_PROXY_PORT:-}" ] || HTTP_PROXY_PORT="$http_candidate"
+                return 1
+            fi
+            ;;
     esac
     if declare -F connect_log >/dev/null 2>&1; then
         connect_log "ENSURE_TUNNEL reseed_needed reason=$state pid=$tunnel_pid socks=$(socks_proxy_port)" 'WARN'
@@ -1490,6 +1596,9 @@ ensure_session_tunnel() {
             fi
             set_socks_proxy_port_on_reuse "$bg_pid"
             if ! tunnel_needs_proxy_reseed "$bg_pid"; then
+                if declare -F complete_cursor_proxy_after_tunnel >/dev/null 2>&1; then
+                    complete_cursor_proxy_after_tunnel || true
+                fi
                 return 0
             fi
             TUNNEL_REUSED=0
@@ -1516,6 +1625,9 @@ ensure_session_tunnel() {
             fi
             set_socks_proxy_port_on_reuse "$bg_pid"
             if ! tunnel_needs_proxy_reseed "$bg_pid"; then
+                if declare -F complete_cursor_proxy_after_tunnel >/dev/null 2>&1; then
+                    complete_cursor_proxy_after_tunnel || true
+                fi
                 return 0
             fi
             TUNNEL_REUSED=0
@@ -1560,6 +1672,8 @@ ensure_session_tunnel() {
     if ! remote_xray_socks_open; then
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "ENSURE_TUNNEL remote_xray_socks=closed port=${XRAY_SERVER_SOCKS_PORT} skipping_proxy_leg" 'INFO'
+            connect_log 'PROXY_FALLBACK mode=server_direct reason=xray_closed' 'WARN'
+            connect_log 'CURSOR_PROXY_MODE mode=server_direct' 'INFO'
         fi
     elif [ "$_is_proxy_owner" -eq 0 ]; then
         if test_local_port_open "$socks_candidate" && test_local_port_open "$(http_proxy_port)"; then
@@ -1612,11 +1726,15 @@ ensure_session_tunnel() {
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "ENSURE_TUNNEL ok=1 pid=$bg_pid" 'INFO'
         fi
-        if declare -F proxy_health >/dev/null 2>&1; then
-            proxy_health || true
-        fi
-        if declare -F start_cursor_proxy_sidecar >/dev/null 2>&1; then
-            start_cursor_proxy_sidecar || true
+        if declare -F complete_cursor_proxy_after_tunnel >/dev/null 2>&1; then
+            complete_cursor_proxy_after_tunnel || true
+        else
+            if declare -F proxy_health >/dev/null 2>&1; then
+                proxy_health || true
+            fi
+            if declare -F start_cursor_proxy_sidecar >/dev/null 2>&1; then
+                start_cursor_proxy_sidecar || true
+            fi
         fi
         return 0
     fi
@@ -3072,7 +3190,7 @@ local_cursor_auth_complete() {
 # True when local auth is missing keys, personal Cursor dominates, or golden
 # export stamp is newer than last laptop merge (token rotates every ~6h).
 cursor_auth_needs_refresh() {
-    local db="${1:-}" gs synced_at_path synced_at golden_exported="" reasons=""
+    local db="${1:-}" auth_complete="${2:-0}" gs synced_at_path synced_at golden_exported="" reasons=""
     if [ -z "$db" ]; then
         db="$(get_cursor_remote_profile_dir)/User/globalStorage/state.vscdb"
     fi
@@ -3098,7 +3216,20 @@ cursor_auth_needs_refresh() {
     if [ -n "$_gold_mid" ] && [ "$_file_mid" != "$_gold_mid" ]; then
         reasons="${reasons}machineid_file_mismatch "
     fi
-    if declare -F test_personal_cursor_dominant >/dev/null 2>&1 && test_personal_cursor_dominant; then
+    # Any single personal Cursor window with no profile window (parity with
+    # Windows Test-CursorAuthNeedsRefresh personal_without_profile check).
+    local personal_main=0 profile_main=0 pc_line pc_cmd
+    while IFS= read -r pc_line; do
+        [ -z "$pc_line" ] && continue
+        pc_cmd="${pc_line#* }"
+        case "$pc_cmd" in *--type=*) continue ;; esac
+        case "$pc_cmd" in *Cursor*|*cursor*)
+            case "$pc_cmd" in *"$_prof"*) profile_main=$(( profile_main + 1 )) ;;
+            *) personal_main=$(( personal_main + 1 )) ;;
+            esac
+        ;; esac
+    done < <(ps ax -o command= 2>/dev/null || true)
+    if [ $personal_main -gt 0 ] && [ $profile_main -eq 0 ] && [ "$auth_complete" != "1" ]; then
         reasons="${reasons}personal_without_profile "
     fi
     golden_exported="$(sshx 'cat /etc/cursor-auth/golden/exported-at 2>/dev/null' 2>/dev/null | tr -d '\r\n' || true)"

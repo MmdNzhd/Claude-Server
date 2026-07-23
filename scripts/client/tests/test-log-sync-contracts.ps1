@@ -96,6 +96,14 @@ $c13 = ($ui -match 'prevPath|previous day|rollover' -or $sh -match 'previous|rol
   ($ui -match 'Sync-ConnectLogToServer -Force -LogPath \$prevPath' -or $ui -match 'prevPath')
 Assert-C '13' $c13 'Midnight flushes previous day' $(if ($c13) { 'ok' } else { 'missing' })
 
+
+$c14 = ($ui -match 'LOG_SYNC_SKIP reason=forbid_shrink') -and ($sh -match 'LOG_SYNC_SKIP reason=forbid_shrink')
+Assert-C '14' $c14 'Stage9: forbid_shrink skip Win+Mac' $(if ($c14) { 'ok' } else { 'missing' })
+
+$c15 = ($ui -match 'LOG_SYNC_FAIL[^
+]*detail=') -and ($sh -match 'LOG_SYNC_FAIL detail=')
+Assert-C '15' $c15 'Stage9: LOG_SYNC_FAIL detail surfaced' $(if ($c15) { 'ok' } else { 'missing' })
+
 Write-Host ''
 Write-Host "=== RESULT fail=$fail ==="
 if ($fail -eq 0) { Write-Host 'VERDICT: PASS'; exit 0 } else { Write-Host 'VERDICT: HARD FAIL'; exit 1 }

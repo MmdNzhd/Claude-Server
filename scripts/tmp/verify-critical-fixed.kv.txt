@@ -1,7 +1,0 @@
-connect.ps1_no_curly_quotes=PASS
-git-mode.sh_tunnel_wait_seq_1_12=PASS
-recover_mounts_no_nested_sshx=PASS
-git-mode.ps1_banner_miss_softfail=PASS
-git-mode.ps1_parses=PASS
-cursor_auth_temp_root_safe=PASS
-STATIC_OVERALL=PASS

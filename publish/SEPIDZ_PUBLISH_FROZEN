@@ -1,0 +1,22 @@
+SEPIDZ PUBLISH/DEPLOY FREEZE
+
+Sepidz client publish and server bundle deploy are frozen.
+Presence of this file blocks:
+
+  - publish-sepidz.bat / publish.ps1 -SepidzOnly (unless -ForceUnfreeze)
+  - finish-sepidz-deploy.bat / .ps1 (unless -ForceUnfreeze)
+  - deploy-client-bundles.ps1 -DeploySepidz (unless -ForceUnfreeze)
+
+Smart publish/deploy is NOT affected.
+
+To unfreeze intentionally:
+  1. Delete this file (publish/SEPIDZ_PUBLISH_FROZEN)
+  2. Pass -ForceUnfreeze on the command you run
+
+FINAL ARTIFACT (Desktop tree - do not edit)
+-------------------------------------------
+Path: C:\Users\Smart\Desktop\claude-publish\claude-code-sepidz
+State: frozen snapshot (connect.bat / mac\connect.sh may be .DISABLED on this tree).
+Agents MUST NOT edit, republish, redeploy, or -ForceUnfreeze this tree.
+Unfreeze deletes/replaces this artifact (HIGH risk) - only on explicit user ask.
+Smart ops use Desktop\Claude-Connect or publish-smart / -SmartOnly only.

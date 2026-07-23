@@ -1,0 +1,22 @@
+[Unit]
+Description=xray proxy (smart's user proxy - Cursor egress unification)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=smart
+Group=smart
+# Drop leftover xray for the same config before start (manual orphans / failed stop).
+ExecStartPre=-/usr/local/bin/xray-ensure-single --pre-start
+ExecStart=/home/smart/.local/bin/xray run -config /home/smart/.local/etc/xray/config.json
+Restart=always
+RestartSec=3
+KillMode=control-group
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/smart/.local/log/xray
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target

@@ -121,7 +121,7 @@ mod.atomic_write(
     datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n",
     mode=0o600,
 )
-os.chmod(mod.GOLDEN_DIR, 0o700)
+mod.apply_golden_permissions()
 print("OK tokens refreshed")
 PY
 

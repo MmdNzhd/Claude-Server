@@ -1,13 +1,33 @@
 # editor-launch.ps1 - shared VS Code/Cursor launch (dot-sourced by connect.ps1)
 # Same pattern as mac/connect.sh:  cursor|code --folder-uri "vscode-remote://..."
 
+function Get-CursorRemoteProfileSite {
+    # Smart vs Sepidz must NOT share one laptop Cursor profile / golden merge.
+    # Prefer explicit script scope set by connect.ps1; fall back to ServerIP / Alias.
+    if ($script:CursorProfileSite) {
+        $s = [string]$script:CursorProfileSite
+        if ($s -match '(?i)^sepidz') { return 'Sepidz' }
+        if ($s -match '(?i)^smart') { return 'Smart' }
+    }
+    $ip = ''
+    if ($script:ServerIP) { $ip = [string]$script:ServerIP }
+    if ($ip -eq '192.168.250.70') { return 'Sepidz' }
+    if ($ip -eq '192.168.210.240') { return 'Smart' }
+    $al = ''
+    if ($script:SshAlias) { $al = [string]$script:SshAlias }
+    if ($al -match '(?i)sepidz') { return 'Sepidz' }
+    return 'Smart'
+}
+
 function Get-CursorRemoteProfileDir {
-    # Isolated Cursor profile for server Remote-SSH sessions. Launching with
-    # --user-data-dir here keeps the server's shared golden identity in its
-    # own storage, completely separate from the developer's personal Cursor
-    # profile (default %APPDATA%\Cursor) - so the personal login is never
-    # read, overwritten, or force-closed to make room for the server one.
-    return (Join-Path $env:LOCALAPPDATA 'ClaudeServerCursorProfile')
+    # Isolated Cursor profile for server Remote-SSH. Smart and Sepidz use
+    # separate dirs so each site's golden Cursor account cannot overwrite
+    # the other. Personal Cursor (%APPDATA%\Cursor) is never touched.
+    $site = Get-CursorRemoteProfileSite
+    if ($site -eq 'Sepidz') {
+        return (Join-Path $env:LOCALAPPDATA 'ClaudeServerCursorProfile-Sepidz')
+    }
+    return (Join-Path $env:LOCALAPPDATA 'ClaudeServerCursorProfile-Smart')
 }
 
 function Initialize-CursorServerProfile {
@@ -18,19 +38,52 @@ function Initialize-CursorServerProfile {
     if (-not (Test-Path $userDir)) {
         New-Item -ItemType Directory -Force -Path $userDir | Out-Null
     }
-    @'
+    $site = Get-CursorRemoteProfileSite
+    $titleTag = if ($site -eq 'Sepidz') { 'Claude Server Sepidz' } else { 'Claude Server Smart' }
+    $barBg = if ($site -eq 'Sepidz') { '#3a1e5f' } else { '#1e3a5f' }
+    $barBgIn = if ($site -eq 'Sepidz') { '#2a1545' } else { '#152a45' }
+    $json = @"
 {
-  "window.title": "${dirty}${activeEditorShort}${separator}[Claude Server] ${rootName}",
+  "window.title": "${dirty}${activeEditorShort}${separator}[$titleTag] ${rootName}",
   "workbench.colorCustomizations": {
-    "titleBar.activeBackground": "#1e3a5f",
+    "titleBar.activeBackground": "$barBg",
     "titleBar.activeForeground": "#e8e8e8",
-    "titleBar.inactiveBackground": "#152a45",
+    "titleBar.inactiveBackground": "$barBgIn",
     "titleBar.inactiveForeground": "#a0a0a0"
   }
 }
-'@ | Set-Content -Path $settingsPath -Encoding UTF8
+"@
+    $json | Set-Content -Path $settingsPath -Encoding UTF8
 }
 
+
+
+function Ensure-CursorRemoteSshQuietSettings {
+    # Cursor Remote-SSH on Windows spawns visible cmd.exe pipes for
+    # cursor_remote_install_*.sh (one per host). Hide the login terminal so
+    # those consoles are not shown after Opening Cursor.
+    $userDir = Join-Path (Get-CursorRemoteProfileDir) 'User'
+    $settingsPath = Join-Path $userDir 'settings.json'
+    if (-not (Test-Path $userDir)) { New-Item -ItemType Directory -Force -Path $userDir | Out-Null }
+    $obj = $null
+    if (Test-Path $settingsPath) {
+        try { $obj = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json -ErrorAction Stop } catch { $obj = $null }
+    }
+    if (-not $obj) { $obj = [PSCustomObject]@{} }
+    $changed = $false
+    $prop = $obj.PSObject.Properties['remote.SSH.showLoginTerminal']
+    if ($prop) {
+        if ($prop.Value -ne $false) { $prop.Value = $false; $changed = $true }
+    } else {
+        $obj | Add-Member -NotePropertyName 'remote.SSH.showLoginTerminal' -NotePropertyValue $false -Force
+        $changed = $true
+    }
+    if ($changed) {
+        ($obj | ConvertTo-Json -Depth 20) | Set-Content -Path $settingsPath -Encoding UTF8
+        Write-EditorLaunchLog 'CURSOR_SSH_UI: showLoginTerminal=false' 'INFO'
+    }
+    return $changed
+}
 
 function Set-CursorProxySettings {
     # Points Cursor's own network stack (not just extensions) at the local -L forward that
@@ -468,6 +521,8 @@ using System.Text;
 
 public static class NonElevatedLauncher
 {
+    // PROCESS_QUERY_LIMITED_INFORMATION works on Win10/11 when full QUERY is denied.
+    const int PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     const int PROCESS_QUERY_INFORMATION = 0x0400;
     const uint TOKEN_DUPLICATE = 0x0002;
     const uint TOKEN_QUERY = 0x0008;
@@ -476,6 +531,7 @@ public static class NonElevatedLauncher
     const int TokenPrimary = 1;
     const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
     const int SW_SHOW = 5;
+    public static int LastWin32Error;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct STARTUPINFO {
@@ -510,17 +566,23 @@ public static class NonElevatedLauncher
     }
 
     public static bool Start(string file, string args) {
+        LastWin32Error = 0;
         Process explorer = FindExplorer();
-        if (explorer == null) { return false; }
-        IntPtr hProc = OpenProcess(PROCESS_QUERY_INFORMATION, false, explorer.Id);
-        if (hProc == IntPtr.Zero) { return false; }
+        if (explorer == null) { LastWin32Error = 2; return false; }
+        IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, explorer.Id);
+        if (hProc == IntPtr.Zero) {
+            hProc = OpenProcess(PROCESS_QUERY_INFORMATION, false, explorer.Id);
+        }
+        if (hProc == IntPtr.Zero) { LastWin32Error = Marshal.GetLastWin32Error(); return false; }
         IntPtr hTok;
-        if (!OpenProcessToken(hProc, TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, out hTok)) {
+        if (!OpenProcessToken(hProc, TOKEN_DUPLICATE | TOKEN_QUERY, out hTok)) {
+            LastWin32Error = Marshal.GetLastWin32Error();
             CloseHandle(hProc);
             return false;
         }
         IntPtr hDup;
         if (!DuplicateTokenEx(hTok, TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY, IntPtr.Zero, SecurityImpersonation, TokenPrimary, out hDup)) {
+            LastWin32Error = Marshal.GetLastWin32Error();
             CloseHandle(hTok);
             CloseHandle(hProc);
             return false;
@@ -545,6 +607,7 @@ public static class NonElevatedLauncher
         // null env (that can inherit the elevated block and break GUI apps).
         const uint LOGON_WITH_PROFILE = 0x00000001;
         bool ok = CreateProcessWithTokenW(hDup, LOGON_WITH_PROFILE, null, cmd, 0, IntPtr.Zero, null, ref si, out pi);
+        if (!ok) { LastWin32Error = Marshal.GetLastWin32Error(); }
         CloseHandle(hDup);
         if (ok) {
             CloseHandle(pi.hProcess);
@@ -767,36 +830,50 @@ function Start-ProcessAsInteractiveUser {
     }
     Initialize-NonElevatedLauncher
     $argStr = Format-ProcessArgumentString -ArgumentList $ArgumentList
-    $evidenceMs = 8000
+    # Keep interactive attempts short: Aria/Mehrdad spent ~17s on Opening Cursor when
+    # NonElevated+Task both failed before elevated_direct_fallback (which works).
+    $evidenceMsNe = 2500
+    $evidenceMsTask = 4000
+    $evidenceMsDirect = 8000
+    $neStarted = $false
     try {
         if ([NonElevatedLauncher]::Start($FilePath, $argStr)) {
-            if (Test-EditorProcessEvidence -FilePath $FilePath -ArgumentList $ArgumentList -TimeoutMs $evidenceMs) {
+            $neStarted = $true
+            if (Test-EditorProcessEvidence -FilePath $FilePath -ArgumentList $ArgumentList -TimeoutMs $evidenceMsNe) {
                 Write-EditorLaunchLog 'PROC_START_OK: mode=elevated_non_elevated_launcher' 'DEBUG'
                 return $true
             }
             Write-EditorLaunchLog 'PROC_START_FAIL: mode=elevated_non_elevated_launcher no_process' 'DEBUG'
         } else {
-            Write-EditorLaunchLog 'PROC_START_FAIL: mode=elevated_non_elevated_launcher Start=false' 'DEBUG'
+            $winErr = 0
+            try { $winErr = [NonElevatedLauncher]::LastWin32Error } catch {}
+            Write-EditorLaunchLog "PROC_START_FAIL: mode=elevated_non_elevated_launcher Start=false win32=$winErr" 'DEBUG'
         }
     } catch {
         Write-EditorLaunchLog "PROC_START_WARN: NonElevatedLauncher exception=$($_.Exception.Message)" 'WARN'
     }
-    if (Start-ProcessViaLaunchTask -FilePath $FilePath -ArgumentList $ArgumentList) {
-        if (Test-EditorProcessEvidence -FilePath $FilePath -ArgumentList $ArgumentList -TimeoutMs $evidenceMs) {
-            Write-EditorLaunchLog 'PROC_START_OK: mode=elevated_launch_task' 'DEBUG'
-            return $true
+    # If CreateProcessWithTokenW failed outright, schtasks /IT usually fails the same way -
+    # skip straight to elevated_direct_fallback to avoid ~8-10s of dead wait.
+    if ($neStarted) {
+        if (Start-ProcessViaLaunchTask -FilePath $FilePath -ArgumentList $ArgumentList) {
+            if (Test-EditorProcessEvidence -FilePath $FilePath -ArgumentList $ArgumentList -TimeoutMs $evidenceMsTask) {
+                Write-EditorLaunchLog 'PROC_START_OK: mode=elevated_launch_task' 'DEBUG'
+                return $true
+            }
+            Write-EditorLaunchLog 'PROC_START_FAIL: mode=elevated_launch_task no_process' 'WARN'
+        } else {
+            Write-EditorLaunchLog 'PROC_START_FAIL: mode=elevated_launch_task schtasks_failed' 'WARN'
         }
-        Write-EditorLaunchLog 'PROC_START_FAIL: mode=elevated_launch_task no_process' 'WARN'
     } else {
-        Write-EditorLaunchLog 'PROC_START_FAIL: mode=elevated_launch_task schtasks_failed' 'WARN'
+        Write-EditorLaunchLog 'PROC_START: skip_launch_task reason=non_elevated_start_false' 'DEBUG'
     }
     # Last resort: start from the elevated token. Remote-SSH still works; better than
     # false "Cursor not found". Prefer interactive paths above whenever they work.
     try {
-        Write-EditorLaunchLog 'PROC_START: mode=elevated_direct_fallback' 'WARN'
+        Write-EditorLaunchLog 'PROC_START: mode=elevated_direct_fallback' 'DEBUG'
         Start-Process -FilePath $FilePath -ArgumentList $ArgumentList | Out-Null
-        if (Test-EditorProcessEvidence -FilePath $FilePath -ArgumentList $ArgumentList -TimeoutMs $evidenceMs) {
-            Write-EditorLaunchLog 'PROC_START_OK: mode=elevated_direct_fallback' 'WARN'
+        if (Test-EditorProcessEvidence -FilePath $FilePath -ArgumentList $ArgumentList -TimeoutMs $evidenceMsDirect) {
+            Write-EditorLaunchLog 'PROC_START_OK: mode=elevated_direct_fallback' 'DEBUG'
             return $true
         }
         Write-EditorLaunchLog 'PROC_START_FAIL: mode=elevated_direct_fallback no_process' 'ERROR'
@@ -1270,9 +1347,18 @@ function Test-RemoteEditorInAgentHome {
     foreach ($p in @(Get-CursorMainProfileProcesses -ProfileDir $ProfileDir)) {
         $cmd = $p.CommandLine
         if (-not $cmd) { continue }
-        if ($cmd -notmatch 'folder-uri') { return $true }
-        # Cursor 3.x: cmdline has folder-uri but UI stuck on Agents (forum #153009)
+        # Agent/home title wins even when folder-uri is present (Cursor 3.x forum #153009).
         if (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath) { return $true }
+        if ($cmd -notmatch 'folder-uri') {
+            $title = ''
+            try {
+                $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
+                $title = [string]$wp.MainWindowTitle
+            } catch { }
+            # Settings (and similar) often lack folder-uri - do not treat as agent-home.
+            if ($title -match '(?i)settings') { continue }
+            return $true
+        }
     }
     return $false
 }
@@ -1361,9 +1447,11 @@ function Get-RemoteEditorLaunchDiag {
 
 function Get-CursorProxyLaunchArgs {
     # Chromium/Electron flags: settings.json alone is not enough on Cursor 3.9.x
-    # Prefer sticky sidecar front door (18999) when listening so tunnel -L reseed does not
-    # require Cursor restart. Never prefer bare backend 19080 when front is up.
+    # Prefer sticky sidecar front door (18999) when listening AND backend -L is up.
+    # Last resort: no --proxy-server (server_direct / none_direct) so Cursor is not
+    # stuck on a dead 18998/18999 loopback proxy.
     $port = 0
+    $mode = 'none_direct'
     $front = 0
     if ($script:CursorSocksFrontPort) { $front = [int]$script:CursorSocksFrontPort }
     $frontUp = $false
@@ -1372,14 +1460,36 @@ function Get-CursorProxyLaunchArgs {
             $frontUp = [bool](Test-LocalPortOpen -PortNum $front)
         } elseif (Get-Command Test-CursorProxySidecarListening -ErrorAction SilentlyContinue) {
             $frontUp = [bool](Test-CursorProxySidecarListening -Port $front)
-        } else {
-            $frontUp = $true
         }
     }
-    if ($frontUp -and $front -gt 0) { $port = $front }
-    elseif ($script:SocksProxyPort) { $port = [int]$script:SocksProxyPort }
-    elseif ($front -gt 0) { $port = $front }
-    if ($port -le 0) { return @() }
+    $backSocks = 0
+    if ($script:SocksProxyPort) { $backSocks = [int]$script:SocksProxyPort }
+    $backUp = $false
+    if ($backSocks -gt 0) {
+        if (Get-Command Test-LocalPortOpen -ErrorAction SilentlyContinue) {
+            $backUp = [bool](Test-LocalPortOpen -PortNum $backSocks)
+        } else {
+            $backUp = $true
+        }
+    }
+    if ($frontUp -and $front -gt 0 -and $backUp) {
+        $port = $front
+        $mode = 'sidecar'
+    } elseif ($backUp -and $backSocks -gt 0) {
+        $port = $backSocks
+        $mode = 'xray'
+    }
+    if ($port -le 0) {
+        if (Get-Command Get-CursorProxyMode -ErrorAction SilentlyContinue) {
+            try { $mode = Get-CursorProxyMode } catch { $mode = 'server_direct' }
+        } else {
+            $mode = 'server_direct'
+        }
+        if ($mode -ne 'server_direct' -and $mode -ne 'none_direct') { $mode = 'server_direct' }
+        Write-EditorLaunchLog ("LAUNCH_PROXY mode={0}" -f $mode) 'INFO'
+        return @()
+    }
+    Write-EditorLaunchLog ("LAUNCH_PROXY mode={0} socks={1}" -f $mode, $port) 'INFO'
     return @(
         "--proxy-server=socks5://127.0.0.1:$port",
         '--disable-http2'
@@ -1674,6 +1784,7 @@ function Launch-RemoteEditor {
         # when settings.json doesn't exist yet, so on a brand-new profile the proxy merge
         # below would otherwise create a proxy-only file first and permanently skip the template.
         Initialize-CursorServerProfile
+        try { [void](Ensure-CursorRemoteSshQuietSettings) } catch { Write-EditorLaunchLog "CURSOR_SSH_UI_FAIL: $($_.Exception.Message)" 'WARN' }
         # Write proxy keys to disk, but NEVER soft-stop ClaudeServerCursorProfile for proxy
         # changes. Non-owners must not SET/CLEAR. Never CLEAR while profile windows are open.
         $isProxyOwner = $true
@@ -1681,33 +1792,75 @@ function Launch-RemoteEditor {
         if (-not $isProxyOwner) {
             Write-EditorLaunchLog 'CURSOR_PROXY_SET_SKIP: reason=non_owner' 'DEBUG'
         } else {
+            # Only SET when a healthy path exists (front+backend or backend). Never pin
+            # settings to constant 18998/18999 when those ports are not actually usable.
             $socksForSettings = 0
             $httpForSettings = 0
-            if ($script:CursorSocksFrontPort) { $socksForSettings = [int]$script:CursorSocksFrontPort }
-            elseif ($script:SocksProxyPort) { $socksForSettings = [int]$script:SocksProxyPort }
-            if ($script:CursorHttpFrontPort) { $httpForSettings = [int]$script:CursorHttpFrontPort }
-            elseif ($script:HttpProxyPort) { $httpForSettings = [int]$script:HttpProxyPort }
-            if ($socksForSettings -gt 0 -or $httpForSettings -gt 0) {
+            $pathHealthy = $false
+            $frontSocks = 0
+            $frontHttp = 0
+            if ($script:CursorSocksFrontPort) { $frontSocks = [int]$script:CursorSocksFrontPort }
+            if ($script:CursorHttpFrontPort) { $frontHttp = [int]$script:CursorHttpFrontPort }
+            $backSocks = 0
+            $backHttp = 0
+            if ($script:SocksProxyPort) { $backSocks = [int]$script:SocksProxyPort }
+            if ($script:HttpProxyPort) { $backHttp = [int]$script:HttpProxyPort }
+            $frontUp = $false
+            $backUp = $false
+            if ($frontSocks -gt 0 -and $frontHttp -gt 0 -and (Get-Command Test-LocalPortOpen -ErrorAction SilentlyContinue)) {
+                $frontUp = (Test-LocalPortOpen -PortNum $frontSocks) -and (Test-LocalPortOpen -PortNum $frontHttp)
+            }
+            if ($backSocks -gt 0 -and $backHttp -gt 0 -and (Get-Command Test-LocalPortOpen -ErrorAction SilentlyContinue)) {
+                $backUp = (Test-LocalPortOpen -PortNum $backSocks) -and (Test-LocalPortOpen -PortNum $backHttp)
+            } elseif ($backSocks -gt 0 -and $backHttp -gt 0) {
+                $backUp = $true
+            }
+            if ($frontUp -and $backUp) {
+                $socksForSettings = $frontSocks
+                $httpForSettings = $frontHttp
+                $pathHealthy = $true
+            } elseif ($backUp) {
+                $socksForSettings = $backSocks
+                $httpForSettings = $backHttp
+                $pathHealthy = $true
+            }
+            if ($pathHealthy) {
                 try {
                     $align = Align-CursorProxyWithRunningCli -SocksPort $socksForSettings -HttpPort $httpForSettings
                     if ($align.SocksPort) { $socksForSettings = [int]$align.SocksPort }
                     if ($align.HttpPort) { $httpForSettings = [int]$align.HttpPort }
                     $httpWrite = $httpForSettings
                     if ($httpWrite -le 0 -and $script:HttpProxyPort) { $httpWrite = [int]$script:HttpProxyPort }
-                    if ($httpWrite -le 0 -and $script:CursorHttpFrontPort) { $httpWrite = [int]$script:CursorHttpFrontPort }
                     $proxyChanged = [bool](Set-CursorProxySettings -SocksPort $socksForSettings -HttpPort $httpWrite)
                     if ($proxyChanged) {
                         Write-EditorLaunchLog ("CURSOR_PROXY_SET: preserved_open_windows socks={0} http={1} (no soft-stop)" -f $socksForSettings, $httpWrite) 'INFO'
                     }
+                    Write-EditorLaunchLog 'LAUNCH_PROXY mode=proxy_settings_healthy' 'DEBUG'
                 } catch { Write-EditorLaunchLog "CURSOR_PROXY_SET_FAIL: $($_.Exception.Message)" 'WARN' }
             } else {
+                # No healthy socks/http after Ensure - clear dead 18998; last resort = direct.
                 try {
-                    if (Test-MayClearCursorProxySettings) {
+                    $cleared = $false
+                    $nOpen = 0
+                    try { $nOpen = @(Get-CursorProfileProcesses -ForceRefresh).Count } catch { $nOpen = 0 }
+                    if ($nOpen -gt 0) {
+                        Write-EditorLaunchLog ("CURSOR_PROXY_CLEAR_SKIP: reason=windows_open action=repair_sidecar_only profile_count={0}" -f $nOpen) 'WARN'
+                        if (Get-Command Repair-CursorProxySettingsToSidecar -ErrorAction SilentlyContinue) {
+                            try { [void](Repair-CursorProxySettingsToSidecar) } catch {}
+                        }
+                    } elseif (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
+                        try { $cleared = [bool](Clear-CursorProxySettingsSidecar) } catch { $cleared = $false }
+                    }
+                    if (-not $cleared -and (Test-MayClearCursorProxySettings -AllowClear)) {
                         $proxyCleared = [bool](Clear-CursorProxySettings)
                         if ($proxyCleared) {
                             Write-EditorLaunchLog 'CURSOR_PROXY_CLEAR: no_windows (no soft-stop)' 'INFO'
+                            $cleared = $true
                         }
+                    } elseif (-not $cleared) {
+                        Write-EditorLaunchLog 'CURSOR_PROXY_CLEAR_SKIP: reason=windows_open_or_non_owner action=reload_for_server_direct' 'WARN'
                     }
+                    Write-EditorLaunchLog 'LAUNCH_PROXY mode=server_direct' 'INFO'
                 } catch { Write-EditorLaunchLog "CURSOR_PROXY_CLEAR_FAIL: $($_.Exception.Message)" 'WARN' }
             }
         }
@@ -1763,8 +1916,12 @@ function Launch-RemoteEditor {
         Write-EditorLaunchVerboseState -Label 'BEGIN' -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
     }
 
+    # profile_all>0 with profile_main=False = helpers from an existing/half-dead
+    # profile session. Do not mis-label that as cold_start (stacked windows).
+    $orphanHelpers = ((-not $hasProfileWindow) -and ($profileProcCount -gt 0))
     $useNewWindow = ($agentHome -or $hasProfileWindow)
-    Write-EditorLaunchLog "LAUNCH_PLAN: use_new_window=$useNewWindow reason=$(if ($agentHome) { 'agent_home' } elseif ($hasProfileWindow) { 'profile_open' } else { 'cold_start' })" 'INFO'
+    $planReason = if ($agentHome) { 'agent_home' } elseif ($hasProfileWindow) { 'profile_open' } elseif ($orphanHelpers) { 'orphan_helpers' } else { 'cold_start' }
+    Write-EditorLaunchLog "LAUNCH_PLAN: use_new_window=$useNewWindow reason=$planReason profile_all=$profileProcCount" 'INFO'
 
     if ($EditorCmd -eq 'code') {
         $swInit = [System.Diagnostics.Stopwatch]::StartNew()

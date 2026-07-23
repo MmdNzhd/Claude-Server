@@ -112,6 +112,9 @@ $script:LastTunnelSpawnSuccessAt = $null
 $script:LastTunnelSpawnSuccessPort = $null
 $script:LastTunnelSpawnPid = $null
 $script:LastTunnelExitLoggedPid = $null
+$script:TunnelForwardProbeIntervalSec = 45
+$script:TunnelSoftFailBudget = 4
+$script:TunnelBannerDeferCount = 0
 
 function Clear-TunnelBannerCache {
     # WS4: CLAUDE_TUNNEL_BANNER_OK (sent to the server in Invoke-MountProject) is only ever
@@ -249,8 +252,13 @@ function Read-PostDisconnectKey {
 }
 
 function Get-TunnelBanner {
-    if (-not $Port) { return '' }
-    # Positive cache only A<"ÃƒÆ'Ã‚Â¯Ãƒâ€šÃ‚Â¿Ãƒâ€šÃ‚Â½<"ÃƒÆ'Ã‚Â¯Ãƒâ€šÃ‚Â¿Ãƒâ€šÃ‚Â½,<"ÃƒÆ'Ã‚Â¯Ãƒâ€šÃ‚Â¿Ãƒâ€šÃ‚Â½<"ÃƒÆ'Ã‚Â¯Ãƒâ€šÃ‚Â¿Ãƒâ€šÃ‚Â½?? never cache empty/false for 3s (poisoned DROP1 recovery).
+    param([int]$TargetPort = 0)
+    $probePort = 0
+    if ($TargetPort -gt 0) { $probePort = [int]$TargetPort }
+    elseif (Get-Command Get-SessionTunnelPort -ErrorAction SilentlyContinue) { $probePort = [int](Get-SessionTunnelPort) }
+    elseif ($Port) { $probePort = [int]$Port }
+    if ($probePort -le 0) { return '' }
+    # Positive cache only A<"ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¯ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¿ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½<"ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¯ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¿ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½,<"ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¯ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¿ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½<"ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¯ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¿ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½?? never cache empty/false for 3s (poisoned DROP1 recovery).
     if (-not $script:TunnelBannerCacheInvalidate -and $script:TunnelBannerCacheAt -and $script:TunnelBannerCacheUp) {
         $ageMs = [int]((Get-Date) - $script:TunnelBannerCacheAt).TotalMilliseconds
         if ($ageMs -lt 3000) {
@@ -259,12 +267,12 @@ function Get-TunnelBanner {
         }
     }
     $script:TunnelBannerCacheInvalidate = $false
-    Write-GitModeLog "TUNNEL_BANNER_BEGIN port=$Port" 'TRACE'
+    Write-GitModeLog "TUNNEL_BANNER_BEGIN port=$probePort" 'TRACE'
     # Single TCP connection (read banner from same fd). Double /dev/tcp+nc burns 2 MaxStartups slots.
-    $r = SshX "timeout 3 nc -w 2 127.0.0.1 $Port 2>/dev/null | head -1" 2>$null
+    $r = SshX "timeout 3 nc -w 2 127.0.0.1 $probePort 2>/dev/null | head -1" 2>$null
     $banner = (($r -join '') -replace "`r",'').Trim()
     if ($banner -match 'MaxStartups') {
-        Write-GitModeLog "TUNNEL_BANNER soft_fail port=$Port reason=maxstartups" 'WARN'
+        Write-GitModeLog "TUNNEL_BANNER soft_fail port=$probePort reason=maxstartups" 'WARN'
         $banner = ''
     }
     $up = (Test-TunnelBannerIsWindows -Banner $banner)
@@ -278,9 +286,9 @@ function Get-TunnelBanner {
         $script:TunnelBannerCacheBanner = ''
         $script:TunnelBannerCacheUp = $false
         $script:TunnelMissCount = [int]$script:TunnelMissCount + 1
-        Write-GitModeLog "TUNNEL_BANNER miss=$($script:TunnelMissCount) port=$Port banner=$banner" 'DEBUG'
+        Write-GitModeLog "TUNNEL_BANNER miss=$($script:TunnelMissCount) port=$probePort banner=$banner" 'DEBUG'
     }
-    Write-GitModeLog "TUNNEL_BANNER port=$Port banner=$banner" 'DEBUG'
+    Write-GitModeLog "TUNNEL_BANNER port=$probePort banner=$banner" 'DEBUG'
     return $banner
 }
 
@@ -314,6 +322,14 @@ function Save-TunnelSlot {
     }
     Set-Content -Path $Cfg -Value $lines -Encoding ASCII
 }
+
+
+function Get-SessionTunnelPort {
+    if ($null -ne $script:Port -and [int]$script:Port -gt 0) { return [int]$script:Port }
+    if ($Port -and [int]$Port -gt 0) { return [int]$Port }
+    return 0
+}
+
 
 
 function Write-AsciiFileRetry {
@@ -372,8 +388,13 @@ function Sanitize-SshAliasConfig {
 }
 
 function Test-TunnelPortTcpOpen {
-    if (-not $Port) { return $false }
-    $r = SshX "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$Port 2>/dev/null' && echo open || echo closed" 2>$null
+    param([int]$TargetPort = 0)
+    $probePort = 0
+    if ($TargetPort -gt 0) { $probePort = [int]$TargetPort }
+    elseif (Get-Command Get-SessionTunnelPort -ErrorAction SilentlyContinue) { $probePort = [int](Get-SessionTunnelPort) }
+    elseif ($Port) { $probePort = [int]$Port }
+    if ($probePort -le 0) { return $false }
+    $r = SshX "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$probePort 2>/dev/null' && echo open || echo closed" 2>$null
     $out = (($r -join '') -replace "`r",'').Trim()
     return ($out -eq 'open')
 }
@@ -402,16 +423,10 @@ function Clear-ServerStaleTunnelForward {
     for ($i = 1; $i -le 4; $i++) {
         Start-Sleep -Milliseconds 250
         Clear-TunnelBannerCache
-        $savedPort = $Port
-        $Port = $TargetPort
-        try {
-            if (-not (Test-TunnelPortTcpOpen)) {
-                Write-GitModeLog "STALE_FORWARD: port released port=$TargetPort wait=$i" 'DEBUG'
-                Add-ClearedTunnelPort -TargetPort $TargetPort
-                return
-            }
-        } finally {
-            $Port = $savedPort
+        if (-not (Test-TunnelPortTcpOpen -TargetPort $TargetPort)) {
+            Write-GitModeLog "STALE_FORWARD: port released port=$TargetPort wait=$i" 'DEBUG'
+            Add-ClearedTunnelPort -TargetPort $TargetPort
+            return
         }
     }
     Write-GitModeLog "STALE_FORWARD: port still busy port=$TargetPort after wait" 'WARN'
@@ -509,7 +524,60 @@ function Test-TunnelPortOccupiedByPeer {
 }
 
 # Peer safety: kill stale local ssh -R on this port only; never the live session PID
-# (ORPHAN_TUNNEL: skip_current). Prevents orphan_cleanup from dropping a peer connect tunnel.
+# (ORPHAN_TUNNEL: skip_current / skip_sibling). Never kill another Connect UI's -R.
+
+function Test-ProcessCommandIsConnectUi {
+    param([string]$CommandLine)
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
+    return [bool]($CommandLine -match '(?i)((^|[\\/])connect-boot\.ps1|(^|[\\/])connect\.ps1)')
+}
+
+function Get-SiblingConnectTunnelPids {
+    param(
+        [Parameter(Mandatory)][int]$TargetPort,
+        [int[]]$ProtectedProcessIds = @()
+    )
+    $protected = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($p in @($ProtectedProcessIds)) {
+        if ($null -ne $p) { [void]$protected.Add([int]$p) }
+    }
+    if ($PID) { [void]$protected.Add([int]$PID) }
+    if ($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) {
+        [void]$protected.Add([int]$script:SessionBgTunnel.Id)
+    }
+    $siblings = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($sshPid in @(Get-LocalTunnelSshPids -TargetPort $TargetPort)) {
+        $sshPid = [int]$sshPid
+        if ($protected.Contains($sshPid)) { continue }
+        $cur = $sshPid
+        $hops = 0
+        $isSibling = $false
+        while ($cur -gt 0 -and $hops -lt 14) {
+            $hops++
+            $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$cur" -ErrorAction SilentlyContinue
+            if (-not $cim) { break }
+            $cmd = [string]$cim.CommandLine
+            if (Test-ProcessCommandIsConnectUi -CommandLine $cmd) {
+                $uiPid = [int]$cim.ProcessId
+                if ($uiPid -eq [int]$PID -or $protected.Contains($uiPid)) { break }
+                $isSibling = $true
+                break
+            }
+            $parent = [int]$cim.ParentProcessId
+            if ($parent -le 0 -or $parent -eq $cur) { break }
+            $cur = $parent
+        }
+        if ($isSibling) { [void]$siblings.Add($sshPid) }
+    }
+    return @($siblings)
+}
+
+function Test-IsPrimaryTunnelPublisher {
+    # Hybrid: only UI slot 0 (or legacy unset) publishes TUNNEL_PORT into server conf.
+    $slot = ($env:CLAUDE_CONNECT_UI_SLOT + '').Trim()
+    if ($slot -eq '') { return $true }
+    return ($slot -eq '0')
+}
 
 function Remove-LocalOrphanTunnel {
     param(
@@ -517,8 +585,8 @@ function Remove-LocalOrphanTunnel {
         [System.Diagnostics.Process]$CurrentBgTunnel = $null,
         [int[]]$ProtectedProcessIds = @()
     )
-    # Peer Connect UIs use different ports. Any unprotected live ssh -R on *this* port is an
-    # orphan (crashed Connect / sticky reclaim) and must be killed so claim_sticky works.
+    # Hybrid multi-UI: peer Connects bind base+UI_SLOT. Never kill a sibling's live ssh -R
+    # (ORPHAN_TUNNEL: skip_sibling). True orphans (no Connect UI ancestor) may be reclaimed.
     $protected = @($ProtectedProcessIds)
     if ($CurrentBgTunnel -and -not $CurrentBgTunnel.HasExited) {
         $protected += [int]$CurrentBgTunnel.Id
@@ -526,10 +594,21 @@ function Remove-LocalOrphanTunnel {
     if ($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) {
         $protected += [int]$script:SessionBgTunnel.Id
     }
+    $siblings = @()
+    if (Get-Command Get-SiblingConnectTunnelPids -ErrorAction SilentlyContinue) {
+        $siblings = @(Get-SiblingConnectTunnelPids -TargetPort $TargetPort -ProtectedProcessIds $protected)
+        if ($siblings.Count -gt 0) {
+            $protected = @($protected + $siblings | Select-Object -Unique)
+        }
+    }
     $killed = $false
     foreach ($processId in (Get-LocalTunnelSshPids -TargetPort $TargetPort)) {
         if ($protected -contains $processId) {
-            Write-GitModeLog "ORPHAN_TUNNEL: skip_current pid=$processId port=$TargetPort" 'DEBUG'
+            if ($siblings -contains $processId) {
+                Write-GitModeLog "ORPHAN_TUNNEL: skip_sibling pid=$processId port=$TargetPort" 'INFO'
+            } else {
+                Write-GitModeLog "ORPHAN_TUNNEL: skip_current pid=$processId port=$TargetPort" 'DEBUG'
+            }
             continue
         }
         $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
@@ -603,13 +682,48 @@ function Save-ForeignTunnelPortSet {
     Set-Content -Path $Cfg -Value $lines -Encoding ASCII
 }
 
-function Add-ForeignTunnelPort {
+function Test-TunnelPortInOwnUidBlock {
+    param([Parameter(Mandatory)][int]$TargetPort)
+    $uid = $null
+    if ($script:ServerUidStr) { $uid = [string]$script:ServerUidStr }
+    if (-not $uid) { return $false }
+    $base = [int](Get-TunnelPortUserBase -UidStr $uid)
+    if ($base -le 20000) { return $false }
+    return ($TargetPort -ge $base -and $TargetPort -le ($base + 9))
+}
+
+function Remove-ForeignTunnelPort {
     param([Parameter(Mandatory)][int]$TargetPort)
     if (-not $TargetPort) { return }
     $set = Get-ForeignTunnelPortSet
-    if ($set.Add($TargetPort)) {
+    $removed = $set.Remove($TargetPort)
+    if ($script:ForeignTunnelPortSeenAt -and $script:ForeignTunnelPortSeenAt.ContainsKey($TargetPort)) {
+        $script:ForeignTunnelPortSeenAt.Remove($TargetPort)
+    }
+    if ($script:ForeignTunnelPortPermanent -and $script:ForeignTunnelPortPermanent.Contains($TargetPort)) {
+        [void]$script:ForeignTunnelPortPermanent.Remove($TargetPort)
+    }
+    if ($removed) {
         Save-ForeignTunnelPortSet
-        Write-GitModeLog "FOREIGN_PORT remembered port=$TargetPort" "INFO"
+        Write-GitModeLog "FOREIGN_PORT forget port=$TargetPort" 'INFO'
+    }
+}
+
+function Add-ForeignTunnelPort {
+    param(
+        [Parameter(Mandatory)][int]$TargetPort,
+        [switch]$Permanent
+    )
+    if (-not $TargetPort) { return }
+    $set = Get-ForeignTunnelPortSet
+    $added = $set.Add($TargetPort)
+    if (-not $script:ForeignTunnelPortSeenAt) { $script:ForeignTunnelPortSeenAt = @{} }
+    if (-not $script:ForeignTunnelPortPermanent) { $script:ForeignTunnelPortPermanent = New-Object "System.Collections.Generic.HashSet[int]" }
+    if ($Permanent) { [void]$script:ForeignTunnelPortPermanent.Add($TargetPort) }
+    $script:ForeignTunnelPortSeenAt[$TargetPort] = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    if ($added) {
+        Save-ForeignTunnelPortSet
+        Write-GitModeLog ("FOREIGN_PORT remembered port={0} permanent={1}" -f $TargetPort, [int][bool]$Permanent) "INFO"
     }
 }
 
@@ -617,8 +731,26 @@ function Test-CachedForeignTunnelPort {
     param([Parameter(Mandatory)][int]$TargetPort)
     $set = Get-ForeignTunnelPortSet
     if (-not $set.Contains($TargetPort)) { return $false }
-    # Trust remembered foreign ports without a 500ms SSH TCP probe each time.
-    # (Amir / other peers stay pinned until removed from FOREIGN_TUNNEL_PORTS.)
+    $permanent = $false
+    if ($script:ForeignTunnelPortPermanent -and $script:ForeignTunnelPortPermanent.Contains($TargetPort)) { $permanent = $true }
+    $inOwn = $false
+    if (Get-Command Test-TunnelPortInOwnUidBlock -ErrorAction SilentlyContinue) {
+        $inOwn = [bool](Test-TunnelPortInOwnUidBlock -TargetPort $TargetPort)
+    }
+    if ($inOwn -and -not $permanent) {
+        if (-not $script:ForeignTunnelPortSeenAt) { $script:ForeignTunnelPortSeenAt = @{} }
+        $ttl = 300
+        if ($script:ForeignTunnelPortTtlSec) { $ttl = [int]$script:ForeignTunnelPortTtlSec }
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $seen = 0
+        if ($script:ForeignTunnelPortSeenAt.ContainsKey($TargetPort)) { $seen = [long]$script:ForeignTunnelPortSeenAt[$TargetPort] }
+        if ($seen -le 0 -or ($now - $seen) -ge $ttl) {
+            Remove-ForeignTunnelPort -TargetPort $TargetPort
+            Write-GitModeLog "FOREIGN_PORT forget port=$TargetPort reason=own_block_ttl ttl=$ttl" 'INFO'
+            return $false
+        }
+    }
+    # Outside own block (or permanent hostkey pin): trust cache.
     Write-GitModeLog "ACQUIRE_SKIP: foreign_peer cached port=$TargetPort" "DEBUG"
     return $true
 }
@@ -631,6 +763,7 @@ function Test-CachedForeignTunnelPort {
 # already established a moment ago by THIS laptop. Never skips the live TCP probe in
 # Get-ServerOpenTunnelPorts - only skips re-verifying ownership of an already-proven port.
 $script:ClearedTunnelPortTtlSec = 8
+$script:ForeignTunnelPortTtlSec = 300
 
 function Get-ClearedTunnelPortMap {
     if ($script:ClearedTunnelPortMap) { return $script:ClearedTunnelPortMap }
@@ -709,7 +842,7 @@ function Test-TunnelHostKeyMismatch {
     if (-not $fp) { return $false }
     if ($fp -ne $stored) {
         Write-GitModeLog "ACQUIRE_SKIP: hostkey_mismatch port=$TargetPort got=$fp want=$stored" 'INFO'
-        if (Get-Command Add-ForeignTunnelPort -ErrorAction SilentlyContinue) { Add-ForeignTunnelPort -TargetPort $TargetPort }
+        if (Get-Command Add-ForeignTunnelPort -ErrorAction SilentlyContinue) { Add-ForeignTunnelPort -TargetPort $TargetPort -Permanent }
         return $true
     }
     return $false
@@ -765,17 +898,14 @@ function Test-TunnelPortIsForeignPeer {
     if (Get-Command Test-RecentlyClearedTunnelPort -ErrorAction SilentlyContinue) {
         if (Test-RecentlyClearedTunnelPort -TargetPort $TargetPort) { return $false }
     }
-$savedPort = $Port
-    $Port = $TargetPort
-    try {
-        $tcpOpen = $false
-        try { $tcpOpen = [bool](Test-TunnelPortTcpOpen) } catch { $tcpOpen = $false }
+$tcpOpen = $false
+    try { $tcpOpen = [bool](Test-TunnelPortTcpOpen -TargetPort $TargetPort) } catch { $tcpOpen = $false }
         if (-not $tcpOpen) {
-            # Closed port cannot be a live foreign peer ÃƒÆ'Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â skip expensive banner/hostkey SSH.
+            # Closed port cannot be a live foreign peer ÃƒÆ'Ã†'Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â skip expensive banner/hostkey SSH.
             return $false
         }
         Clear-TunnelBannerCache
-        $banner = Get-TunnelBanner
+        $banner = Get-TunnelBanner -TargetPort $TargetPort
         # Absolute pin: different sshd host key than our laptop => never claim/kill.
         if (Test-TunnelHostKeyMismatch -TargetPort $TargetPort) {
             Write-GitModeLog "ACQUIRE_SKIP: foreign_peer hostkey port=$TargetPort" 'INFO'
@@ -797,14 +927,24 @@ $savedPort = $Port
             Write-GitModeLog "TUNNEL_OWNERSHIP port=$TargetPort sticky_ours=1 (no local -R)" 'DEBUG'
             return $false
         }
+        $inOwnBlock = $false
+        if (Get-Command Test-TunnelPortInOwnUidBlock -ErrorAction SilentlyContinue) {
+            $inOwnBlock = [bool](Test-TunnelPortInOwnUidBlock -TargetPort $TargetPort)
+        }
+        # Own UID block: tcpOpen + no local -R + auth not owned => INDETERMINATE (not foreign).
+        # Avoid permanent false-foreign pins (e.g. 20028) that shrink the 10-port block.
+        if ($inOwnBlock -and ($tcpOpen -or (Test-TunnelBannerIsWindows -Banner $banner))) {
+            Write-GitModeLog "FOREIGN_INDETERMINATE port=$TargetPort banner=$banner tcp=$tcpOpen auth_owned=0" 'INFO'
+            return $false
+        }
         if ($tcpOpen -or (Test-TunnelBannerIsWindows -Banner $banner)) {
+            if (Get-Command Add-ForeignTunnelPort -ErrorAction SilentlyContinue) {
+                Add-ForeignTunnelPort -TargetPort $TargetPort
+            }
             Write-GitModeLog "ACQUIRE_SKIP: foreign_peer port=$TargetPort banner=$banner tcp=$tcpOpen" 'INFO'
             return $true
         }
         return $false
-    } finally {
-        $Port = $savedPort
-    }
 }
 
 function Get-LocalTunnelPortPidMap {
@@ -831,13 +971,14 @@ function Get-ServerOpenTunnelPorts {
         return ,$set
     }
     $list = (@($Ports) | Select-Object -Unique) -join ' '
-    # One SSH, parallel short probes ÃƒÆ'Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â closed ports fail in ~250ms, not 1s serial each.
+    # One SSH, parallel short probes ÃƒÆ'Ã†'Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â closed ports fail in ~250ms, not 1s serial each.
     $script = @"
 for p in $list; do
   ( timeout 0.25 bash -c "exec 3<>/dev/tcp/127.0.0.1/`$p" 2>/dev/null && echo OPEN:`$p ) &
 done
 wait
 "@
+    $script = (($script -replace "`r`n", "`n") -replace "`r", "`n")
     $out = (SshX $script 2>$null) -join "`n"
     foreach ($line in @($out -split "`n")) {
         if ($line -match 'OPEN:(\d+)') { [void]$set.Add([int]$Matches[1]) }
@@ -999,11 +1140,40 @@ function Release-CursorProxyOwner {
 }
 
 
+
+function Get-CursorProxyMode {
+    # Classify how Cursor should reach the internet for this Connect session:
+    #   sidecar       = sticky 18999/18998 front listening AND backend -L up
+    #   xray          = tunnel -L backends up (no healthy front)
+    #   server_direct = last resort (no healthy local proxy; remote uses server NIC)
+    $frontSocks = Get-CursorSocksFrontPort
+    $frontHttp = Get-CursorHttpFrontPort
+    $frontUp = $false
+    if ($frontSocks -gt 0 -and $frontHttp -gt 0) {
+        $frontUp = (Test-LocalPortOpen -PortNum $frontSocks) -and (Test-LocalPortOpen -PortNum $frontHttp)
+    }
+    $backSocks = 0
+    $backHttp = 0
+    if ($script:SocksProxyPort) { $backSocks = [int]$script:SocksProxyPort }
+    elseif (Get-Command Get-SocksProxyPort -ErrorAction SilentlyContinue) { $backSocks = [int](Get-SocksProxyPort) }
+    if ($script:HttpProxyPort) { $backHttp = [int]$script:HttpProxyPort }
+    elseif (Get-Command Get-HttpProxyPort -ErrorAction SilentlyContinue) { $backHttp = [int](Get-HttpProxyPort) }
+    $backUp = $false
+    if ($backSocks -gt 0 -and $backHttp -gt 0) {
+        $backUp = (Test-LocalPortOpen -PortNum $backSocks) -and (Test-LocalPortOpen -PortNum $backHttp)
+    }
+    if ($frontUp -and $backUp) { return 'sidecar' }
+    if ($backUp) { return 'xray' }
+    return 'server_direct'
+}
+
 function Complete-CursorProxyAfterTunnel {
     # Must run on EVERY successful Ensure-SessionTunnel path (spawn AND reuse).
     # Reuse used to return early without touching the sticky sidecar - Cursor then kept
     # settings http.proxy=127.0.0.1:18998 while the front door was dead -> agent error
     # "Failed to establish a socket connection to proxies: PROXY 127.0.0.1:18998".
+    # Last resort when all proxies fail: clear dead 18998 so laptop chat can recover
+    # while remote Machine settings use server NIC (server_direct).
     if (Get-Command Ensure-CursorProxySidecar -ErrorAction SilentlyContinue) {
         try { [void](Ensure-CursorProxySidecar) } catch {
             if (Get-Command Start-CursorProxySidecar -ErrorAction SilentlyContinue) {
@@ -1016,14 +1186,44 @@ function Complete-CursorProxyAfterTunnel {
     if (Get-Command Test-ProxyHealth -ErrorAction SilentlyContinue) {
         try { [void](Test-ProxyHealth) } catch {}
     }
+    $frontHttp = Get-CursorHttpFrontPort
+    $frontListening = $false
+    if ($frontHttp -gt 0) {
+        $frontListening = [bool](Test-LocalPortOpen -PortNum $frontHttp)
+    }
     if ($script:LastProxyHealthOk -eq $false) {
-        if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
-            try { [void](Clear-CursorProxySettingsSidecar) } catch {}
+        if (-not $frontListening) {
+            # Prefer sidecar CLEAR (safe with windows open). Full CLEAR only if allowed.
+            $cleared = $false
+            if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
+                try { $cleared = [bool](Clear-CursorProxySettingsSidecar) } catch { $cleared = $false }
+            }
+            if (-not $cleared -and (Get-Command Clear-CursorProxySettings -ErrorAction SilentlyContinue)) {
+                $may = $true
+                if (Get-Command Test-MayClearCursorProxySettings -ErrorAction SilentlyContinue) {
+                    try { $may = [bool](Test-MayClearCursorProxySettings -AllowClear) } catch { $may = $false }
+                }
+                if ($may) {
+                    try { [void](Clear-CursorProxySettings) } catch {}
+                } else {
+                    Write-GitModeLog 'CURSOR_PROXY_CLEAR_SKIP: reason=windows_open_or_non_owner action=reload_for_server_direct' 'WARN'
+                }
+            }
+            Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail_front_down' 'WARN'
+        } else {
+            # Front still listening but egress health failed (e.g. austria dead).
+            if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
+                try { [void](Clear-CursorProxySettingsSidecar) } catch {}
+            }
+            Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail' 'WARN'
         }
     } elseif (Get-Command Repair-CursorProxySettingsToSidecar -ErrorAction SilentlyContinue) {
         # Health OK through 18998 - keep sticky settings aligned.
         try { [void](Repair-CursorProxySettingsToSidecar) } catch {}
     }
+    $mode = 'server_direct'
+    try { $mode = Get-CursorProxyMode } catch { $mode = 'server_direct' }
+    Write-GitModeLog ("CURSOR_PROXY_MODE mode={0}" -f $mode) 'INFO'
 }
 
 function Test-ProxyHealth {
@@ -1151,8 +1351,8 @@ function Get-TunnelProxyLegState {
     # Classify reverse-tunnel ssh cmdline for the xray proxy leg.
     # ok           = SOCKS + HTTP -L to server xray
     # missing_http = SOCKS -L without HTTP -L
-    # legacy_D     = old ssh -D (office-IP egress) ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â must reseed
-    # missing  = no -L / -D for our socks port ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â must reseed when xray is up
+    # legacy_D     = old ssh -D (office-IP egress) ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â must reseed
+    # missing  = no -L / -D for our socks port ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â must reseed when xray is up
     # unknown  = process gone / unreadable
     param([Parameter(Mandatory)][int]$TunnelPid)
     $socksCandidate = Get-SocksProxyPort
@@ -1202,6 +1402,8 @@ function Add-TunnelHttpProxyLeg {
 function Test-TunnelNeedsProxyReseed {
     # When server xray SOCKS is open, refuse to keep a tunnel without the -L proxy leg
     # (or with legacy -D). Sepidz / no xray: never reseed for proxy.
+    # After proxy_adopt busy_healthy, this Connect may lack -L (another owns 19080);
+    # do not kill/respawn while backends or sticky fronts still listen.
     param(
         [Parameter(Mandatory)][int]$TunnelPid,
         [Parameter(Mandatory)][string]$Alias,
@@ -1211,9 +1413,31 @@ function Test-TunnelNeedsProxyReseed {
     $state = Get-TunnelProxyLegState -TunnelPid $TunnelPid
     if ($state -eq 'ok') { return $false }
     if ($state -eq 'unknown') { return $false }
+    if ($state -eq 'missing' -or $state -eq 'missing_http') {
+        $socksCandidate = Get-SocksProxyPort
+        $httpCandidate = Get-HttpProxyPort
+        $backendsOk = (Test-LocalPortOpen -PortNum $socksCandidate) -and (Test-LocalPortOpen -PortNum $httpCandidate)
+        $frontsOk = $false
+        if (-not $backendsOk) {
+            $frontSocks = Get-CursorSocksFrontPort
+            $frontHttp = Get-CursorHttpFrontPort
+            if (Get-Command Test-CursorProxySidecarListening -ErrorAction SilentlyContinue) {
+                $frontsOk = (Test-CursorProxySidecarListening -Port $frontSocks) -and (Test-CursorProxySidecarListening -Port $frontHttp)
+            } else {
+                $frontsOk = (Test-LocalPortOpen -PortNum $frontSocks) -and (Test-LocalPortOpen -PortNum $frontHttp)
+            }
+        }
+        if ($backendsOk -or $frontsOk) {
+            Write-GitModeLog "ENSURE_TUNNEL reseed_skip reason=proxy_adopted_elsewhere state=$state socks=$socksCandidate http=$httpCandidate" 'INFO'
+            if (-not $script:SocksProxyPort) { $script:SocksProxyPort = $socksCandidate }
+            if (-not $script:HttpProxyPort) { $script:HttpProxyPort = $httpCandidate }
+            return $false
+        }
+    }
     Write-GitModeLog "ENSURE_TUNNEL reseed_needed reason=$state pid=$TunnelPid socks=$(Get-SocksProxyPort)" 'WARN'
     return $true
 }
+
 
 function Clear-LegacyDynamicSocksTunnels {
     # Free OUR socks port only when a legacy ssh -D still holds it.
@@ -1259,7 +1483,7 @@ function Acquire-TunnelPort {
     $portBase = Get-TunnelPortUserBase -UidStr $UidStr
     if (-not $UidStr) { return $false }
 
-    # Already bound to a live session tunnel ÃƒÆ'Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â do not rescan.
+    # Already bound to a live session tunnel ÃƒÆ'Ã†'Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â do not rescan.
     if ($Port -and $script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) {
         $mine = @($ProtectedProcessIds)
         $mine += [int]$script:SessionBgTunnel.Id
@@ -1294,10 +1518,12 @@ function Acquire-TunnelPort {
 
     $candidates = @()
     foreach ($slot in $trySlots) {
-        $port = $portBase + $slot
-        if ($port -le 65535) { $candidates += @{ Slot = $slot; Port = $port } }
+        $candPort = $portBase + $slot
+        # Guard: 20000 < PORT (20000 is reserved sentinel). UID 1000 base+slot0 = 20000.
+        if ($candPort -gt 20000 -and $candPort -le 65535) { $candidates += @{ Slot = $slot; Port = $candPort } }
     }
-    if ($preferredPort) {
+    # Hybrid: UI_SLOT order already preferred in $trySlots. Only boost conf PORT when UI slot unset.
+    if ($preferredPort -and -not ($preferred -match '^\d+$')) {
         $candidates = @($candidates | Sort-Object { if ($_.Port -eq $preferredPort) { 0 } else { 1 } }, { $_.Slot })
     }
 
@@ -1309,23 +1535,23 @@ function Acquire-TunnelPort {
 
     $probePorts = @()
     foreach ($c in $candidates) {
-        $port = [int]$c.Port
+        $candPort = [int]$c.Port
         if (Get-Command Test-CachedForeignTunnelPort -ErrorAction SilentlyContinue) {
-            if (Test-CachedForeignTunnelPort -TargetPort $port) { continue }
+            if (Test-CachedForeignTunnelPort -TargetPort $candPort) { continue }
         }
         $peerLive = $false
-        if ($localMap.ContainsKey($port)) {
-            foreach ($processId in @($localMap[$port])) {
+        if ($localMap.ContainsKey($candPort)) {
+            foreach ($processId in @($localMap[$candPort])) {
                 if ($protected -contains [int]$processId) { continue }
                 $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
                 if ($proc -and -not $proc.HasExited) { $peerLive = $true; break }
             }
         }
         if ($peerLive) {
-            Write-GitModeLog "ACQUIRE_SKIP: peer_live port=$port slot=$($c.Slot)" 'DEBUG'
+            Write-GitModeLog "ACQUIRE_SKIP: peer_live port=$candPort slot=$($c.Slot)" 'DEBUG'
             continue
         }
-        $probePorts += $port
+        $probePorts += $candPort
     }
 
     if (@($probePorts).Count -eq 0) {
@@ -1339,33 +1565,66 @@ function Acquire-TunnelPort {
             $stickySlot = [int]$stickyPort - $portBase
             if ($stickySlot -ge 0 -and $stickySlot -le 9) {
                 if (-not (Test-CachedForeignTunnelPort -TargetPort $stickyPort)) {
-                    $script:TunnelSlot = $stickySlot
-                    $script:Port = $stickyPort
-                    # Drop foreign-looking local orphans on this port except protected.
-                    $null = Remove-LocalOrphanTunnel -TargetPort $stickyPort -CurrentBgTunnel $CurrentBgTunnel -ProtectedProcessIds $ProtectedProcessIds
-                    Save-TunnelSlot
-                    Push-ServerConnectConf
-                    Write-GitModeLog ("ACQUIRE_FAST claim_sticky port={0} slot={1} ms={2}" -f $stickyPort, $stickySlot, $sw.ElapsedMilliseconds) 'INFO'
-                    return $true
+                    $protSticky = @($ProtectedProcessIds)
+                    if ($CurrentBgTunnel -and -not $CurrentBgTunnel.HasExited) { $protSticky += [int]$CurrentBgTunnel.Id }
+                    if ($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) { $protSticky += [int]$script:SessionBgTunnel.Id }
+                    $sibSticky = @()
+                    if (Get-Command Get-SiblingConnectTunnelPids -ErrorAction SilentlyContinue) {
+                        $sibSticky = @(Get-SiblingConnectTunnelPids -TargetPort $stickyPort -ProtectedProcessIds $protSticky)
+                    }
+                    if ($sibSticky.Count -gt 0) {
+                        # Hybrid: never steal sibling -R; keep shared or take another free slot below.
+                        Write-GitModeLog ("ACQUIRE_SKIP: sibling_live port={0} pids={1}" -f $stickyPort, ($sibSticky -join ',')) 'INFO'
+                        Write-GitModeLog ("ACQUIRE_FAST sticky_shared port={0} slot={1} ms={2}" -f $stickyPort, $stickySlot, $sw.ElapsedMilliseconds) 'INFO'
+                    } else {
+                        $script:TunnelSlot = $stickySlot
+                        $script:Port = $stickyPort
+                        $Port = $script:Port
+                        # Classify/orphan first, then publish (I6).
+                        $null = Remove-LocalOrphanTunnel -TargetPort $stickyPort -CurrentBgTunnel $CurrentBgTunnel -ProtectedProcessIds $ProtectedProcessIds
+                        Save-TunnelSlot
+                        Push-ServerConnectConf
+                        Write-GitModeLog ("ACQUIRE_FAST claim_sticky port={0} slot={1} ms={2}" -f $stickyPort, $stickySlot, $sw.ElapsedMilliseconds) 'INFO'
+                        return $true
+                    }
                 }
             }
         }
         # Last resort: first non-foreign slot in range (even if peer_live map said busy).
         foreach ($c in $candidates) {
-            $port = [int]$c.Port
+            $candPort = [int]$c.Port
             $slot = [int]$c.Slot
-            if (Test-CachedForeignTunnelPort -TargetPort $port) { continue }
+            if (Test-CachedForeignTunnelPort -TargetPort $candPort) { continue }
+            $protBusy = @($ProtectedProcessIds)
+            if ($CurrentBgTunnel -and -not $CurrentBgTunnel.HasExited) { $protBusy += [int]$CurrentBgTunnel.Id }
+            if ($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) { $protBusy += [int]$script:SessionBgTunnel.Id }
+            $sibBusy = @()
+            if (Get-Command Get-SiblingConnectTunnelPids -ErrorAction SilentlyContinue) {
+                $sibBusy = @(Get-SiblingConnectTunnelPids -TargetPort $candPort -ProtectedProcessIds $protBusy)
+            }
+            if ($sibBusy.Count -gt 0) {
+                Write-GitModeLog ("ACQUIRE_SKIP: sibling_live port={0} slot={1}" -f $candPort, $slot) 'DEBUG'
+                continue
+            }
             $script:TunnelSlot = $slot
-            $script:Port = $port
-            $null = Remove-LocalOrphanTunnel -TargetPort $port -CurrentBgTunnel $CurrentBgTunnel -ProtectedProcessIds $ProtectedProcessIds
+            $script:Port = $candPort
+            $Port = $script:Port
+            $null = Remove-LocalOrphanTunnel -TargetPort $candPort -CurrentBgTunnel $CurrentBgTunnel -ProtectedProcessIds $ProtectedProcessIds
             Save-TunnelSlot
             Push-ServerConnectConf
-            Write-GitModeLog ("ACQUIRE_FAST claim_busy_fallback port={0} slot={1} ms={2}" -f $port, $slot, $sw.ElapsedMilliseconds) 'WARN'
+            Write-GitModeLog ("ACQUIRE_FAST claim_busy_fallback port={0} slot={1} ms={2}" -f $candPort, $slot, $sw.ElapsedMilliseconds) 'WARN'
             return $true
         }
-        $script:Port = $portBase
-        $script:TunnelSlot = 0
-        Write-GitModeLog ("ACQUIRE_FAST fail_empty_probe ms={0}" -f $sw.ElapsedMilliseconds) 'WARN'
+        if ($portBase -le 20000) {
+            $script:Port = 20001
+            $Port = $script:Port
+            $script:TunnelSlot = 1
+        } else {
+            $script:Port = $portBase
+            $Port = $script:Port
+            $script:TunnelSlot = 0
+        }
+        Write-GitModeLog ("ACQUIRE_FAST fail_empty_probe ms={0} port={1}" -f $sw.ElapsedMilliseconds, $script:Port) 'WARN'
         return $false
     }
     $openSet = Get-ServerOpenTunnelPorts -Ports $probePorts
@@ -1380,74 +1639,78 @@ function Acquire-TunnelPort {
     }
     Write-GitModeLog ("ACQUIRE_FAST prep_ms={0} candidates={1} probe={2} open={3}" -f $sw.ElapsedMilliseconds, $candidates.Count, $probePorts.Count, $openSet.Count) 'INFO'
 
-    # Pass 1: claim first CLOSED port (truly free) ÃƒÆ'Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â no banner/hostkey/foreign SSH.
+    # Pass 1: claim first CLOSED port (truly free) ÃƒÆ'Ã†'Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â no banner/hostkey/foreign SSH.
     foreach ($c in $candidates) {
-        $port = [int]$c.Port
+        $candPort = [int]$c.Port
         $slot = [int]$c.Slot
-        if ($probePorts -notcontains $port) { continue }
-        if ($openSet.Contains($port)) { continue }
+        if ($probePorts -notcontains $candPort) { continue }
+        if ($openSet.Contains($candPort)) { continue }
         $script:TunnelSlot = $slot
-        $script:Port = $port
+        $script:Port = $candPort
+        $Port = $script:Port
         Save-TunnelSlot
         Push-ServerConnectConf
-        Write-GitModeLog ("ACQUIRE_FAST claim_free port={0} slot={1} ms={2}" -f $port, $slot, $sw.ElapsedMilliseconds) 'INFO'
+        Write-GitModeLog ("ACQUIRE_FAST claim_free port={0} slot={1} ms={2}" -f $candPort, $slot, $sw.ElapsedMilliseconds) 'INFO'
         return $true
     }
 
-    # Pass 2: TCP-open ports ÃƒÆ'Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â only then do ownership/foreign checks (expensive).
+    # Pass 2: TCP-open ports ÃƒÆ'Ã†'Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â only then do ownership/foreign checks (expensive).
     foreach ($c in $candidates) {
-        $port = [int]$c.Port
+        $candPort = [int]$c.Port
         $slot = [int]$c.Slot
-        if ($probePorts -notcontains $port) { continue }
-        if (-not $openSet.Contains($port)) { continue }
-        if (Test-TunnelPortIsForeignPeer -TargetPort $port -CurrentBgTunnel $CurrentBgTunnel -ProtectedProcessIds $ProtectedProcessIds) {
+        if ($probePorts -notcontains $candPort) { continue }
+        if (-not $openSet.Contains($candPort)) { continue }
+        if (Test-TunnelPortIsForeignPeer -TargetPort $candPort -CurrentBgTunnel $CurrentBgTunnel -ProtectedProcessIds $ProtectedProcessIds) {
             continue
         }
-        $script:Port = $port
+        $script:Port = $candPort
+        $Port = $script:Port
         Clear-TunnelBannerCache
         $banner = Get-TunnelBanner
         if ($banner -and -not (Test-TunnelBannerIsWindows -Banner $banner)) {
-            Write-GitModeLog "ACQUIRE_STALE: foreign_banner port=$port banner=$banner" 'DEBUG'
-            Clear-ServerStaleTunnelForward -TargetPort $port
+            Write-GitModeLog "ACQUIRE_STALE: foreign_banner port=$candPort banner=$banner" 'DEBUG'
+            Clear-ServerStaleTunnelForward -TargetPort $candPort
             Clear-TunnelBannerCache
             $banner = Get-TunnelBanner
             if ($banner -and -not (Test-TunnelBannerIsWindows -Banner $banner)) { continue }
-            if (Test-TunnelPortIsForeignPeer -TargetPort $port -CurrentBgTunnel $CurrentBgTunnel -ProtectedProcessIds $ProtectedProcessIds) { continue }
+            if (Test-TunnelPortIsForeignPeer -TargetPort $candPort -CurrentBgTunnel $CurrentBgTunnel -ProtectedProcessIds $ProtectedProcessIds) { continue }
         }
         if (-not $banner) {
-            if (Test-TunnelPortAuthOwned -TargetPort $port) {
-                Write-GitModeLog "ACQUIRE_STALE: sticky_ours port=$port reclaim" 'DEBUG'
-                Clear-ServerStaleTunnelForward -TargetPort $port
+            if (Test-TunnelPortAuthOwned -TargetPort $candPort) {
+                Write-GitModeLog "ACQUIRE_STALE: sticky_ours port=$candPort reclaim" 'DEBUG'
+                Clear-ServerStaleTunnelForward -TargetPort $candPort
                 Clear-TunnelBannerCache
                 $banner = Get-TunnelBanner
-            } elseif (Test-TunnelPortIsForeignPeer -TargetPort $port -CurrentBgTunnel $CurrentBgTunnel -ProtectedProcessIds $ProtectedProcessIds) {
+            } elseif (Test-TunnelPortIsForeignPeer -TargetPort $candPort -CurrentBgTunnel $CurrentBgTunnel -ProtectedProcessIds $ProtectedProcessIds) {
                 continue
             } else {
-                Write-GitModeLog "ACQUIRE_STALE: zombie port=$port tcp=open banner=(empty)" 'WARN'
-                Clear-ServerStaleTunnelForward -TargetPort $port
+                Write-GitModeLog "ACQUIRE_STALE: zombie port=$candPort tcp=open banner=(empty)" 'WARN'
+                Clear-ServerStaleTunnelForward -TargetPort $candPort
                 Clear-TunnelBannerCache
                 $banner = Get-TunnelBanner
             }
             if ($banner -and -not (Test-TunnelBannerIsWindows -Banner $banner)) { continue }
-            if (Test-TunnelPortIsForeignPeer -TargetPort $port -CurrentBgTunnel $CurrentBgTunnel -ProtectedProcessIds $ProtectedProcessIds) { continue }
-            if (-not $banner -and $openSet.Contains($port)) { continue }
+            if (Test-TunnelPortIsForeignPeer -TargetPort $candPort -CurrentBgTunnel $CurrentBgTunnel -ProtectedProcessIds $ProtectedProcessIds) { continue }
+            if (-not $banner -and $openSet.Contains($candPort)) { continue }
         }
         if (-not $banner -or (Test-TunnelBannerIsWindows -Banner $banner)) {
-            $localNow = @(Get-LocalTunnelSshPids -TargetPort $port)
-            if ($banner -and $localNow.Count -eq 0 -and -not (Test-TunnelPortAuthOwned -TargetPort $port)) {
-                Write-GitModeLog "ACQUIRE_SKIP: unauth_windows port=$port slot=$slot" 'INFO'
+            $localNow = @(Get-LocalTunnelSshPids -TargetPort $candPort)
+            if ($banner -and $localNow.Count -eq 0 -and -not (Test-TunnelPortAuthOwned -TargetPort $candPort)) {
+                Write-GitModeLog "ACQUIRE_SKIP: unauth_windows port=$candPort slot=$slot" 'INFO'
                 continue
             }
             $script:TunnelSlot = $slot
-            $script:Port = $port
+            $script:Port = $candPort
+            $Port = $script:Port
             Save-TunnelSlot
             Push-ServerConnectConf
-            Write-GitModeLog ("ACQUIRE_FAST claim_reclaim port={0} slot={1} ms={2}" -f $port, $slot, $sw.ElapsedMilliseconds) 'INFO'
+            Write-GitModeLog ("ACQUIRE_FAST claim_reclaim port={0} slot={1} ms={2}" -f $candPort, $slot, $sw.ElapsedMilliseconds) 'INFO'
             return $true
         }
     }
 
     $script:Port = $portBase
+    $Port = $script:Port
     $script:TunnelSlot = 0
     Write-GitModeLog ("ACQUIRE_FAST fail ms={0} fallback_port={1}" -f $sw.ElapsedMilliseconds, $script:Port) 'WARN'
     return $false
@@ -1541,9 +1804,9 @@ function Sync-SessionTunnelProcess {
         try { $tcpOpen = [bool](Test-TunnelPortTcpOpen) } catch { $tcpOpen = $false }
         if ($tcpOpen) {
             $script:TunnelSoftFailCount++
-            Write-GitModeLog ("TUNNEL_SYNC soft_fail count=$script:TunnelSoftFailCount/6 port=$Port reason=no_proc_tcp_open$(Get-TunnelSessionDiagSuffix)") 'WARN'
+            Write-GitModeLog ("TUNNEL_SYNC soft_fail count=$script:TunnelSoftFailCount/$script:TunnelSoftFailBudget port=$Port reason=no_proc_tcp_open$(Get-TunnelSessionDiagSuffix)") 'WARN'
             $null = Try-ReattachSessionTunnelProcess -BgTunnel $BgTunnel
-            if ($script:TunnelSoftFailCount -ge 6) {
+            if ($script:TunnelSoftFailCount -ge $script:TunnelSoftFailBudget) {
                 $dropPid = 0
                 if ($BgTunnel.Value) { $dropPid = $BgTunnel.Value.Id }
                 elseif ($script:LastTunnelExitLoggedPid) { $dropPid = $script:LastTunnelExitLoggedPid }
@@ -1566,45 +1829,53 @@ function Sync-SessionTunnelProcess {
         $now = Get-Date
         if (-not $script:LastForwardProbeAt) {
             $script:LastForwardProbeAt = $now
-        } elseif (($now - $script:LastForwardProbeAt).TotalSeconds -ge 30) {
+        } elseif (($now - $script:LastForwardProbeAt).TotalSeconds -ge $script:TunnelForwardProbeIntervalSec) {
             $script:LastForwardProbeAt = $now
-            $probeUp = $false
-            for ($i = 1; $i -le 3; $i++) {
-                if ($i -gt 1) { Start-Sleep -Milliseconds 300 }
-                if (Test-TunnelUp) { $probeUp = $true; break }
-            }
-            if (-not $probeUp) {
-                $tcpOpen = $false
-                try { $tcpOpen = [bool](Test-TunnelPortTcpOpen) } catch { $tcpOpen = $false }
-                if ($tcpOpen) {
-                    $script:TunnelSoftFailCount++
-                    Write-GitModeLog ("TUNNEL_SYNC soft_fail count=$script:TunnelSoftFailCount/6 pid=$($BgTunnel.Value.Id) port=$Port reason=banner_miss_tcp_open$(Get-TunnelSessionDiagSuffix)") 'WARN'
-                    $script:TunnelSyncFailCount = 0
-                    if ($script:TunnelSoftFailCount -ge 6) {
-                        Write-TunnelDropLog -Reason 'banner_miss_tcp_open_budget' -TunnelPid $BgTunnel.Value.Id `
-                            -TcpOpen $true -Banner $script:TunnelBannerCacheBanner
+            if ($script:TunnelSoftFailCount -eq 0 -and $script:TunnelBannerCacheUp -and [int]$script:TunnelBannerDeferCount -lt 1) {
+                $script:TunnelBannerDeferCount++
+                Write-GitModeLog "TUNNEL_SYNC probe_deferred count=$script:TunnelBannerDeferCount reason=keepalive_banner_fresh pid=$($BgTunnel.Value.Id) port=$Port" 'DEBUG'
+                # skip Test-TunnelUp this tick; still return $true (bg alive) below
+            } else {
+                $script:TunnelBannerDeferCount = 0
+                $probeUp = $false
+                $attempts = if ($script:TunnelSoftFailCount -gt 0) { 3 } else { 1 }
+                for ($i = 1; $i -le $attempts; $i++) {
+                    if ($i -gt 1) { Start-Sleep -Milliseconds 300 }
+                    if (Test-TunnelUp) { $probeUp = $true; break }
+                }
+                if (-not $probeUp) {
+                    $tcpOpen = $false
+                    try { $tcpOpen = [bool](Test-TunnelPortTcpOpen) } catch { $tcpOpen = $false }
+                    if ($tcpOpen) {
+                        $script:TunnelSoftFailCount++
+                        Write-GitModeLog ("TUNNEL_SYNC soft_fail count=$script:TunnelSoftFailCount/$script:TunnelSoftFailBudget pid=$($BgTunnel.Value.Id) port=$Port reason=banner_miss_tcp_open$(Get-TunnelSessionDiagSuffix)") 'WARN'
+                        $script:TunnelSyncFailCount = 0
+                        if ($script:TunnelSoftFailCount -ge $script:TunnelSoftFailBudget) {
+                            Write-TunnelDropLog -Reason 'banner_miss_tcp_open_budget' -TunnelPid $BgTunnel.Value.Id `
+                                -TcpOpen $true -Banner $script:TunnelBannerCacheBanner
+                            Release-StaleTunnelPort
+                            $script:TunnelSoftFailCount = 0
+                            return $false
+                        }
+                        return $true
+                    } else {
+                        $script:TunnelSyncFailCount++
+                        $probeBanner = $script:TunnelBannerCacheBanner
+                        if ($script:TunnelSyncFailCount -lt 3) {
+                            $script:LastForwardProbeAt = (Get-Date).AddSeconds(-$script:TunnelForwardProbeIntervalSec)
+                            Write-GitModeLog "TUNNEL_SYNC miss=$script:TunnelSyncFailCount/3 pid=$($BgTunnel.Value.Id) port=$Port reason=bg_alive_forward_dead" 'DEBUG'
+                            return $true
+                        }
+                        Write-TunnelDropLog -Reason 'bg_alive_forward_dead' -TunnelPid $BgTunnel.Value.Id `
+                            -TcpOpen $false -Banner $probeBanner
                         Release-StaleTunnelPort
                         $script:TunnelSoftFailCount = 0
                         return $false
                     }
-                    return $true
                 } else {
-                    $script:TunnelSyncFailCount++
-                    $probeBanner = $script:TunnelBannerCacheBanner
-                    if ($script:TunnelSyncFailCount -lt 3) {
-                        $script:LastForwardProbeAt = (Get-Date).AddSeconds(-30)
-                        Write-GitModeLog "TUNNEL_SYNC miss=$script:TunnelSyncFailCount/3 pid=$($BgTunnel.Value.Id) port=$Port reason=bg_alive_forward_dead" 'DEBUG'
-                        return $true
-                    }
-                    Write-TunnelDropLog -Reason 'bg_alive_forward_dead' -TunnelPid $BgTunnel.Value.Id `
-                        -TcpOpen $false -Banner $probeBanner
-                    Release-StaleTunnelPort
+                    $script:TunnelSyncFailCount = 0
                     $script:TunnelSoftFailCount = 0
-                    return $false
                 }
-            } else {
-                $script:TunnelSyncFailCount = 0
-                $script:TunnelSoftFailCount = 0
             }
         }
         # Throttle TRACE: the session loop runs far more often than this is useful.
@@ -1823,7 +2094,8 @@ function Prepare-ServerSessionParallel {
 
 function Test-ProjectMountHealthy {
     param([Parameter(Mandatory)][string]$ProjectId)
-    $out = ((SshX "$CM check '$ProjectId' 2>/dev/null") -join '').Trim()
+    # Bound the remote check - a wedged sshfs/fcb can otherwise hang SshX with no UI step.
+    $out = ((SshX "timeout 12 $CM check '$ProjectId' 2>/dev/null") -join '').Trim()
     return ($out -eq 'ok')
 }
 
@@ -2049,8 +2321,8 @@ function Ensure-SessionTunnel {
             }
             # Banner miss + TCP open: zombie forward. Do not return success / TUNNEL_REUSED.
             $script:TunnelSoftFailCount++
-            Write-GitModeLog ("ENSURE_TUNNEL soft_fail count=$script:TunnelSoftFailCount/6 pid=$($BgTunnel.Value.Id) port=$Port reason=banner_miss_tcp_open action=reseed$(Get-TunnelSessionDiagSuffix)") 'WARN'
-            if ($script:TunnelSoftFailCount -ge 6) {
+            Write-GitModeLog ("ENSURE_TUNNEL soft_fail count=$script:TunnelSoftFailCount/$script:TunnelSoftFailBudget pid=$($BgTunnel.Value.Id) port=$Port reason=banner_miss_tcp_open action=reseed$(Get-TunnelSessionDiagSuffix)") 'WARN'
+            if ($script:TunnelSoftFailCount -ge $script:TunnelSoftFailBudget) {
                 Write-TunnelDropLog -Reason 'banner_miss_tcp_open_budget' -TunnelPid $BgTunnel.Value.Id `
                     -TcpOpen $true -Banner $script:TunnelBannerCacheBanner
                 Release-StaleTunnelPort
@@ -2163,6 +2435,8 @@ function Ensure-SessionTunnel {
     }
     if (-not $remoteSocksOk) {
         Write-GitModeLog "ENSURE_TUNNEL remote_xray_socks=closed port=$($script:XrayServerSocksPort) skipping_proxy_leg" 'INFO'
+        Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=xray_closed' 'WARN'
+        Write-GitModeLog 'CURSOR_PROXY_MODE mode=server_direct' 'INFO'
     } elseif (-not $isOwner) {
         if ((Test-LocalPortOpen -PortNum $socksCandidate) -and (Test-LocalPortOpen -PortNum (Get-HttpProxyPort))) {
             $script:SocksProxyPort = $socksCandidate
@@ -2353,27 +2627,55 @@ function Push-ServerConnectConf {
             $preferAm = [string]$script:ActiveProjectId
         }
     }
+    # Stage 5: refuse overwriting ACTIVE_MOUNT when another project is still mounted.
+    if ($preferAm -and -not $ClearActiveMount -and (Get-Command Test-ProjectMountHealthy -ErrorAction SilentlyContinue)) {
+        $currentAm = ''
+        if ($script:LastPushConfActive) { $currentAm = [string]$script:LastPushConfActive }
+        if (-not $currentAm -and $Cfg -and (Test-Path $Cfg)) {
+            # Local hint only; server truth is LastPushConfActive / remote body keep path.
+        }
+        if ($currentAm -and $currentAm -ne $preferAm) {
+            $otherLive = $false
+            try { $otherLive = [bool](Test-ProjectMountHealthy -ProjectId $currentAm) } catch { $otherLive = $false }
+            if ($otherLive) {
+                Write-GitModeLog ("ACTIVE_MOUNT_GUARD keep={0} prefer={1} reason=other_still_mounted" -f $currentAm, $preferAm) 'WARN'
+                $preferAm = $currentAm
+            }
+        }
+    }
     $clearFlag = if ($ClearActiveMount) { '1' } else { '0' }
+    $sessionPort = Get-SessionTunnelPort
+    if ($Port -and $script:Port -and ([int]$Port -ne [int]$script:Port)) {
+        Write-GitModeLog ("PORT_SHADOW_DETECT bare={0} script={1} using={2}" -f $Port, $script:Port, $sessionPort) 'WARN'
+    }
+    # #17 strategy A: non-primary still pushes ACTIVE_MOUNT(+GIT_MODE); never overwrite primary TUNNEL_PORT.
+    $amOnly = $false
+    if (Get-Command Test-IsPrimaryTunnelPublisher -ErrorAction SilentlyContinue) {
+        if (-not (Test-IsPrimaryTunnelPublisher)) {
+            $amOnly = $true
+            Write-GitModeLog ("PUSH_CONF am_only slot={0} port={1} publish_port=0" -f ($env:CLAUDE_CONNECT_UI_SLOT), $sessionPort) 'INFO'
+        }
+    }
     # Dedupe identical pushes within a few seconds (startup called this twice).
     # Checked BEFORE the foreign-peer/hostkey safety probes below so a repeat push of
     # the same key skips their SSH round trips too (perf-only reorder; a cache-miss
     # still runs the exact same safety checks, in the exact same order, as before).
-    $dedupeKey = "{0}|{1}|{2}|{3}|{4}" -f $LaptopUser, $Port, $mode, $preferAm, $clearFlag
+    $dedupeKey = "{0}|{1}|{2}|{3}|{4}|{5}" -f $LaptopUser, $sessionPort, $mode, $preferAm, $clearFlag, $(if ($amOnly) { "1" } else { "0" })
     if ($script:LastPushConfKey -eq $dedupeKey -and $script:LastPushConfAt -and
         ((Get-Date) - $script:LastPushConfAt).TotalSeconds -le 8) {
         Write-GitModeLog "PUSH_CONF skip_duplicate key=$dedupeKey" 'INFO'
         return
     }
     # Never publish another peer's reverse port into ~/.claude-connect.conf.
-    if ($Port -and (Get-Command Test-TunnelPortIsForeignPeer -ErrorAction SilentlyContinue)) {
-        if (Test-TunnelPortIsForeignPeer -TargetPort ([int]$Port)) {
-            Write-GitModeLog "PUSH_CONF blocked: foreign_peer port=$Port" 'ERROR'
+    if ($sessionPort -and (Get-Command Test-TunnelPortIsForeignPeer -ErrorAction SilentlyContinue)) {
+        if (Test-TunnelPortIsForeignPeer -TargetPort ([int]$sessionPort)) {
+            Write-GitModeLog "PUSH_CONF blocked: foreign_peer port=$sessionPort" 'ERROR'
             return
         }
     }
-    if ($Port -and (Get-Command Test-TunnelHostKeyMismatch -ErrorAction SilentlyContinue)) {
-        if (Test-TunnelHostKeyMismatch -TargetPort ([int]$Port)) {
-            Write-GitModeLog "PUSH_CONF blocked: hostkey_mismatch port=$Port" 'ERROR'
+    if ($sessionPort -and (Get-Command Test-TunnelHostKeyMismatch -ErrorAction SilentlyContinue)) {
+        if (Test-TunnelHostKeyMismatch -TargetPort ([int]$sessionPort)) {
+            Write-GitModeLog "PUSH_CONF blocked: hostkey_mismatch port=$sessionPort" 'ERROR'
             return
         }
     }
@@ -2381,10 +2683,12 @@ function Push-ServerConnectConf {
     $lu = ($LaptopUser -replace "'", "'\''")
     $modeEsc = ($mode -replace "'", "'\''")
     $preferEsc = ($preferAm -replace "'", "'\''")
-    $portEsc = ("$Port" -replace "'", "'\''")
+    $portEsc = ("$sessionPort" -replace "'", "'\''")
     $slotEsc = ("$($script:TunnelSlot)" -replace "'", "'\''")
     $hkEsc = ((Get-StoredLaptopHostKeyFingerprint) -replace "'", "'\''")
-    Write-GitModeLog "PUSH_CONF begin laptop_user=$LaptopUser port=$Port slot=$($script:TunnelSlot) git_mode=$mode prefer_mount=$preferAm clear=$ClearActiveMount" 'INFO'
+    $amOnlyFlag = if ($amOnly) { '1' } else { '0' }
+    $publishPortLog = if ($amOnly) { '0' } else { "$sessionPort" }
+    Write-GitModeLog "PUSH_CONF begin laptop_user=$LaptopUser port=$sessionPort slot=$($script:TunnelSlot) git_mode=$mode prefer_mount=$preferAm clear=$ClearActiveMount am_only=$amOnlyFlag publish_port=$publishPortLog" 'INFO'
     # Windows OpenSSH eats nested double quotes in remote payloads (AM="" -> AM="; elif syntax error).
     # Ship remote body as base64 so ACTIVE_MOUNT always lands correctly and stays trackable.
     $remoteBody = @"
@@ -2396,17 +2700,38 @@ PORT='$portEsc'
 SLOT='$slotEsc'
 MODE='$modeEsc'
 HK='$hkEsc'
+AM_ONLY='$amOnlyFlag'
+CUR_AM=`$(grep -E '^ACTIVE_MOUNT=' "`$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
+CUR_PORT=`$(grep -E '^TUNNEL_PORT=' "`$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
+CUR_SLOT=`$(grep -E '^TUNNEL_SLOT=' "`$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
 if [ "`$CLEAR" = "1" ]; then
   AM=
 elif [ -n "`$PREFER" ]; then
-  AM=`$PREFER
+  if [ -n "`$CUR_AM" ] && [ "`$CUR_AM" != "`$PREFER" ] && mountpoint -q "`$HOME/mounts/`$CUR_AM" 2>/dev/null; then
+    AM=`$CUR_AM
+    printf 'ACTIVE_MOUNT_GUARD keep=%s prefer=%s reason=other_still_mounted\n' "`$CUR_AM" "`$PREFER"
+  else
+    AM=`$PREFER
+  fi
 else
-  AM=`$(grep -E '^ACTIVE_MOUNT=' "`$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
+  AM=`$CUR_AM
+fi
+if [ "`$AM_ONLY" = "1" ]; then
+  PORT_OUT=`$CUR_PORT
+  SLOT_OUT=`$CUR_SLOT
+  if [ -n "`$PORT" ] && [ -n "`$CUR_PORT" ] && [ "`$PORT" != "`$CUR_PORT" ]; then
+    printf 'PUSH_CONF port_mismatch_keep session=%s server=%s\n' "`$PORT" "`$CUR_PORT"
+  fi
+  PUBLISH_PORT=0
+else
+  PORT_OUT=`$PORT
+  SLOT_OUT=`$SLOT
+  PUBLISH_PORT=`$PORT
 fi
 mkdir -p "`$HOME/.local/bin"
-printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nPORT=%s\nTUNNEL_SLOT=%s\nGIT_MODE=%s\nLAPTOP_OS=windows\nACTIVE_MOUNT=%s\nLAPTOP_HOSTKEY_FP=%s\n' "`$LU" "`$PORT" "`$PORT" "`$SLOT" "`$MODE" "`$AM" "`$HK" > "`$HOME/.claude-connect.conf"
+printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nPORT=%s\nTUNNEL_SLOT=%s\nGIT_MODE=%s\nLAPTOP_OS=windows\nACTIVE_MOUNT=%s\nLAPTOP_HOSTKEY_FP=%s\n' "`$LU" "`$PORT_OUT" "`$PORT_OUT" "`$SLOT_OUT" "`$MODE" "`$AM" "`$HK" > "`$HOME/.claude-connect.conf"
 chmod 600 "`$HOME/.claude-connect.conf" 2>/dev/null || true
-printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s\n' "`$CLEAR" "`$PREFER" "`$AM"
+printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s am_only=%s publish_port=%s\n' "`$CLEAR" "`$PREFER" "`$AM" "`$AM_ONLY" "`$PUBLISH_PORT"
 "@
     # Windows here-strings are CRLF; Linux bash then sees "set +e\r" -> "set: + : invalid option".
     $remoteBody = ($remoteBody -replace "`r`n", "`n") -replace "`r", "`n"

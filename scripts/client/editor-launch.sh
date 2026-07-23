@@ -73,8 +73,31 @@ resolve_editor_choice() {
     return 0
 }
 
+get_cursor_remote_profile_site() {
+    if [ -n "${CURSOR_PROFILE_SITE:-}" ]; then
+        case "$(printf '%s' "$CURSOR_PROFILE_SITE" | tr '[:upper:]' '[:lower:]')" in
+            sepidz*) printf '%s' 'Sepidz'; return 0 ;;
+            smart*) printf '%s' 'Smart'; return 0 ;;
+        esac
+    fi
+    ip="${SERVER_IP:-${CONNECT_SERVER_IP:-}}"
+    case "$ip" in
+        192.168.250.70) printf '%s' 'Sepidz'; return 0 ;;
+        192.168.210.240) printf '%s' 'Smart'; return 0 ;;
+    esac
+    case "${ALIAS:-${SSH_ALIAS:-}}" in
+        *sepidz*) printf '%s' 'Sepidz'; return 0 ;;
+    esac
+    printf '%s' 'Smart'
+}
+
 get_cursor_server_profile_dir() {
-    printf '%s' "$HOME/Library/Application Support/ClaudeServerCursorProfile"
+    site="$(get_cursor_remote_profile_site)"
+    if [ "$site" = "Sepidz" ]; then
+        printf '%s' "$HOME/Library/Application Support/ClaudeServerCursorProfile-Sepidz"
+    else
+        printf '%s' "$HOME/Library/Application Support/ClaudeServerCursorProfile-Smart"
+    fi
 }
 
 get_code_server_profile_dir() {
@@ -114,13 +137,33 @@ test_may_clear_cursor_proxy_settings() {
 }
 
 _resolve_cursor_proxy_ports() {
-    # stdout: socks_port http_port (for CLI and settings)
-    local socks="${SOCKS_PROXY_PORT:-}" http="${HTTP_PROXY_PORT:-}"
-    if [ -n "${CURSOR_SOCKS_FRONT_PORT:-}" ]; then
-        socks="${CURSOR_SOCKS_FRONT_PORT}"
+    # stdout: socks_port http_port (for CLI and settings).
+    # Only advertise front doors when they listen AND backend -L is up; otherwise
+    # return empty so launch skips --proxy-server (server_direct last resort).
+    local front_s="${CURSOR_SOCKS_FRONT_PORT:-}" front_h="${CURSOR_HTTP_FRONT_PORT:-}"
+    local back_s="${SOCKS_PROXY_PORT:-}" back_h="${HTTP_PROXY_PORT:-}"
+    local socks="" http=""
+    local front_up=0 back_up=0
+    if [ -n "$back_s" ] && [ -n "$back_h" ]; then
+        if declare -F test_local_port_open >/dev/null 2>&1; then
+            if test_local_port_open "$back_s" && test_local_port_open "$back_h"; then
+                back_up=1
+            fi
+        else
+            back_up=1
+        fi
     fi
-    if [ -n "${CURSOR_HTTP_FRONT_PORT:-}" ]; then
-        http="${CURSOR_HTTP_FRONT_PORT}"
+    if [ -n "$front_s" ] && [ -n "$front_h" ] && declare -F test_local_port_open >/dev/null 2>&1; then
+        if test_local_port_open "$front_s" && test_local_port_open "$front_h"; then
+            front_up=1
+        fi
+    fi
+    if [ "$front_up" -eq 1 ] && [ "$back_up" -eq 1 ]; then
+        socks="$front_s"
+        http="$front_h"
+    elif [ "$back_up" -eq 1 ]; then
+        socks="$back_s"
+        http="$back_h"
     fi
     printf '%s %s' "${socks:-}" "${http:-}"
 }
@@ -229,7 +272,7 @@ remote_editor_window_open() {
     local editor_cmd="$1" alias_name="$2" remote_path="$3"
     local profile_tag="" cmd line
     case "$editor_cmd" in
-        cursor) profile_tag="ClaudeServerCursorProfile" ;;
+        cursor) profile_tag="$(basename "$(get_cursor_server_profile_dir)")" ;;
         code)   profile_tag="ClaudeServerCodeProfile" ;;
         *) return 1 ;;
     esac
@@ -250,7 +293,7 @@ remote_editor_on_correct_folder() {
     local profile_tag="" path_needle cmd line
     path_needle="${remote_path%/}"
     case "$editor_cmd" in
-        cursor) profile_tag="ClaudeServerCursorProfile" ;;
+        cursor) profile_tag="$(basename "$(get_cursor_server_profile_dir)")" ;;
         code)   profile_tag="ClaudeServerCodeProfile" ;;
         *) return 1 ;;
     esac
@@ -272,7 +315,7 @@ remote_editor_on_correct_folder() {
 # Wrong-folder (has folder-uri to another path) is NOT agent home - use --new-window, do not soft-kill.
 remote_editor_in_agent_home() {
     local alias_name="$1" remote_path="$2"
-    local profile_tag="ClaudeServerCursorProfile" cmd line
+    local profile_tag="$(basename "$(get_cursor_server_profile_dir)")" cmd line
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         cmd="${line#* }"
@@ -286,7 +329,7 @@ remote_editor_in_agent_home() {
 }
 
 cursor_profile_main_count() {
-    local profile_tag="ClaudeServerCursorProfile" n=0 cmd line
+    local profile_tag="$(basename "$(get_cursor_server_profile_dir)")" n=0 cmd line
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         cmd="${line#* }"
@@ -298,7 +341,7 @@ cursor_profile_main_count() {
 
 # Soft-stop profile tree (used before --new-window relaunch from Agent home).
 stop_cursor_profile_soft() {
-    local profile_tag="ClaudeServerCursorProfile" line pid cmd
+    local profile_tag="$(basename "$(get_cursor_server_profile_dir)")" line pid cmd
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         pid="${line%% *}"
@@ -320,7 +363,7 @@ launch_remote_editor() {
             init_cursor_server_profile
         fi
 
-        local _proxy_socks _proxy_http _is_owner=1
+        local _proxy_socks _proxy_http _is_owner=1 _launch_mode=none_direct
         if [ -n "${CURSOR_PROXY_OWNER:-}" ] && [ "${CURSOR_PROXY_OWNER}" = "0" ]; then
             _is_owner=0
         fi
@@ -329,24 +372,37 @@ $(_resolve_cursor_proxy_ports)
 EOF
 
         # Write proxy settings but NEVER soft-stop (preserves N open windows).
+        # Only SET when resolve returned a healthy path; else CLEAR dead 18998.
         if [ "$_is_owner" -eq 0 ]; then
             declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_SET_SKIP: reason=non_owner' 'DEBUG'
-        elif [ -n "${SOCKS_PROXY_PORT:-}" ] || [ -n "$_proxy_http" ]; then
-            if set_cursor_proxy_settings "$SOCKS_PROXY_PORT" "$HTTP_PROXY_PORT"; then
+        elif [ -n "${_proxy_socks:-}" ] && [ -n "${_proxy_http:-}" ]; then
+            if set_cursor_proxy_settings "$_proxy_socks" "$_proxy_http"; then
                 declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_SET: preserved_open_windows socks=${_proxy_socks:-} http=${_proxy_http:-} (no soft-stop)" 'INFO'
             fi
+            if declare -F get_cursor_proxy_mode >/dev/null 2>&1; then
+                _launch_mode="$(get_cursor_proxy_mode)"
+            else
+                _launch_mode=sidecar
+            fi
         else
-            if test_may_clear_cursor_proxy_settings; then
+            if test_may_clear_cursor_proxy_settings 1; then
                 if clear_cursor_proxy_settings; then
                     declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR: no_windows (no soft-stop)' 'INFO'
                 fi
+            else
+                declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR_SKIP: reason=windows_open_or_non_owner action=reload_for_server_direct' 'WARN'
             fi
+            _launch_mode=server_direct
         fi
 
         # Chromium flags: Cursor 3.9.x always-local-singleton can ignore settings.json proxy.
+        # No healthy socks => launch WITHOUT --proxy-server (server_direct last resort).
         _proxy_args=()
         if [ -n "$_proxy_socks" ]; then
             _proxy_args=(--proxy-server="socks5://127.0.0.1:${_proxy_socks}" --disable-http2)
+            declare -F connect_log >/dev/null 2>&1 && connect_log "LAUNCH_PROXY mode=${_launch_mode} socks=${_proxy_socks}" 'INFO'
+        else
+            declare -F connect_log >/dev/null 2>&1 && connect_log "LAUNCH_PROXY mode=${_launch_mode:-server_direct}" 'INFO'
         fi
 
         if [ "$known_on_folder" = "1" ]; then

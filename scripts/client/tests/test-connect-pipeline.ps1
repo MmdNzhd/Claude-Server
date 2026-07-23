@@ -145,7 +145,7 @@ $connectUiPs1 = Get-Content (Get-ClientFile 'connect-ui.ps1') -Raw
 $connectUiSh = Get-Content (Get-ClientFile 'connect-ui.sh') -Raw
 Assert ($connectBat -match 'CLAUDE_CONNECT_RUN_ID') 'connect.bat bootstraps CLAUDE_CONNECT_RUN_ID'
 Assert ($connectBat -notmatch '-WindowStyle Hidden.*connect\.ps1') 'connect.bat runs connect.ps1 in visible console (not hidden window)'
-Assert ($connectBat -match 'start "" /D "%HERE%" powershell.*connect-boot\.ps1') 'connect.bat async handoff starts connect-boot.ps1'
+Assert ($connectBat -match 'start "" /D "%HERE_NOTRAIL%" powershell(\.exe)?.*connect-boot\.ps1') 'connect.bat async handoff starts connect-boot.ps1'
 Assert ($connectBat -match 'connect-boot\.ps1') 'connect.bat handoffs via connect-boot.ps1'
 Assert ($gitMode -match 'TUNNEL_DROP') 'git-mode.ps1 emits TUNNEL_DROP on tunnel soft-fail'
 Assert ($connectUiPs1 -match 'TUNNEL_DROP') 'connect-ui.ps1 forces log sync on TUNNEL_DROP'

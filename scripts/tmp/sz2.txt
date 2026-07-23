@@ -1,5 +1,0 @@
-HOST=cloud VER=20260719.31
--- farzadb --
--- alit --
--- smart --
-NO_SUDO

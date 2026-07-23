@@ -30,6 +30,11 @@ if [ -x /usr/local/bin/cursor-auth-sync ] && [ -f /etc/cursor-auth/golden/auth.j
     timeout 4 /usr/local/bin/cursor-auth-sync >/dev/null 2>&1 || true
 fi
 
+# Remote Machine proxy: 10809 when xray up, else proxySupport=off (server NIC).
+if [ -x /usr/local/bin/cursor-remote-proxy-sync ]; then
+    timeout 4 /usr/local/bin/cursor-remote-proxy-sync >/dev/null 2>&1 || true
+fi
+
 if [ -x /usr/local/bin/laptop-exec-setup ]; then
     timeout 5 /usr/local/bin/laptop-exec-setup --user >/dev/null 2>&1 || true
     timeout 5 /usr/local/bin/laptop-exec-setup --all-projects >/dev/null 2>&1 || true
@@ -164,5 +169,10 @@ if [ -f "$HOME/.config/windows-mcp/env" ]; then
         "$HOME/.local/bin/windows-mcp-forward" start >/dev/null 2>&1 || true
     elif [ -x /usr/local/bin/windows-mcp-forward ]; then
         /usr/local/bin/windows-mcp-forward start >/dev/null 2>&1 || true
+    fi
+    if [ -x "$HOME/.local/bin/windows-mcp-seed-agent-tools" ]; then
+        "$HOME/.local/bin/windows-mcp-seed-agent-tools" >/dev/null 2>&1 || true
+    elif [ -x /usr/local/bin/windows-mcp-seed-agent-tools ]; then
+        /usr/local/bin/windows-mcp-seed-agent-tools >/dev/null 2>&1 || true
     fi
 fi

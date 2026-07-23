@@ -444,6 +444,71 @@ function Ensure-WindowsMcpTask {
 }
 
 
+function Start-WindowsMcpProcessDirect {
+    # Prefer windows-mcp.exe; else python -m windows_mcp serve (no cmd.exe wrapper).
+    $filePath = $null
+    $argStr = $null
+    $via = $null
+    $exe = Get-WindowsMcpExe
+    if ($exe) {
+        $filePath = $exe
+        $argStr = 'serve --transport streamable-http --host 127.0.0.1 --port 8000'
+        $via = 'windows_mcp_exe'
+    } else {
+        $py = Get-PythonLauncher
+        if (-not $py) {
+            Write-WindowsMcpEnsureLog 'start_direct_no_exe_or_python' 'WARN'
+            return $false
+        }
+        $filePath = $py
+        $argStr = '-m windows_mcp serve --transport streamable-http --host 127.0.0.1 --port 8000'
+        $via = 'python_direct'
+    }
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $filePath
+        $psi.Arguments = $argStr
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+        $p = New-Object System.Diagnostics.Process
+        $p.StartInfo = $psi
+        if (-not $p.Start()) {
+            Write-WindowsMcpEnsureLog 'start_direct_start_returned_false' 'WARN'
+            return $false
+        }
+        if ($via -eq 'windows_mcp_exe') {
+            Write-WindowsMcpEnsureLog 'started_via_windows_mcp_exe'
+        } else {
+            Write-WindowsMcpEnsureLog 'started_via_python_direct'
+        }
+        return $true
+    } catch {
+        Write-WindowsMcpEnsureLog ("start_direct_failed {0}" -f $_.Exception.Message) 'WARN'
+        return $false
+    }
+}
+
+function Stop-WindowsMcpOrphanCmdWrappers {
+    # Reap leftover cmd.exe /c parents that launched start-server.cmd once :8000 listens.
+    if (-not (Test-WindowsMcpListening)) { return }
+    try {
+        $orphans = @(Get-CimInstance Win32_Process -Filter "Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
+            Where-Object {
+                $cl = [string]$_.CommandLine
+                $cl -and ($cl -match 'start-server\.cmd') -and ($cl -match 'windows-mcp')
+            })
+        foreach ($o in $orphans) {
+            try {
+                Stop-Process -Id ([int]$o.ProcessId) -Force -ErrorAction SilentlyContinue
+                Write-WindowsMcpEnsureLog ("orphan_cmd_reaped pid={0}" -f $o.ProcessId)
+            } catch { }
+        }
+    } catch {
+        Write-WindowsMcpEnsureLog ("orphan_cmd_reap_failed {0}" -f $_.Exception.Message) 'WARN'
+    }
+}
+
 function Restart-WindowsMcpServer {
     Write-WindowsMcpEnsureLog 'restarting_server_after_auth_rotate'
     try { schtasks /End /TN 'windows-mcp-server' 2>&1 | Out-Null } catch { }
@@ -455,38 +520,42 @@ function Restart-WindowsMcpServer {
     } catch { }
     Start-Sleep -Seconds 1
     try { schtasks /Run /TN 'windows-mcp-server' 2>&1 | Out-Null } catch { }
-    $cmd = Join-Path $env:USERPROFILE '.windows-mcp\start-server.cmd'
-    if (-not (Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $cmd)) {
-        try { Start-Process -FilePath $cmd -WindowStyle Hidden | Out-Null } catch { }
+    if (-not (Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue)) {
+        [void](Start-WindowsMcpProcessDirect)
     }
     for ($i = 0; $i -lt 20; $i++) {
         Start-Sleep -Seconds 1
-        if (Test-WindowsMcpListening) { return $true }
+        if (Test-WindowsMcpListening) {
+            Stop-WindowsMcpOrphanCmdWrappers
+            return $true
+        }
     }
-    return (Test-WindowsMcpListening)
+    $ok = Test-WindowsMcpListening
+    if ($ok) { Stop-WindowsMcpOrphanCmdWrappers }
+    return $ok
 }
 
 function Start-WindowsMcpIfNeeded {
-    if (Test-WindowsMcpListening) { return $true }
+    if (Test-WindowsMcpListening) {
+        Stop-WindowsMcpOrphanCmdWrappers
+        return $true
+    }
     Write-WindowsMcpHost '      -> starting windows-mcp-server task...'
     Write-WindowsMcpEnsureLog 'starting scheduled task'
     try { schtasks /Run /TN 'windows-mcp-server' 2>&1 | Out-Null } catch { }
     if (-not (Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue)) {
-        $cmd = Join-Path $env:USERPROFILE '.windows-mcp\start-server.cmd'
-        if (Test-Path -LiteralPath $cmd) {
-            try {
-                Start-Process -FilePath $cmd -WindowStyle Hidden | Out-Null
-                Write-WindowsMcpEnsureLog 'started_via_start-server.cmd'
-            } catch {
-                Write-WindowsMcpEnsureLog ("start_cmd_failed {0}" -f $_.Exception.Message) 'WARN'
-            }
-        }
+        [void](Start-WindowsMcpProcessDirect)
     }
     for ($i = 0; $i -lt 20; $i++) {
         Start-Sleep -Seconds 1
-        if (Test-WindowsMcpListening) { return $true }
+        if (Test-WindowsMcpListening) {
+            Stop-WindowsMcpOrphanCmdWrappers
+            return $true
+        }
     }
-    return (Test-WindowsMcpListening)
+    $ok = Test-WindowsMcpListening
+    if ($ok) { Stop-WindowsMcpOrphanCmdWrappers }
+    return $ok
 }
 
 function Sync-WindowsMcpAuthToServer {
@@ -532,6 +601,8 @@ function Sync-WindowsMcpAuthToServer {
     $remote = "export WMCP_AUTH='$AuthKey'; echo $b64 | base64 -d | python3 -; " +
               'F="$HOME/.local/bin/windows-mcp-forward"; G=/usr/local/bin/windows-mcp-forward; ' +
               'if [ -x "$F" ]; then "$F" start >/dev/null 2>&1 || true; elif [ -x "$G" ]; then "$G" start >/dev/null 2>&1 || true; fi; ' +
+              'S="$HOME/.local/bin/windows-mcp-seed-agent-tools"; T=/usr/local/bin/windows-mcp-seed-agent-tools; ' +
+              'if [ -x "$S" ]; then "$S" >/dev/null 2>&1 || true; elif [ -x "$T" ]; then "$T" >/dev/null 2>&1 || true; fi; ' +
               'echo WMCP_SYNC_OK'
     try {
         $out = ((SshX $remote) -join "`n")

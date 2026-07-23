@@ -26,3 +26,17 @@ __MACOSX/
 # Deploy credentials (laptop only) - never commit real passwords
 *-deploy.local.ps1
 publish/*-deploy.local.ps1
+
+
+# Agent/dev scratch dumps - never commit one-off debug scripts (repo-root and scripts/tmp)
+/tmp/
+/_tmp/
+/dev/
+/dist/
+/logs/
+/tools/
+scripts/tmp/
+
+# Test-generated artifact bundles (recreated by tests, not source)
+/.test-client-bundle/
+/.test-client-local/

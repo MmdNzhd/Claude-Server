@@ -175,6 +175,14 @@ if [ -f "$SERVER_DIR/claude-git-setup.sh" ]; then
 fi
 if [ -f "$SERVER_DIR/laptop-exec.sh" ]; then
     install -m 755 "$SERVER_DIR/laptop-exec.sh" /usr/local/bin/laptop-exec
+    if [ -f "$SERVER_DIR/windows-mcp-forward.sh" ]; then
+        install -m 755 "$SERVER_DIR/windows-mcp-forward.sh" /usr/local/bin/windows-mcp-forward
+        ok "windows-mcp-forward -> /usr/local/bin/"
+    fi
+    if [ -f "$SERVER_DIR/windows-mcp-seed-agent-tools.sh" ]; then
+        install -m 755 "$SERVER_DIR/windows-mcp-seed-agent-tools.sh" /usr/local/bin/windows-mcp-seed-agent-tools
+        ok "windows-mcp-seed-agent-tools -> /usr/local/bin/"
+    fi
     ok "laptop-exec -> /usr/local/bin/"
     if [ -f "$SERVER_DIR/skills/laptop-exec/SKILL.md" ]; then
         mkdir -p /usr/local/lib/claude-server/skills/laptop-exec
@@ -287,6 +295,21 @@ if [ -f "$SERVER_DIR/mcp-via-xray.sh" ]; then
     install -m 755 "$SERVER_DIR/mcp-via-xray.sh" /usr/local/lib/claude-server/mcp-via-xray.sh
     ok "mcp-via-xray -> /usr/local/bin/ (server-side HTTP MCP via xray)"
 fi
+if [ -f "$SERVER_DIR/xray-ensure-single.sh" ]; then
+    install -m 755 "$SERVER_DIR/xray-ensure-single.sh" /usr/local/bin/xray-ensure-single
+    mkdir -p /usr/local/lib/claude-server
+    install -m 755 "$SERVER_DIR/xray-ensure-single.sh" /usr/local/lib/claude-server/xray-ensure-single.sh
+    ok "xray-ensure-single -> /usr/local/bin/ (single-instance helper)"
+fi
+if [ -f "$SERVER_DIR/xray.service" ]; then
+    install -m 644 "$SERVER_DIR/xray.service" /etc/systemd/system/xray.service
+    systemctl daemon-reload
+    systemctl enable xray >/dev/null 2>&1 || true
+    if command -v xray-ensure-single >/dev/null 2>&1; then
+        xray-ensure-single || true
+    fi
+    ok "xray.service -> /etc/systemd/system/ (ExecStartPre single-instance)"
+fi
 if [ -f "$SERVER_DIR/cursor-mcp-template.json" ]; then
     mkdir -p /usr/local/lib/claude-server
     install -m 644 "$SERVER_DIR/cursor-mcp-template.json" /usr/local/lib/claude-server/cursor-mcp-template.json
@@ -297,6 +320,12 @@ if [ -f "$SERVER_DIR/cursor-mcp-sync.sh" ]; then
     install -m 755 "$SERVER_DIR/cursor-mcp-sync.sh" /usr/local/bin/cursor-mcp-sync
     install -m 755 "$SERVER_DIR/cursor-mcp-sync.sh" /usr/local/lib/claude-server/cursor-mcp-sync.sh
     ok "cursor-mcp-sync -> /usr/local/bin/ + /usr/local/lib/claude-server/"
+fi
+if [ -f "$SERVER_DIR/cursor-remote-proxy-sync.sh" ]; then
+    mkdir -p /usr/local/lib/claude-server
+    install -m 755 "$SERVER_DIR/cursor-remote-proxy-sync.sh" /usr/local/bin/cursor-remote-proxy-sync
+    install -m 755 "$SERVER_DIR/cursor-remote-proxy-sync.sh" /usr/local/lib/claude-server/cursor-remote-proxy-sync.sh
+    ok "cursor-remote-proxy-sync -> /usr/local/bin/ + /usr/local/lib/claude-server/"
 fi
 if [ -f "$SERVER_DIR/skills/context7/SKILL.md" ]; then
     mkdir -p /usr/local/lib/claude-server/skills/context7
@@ -627,6 +656,11 @@ fi
 if [ -x /usr/local/bin/cursor-mcp-sync ]; then
     cursor-mcp-sync --all || warn "cursor-mcp-sync --all failed (non-fatal)"
     ok "Cursor MCP pack synced to all users"
+fi
+
+if [ -x /usr/local/bin/cursor-remote-proxy-sync ]; then
+    cursor-remote-proxy-sync --all || warn "cursor-remote-proxy-sync --all failed (non-fatal)"
+    ok "Cursor remote Machine proxy synced to all users"
 fi
 
 DEPLOY_BUNDLE=""

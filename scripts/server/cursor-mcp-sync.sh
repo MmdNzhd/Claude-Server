@@ -441,3 +441,15 @@ case "$MODE" in
         _sync_user "$TARGET"
         ;;
 esac
+
+# Keep remote Machine proxy aligned with xray (10809) or server_direct fallback.
+if [ -x /usr/local/bin/cursor-remote-proxy-sync ]; then
+    case "$MODE" in
+        all)
+            /usr/local/bin/cursor-remote-proxy-sync --all || true
+            ;;
+        user)
+            /usr/local/bin/cursor-remote-proxy-sync --user "$TARGET" || true
+            ;;
+    esac
+fi

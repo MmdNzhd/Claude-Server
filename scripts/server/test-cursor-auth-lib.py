@@ -158,13 +158,13 @@ def main() -> int:
             errors += 1
 
         golden_mode = oct(os.stat(golden).st_mode & 0o777)
-        if golden_mode != "0o700":
-            print(f"FAIL golden dir mode {golden_mode} (expected 700)")
+        if golden_mode != "0o750":
+            print(f"FAIL golden dir mode {golden_mode} (expected 750)")
             errors += 1
 
         auth_mode = oct(os.stat(lib.AUTH_JSON).st_mode & 0o777)
-        if auth_mode != "0o600":
-            print(f"FAIL auth.json mode {auth_mode} (expected 600)")
+        if auth_mode != "0o640":
+            print(f"FAIL auth.json mode {auth_mode} (expected 640)")
             errors += 1
 
     if errors:

@@ -2,7 +2,7 @@
 
 SSHFS mount of laptop design folder + noVNC browser desktop. No Cursor/VS Code.
 
-Client scripts: **v20260722.24** (Windows developer package uses same git-mode modules).
+Client scripts: **v20260722.41** (Windows developer package uses same git-mode modules).
 
 Ships in the **Sepidz** ZIP under `designer/` (IP `192.168.250.70`). Smart developer ZIPs do not include designer.
 

@@ -249,7 +249,7 @@ _laptop_ssh() {
         set +e
         if [ -n "${LAPTOP_EXEC_CMD_TIMEOUT:-}" ] && command -v timeout >/dev/null 2>&1; then
             # Bound long searches so hung Select-String cannot pin mux slots for hours.
-            timeout --foreground "$LAPTOP_EXEC_CMD_TIMEOUT" \
+            timeout -k 5 --foreground "$LAPTOP_EXEC_CMD_TIMEOUT" \
                 ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" "$@"
             _rc=$?
             if [ "$_rc" -eq 124 ]; then
@@ -611,7 +611,7 @@ _cmd_run() {
     _parse_project_flag "$@"; _strip_leading_dd
     [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec run [-p PROJECT] -- <cmd...>"
     _require_session; _resolve_project
-    local _t="${LAPTOP_EXEC_RUN_TIMEOUT:-600}"
+    local _t="${LAPTOP_EXEC_RUN_TIMEOUT:-120}"
     if [ "$_t" = "0" ]; then _run_in_project "$REMOTE_PATH" "${REMAINING[@]}"
     else LAPTOP_EXEC_CMD_TIMEOUT="$_t" _run_in_project "$REMOTE_PATH" "${REMAINING[@]}"; fi
 }
@@ -821,7 +821,7 @@ Project selection (first match):
 Speed: shared ControlMaster + 8 session slots (capped for OpenSSH MaxSessions) + flock bring-up
 Search: git grep (tracked) -> PowerShell Select-String (excl. node_modules/.git/...)
   rg flags -i/-l/--glob REJECTED. Dash patterns: rg -- -foo path
-  Timeouts: rg 90s, run 600s, git 300s, scp 120s (set LAPTOP_EXEC_*_TIMEOUT=0 to disable)
+  Timeouts: rg 90s, run 120s, git 300s, scp 120s (set LAPTOP_EXEC_*_TIMEOUT=0 to disable)
 EOF
 }
 
@@ -877,6 +877,9 @@ main() {
         _le_audit_log INFO CMD_END "cmd=${cmd}" "exit=0" "ms=${_ms}"             "project=${PROJECT_ID:-${ACTIVE_MOUNT:-?}}" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8"
     elif [ "$_rc" -eq 1 ] && [ "$cmd" = "rg" ]; then
         _le_audit_log INFO CMD_END "cmd=rg" "exit=1" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "meaning=no_matches" "$(_le_audit_session_fields)"
+    elif [ "$_rc" -eq 124 ]; then
+        # Guarantee CMD_END on timeout (124) even when CMD_TIMEOUT already logged in _laptop_ssh.
+        _le_audit_log WARN CMD_END "cmd=${cmd}" "exit=124" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "meaning=timeout" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8"
     elif [ "$_rc" -eq 255 ]; then
         _le_audit_log ERROR CMD_END "cmd=${cmd}" "exit=255" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8" "hint=SSH/mux failure or SLOT_FULL — check prior SLOT_*/MUX_* lines."
     else

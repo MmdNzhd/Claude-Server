@@ -135,5 +135,5 @@ for home in /home/*/; do
 done
 
 echo ""
-echo -e "${GREEN}Done.${NC} Users should reconnect connect.bat (v20260722.24+)."
+echo -e "${GREEN}Done.${NC} Users should reconnect connect.bat (v20260722.41+)."
 echo ""

@@ -5,6 +5,124 @@
 $script:CursorSocksFrontPort = 18999
 $script:CursorHttpFrontPort = 18998
 
+
+# #14: Job Object bound to Connect-spawned sidecar/watchdog tree only (KILL_ON_JOB_CLOSE).
+# Never assign foreign PowerShell processes.
+$script:CursorProxySidecarJob = $null
+
+function Initialize-CursorProxySidecarJob {
+    if ($script:CursorProxySidecarJob) { return $true }
+    try {
+        if (-not ('ClaudeConnect.SidecarJob' -as [type])) {
+            Add-Type -Language CSharp -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class ClaudeConnectSidecarJob {
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool SetInformationJobObject(IntPtr hJob, int JobObjectInfoClass, IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool CloseHandle(IntPtr hObject);
+  [StructLayout(LayoutKind.Sequential)]
+  public struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+    public long PerProcessUserTimeLimit;
+    public long PerJobUserTimeLimit;
+    public uint LimitFlags;
+    public UIntPtr MinimumWorkingSetSize;
+    public UIntPtr MaximumWorkingSetSize;
+    public uint ActiveProcessLimit;
+    public UIntPtr Affinity;
+    public uint PriorityClass;
+    public uint SchedulingClass;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct IO_COUNTERS {
+    public ulong ReadOperationCount;
+    public ulong WriteOperationCount;
+    public ulong OtherOperationCount;
+    public ulong ReadTransferCount;
+    public ulong WriteTransferCount;
+    public ulong OtherTransferCount;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+    public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+    public IO_COUNTERS IoInfo;
+    public UIntPtr ProcessMemoryLimit;
+    public UIntPtr JobMemoryLimit;
+    public UIntPtr PeakProcessMemoryUsed;
+    public UIntPtr PeakJobMemoryUsed;
+  }
+  public const int JobObjectExtendedLimitInformation = 9;
+  public const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+  public static IntPtr CreateKillOnCloseJob() {
+    IntPtr h = CreateJobObject(IntPtr.Zero, null);
+    if (h == IntPtr.Zero) return IntPtr.Zero;
+    var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    int len = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+    IntPtr ptr = Marshal.AllocHGlobal(len);
+    try {
+      Marshal.StructureToPtr(info, ptr, false);
+      if (!SetInformationJobObject(h, JobObjectExtendedLimitInformation, ptr, (uint)len)) {
+        CloseHandle(h);
+        return IntPtr.Zero;
+      }
+    } finally { Marshal.FreeHGlobal(ptr); }
+    return h;
+  }
+}
+"@
+        }
+        $h = [ClaudeConnectSidecarJob]::CreateKillOnCloseJob()
+        if ($h -eq [IntPtr]::Zero) { return $false }
+        $script:CursorProxySidecarJob = $h
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog 'SIDECAR_JOB created kill_on_close=1' 'INFO'
+        }
+        return $true
+    } catch {
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("SIDECAR_JOB create_fail err={0}" -f $_.Exception.Message) 'WARN'
+        }
+        return $false
+    }
+}
+
+function Add-CursorProxySidecarJobProcess {
+    param([Parameter(Mandatory)]$Process)
+    if (-not $Process) { return }
+    if (-not (Initialize-CursorProxySidecarJob)) { return }
+    try {
+        $ok = [ClaudeConnectSidecarJob]::AssignProcessToJobObject(
+            [IntPtr]$script:CursorProxySidecarJob,
+            $Process.Handle
+        )
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("SIDECAR_JOB assign pid={0} ok={1}" -f $Process.Id, [int]$ok) 'DEBUG'
+        }
+    } catch {
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("SIDECAR_JOB assign_fail pid={0} err={1}" -f $Process.Id, $_.Exception.Message) 'DEBUG'
+        }
+    }
+}
+
+function Stop-CursorProxySidecarJob {
+    if (-not $script:CursorProxySidecarJob) { return }
+    try {
+        [void][ClaudeConnectSidecarJob]::CloseHandle([IntPtr]$script:CursorProxySidecarJob)
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog 'SIDECAR_JOB closed' 'INFO'
+        }
+    } catch {}
+    $script:CursorProxySidecarJob = $null
+}
+
+
 if (-not ("ClaudeConnect.TcpRelay" -as [type])) {
     Add-Type -Language CSharp -TypeDefinition @"
 using System;
@@ -70,14 +188,24 @@ function Start-TcpPortRelay {
         }
         return $true
     }
+    if (-not $script:CursorProxySidecarPortMutexes) { $script:CursorProxySidecarPortMutexes = @{} }
     $mutexName = "Local\ClaudeConnectSidecar-$ListenPort"
     $created = $false
+    $portMutex = $null
     try {
-        $null = New-Object System.Threading.Mutex($false, $mutexName, [ref]$created)
-    } catch { $created = $true }
+        $portMutex = New-Object System.Threading.Mutex($false, $mutexName, [ref]$created)
+    } catch { $created = $true; $portMutex = $null }
     if (-not $created) {
+        # Another owner already holds this port's mutex - never store a foreign handle.
+        try { if ($portMutex) { $portMutex.Dispose() } } catch {}
         Start-Sleep -Milliseconds 500
         return (Test-CursorProxySidecarListening -Port $ListenPort)
+    }
+    # We created it (single-flight winner for this port) - hold the handle open for the
+    # lifetime of this Connect process so Stop-CursorProxySidecarRelays can release it
+    # on clean disconnect instead of leaking it to process exit.
+    if ($portMutex -and -not $script:CursorProxySidecarPortMutexes.ContainsKey($ListenPort)) {
+        $script:CursorProxySidecarPortMutexes[$ListenPort] = $portMutex
     }
     $arg = "-NoProfile -ExecutionPolicy Bypass -Command `"Add-Type -Language CSharp -TypeDefinition (Get-Content -Raw '%TEMP%\claude-connect-relay-type.cs'); [ClaudeConnectTcpRelay]::Run($ListenPort, $BackendPort)`""
     $cs = Join-Path $env:TEMP 'claude-connect-relay-type.cs'
@@ -121,9 +249,12 @@ Add-Type -Language CSharp -TypeDefinition (Get-Content -LiteralPath '$cs' -Raw)
 [ClaudeConnectTcpRelay]::Run($ListenPort, $BackendPort)
 "@ | Set-Content -LiteralPath $ps1 -Encoding UTF8
     try {
-        Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @(
+        $pRelay = Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -PassThru -ArgumentList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ps1
-        ) | Out-Null
+        )
+        if ($pRelay -and (Get-Command Add-CursorProxySidecarJobProcess -ErrorAction SilentlyContinue)) {
+            Add-CursorProxySidecarJobProcess -Process $pRelay
+        }
     } catch {
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
             Write-GitModeLog "SIDECAR_START_FAIL name=$Name port=$ListenPort err=$($_.Exception.Message)" 'WARN'
@@ -189,6 +320,23 @@ function Repair-CursorProxySettingsToSidecar {
 function Clear-CursorProxySettingsSidecar {
     # Remove sticky 18998 proxy when sidecar/backend is down so Cursor can talk direct
     # instead of hard-failing every agent turn on a dead loopback proxy.
+    # NEVER clear settings while server-profile Cursor windows are open - repair sidecar only
+    # (CLEAR_SKIP). Clearing under an open window freezes chat/proxy mid-session.
+    $nOpen = 0
+    try {
+        if (Get-Command Get-CursorProfileProcesses -ErrorAction SilentlyContinue) {
+            $nOpen = @(Get-CursorProfileProcesses -ForceRefresh).Count
+        }
+    } catch { $nOpen = 0 }
+    if ($nOpen -gt 0) {
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("CURSOR_PROXY_CLEAR_SKIP: reason=windows_open action=repair_sidecar_only profile_count={0}" -f $nOpen) 'WARN'
+        }
+        if (Get-Command Repair-CursorProxySettingsToSidecar -ErrorAction SilentlyContinue) {
+            try { [void](Repair-CursorProxySettingsToSidecar) } catch {}
+        }
+        return $false
+    }
     $settingsPath = Get-CursorProxySettingsPath
     if (-not (Test-Path -LiteralPath $settingsPath)) { return $false }
     try {
@@ -259,12 +407,18 @@ function Test-CursorProxyBackendOpen {
 function Ensure-CursorProxySidecar {
     # Cheap heal for open Cursor sessions: if sticky front is down, restart relays.
     # Only write settings->18998 when front AND backend -L ports are up (else Clear).
+    if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+        Write-GitModeLog 'SIDECAR_ENSURE begin' 'DEBUG'
+    }
     $frontOk = ((Test-CursorProxySidecarListening -Port 18998) -and (Test-CursorProxySidecarListening -Port 18999))
     if (-not $frontOk) {
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
             Write-GitModeLog 'SIDECAR_ENSURE restarting_front_doors' 'WARN'
         }
         $frontOk = [bool](Start-CursorProxySidecar)
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("SIDECAR_ENSURE start_done ok={0}" -f [int]$frontOk) 'DEBUG'
+        }
     }
     if (-not $frontOk) {
         try { Clear-CursorProxySettingsSidecar | Out-Null } catch {}
@@ -284,14 +438,26 @@ function Ensure-CursorProxySidecar {
 
 function Start-CursorProxySidecarWatchdog {
     # Mid-session heal: Cursor stays open for hours; sidecar powershell can die and leave
-    # settings pointed at a dead 18998. One watchdog per machine (mutex).
+    # settings pointed at a dead 18998. One watchdog per machine, enforced by an OS mutex
+    # that this Connect process actually WAITS ON (WaitOne) and HOLDS for its own lifetime -
+    # not just a "does the named object exist" check - so Stop-CursorProxySidecarWatchdog
+    # can deterministically release it on clean disconnect and let the next Connect (or a
+    # relaunch) start a fresh watchdog immediately instead of racing/blocking on a stale one.
+    if ($script:CursorProxyWatchdogStarted) { return $true }
     $mutexName = 'Local\ClaudeConnectSidecarWatchdog'
     $created = $false
+    $m = $null
+    try { $m = New-Object System.Threading.Mutex($false, $mutexName, [ref]$created) } catch { return $false }
+    if (-not $created) {
+        # another owner holds it
+        try { if ($m) { $m.Dispose() } } catch {}
+        return $false
+    }
     try {
-        $null = New-Object System.Threading.Mutex($false, $mutexName, [ref]$created)
-    } catch { $created = $false }
-    if (-not $created) { return $false }
-    if ($script:CursorProxyWatchdogStarted) { return $true }
+        $got = $m.WaitOne(0)
+    } catch [System.Threading.AbandonedMutexException] { $got = $true }
+    if (-not $got) { try { $m.Dispose() } catch {}; return $false }
+    $script:CursorProxyWatchdogMutex = $m
     $wd = Join-Path $env:TEMP 'claude-connect-sidecar-watchdog.ps1'
     @'
 $ErrorActionPreference = "Continue"
@@ -329,30 +495,167 @@ while ($true) {
 }
 '@ | Set-Content -LiteralPath $wd -Encoding UTF8
     try {
-        Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @(
+        $pWd = Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -PassThru -ArgumentList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wd
-        ) | Out-Null
+        )
+        if ($pWd -and (Get-Command Add-CursorProxySidecarJobProcess -ErrorAction SilentlyContinue)) {
+            Add-CursorProxySidecarJobProcess -Process $pWd
+        }
         $script:CursorProxyWatchdogStarted = $true
+        try {
+            $lease = Join-Path $env:TEMP 'claude-connect-sidecar-watchdog.lease'
+            ("{0}|{1}" -f $PID, (Get-Date -Format o)) | Set-Content -LiteralPath $lease -Encoding ASCII
+        } catch {}
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
             Write-GitModeLog 'SIDECAR_WATCHDOG started' 'INFO'
         }
         return $true
     } catch {
+        try { if ($script:CursorProxyWatchdogMutex) { $script:CursorProxyWatchdogMutex.ReleaseMutex() } } catch {}
+        try { if ($script:CursorProxyWatchdogMutex) { $script:CursorProxyWatchdogMutex.Dispose() } } catch {}
+        $script:CursorProxyWatchdogMutex = $null
         return $false
     }
 }
 
+function Stop-CursorProxySidecarWatchdog {
+    # Clean disconnect only (wired from connect.ps1's finally, never-keepTunnelForEditor
+    # branch). Releases the machine-wide watchdog mutex this process actually holds
+    # (acquired via WaitOne in Start-CursorProxySidecarWatchdog), kills the detached
+    # watchdog powershell.exe (matched by its TEMP script path in CommandLine - never a
+    # blind powershell.exe kill), and removes its TEMP script + lease file so a future
+    # Connect can start a fresh watchdog without waiting on a stale mutex or process.
+    try {
+        if ($script:CursorProxyWatchdogMutex) {
+            try { $script:CursorProxyWatchdogMutex.ReleaseMutex() } catch {}
+            try { $script:CursorProxyWatchdogMutex.Dispose() } catch {}
+        }
+    } catch {}
+    $script:CursorProxyWatchdogMutex = $null
+    try {
+        $procs = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -match [regex]::Escape('claude-connect-sidecar-watchdog.ps1') })
+        foreach ($p in $procs) {
+            try {
+                Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+                if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+                    Write-GitModeLog ("SIDECAR_WATCHDOG_STOP pid={0}" -f $p.ProcessId) 'INFO'
+                }
+            } catch {}
+        }
+    } catch {}
+    foreach ($f in @(
+        (Join-Path $env:TEMP 'claude-connect-sidecar-watchdog.ps1'),
+        (Join-Path $env:TEMP 'claude-connect-sidecar-watchdog.lease')
+    )) {
+        try { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } } catch {}
+    }
+    if (Get-Command Stop-CursorProxySidecarJob -ErrorAction SilentlyContinue) { try { Stop-CursorProxySidecarJob } catch {} }
+    $script:CursorProxyWatchdogStarted = $false
+    if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+        Write-GitModeLog 'SIDECAR_WATCHDOG_STOPPED' 'INFO'
+    }
+    return $true
+}
+
+function Stop-CursorProxySidecarRelays {
+    # Clean disconnect only (wired from connect.ps1's finally, never-keepTunnelForEditor
+    # branch). Kills ONLY the two sticky front-door relay powershell.exe processes,
+    # matched by their TEMP script path in CommandLine (claude-connect-sidecar-18998.ps1 /
+    # claude-connect-sidecar-18999.ps1) - never a blind "kill all powershell". Disposes the
+    # port mutexes this process holds (opened, not owned - Dispose only, no ReleaseMutex)
+    # and removes the matching TEMP relay scripts.
+    try {
+        $procs = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.CommandLine -match [regex]::Escape('claude-connect-sidecar-18998.ps1') -or
+                $_.CommandLine -match [regex]::Escape('claude-connect-sidecar-18999.ps1')
+            })
+        foreach ($p in $procs) {
+            try {
+                Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+                if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+                    Write-GitModeLog ("SIDECAR_RELAY_STOP pid={0}" -f $p.ProcessId) 'INFO'
+                }
+            } catch {}
+        }
+    } catch {}
+    if ($script:CursorProxySidecarPortMutexes) {
+        foreach ($key in @($script:CursorProxySidecarPortMutexes.Keys)) {
+            $mx = $script:CursorProxySidecarPortMutexes[$key]
+            # These handles were opened with initiallyOwned=$false and never WaitOne'd -
+            # this process does not own them, so only Dispose (ReleaseMutex would throw).
+            try { if ($mx) { $mx.Dispose() } } catch {}
+        }
+        $script:CursorProxySidecarPortMutexes = @{}
+    }
+    foreach ($f in @(
+        (Join-Path $env:TEMP 'claude-connect-sidecar-18998.ps1'),
+        (Join-Path $env:TEMP 'claude-connect-sidecar-18999.ps1')
+    )) {
+        try { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } } catch {}
+    }
+    if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+        Write-GitModeLog 'SIDECAR_RELAYS_STOPPED' 'INFO'
+    }
+    return $true
+}
+
+function Invoke-CursorProxySidecarBootReap {
+    # Optional nice-to-have: if a previous Connect process crashed/was killed without
+    # reaching the clean-disconnect Stop-CursorProxySidecarWatchdog call, its lease file
+    # points at a Connect host PID that's no longer running. Reap just that orphaned
+    # watchdog (mutex release + cmdline-scoped process kill + TEMP cleanup) once at boot,
+    # before Ensure-CursorProxySidecar, so this Connect doesn't inherit a stale watchdog.
+    # Never touches Mac; never kills anything not matched by the watchdog TEMP script path.
+    $lease = Join-Path $env:TEMP 'claude-connect-sidecar-watchdog.lease'
+    if (-not (Test-Path -LiteralPath $lease)) { return $false }
+    $leasePid = 0
+    try {
+        $raw = (Get-Content -LiteralPath $lease -Raw -ErrorAction Stop).Trim()
+        $parts = $raw -split '\|', 2
+        if ($parts.Length -ge 1) { [void][int]::TryParse($parts[0], [ref]$leasePid) }
+    } catch { return $false }
+    if ($leasePid -le 0 -or $leasePid -eq $PID) { return $false }
+    $stillRunning = $false
+    try { $stillRunning = [bool](Get-Process -Id $leasePid -ErrorAction SilentlyContinue) } catch { $stillRunning = $false }
+    if ($stillRunning) { return $false }
+    if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+        Write-GitModeLog ("SIDECAR_BOOT_REAP orphan_lease_pid={0}" -f $leasePid) 'WARN'
+    }
+    if (Get-Command Stop-CursorProxySidecarWatchdog -ErrorAction SilentlyContinue) {
+        try { Stop-CursorProxySidecarWatchdog } catch {}
+    }
+    return $true
+}
+
 function Start-LegacyCursorProxyRelays {
     # If running Cursor still has --proxy-server on an old per-slot port, listen there and forward to 19080.
+    # CIM process enumeration can hang for tens of seconds under load - bound it so
+    # Ensure-CursorProxySidecar cannot freeze Connect after SIDECAR_ENSURE.
     $prof = Join-Path $env:LOCALAPPDATA 'ClaudeServerCursorProfile'
     $ports = @()
     try {
-        Get-CimInstance Win32_Process -Filter "Name = 'Cursor.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
-            $cmd = [string]$_.CommandLine
-            if ($cmd -match [regex]::Escape($prof) -and $cmd -match '--proxy-server=socks5://127\.0\.0\.1:(\d+)') {
-                $ports += [int]$Matches[1]
+        $job = Start-Job -ScriptBlock {
+            param($ProfNeedle)
+            $found = @()
+            Get-CimInstance Win32_Process -Filter "Name = 'Cursor.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+                $cmd = [string]$_.CommandLine
+                if ($cmd -match [regex]::Escape($ProfNeedle) -and $cmd -match '--proxy-server=socks5://127\.0\.0\.1:(\d+)') {
+                    $found += [int]$Matches[1]
+                }
             }
+            return $found
+        } -ArgumentList $prof
+        if (Wait-Job -Job $job -Timeout 2) {
+            $ports = @((Receive-Job -Job $job) | Where-Object { $_ })
+        } else {
+            if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+                Write-GitModeLog 'SIDECAR_LEGACY skip reason=cim_timeout' 'WARN'
+            }
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
         }
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
     } catch {}
     foreach ($p in ($ports | Select-Object -Unique)) {
         if ($p -eq 18999 -or $p -eq 19080) { continue }

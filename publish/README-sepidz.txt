@@ -3,7 +3,23 @@ Claude Code Server - Client Package (Sepidz)
 
 Site: Sepidz
 Server IP (baked into connect scripts): 192.168.250.70
-Current connect scripts: v20260722.24
+Current connect scripts: v20260722.41
+
+SEPIDZ PUBLISH FREEZE (permanent until explicit unfreeze)
+---------------------------------------------------------
+- Marker file: publish\SEPIDZ_PUBLISH_FROZEN - do not delete without a direct user ask.
+- Do NOT pass -ForceUnfreeze unless the user explicitly requests unfreeze.
+- Sepidz is bat-only: no Claude-Connect EXE, no auto-update from Smart server share.
+- Agents must not restore /usr/local/share/claude-client on the server while frozen.
+- Keep using connect.bat from claude-code\windows\ (full script folder).
+
+FINAL DESKTOP ARTIFACT (do not treat as live package)
+-----------------------------------------------------
+Path: C:\Users\Smart\Desktop\claude-publish\claude-code-sepidz
+This Desktop tree is the frozen FINAL snapshot. Launchers may be .DISABLED;
+do not instruct users/agents to "run connect.bat from that folder" as if live.
+Do not edit that tree. Smart users: Desktop\Claude-Connect only.
+
 
 This ZIP contains two products:
 
@@ -23,7 +39,7 @@ WINDOWS
   3. Double-click connect.bat
 
   Header must show:
-    claude-server  |  192.168.250.70  |  v20260722.24
+    claude-server  |  192.168.250.70  |  v20260722.41
 
 MAC
   1. In Terminal:
@@ -32,7 +48,7 @@ MAC
      claude-mount.sh
 
   Header must show:
-    claude-server  |  192.168.250.70  |  v20260722.24
+    claude-server  |  192.168.250.70  |  v20260722.41
 
   Mac Remote Login: System Settings -> Sharing -> Remote Login must allow
   your Mac account (whoami) or All users. Separate from Linux server username.
@@ -58,7 +74,7 @@ ONE CONNECT PER PC
   Orphan tunnel cleanup never kills the live session ssh -R (peer safety).
 
 
-SINGLE PROJECT: only one ACTIVE_MOUNT per session (v20260722.24+).
+SINGLE PROJECT: only one ACTIVE_MOUNT per session (v20260722.41+).
 
 DESIGNER CLIENT (designer\)
 ---------------------------
@@ -79,7 +95,7 @@ TROUBLESHOOTING
 
 CURSOR AUTH: server golden tokens + profile machineid; use [Claude Server] window only.
 
-LOGS (durable on laptop + synced to server, v20260722.24+)
+LOGS (durable on laptop + synced to server, v20260722.41+)
 ----------------------------------------------------------------
   Connect keeps a durable local day log on your laptop AND syncs it to
   the Sepidz server account:

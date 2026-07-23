@@ -115,3 +115,26 @@ After deploy changes to the golden MCP pack, re-run sync and reload Cursor.
 Figma MCP is **not** reached from the laptop `http.proxy`. Cursor launches `/usr/local/bin/mcp-via-xray` on the **Linux server** (stdio), which dials `https://mcp.figma.com/mcp` through server xray HTTP `127.0.0.1:10809`. Bearer token is injected by `cursor-mcp-sync` as `MCP_AUTH_HEADER` from `/etc/claude-code/figma-mcp.env`.
 
 After changing the pack: `sudo claude-server sync-cursor-mcp` then **Reload Window**.
+
+## Remote Machine proxy (server last-resort direct)
+
+Remote Cursor inherits the laptop `http.proxy` (often `127.0.0.1:18998`), which does not exist on the server. `cursor-remote-proxy-sync` writes Machine settings under `~/.cursor-server/data/Machine/settings.json`:
+
+| Condition | Mode | Machine settings |
+|---|---|---|
+| `ss` shows `127.0.0.1:10809` (xray up) | `xray_10809` | `http(s).proxy=http://127.0.0.1:10809`, `http.proxySupport=override` |
+| 10809 down | `server_direct` | `http.proxySupport=off` (server NIC; no proxy) |
+
+`server_direct` means **no proxy on the remote host**. It does not change xray routing: when xray is up, austria-xhttp remains the primary egress for Cursor IP unification. There is no austria→direct balancer (would risk office-IP leak).
+
+Re-run:
+
+```bash
+sudo cursor-remote-proxy-sync --all
+# or via install / MCP sync:
+sudo claude-server install
+sudo claude-server sync-cursor-mcp
+```
+
+Wired into: `install.sh`, `add-user.sh`, `claude-automount.sh` (per-login self), `cursor-mcp-sync` / `sync-cursor-mcp`.
+

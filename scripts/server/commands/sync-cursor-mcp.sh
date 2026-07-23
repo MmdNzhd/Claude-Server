@@ -40,6 +40,15 @@ else
     bash "$SYNC_BIN" --all
 fi
 
+# Explicit proxy sync for older packs (mcp-sync also calls it when installed).
+if [ -x /usr/local/bin/cursor-remote-proxy-sync ]; then
+    if [ -n "${1:-}" ]; then
+        /usr/local/bin/cursor-remote-proxy-sync --user "$1" || true
+    else
+        /usr/local/bin/cursor-remote-proxy-sync --all || true
+    fi
+fi
+
 echo ""
 echo -e "${GREEN}Done.${NC} Users should reload Cursor (Developer: Reload Window) if a session is open."
 echo ""

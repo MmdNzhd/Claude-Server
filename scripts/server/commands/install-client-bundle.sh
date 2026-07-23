@@ -19,6 +19,12 @@ if [ "$EUID" -ne 0 ]; then
     fail "run as root: sudo claude-server install-client-bundle <bundle.zip>"
 fi
 
+# Honor server freeze marker (Sepidz: /usr/local/share/claude-client.FROZEN).
+# Smart has no marker => deploy continues. Override: FORCE_UNFREEZE=1
+if [ -f /usr/local/share/claude-client.FROZEN ] && [ "${FORCE_UNFREEZE:-0}" != "1" ]; then
+    fail "client bundle FROZEN (/usr/local/share/claude-client.FROZEN). Set FORCE_UNFREEZE=1 to override."
+fi
+
 ZIP="${1:-}"
 [ -n "$ZIP" ] || fail "usage: sudo claude-server install-client-bundle <bundle.zip>"
 [ -f "$ZIP" ] || fail "bundle not found: $ZIP"

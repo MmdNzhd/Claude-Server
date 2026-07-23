@@ -305,6 +305,25 @@ connect_log_ts() {
     date '+%Y-%m-%d %H:%M:%S.000'
 }
 
+
+write_connect_scorecard() {
+    # #19: always-on INFO day-log; UI only when CLAUDE_CONNECT_SCORECARD_UI=1
+    local phase="${1:-boot}"
+    local ver="${CONNECT_VERSION:-unknown}"
+    local am="${ACTIVE_MOUNT_ID:-${go_id:-none}}"
+    local ed='closed'
+    [ "${_editor_opened:-0}" = "1" ] && ed='open'
+    local banner='n/a'
+    [ "${TUNNEL_BANNER_CACHE_UP:-0}" = "1" ] && banner='ok'
+    local line="SCORECARD ${phase} auth_ms=n/a banner=${banner} mount_ms=n/a am=${am} editor=${ed} slot=0 ver=${ver}"
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "$line" 'INFO'
+    fi
+    if [ "${CLAUDE_CONNECT_SCORECARD_UI:-0}" = "1" ]; then
+        printf '  %s\n' "$line" >&2
+    fi
+}
+
 connect_log() {
     local msg="$1" level="${2:-INFO}"
     [ -n "${CONNECT_LOG_PATH:-}" ] || return 0
@@ -448,14 +467,21 @@ invoke_connect_silent_update_check() {
     fi
 }
 
+
+_connect_log_sync_fail() {
+    local detail="${1:-sync_fail}"
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "LOG_SYNC_FAIL detail=${detail} (local kept; retry later)" 'WARN'
+    fi
+}
+
 test_connect_remote_log_needs_rebuild() {
     local local_size="$1" remote_size="$2" offset="$3"
     [ -z "$remote_size" ] && remote_size=0
     [ -z "$local_size" ] && local_size=0
     [ -z "$offset" ] && offset=0
-    if [ "$offset" -eq 0 ] && [ "$remote_size" -gt "$local_size" ] 2>/dev/null; then return 0; fi
-    if [ "$local_size" -gt 0 ] && [ "$remote_size" -gt $((local_size * 2)) ] 2>/dev/null; then return 0; fi
-    if [ "$remote_size" -gt $((local_size + 1048576)) ] 2>/dev/null; then return 0; fi
+    # Stage 9: never replace remote with smaller local (forbid shrink).
+    if [ "$local_size" -lt "$remote_size" ] 2>/dev/null; then return 1; fi
     return 1
 }
 
@@ -548,6 +574,11 @@ sync_connect_log_to_server() {
         remote_before="$(ssh -o BatchMode=yes -o ConnectTimeout=6 "$ALIAS" "stat -c%s \"\$HOME/${remote_day}\" 2>/dev/null || echo 0" 2>/dev/null | tr -dc '0-9')"
     fi
     : "${remote_before:=0}"
+    if [ "$size" -lt "$remote_before" ] 2>/dev/null; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "LOG_SYNC_SKIP reason=forbid_shrink local=$size remote_was=$remote_before off=$off (append/merge only)" 'INFO'
+        fi
+    fi
     if declare -F test_connect_remote_log_needs_rebuild >/dev/null 2>&1 && test_connect_remote_log_needs_rebuild "$size" "$remote_before" "$off"; then
         rm -f "${CONNECT_LOG_PATH}.sync-pending" "${CONNECT_LOG_PATH}.chunk" 2>/dev/null || true
         if declare -F sshx >/dev/null 2>&1; then
@@ -685,6 +716,11 @@ sync_connect_log_to_server() {
                 done
             fi
         fi
+    else
+        _connect_log_sync_fail "scp_chunk_fail"
+        rm -f "${CONNECT_LOG_PATH}.chunk"
+        flock -u 8 2>/dev/null || true
+        return 0
     fi
     rm -f "${CONNECT_LOG_PATH}.chunk"
     flock -u 8 2>/dev/null || true

@@ -395,10 +395,11 @@ main() {
                 fi
             fi
         fi
-        _update_msg '  Optional update available (v%s -> v%s). Update now? [Y/n/D]:\n' "$local_ver" "$remote_ver"
-        ans=Y
-        if [ -t 0 ]; then read -r ans || ans=Y; fi
+        _update_msg '  Optional update available (v%s -> v%s). Update now? [y/N/D]:\n' "$local_ver" "$remote_ver"
+        ans=N
+        if [ -t 0 ]; then read -r ans || ans=N; fi
         ans="$(printf '%s' "$ans" | tr '[:lower:]' '[:upper:]')"
+        [ -z "$ans" ] && ans=N
         case "$ans" in
             N|NO)
                 _update_file_log "UPDATE_OPTIONAL_SKIP reason=user_no local=$local_ver remote=$remote_ver"

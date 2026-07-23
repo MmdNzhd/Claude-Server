@@ -656,7 +656,7 @@ function Heal-CursorProfileMachineIdFromLocal {
 # (plus 2 more inside Test-CursorAuthNeedsRefresh) to rediscover "still missing" each time.
 # Cache the negative result locally with a short TTL so repeat connects skip the probe
 # entirely; the TTL keeps it self-healing once the admin actually bootstraps golden auth.
-$script:CursorGoldenMissingTtlMin = 15
+$script:CursorGoldenMissingTtlMin = 3
 function Test-CursorGoldenKnownMissing {
     $gs = Get-LocalCursorGlobalStorage
     $path = Join-Path $gs 'golden-missing-checked-at.txt'
@@ -692,6 +692,8 @@ function Get-CursorGoldenExportedAtStamp {
     if ($stamp) {
         $cache.Stamp = $stamp
         $cache.At = Get-Date
+        # Stamp proves golden exists - never keep a stale "missing" negative cache.
+        Clear-CursorGoldenMissingCache
     }
     return $stamp
 }
@@ -732,7 +734,7 @@ function Test-CursorAuthStampCurrent {
 }
 
 function Test-CursorAuthNeedsRefresh {
-    param([string]$DbPath = '')
+    param([string]$DbPath = '', [bool]$AuthComplete = $false)
     $reasons = @()
 
     if (-not $DbPath) {
@@ -818,7 +820,7 @@ function Test-CursorAuthNeedsRefresh {
     if (Get-Command Get-CursorMainProfileProcesses -ErrorAction SilentlyContinue) {
         $profileMain = @(Get-CursorMainProfileProcesses).Count
     }
-    if ($personalMain -gt 0 -and $profileMain -eq 0) {
+    if ($personalMain -gt 0 -and $profileMain -eq 0 -and -not $AuthComplete) {
         Write-AuthSyncLog (
             "personal Cursor active without server profile (personal_main=$personalMain profile_main=$profileMain) - auth needs refresh"
         ) 'WARN'
@@ -862,7 +864,6 @@ function Sync-CursorGoldenAuth {
     )
 
     $authTotalSw = [System.Diagnostics.Stopwatch]::StartNew()
-    $skipped = [PSCustomObject]@{ Ok = $false; Skipped = $true }
 
     $localGs = Get-LocalCursorGlobalStorage
     $dbPath = Join-Path $localGs 'state.vscdb'
@@ -872,11 +873,29 @@ function Sync-CursorGoldenAuth {
     $walBytes = if (Test-Path "$dbPath-wal") { (Get-Item "$dbPath-wal").Length } else { 0 }
 
     Write-AuthSyncLog "AUTH_SYNC: begin force=$Force db_bytes=$dbBytes wal_bytes=$walBytes alias=$Alias remote_path=$RemotePath" 'INFO'
+    # Mid-session AUTH: never merge into a huge open profile DB (chat freeze / WAL risk).
+    # Threshold 500 MiB. -Force (explicit bootstrap/P) still allowed.
+    $authDbTooLarge = 524288000L
+    if (-not $Force -and $dbBytes -gt $authDbTooLarge) {
+        Write-AuthSyncLog ("AUTH_SYNC_SKIP: reason=db_too_large db_bytes={0} threshold={1}" -f $dbBytes, $authDbTooLarge) 'WARN'
+        return [PSCustomObject]@{ Ok = $false; Skipped = $true; Reason = 'db_too_large' }
+    }
+    # If we already saw exported-at this session (stamp prefetch), golden is NOT missing.
+    if ($script:CursorGoldenStampCache -and $script:CursorGoldenStampCache.Stamp) {
+        Clear-CursorGoldenMissingCache
+    }
     if (-not $Force -and (Test-CursorGoldenKnownMissing)) {
-        Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=true reason=golden_missing_cached db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
-        $authTotalSw.Stop()
-        Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra 'path=skip_golden_missing_cached'
-        return $skipped
+        # Prior successful sync proves golden existed; never stay stuck on a stale
+        # negative cache (permission blips used to pin golden_missing_cached).
+        if (Test-Path -LiteralPath $syncedAtPath) {
+            Clear-CursorGoldenMissingCache
+            Write-AuthSyncLog 'AUTH: cleared_stale_golden_missing_cache reason=synced_at_present' 'WARN'
+        } else {
+            Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=true reason=golden_missing_cached db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
+            $authTotalSw.Stop()
+            Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra 'path=skip_golden_missing_cached'
+            return [PSCustomObject]@{ Ok = $false; Skipped = $true; Reason = 'golden_missing_cached' }
+        }
     }
     # AUTH_SYNC_BATCH_PROBE: one SSH for golden existence + exported-at (was 2 round-trips).
     $swProbe = [System.Diagnostics.Stopwatch]::StartNew()
@@ -899,7 +918,7 @@ fi
         Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=true reason=golden_missing db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
         $authTotalSw.Stop()
         Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra 'path=skip_golden_missing'
-        return $skipped
+        return [PSCustomObject]@{ Ok = $false; Skipped = $true; Reason = 'golden_missing' }
     }
     Clear-CursorGoldenMissingCache
     Write-AuthPerfLog -Mark 'auth_ssh_golden_meta' -Ms 0 -Extra 'batched_into_probe'
@@ -959,7 +978,7 @@ fi
         Write-AuthSyncLog "AUTH_SYNC: result force=$Force ok=false skipped=true reason=golden_read_failed db_bytes=$dbBytes wal_bytes=$walBytes" 'INFO'
         $authTotalSw.Stop()
         Write-AuthPerfLog -Mark 'auth_total' -Ms $authTotalSw.ElapsedMilliseconds -Extra 'path=golden_read_failed'
-        return $skipped
+        return [PSCustomObject]@{ Ok = $false; Skipped = $true; Reason = 'golden_read_failed' }
     }
     Write-AuthSyncLog "golden keys=$($authValues.PSObject.Properties.Name -join ',')" 'TRACE'
 

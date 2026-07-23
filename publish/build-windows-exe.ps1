@@ -1,7 +1,10 @@
 #Requires -Version 5.1
 # build-windows-exe.ps1 - pack windows\ client into a single self-extracting .exe (IExpress).
-# For END USERS: give them Claude-Connect.exe only (not the windows\ folder).
-# EXE installs to Desktop\Claude-Connect and launches connect.bat (one PowerShell UI).
+# Folder/ZIP handoff is PRIMARY for users (see docs/client-connect.md + publish/README.txt).
+# This unsigned IExpress EXE is an OPTIONAL fallback and may trip SmartScreen/Defender FP.
+# Never disable Defender in this script. EXE installs to Desktop\Claude-Connect + connect.bat.
+# FP guidance: Unblock/MOTW, scoped exclusion Desktop\Claude-Connect only, WDSI submission,
+# future Authenticode OV+timestamp â€” docs/client-connect.md "SmartScreen / Defender".
 
 param(
     [Parameter(Mandatory)][string]$WindowsDir,
@@ -35,55 +38,9 @@ try {
     }
 
     # Reliable launcher (avoid fragile multi-line powershell inside .cmd)
-    $launchPs = @'
-#Requires -Version 5.1
-$ErrorActionPreference = 'Stop'
-$Dest = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
-$Src = $PSScriptRoot
-$Log = Join-Path $env:TEMP 'claude-connect-setup.log'
-function Log([string]$m) {
-    $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $m
-    Add-Content -LiteralPath $Log -Value $line -Encoding UTF8
-    Write-Host ("  {0}" -f $m)
-}
-try {
-    Log ("setup begin src={0}" -f $Src)
-    Log ("setup dest={0}" -f $Dest)
-    if (-not (Test-Path -LiteralPath $Dest)) {
-        New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-    }
-    $skip = @('setup-claude-connect.cmd', 'setup-launch.ps1', 'READ-ME-USERS.txt')
-    Get-ChildItem -LiteralPath $Src -File | Where-Object { $skip -notcontains $_.Name } | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $Dest $_.Name) -Force
-    }
-    $bat = Join-Path $Dest 'connect.bat'
-    if (-not (Test-Path -LiteralPath $bat)) { throw "connect.bat missing after copy: $bat" }
-
-    if ($env:CLAUDE_CONNECT_SETUP_NO_LAUNCH -eq '1') {
-        Log 'setup files-only (NO_LAUNCH=1) - skip connect.bat'
-        exit 0
-    }
-
-    # NOTE: do NOT block a second run here. connect-boot.ps1 already owns the single
-    # source of truth for "how many Connect windows may run" (Global\ClaudeConnect#0..9,
-    # up to 10 per PC - see connect-boot.ps1). A hard pre-check here duplicated that gate
-    # and rejected legitimate multi-project runs (2nd, 3rd exe launch) even when slots
-    # were free. Let connect-boot.ps1 accept-or-reject via its own mutex pool instead.
-    Log 'launching connect.bat (hidden console -> one PowerShell UI)'
-    # Hidden cmd runs connect.bat; bat starts visible powershell and exits.
-    Start-Process -FilePath 'cmd.exe' -WorkingDirectory $Dest -ArgumentList @('/c', 'connect.bat') -WindowStyle Minimized
-    Log 'setup ok'
-    exit 0
-} catch {
-    Log ("SETUP_FAIL $($_.Exception.Message)")
-    Write-Host ''
-    Write-Host ("  [X] Setup failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
-    Write-Host ("  Log: {0}" -f $Log) -ForegroundColor Yellow
-    Write-Host ''
-    try { pause } catch { Start-Sleep -Seconds 8 }
-    exit 1
-}
-'@
+    $bodyPath = Join-Path $PSScriptRoot '_setup-launch-body.ps1'
+    if (-not (Test-Path -LiteralPath $bodyPath)) { Write-ExeErr "_setup-launch-body.ps1 missing: $bodyPath" }
+    $launchPs = Get-Content -LiteralPath $bodyPath -Raw -Encoding UTF8
     $launchPath = Join-Path $stage 'setup-launch.ps1'
     [System.IO.File]::WriteAllText($launchPath, ($launchPs -replace "`n", "`r`n"), [System.Text.UTF8Encoding]::new($false))
 
@@ -112,9 +69,10 @@ Later updates: automatic from the server when you connect again.
 setlocal EnableExtensions
 cd /d "%~dp0"
 echo.
-echo   Claude Connect setup...
+echo   Claude Connect - installing / starting...
+echo   A progress window appears if an update is downloading.
 echo.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup-launch.ps1"
+powershell -NoProfile -STA -ExecutionPolicy Bypass -File "%~dp0setup-launch.ps1"
 set "EC=%ERRORLEVEL%"
 if not "%EC%"=="0" (
   echo.
@@ -157,7 +115,7 @@ exit /b %EC%
     [void]$sb.AppendLine('FinishMessage=')
     [void]$sb.AppendLine(("TargetName={0}" -f $OutExe))
     [void]$sb.AppendLine(("FriendlyName={0}" -f $FriendlyName))
-    [void]$sb.AppendLine('AppLaunched=cmd.exe /c setup-claude-connect.cmd')
+    [void]$sb.AppendLine('AppLaunched=powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File setup-launch.ps1')
     [void]$sb.AppendLine('PostInstallCmd=<None>')
     [void]$sb.AppendLine('AdminQuietInstCmd=')
     [void]$sb.AppendLine('UserQuietInstCmd=')

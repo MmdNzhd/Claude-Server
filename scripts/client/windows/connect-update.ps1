@@ -12,6 +12,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 $script:Quiet = $Quiet.IsPresent -or ($env:CLAUDE_CONNECT_UPDATE_QUIET -eq '1')
+$script:UpdateProgressForm = $null
+$script:UpdateProgressLabel = $null
+$script:UpdateProgressBar = $null
 
 function Ensure-ConnectRunId {
     if ($env:CLAUDE_CONNECT_RUN_ID -and $env:CLAUDE_CONNECT_RUN_ID.Trim().Length -ge 8) {
@@ -43,12 +46,156 @@ $script:SshCommonOpts = @(
 )
 
 
+
+function Test-PathLooksSepidz {
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    $n = $Path.Replace('/', '\').ToLowerInvariant()
+    return ($n -match 'claude-code-sepidz') -or ($n -match 'claude-connect-sepidz')
+}
+
+function Assert-SmartNotSepidzContaminated {
+    param(
+        [string]$LaunchPath,
+        [string]$ServerIp
+    )
+    $sepidzPath = Test-PathLooksSepidz -Path $LaunchPath
+    $smartCanon = $false
+    try {
+        $canon = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
+        if ($LaunchPath -and $canon) {
+            $a = [IO.Path]::GetFullPath($LaunchPath).TrimEnd('\', '/').ToLowerInvariant()
+            $b = [IO.Path]::GetFullPath($canon).TrimEnd('\', '/').ToLowerInvariant()
+            if ($a -eq $b -or $a.StartsWith($b + '\')) { $smartCanon = $true }
+        }
+    } catch {}
+    # Smart package (.240 / non-Sepidz) must never live under Sepidz folder names.
+    if ($sepidzPath -and $ServerIp -ne '192.168.250.70') {
+        $msg = 'REFUSE Smart/Sepidz contamination: Smart package under Sepidz path (claude-code-sepidz / Claude-Connect-Sepidz)'
+        Write-UpdateFileLog ("FAIL $msg path=$LaunchPath ip=$ServerIp") 'ERROR'
+        Write-UpdateMsg $msg 'Red'
+        exit 1
+    }
+    # Sepidz IP only valid under a Sepidz tree — never on Smart Desktop\Claude-Connect.
+    if ($ServerIp -eq '192.168.250.70' -and (-not $sepidzPath -or $smartCanon)) {
+        $msg = 'REFUSE Smart/Sepidz contamination: ServerIP 192.168.250.70 outside Sepidz tree (or Smart Claude-Connect path)'
+        Write-UpdateFileLog ("FAIL $msg path=$LaunchPath ip=$ServerIp smart_canon=$smartCanon sepidz_path=$sepidzPath") 'ERROR'
+        Write-UpdateMsg $msg 'Red'
+        exit 1
+    }
+}
+
 function Write-UpdateMsg {
     param([string]$Msg, [string]$Color = 'DarkGray')
     if (-not $script:Quiet) {
         Write-Host "  $Msg" -ForegroundColor $Color
         [Console]::Out.Flush()
     }
+}
+
+
+function Test-UpdateProgressUiWanted {
+    if ($env:CLAUDE_CONNECT_UPDATE_UI -eq '0') { return $false }
+    if ($env:CLAUDE_CONNECT_UPDATE_UI -eq '1') { return $true }
+    # Bat early update uses -Quiet but still wants a visible progress window.
+    # Mid-session UPDATE_SILENT leaves UPDATE_UI unset -> no modal.
+    return (-not $script:Quiet)
+}
+
+function Close-UpdateProgressUi {
+    try {
+        if ($script:UpdateProgressForm) {
+            $f = $script:UpdateProgressForm
+            $script:UpdateProgressForm = $null
+            $script:UpdateProgressLabel = $null
+            $script:UpdateProgressBar = $null
+            try { $f.Close() } catch { }
+            try { $f.Dispose() } catch { }
+        }
+    } catch { }
+    try { [System.Windows.Forms.Application]::DoEvents() } catch { }
+}
+
+function Show-UpdateProgressUi {
+    param([string]$Status = 'Updating Claude Connect...')
+    if (-not (Test-UpdateProgressUiWanted)) { return }
+    if ($script:UpdateProgressForm) {
+        Set-UpdateProgressUi -Status $Status
+        return
+    }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = 'Claude Connect'
+        $form.Size = New-Object System.Drawing.Size(460, 168)
+        $form.StartPosition = 'CenterScreen'
+        $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+        $form.MaximizeBox = $false
+        $form.MinimizeBox = $false
+        $form.ControlBox = $false
+        $form.TopMost = $true
+        $form.ShowInTaskbar = $true
+        $title = New-Object System.Windows.Forms.Label
+        $title.AutoSize = $false
+        $title.Location = New-Object System.Drawing.Point(18, 16)
+        $title.Size = New-Object System.Drawing.Size(410, 24)
+        $title.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
+        $title.Text = 'Updating Claude Connect'
+        $label = New-Object System.Windows.Forms.Label
+        $label.AutoSize = $false
+        $label.Location = New-Object System.Drawing.Point(18, 48)
+        $label.Size = New-Object System.Drawing.Size(410, 36)
+        $label.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+        $label.Text = $Status
+        $bar = New-Object System.Windows.Forms.ProgressBar
+        $bar.Location = New-Object System.Drawing.Point(18, 96)
+        $bar.Size = New-Object System.Drawing.Size(410, 22)
+        $bar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+        $bar.MarqueeAnimationSpeed = 30
+        $form.Controls.Add($title)
+        $form.Controls.Add($label)
+        $form.Controls.Add($bar)
+        $form.Show()
+        $form.Refresh()
+        [System.Windows.Forms.Application]::DoEvents()
+        $script:UpdateProgressForm = $form
+        $script:UpdateProgressLabel = $label
+        $script:UpdateProgressBar = $bar
+        Write-UpdateFileLog 'UPDATE_UI shown'
+    } catch {
+        Write-UpdateFileLog ("UPDATE_UI show_fail err=$($_.Exception.Message)") 'WARN'
+    }
+}
+
+function Set-UpdateProgressUi {
+    param(
+        [string]$Status,
+        [int]$Percent = -1
+    )
+    if (-not $script:UpdateProgressForm) { return }
+    try {
+        if ($Status) { $script:UpdateProgressLabel.Text = $Status }
+        if ($Percent -ge 0 -and $script:UpdateProgressBar) {
+            if ($script:UpdateProgressBar.Style -ne [System.Windows.Forms.ProgressBarStyle]::Continuous) {
+                $script:UpdateProgressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
+            }
+            $script:UpdateProgressBar.Value = [Math]::Max(0, [Math]::Min(100, $Percent))
+        }
+        $script:UpdateProgressForm.Refresh()
+        [System.Windows.Forms.Application]::DoEvents()
+    } catch { }
+}
+
+function Get-SafeFileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $fh = Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction SilentlyContinue
+        if (-not $fh) { return $null }
+        $prop = $fh.PSObject.Properties['Hash']
+        if (-not $prop -or -not $prop.Value) { return $null }
+        return ([string]$prop.Value).ToLowerInvariant()
+    } catch { return $null }
 }
 
 function Sync-ConnectExeBesideClient {
@@ -76,6 +223,7 @@ function Sync-ConnectExeBesideClient {
 }
 
 function Complete-UpdateCheckHandoff {
+    Close-UpdateProgressUi
     Sync-ConnectExeBesideClient
     # Boot path: connect.bat runs update then connect.ps1 in the same console.
     if (-not $script:Quiet) { [Console]::Out.Flush() }
@@ -97,6 +245,11 @@ function Write-UpdateFileLog {
         $sid = Ensure-ConnectRunId
         $line = "[$ts] [$Level] [$sid] UPDATE: $Message`n"
         [System.IO.File]::AppendAllText((Get-UpdateLogPath), $line, [System.Text.UTF8Encoding]::new($false))
+        if ($Level -eq 'ERROR' -or $Level -eq 'WARN') {
+            $bread = Join-Path $env:USERPROFILE '.config\claude-connect\last-fail.txt'
+            try { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $bread) | Out-Null } catch { }
+            [System.IO.File]::AppendAllText($bread, $line.Replace("`n","`r`n"), [System.Text.UTF8Encoding]::new($false))
+        }
     } catch { }
 }
 
@@ -106,6 +259,7 @@ trap {
     try { $pos = $_.InvocationInfo.PositionMessage } catch { }
     try { Write-UpdateFileLog ("UNHANDLED $msg at $pos") 'ERROR' } catch { }
     try { Write-UpdateFileLog ("FAIL UPDATE_UNHANDLED: $msg") 'ERROR' } catch { }
+    try { Close-UpdateProgressUi } catch { }
     if (-not $script:Quiet) {
         Write-Host "  [X] Update error: $msg" -ForegroundColor Red
     }
@@ -302,8 +456,9 @@ function Get-RemoteUserFromConf {
 }
 
 function Get-ServerEndpoint {
-    # Always user@IP from this package. NEVER Host alias "claude-server"
-    # (often points at Smart 210.240 -> Sepidz clients pull frozen .22).
+    # Always user@IP from this package. NEVER Host alias "claude-server".
+    # Prefer laptop connect.conf REMOTE_USER (aria/mehrdad/...). Site service
+    # accounts (smart/sepidz) are fallback only when conf has no user.
     $ip = Get-LocalServerIp
     if ($env:CLAUDE_UPDATE_SSH_TARGET) {
         $t = $env:CLAUDE_UPDATE_SSH_TARGET.Trim()
@@ -312,12 +467,17 @@ function Get-ServerEndpoint {
     if ($ip) {
         $user = Get-RemoteUserFromConf
         if (-not $user) {
-            $user = if ($ip -eq '192.168.250.70') { 'sepidz' } elseif ($ip -eq '192.168.210.240') { 'smart' } else { 'smart' }
+            if ($ip -eq '192.168.250.70') { $user = 'sepidz' }
+            elseif ($ip -eq '192.168.210.240') { $user = 'smart' }
+            else { $user = 'smart' }
         }
         $t = "{0}@{1}" -f $user, $ip
         return @{ Target = $t; Display = $t }
     }
-    return @{ Target = 'smart@192.168.210.240'; Display = 'smart@192.168.210.240' }
+    $user = Get-RemoteUserFromConf
+    if (-not $user) { $user = 'smart' }
+    $t = "{0}@192.168.210.240" -f $user
+    return @{ Target = $t; Display = $t }
 }
 function Invoke-SshTimed {
     param(
@@ -403,7 +563,8 @@ function Test-BundleChecksums {
             $bad += "missing:$rel"
             continue
         }
-        $got = (Get-FileHash -LiteralPath $fp -Algorithm SHA256).Hash.ToLowerInvariant()
+        $got = Get-SafeFileSha256 -Path $fp
+        if (-not $got) { $bad += "hashfail:$rel"; continue }
         if ($got -ne $want) { $bad += "mismatch:$rel" }
     }
     if ($bad.Count -gt 0) {
@@ -441,7 +602,8 @@ function Test-LocalMatchesRemoteChecksums {
             [void]$bad.Add("missing:$rel")
             continue
         }
-        $got = (Get-FileHash -LiteralPath $fp -Algorithm SHA256).Hash.ToLowerInvariant()
+        $got = Get-SafeFileSha256 -Path $fp
+        if (-not $got) { [void]$bad.Add("hashfail:$rel"); continue }
         if ($got -ne $want) { [void]$bad.Add("mismatch:$rel") }
     }
     if ($bad.Count -gt 0) {
@@ -490,12 +652,11 @@ function Test-LocalExeMatchesRemoteHash {
         Write-UpdateFileLog 'local_exe_missing drift=1'
         return $false
     }
-    $fh = Get-FileHash -LiteralPath $local -Algorithm SHA256 -ErrorAction SilentlyContinue
-    if (-not $fh -or -not $fh.PSObject.Properties['Hash'] -or -not $fh.Hash) {
+    $got = Get-SafeFileSha256 -Path $local
+    if (-not $got) {
         Write-UpdateFileLog ("local_exe_hash_fail local=$local") 'WARN'
         return $false
     }
-    $got = ([string]$fh.Hash).ToLowerInvariant()
     if ($got -ne $want) {
         Write-UpdateFileLog ("local_exe_drift local=$local") 'WARN'
         return $false
@@ -550,6 +711,7 @@ function Invoke-ExeOnlyClientUpdate {
     $null = New-Item -ItemType Directory -Force -Path $tmpDir
     $tmpExe = Join-Path $tmpDir 'Claude-Connect.exe'
 
+    Set-UpdateProgressUi -Status 'Downloading Claude-Connect.exe...' -Percent 25
     Write-UpdateMsg '  downloading Claude-Connect.exe...' 'DarkGray'
     Write-UpdateFileLog ("exe_only_scp begin target=$Target")
     $scpOpts = @(
@@ -584,6 +746,7 @@ function Invoke-ExeOnlyClientUpdate {
     Write-UpdateFileLog ("exe_only_scp_ok bytes=$len pe=1")
 
     $canon = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
+    Set-UpdateProgressUi -Status 'Installing update files...' -Percent 55
     Write-UpdateMsg '  installing from EXE (files only)...' 'DarkGray'
     $prevNoLaunch = $env:CLAUDE_CONNECT_SETUP_NO_LAUNCH
     $env:CLAUDE_CONNECT_SETUP_NO_LAUNCH = '1'
@@ -610,12 +773,25 @@ function Invoke-ExeOnlyClientUpdate {
     }
 
     # Always place the NEW downloaded EXE on Desktop + inside install folder.
+    # When launched FROM the Desktop EXE itself, that file is locked - skip it (folder copy is enough).
     $deskExe = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect.exe'
     $deskSetup = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect-Setup.exe'
     $canonExe = Join-Path $canon 'Claude-Connect.exe'
-    Copy-Item -LiteralPath $tmpExe -Destination $deskExe -Force -ErrorAction SilentlyContinue
-    Copy-Item -LiteralPath $tmpExe -Destination $deskSetup -Force -ErrorAction SilentlyContinue
-    Copy-Item -LiteralPath $tmpExe -Destination $canonExe -Force -ErrorAction SilentlyContinue
+    foreach ($pair in @(
+        @{ Dst = $deskSetup; Req = 'desk_setup' },
+        @{ Dst = $canonExe; Req = 'canon_exe' },
+        @{ Dst = $deskExe; Req = 'desk_exe' }
+    )) {
+        if ($pair.Tag -eq 'desk_exe' -and $env:CLAUDE_CONNECT_FROM_EXE -eq '1') {
+            Write-UpdateFileLog 'exe_copy_skip desk_exe reason=from_exe_locked'
+            continue
+        }
+        try {
+            Copy-Item -LiteralPath $tmpExe -Destination $pair.Dst -Force -ErrorAction Stop
+        } catch {
+            Write-UpdateFileLog ("exe_copy_skip tag=$($pair.Tag) err=$($_.Exception.Message -replace '[\r\n]',' ')") 'WARN'
+        }
+    }
 
     # If user launched from another folder (old bat), refresh that folder too.
     $liveWin = $ScriptDir
@@ -686,6 +862,7 @@ if (-not (Get-Command scp -ErrorAction SilentlyContinue)) { Write-UpdateFileLog 
 
 $localVer = Get-LocalVersion
 Write-UpdateFileLog ("bat_launch script_dir=$ScriptDir local_ver=$localVer quiet=$($script:Quiet)")
+Assert-SmartNotSepidzContaminated -LaunchPath $ScriptDir -ServerIp (Get-LocalServerIp)
 if (-not $localVer) { Write-UpdateFileLog 'no local connect-version.txt - skip' 'WARN'; Complete-UpdateCheckHandoff; exit 0 }
 
 function Get-FallbackServiceUser {
@@ -696,32 +873,42 @@ function Get-FallbackServiceUser {
 }
 
 function Resolve-UpdateEndpoint {
-    # Try laptop REMOTE_USER first, then sepidz/smart service account.
+    # Primary = REMOTE_USER@IP (or site service if conf empty).
+    # Fallback = the other identity (svc <-> developer).
     $primary = Get-ServerEndpoint
-    Write-UpdateFileLog ("SSH_STAGE resolve primary=$($primary.Display)")
+    $ip = Get-LocalServerIp
+    $svc = if ($ip) { Get-FallbackServiceUser -Ip $ip } else { 'smart' }
+    $ru = Get-RemoteUserFromConf
+    $ruDisp = if ($ru) { $ru } else { '(none)' }
+    Write-UpdateFileLog ("SSH_STAGE resolve primary=$($primary.Display) conf_REMOTE_USER=$ruDisp svc_fallback=$svc")
     $ver = Invoke-SshCat -Target $primary.Target -RemotePath "$RemoteBundle/connect-version.txt"
     if ($ver) {
+        Write-UpdateFileLog ("SSH_STAGE resolve_ok target=$($primary.Target) via=primary conf_REMOTE_USER=$ruDisp svc_fallback=$svc")
         return @{ Target = $primary.Target; Display = $primary.Display; RemoteVer = $ver }
     }
-    $ip = Get-LocalServerIp
-    if (-not $ip) { return $null }
-    $svc = Get-FallbackServiceUser -Ip $ip
-    $user = Get-RemoteUserFromConf
-    if ($user -and ($user -ne $svc)) {
-        $fb = "{0}@{1}" -f $svc, $ip
+    if (-not $ip) {
+        Write-UpdateFileLog ("SSH_STAGE resolve_fail reason=no_ip primary=$($primary.Display) conf_REMOTE_USER=$ruDisp") 'WARN'
+        return $null
+    }
+    $user = $ru
+    $primaryUser = (($primary.Target -split '@')[0] + '').Trim()
+    foreach ($u in @($user, $svc)) {
+        if (-not $u) { continue }
+        if ($u -eq $primaryUser) { continue }
+        $fb = "{0}@{1}" -f $u, $ip
+        $via = if ($u -eq $svc) { 'svc_fallback' } else { 'conf_REMOTE_USER' }
         Write-UpdateMsg ("Update retry via {0}" -f $fb) 'DarkGray'
-        Write-UpdateFileLog ("SSH_STAGE resolve fallback=$fb")
+        Write-UpdateFileLog ("SSH_STAGE resolve fallback=$fb via=$via conf_REMOTE_USER=$ruDisp svc_fallback=$svc")
         $ver2 = Invoke-SshCat -Target $fb -RemotePath "$RemoteBundle/connect-version.txt"
         if ($ver2) {
+            Write-UpdateFileLog ("SSH_STAGE resolve_ok target=$fb via=$via conf_REMOTE_USER=$ruDisp")
             return @{ Target = $fb; Display = $fb; RemoteVer = $ver2 }
         }
-    } elseif (-not $user) {
-        # primary already used service account
-    } else {
-        # primary was service; try nothing else
     }
+    Write-UpdateFileLog ("SSH_STAGE resolve exhausted primary=$($primary.Display) conf_REMOTE_USER=$ruDisp svc_fallback=$svc") 'WARN'
     return $null
 }
+
 
 $resolved = Resolve-UpdateEndpoint
 if (-not $resolved) {
@@ -800,9 +987,10 @@ try {
 $forceReq = Test-UpdateForceRequired -Policy $policy -LocalVer $localVer
 $mode = 'optional'
 try { if ($policy.mode) { $mode = [string]$policy.mode } } catch {}
-if ($forceReq) { $mode = 'force' }
+# UPDATE_FORCE / applied_ok only when policy mode is force AND force_min requires it.
+$forceApply = ($mode -eq 'force') -and $forceReq
 
-if ($mode -ne 'force') {
+if (-not $forceApply) {
     # UPDATE_SILENT / Quiet must never auto-apply optional updates
     if ($script:Quiet) {
         Write-UpdateMsg 'Optional client update available (skipped in silent check)' 'DarkYellow'
@@ -819,12 +1007,12 @@ if ($mode -ne 'force') {
     $msg = 'A newer Claude Connect is available. Update now?'
     try { if ($policy.message_optional) { $msg = [string]$policy.message_optional } } catch {}
     Write-UpdateMsg ("{0} (v{1} -> v{2})" -f $msg, $localVer, $remoteVer) 'Cyan'
-    $answer = 'Y'
+    $answer = 'N'
     try {
         Write-Host -NoNewline '  Update now? [Y]es / [N]ot now / [D]efer 48h: '
         $answer = [Console]::ReadLine()
-    } catch { $answer = 'Y' }
-    if (-not $answer) { $answer = 'Y' }
+    } catch { $answer = 'N' }
+    if (-not $answer) { $answer = 'N' }
     $a = $answer.Trim().ToUpperInvariant()
     if ($a -eq 'D' -or $a -eq 'DEFER') {
         $hours = 48
@@ -848,10 +1036,12 @@ if ($mode -ne 'force') {
 
 
 # --- EXE-only primary update (bat or EXE launch) ---
+Show-UpdateProgressUi -Status 'Preparing update...'
+Set-UpdateProgressUi -Status ('Updating to v{0}...' -f $remoteVer) -Percent 5
 Write-UpdateFileLog 'exe_only_primary try=1'
 if (Invoke-ExeOnlyClientUpdate -Target $ep.Target -RemoteVer $remoteVer) {
     Write-UpdateMsg "Updated to v$remoteVer" 'Green'
-    Write-UpdateFileLog 'applied_ok via=exe_only need_relaunch exit=2'
+    Write-UpdateFileLog 'applied_ok via=exe_only continue_no_relaunch exit=0'
     try {
         $dayLog = Get-UpdateLogPath
         $cfg = Join-Path $env:USERPROFILE '.config\claude-connect\connect.conf'
@@ -937,25 +1127,29 @@ if (Invoke-ExeOnlyClientUpdate -Target $ep.Target -RemoteVer $remoteVer) {
         Write-UpdateFileLog ("SHIP_FAIL ex=" + $_.Exception.Message) 'WARN'
     }
     Sync-ConnectExeBesideClient
-    Release-ConnectSingleInstanceForUpdateRelaunch
-    exit 2
+    Set-UpdateProgressUi -Status 'Update complete...' -Percent 100
+    Close-UpdateProgressUi
+    exit 0
 }
 
 Write-UpdateFileLog 'exe_only_fallback_to_bundle' 'WARN'
+Set-UpdateProgressUi -Status 'Falling back to full bundle download...' -Percent 30
 Write-UpdateMsg '  EXE update unavailable - falling back to full bundle...' 'DarkYellow'
 
 $manifestRaw = Invoke-SshCat -Target $ep.Target -RemotePath "$RemoteBundle/manifest.txt"
-if (-not $manifestRaw) { Write-UpdateFileLog 'manifest_empty_or_unreachable' 'ERROR'; exit 1 }
+if (-not $manifestRaw) { Write-UpdateFileLog 'manifest_empty_or_unreachable' 'ERROR'; Close-UpdateProgressUi; exit 1 }
 
 $files = @($manifestRaw -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-if ($files.Count -eq 0) { Write-UpdateFileLog 'manifest_zero_files' 'ERROR'; exit 1 }
+if ($files.Count -eq 0) { Write-UpdateFileLog 'manifest_zero_files' 'ERROR'; Close-UpdateProgressUi; exit 1 }
 
 Write-UpdateFileLog ("manifest_files=$($files.Count)")
+Set-UpdateProgressUi -Status 'Downloading client bundle...' -Percent 35
 Write-UpdateMsg '  downloading client bundle...' 'DarkGray'
 if (-not (Invoke-BundleDownload -Target $ep.Target -RemoteBundlePath $RemoteBundle -LocalStagingRoot $StagingDir)) {
     Write-UpdateMsg '[!] Update download failed - using local copy' 'DarkYellow'
     Write-UpdateFileLog 'download_failed' 'ERROR'
     Remove-Item $StagingDir -Recurse -Force -ErrorAction SilentlyContinue
+    Close-UpdateProgressUi
     exit 1
 }
 
@@ -967,6 +1161,7 @@ if (-not (Test-BundleChecksums -StagingRoot $StagingDir)) {
     Write-UpdateMsg '[!] Update checksum failed - using local copy' 'DarkYellow'
     Write-UpdateFileLog 'checksum_verify_failed exit=1' 'ERROR'
     Remove-Item $StagingDir -Recurse -Force -ErrorAction SilentlyContinue
+    Close-UpdateProgressUi
     exit 1
 }
 
@@ -1067,6 +1262,7 @@ if ($failed.Count -gt 0) {
     Write-UpdateMsg "[!] Update incomplete ($($failed.Count) files) - using local copy" 'DarkYellow'
     Write-UpdateFileLog ("incomplete_files=$($failed.Count) sample=$($failed[0])") 'ERROR'
     Remove-Item $StagingDir, $NewRoot, $BakRoot -Recurse -Force -ErrorAction SilentlyContinue
+    Close-UpdateProgressUi
     exit 1
 }
 
@@ -1118,9 +1314,11 @@ function Swap-LiveDir {
                 }
                 Write-UpdateFileLog 'swap_inplace_ok reason=live_in_use' 'WARN'
                 Write-UpdateFileLog 'UPDATE_SWAP_IN_USE: inplace copy ok; bat will relaunch (exit=2)' 'WARN'
+                Write-UpdateFileLog 'UPDATE_EXIT pending=2 reason=swap_inplace_live_in_use' 'WARN'
                 return $true
             } catch {
                 Write-UpdateFileLog ("swap_inplace_fail err=$($_.Exception.Message)") 'ERROR'
+                Write-UpdateFileLog ("UPDATE_EXIT pending=1 reason=swap_inplace_fail") 'ERROR'
             }
         }
         Restore-FromBak -Live $Live -Bak $Bak
@@ -1161,11 +1359,18 @@ if ($swapOk) {
 } else {
     Write-UpdateMsg '[!] Update apply failed - rolled back to previous package' 'DarkYellow'
     Write-UpdateFileLog 'apply_rollback' 'ERROR'
+    Write-UpdateFileLog 'UPDATE_EXIT exit=1 reason=apply_rollback_swap_fail' 'ERROR'
+    Close-UpdateProgressUi
     exit 1
 }
 
 Write-UpdateMsg "Updated to v$remoteVer" 'Green'
+$depth = 0
+try { if ($env:CLAUDE_CONNECT_UPDATE_DEPTH) { $depth = [int]$env:CLAUDE_CONNECT_UPDATE_DEPTH } } catch { $depth = 0 }
+$fromExe = if ($env:CLAUDE_CONNECT_FROM_EXE -eq '1') { '1' } else { '0' }
 Write-UpdateFileLog "applied_ok need_relaunch exit=2"
+Write-UpdateFileLog ("UPDATE_EXIT exit=2 need_relaunch pid=$PID depth=$depth dir=$ScriptDir from_exe=$fromExe")
+Write-UpdateFileLog ("bat_relaunch_attempt via=caller depth=$depth dir=$ScriptDir from_exe=$fromExe")
 
     # best-effort: ship ONLY unsynced bytes (same .sync-offset watermark as connect-ui)
     try {
@@ -1254,6 +1459,15 @@ Write-UpdateFileLog "applied_ok need_relaunch exit=2"
     } catch {
         Write-UpdateFileLog ("SHIP_FAIL ex=" + $_.Exception.Message) 'WARN'
     }
-    Release-ConnectSingleInstanceForUpdateRelaunch
+    Set-UpdateProgressUi -Status 'Update complete - restarting...' -Percent 100
+    Close-UpdateProgressUi
+    try {
+        Release-ConnectSingleInstanceForUpdateRelaunch
+        Write-UpdateFileLog ("bat_relaunch_handoff ok released_mutex pid=$PID depth=$depth dir=$ScriptDir")
+    } catch {
+        Write-UpdateFileLog ("bat_relaunch_handoff fail err=$($_.Exception.Message -replace '[\r\n]',' ') pid=$PID") 'ERROR'
+    }
+    # Final breadcrumb after ship so day log always records handoff intent before process dies.
+    Write-UpdateFileLog ("UPDATE_EXIT exiting=2 handoff_to_bat_or_exe_setup pid=$PID")
     exit 2
 

@@ -31,7 +31,11 @@ cp "$WIN_SRC/connect-version.txt" "$TEST_BUNDLE/connect-version.txt"
 cp "$WIN_SRC/connect-version.txt" "$TEST_BUNDLE/mac/connect-version.txt"
 for f in connect.bat connect.ps1 connect-update.ps1 connect-ui.ps1 connect-diagnostic.ps1 \
     editor-launch.ps1 git-mode.ps1 cursor-auth-laptop.ps1 connect-rider.bat; do
-    src="$WIN_SRC/$f"; [ -f "$src" ] || src="$CLIENT_DIR/$f"
+    if [ "$f" = "connect-ui.ps1" ] || [ "$f" = "connect-diagnostic.ps1" ]; then
+        src="$CLIENT_DIR/$f"; [ -f "$src" ] || src="$WIN_SRC/$f"
+    else
+        src="$WIN_SRC/$f"; [ -f "$src" ] || src="$CLIENT_DIR/$f"
+    fi
     [ -f "$src" ] && cp "$src" "$TEST_BUNDLE/$f"
 done
 for f in connect.sh connect-update.sh git-mode.sh connect-ui.sh editor-launch.sh; do

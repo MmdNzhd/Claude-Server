@@ -105,6 +105,22 @@ function Compare-Ver {
     return [string]::CompareOrdinal($A, $B)
 }
 
+function Test-IsSepidzClientDir {
+    param([string]$Dir)
+    if ([string]::IsNullOrWhiteSpace($Dir)) { return $false }
+    if ($Dir -match '(?i)claude-code-sepidz|Claude-Connect-Sepidz') { return $true }
+    $ps1 = Join-Path $Dir 'connect.ps1'
+    if (-not (Test-Path -LiteralPath $ps1)) { return $false }
+    try {
+        $raw = Get-Content -LiteralPath $ps1 -Raw -ErrorAction Stop
+        # Match ONLY the $ServerIP assignment. Smart connect.ps1 also mentions
+        # 192.168.250.70 in guard/compare code - a bare IP match false-positives Sepidz.
+        if ($raw -match '(?m)^\s*\$ServerIP\s*=\s*[''"]192\.168\.250\.70[''"]') { return $true }
+        if ($raw -match '(?m)^\s*\$ServerIP\s*=\s*[''"]192\.168\.210\.240[''"]') { return $false }
+    } catch {}
+    return $false
+}
+
 function Get-ServerTarget {
     if ($env:CLAUDE_UPDATE_SSH_TARGET) { return $env:CLAUDE_UPDATE_SSH_TARGET.Trim() }
     $ip = ''
@@ -118,6 +134,8 @@ function Get-ServerTarget {
         if ($m.Success) { $ip = $m.Groups[1].Value.Trim(); break }
     }
     if (-not $ip) { $ip = '192.168.210.240' }
+    # Prefer %USERPROFILE%\.config\claude-connect\connect.conf REMOTE_USER.
+    # Site service user only if unset. Never force smart@ on 210.240.
     $user = ''
     $conf = Join-Path $env:USERPROFILE '.config\claude-connect\connect.conf'
     if (Test-Path -LiteralPath $conf) {
@@ -130,7 +148,9 @@ function Get-ServerTarget {
         }
     }
     if (-not $user) {
-        $user = if ($ip -eq '192.168.250.70') { 'sepidz' } else { 'smart' }
+        if ($ip -eq '192.168.250.70') { $user = 'sepidz' }
+        elseif ($ip -eq '192.168.210.240') { $user = 'smart' }
+        else { $user = 'smart' }
     }
     return ('{0}@{1}' -f $user, $ip)
 }
@@ -257,9 +277,13 @@ function Copy-DirFiles {
 }
 
 try {
-    if ($env:CLAUDE_CONNECT_SKIP_BOOTSTRAP -eq '1') { exit 0 }
+    if ($env:CLAUDE_CONNECT_SKIP_BOOTSTRAP -eq '1') {
+        Write-BootLog 'skip reason=CLAUDE_CONNECT_SKIP_BOOTSTRAP=1'
+        exit 0
+    }
     if (-not (Get-Command scp -ErrorAction SilentlyContinue) -or -not (Get-Command ssh -ErrorAction SilentlyContinue)) {
         Write-BootLog 'ssh/scp missing - skip' 'WARN'
+        Write-BootLog 'BOOTSTRAP_EXIT exit=1 reason=ssh_scp_missing' 'ERROR'
         exit 1
     }
 
@@ -267,18 +291,32 @@ try {
     if ($Here) {
         $legacy = ($Here -match '(?i)claude-code-client-\d{8}') -or ($Here -match '(?i)claude-code-sepidz-\d{8}') -or ($Here -match '(?i)[\\/]claude-publish[\\/]')
     }
+    # Sepidz trees must never wipe/redirect to Desktop\Claude-Connect (Smart).
+    if ($Here -and (Test-IsSepidzClientDir -Dir $Here)) {
+        Write-BootLog ("sepidz_stay here=$Here")
+        if (Test-GoodClientDir -Dir $Here) { exit 0 }
+        Write-BootLog 'sepidz_here_bad skip_smart_canon_pull' 'WARN'
+        Write-BootLog 'BOOTSTRAP_EXIT exit=1 reason=sepidz_here_bad' 'WARN'
+        exit 1
+    }
     $hereBad = $Here -and -not (Test-GoodClientDir -Dir $Here)
     $canonGood = Test-GoodClientDir -Dir $Canon
     $needPull = $Force -or (-not $canonGood) -or $hereBad -or $legacy
 
     $target = Get-ServerTarget
+    Write-BootLog ("target_chosen=$target here=$Here force=$([bool]$Force) canon=$Canon")
     $cat = Invoke-SshTimed -Exe 'ssh' -ArgumentList ($SshOpts + @($target, "cat '$RemoteBundle/connect-version.txt'")) -TimeoutMs 15000
     if (-not $cat.Ok -or -not $cat.Out) {
         Write-BootLog ("ssh_fail target=$target err=$($cat.Err)" -replace '[\r\n]', ' ') 'ERROR'
+        Write-BootLog ("BOOTSTRAP_EXIT exit=1 reason=ssh_fail target=$target") 'ERROR'
         exit 1
     }
     $remoteVer = ($cat.Out -split '\r?\n' | Select-Object -First 1).Trim()
-    if (-not $remoteVer) { Write-BootLog 'empty remote version' 'ERROR'; exit 1 }
+    if (-not $remoteVer) {
+        Write-BootLog 'empty remote version' 'ERROR'
+        Write-BootLog 'BOOTSTRAP_EXIT exit=1 reason=empty_remote_version' 'ERROR'
+        exit 1
+    }
 
     $canonVer = Get-DirVersion -Dir $Canon
     if (-not $needPull -and $canonGood -and ((Compare-Ver -A $remoteVer -B $canonVer) -le 0)) {
@@ -287,6 +325,7 @@ try {
             Clear-LegacyFolderToExeOnly -Dir $Here
             Set-Content -LiteralPath $RelaunchMarker -Value $Canon -Encoding ASCII
             Write-BootLog ("redirect legacy here=$Here") 'WARN'
+            Write-BootLog ("BOOTSTRAP_EXIT exit=2 reason=redirect_legacy here=$Here canon=$Canon") 'WARN'
             exit 2
         }
         exit 0
@@ -305,6 +344,7 @@ try {
         $scp = Invoke-SshTimed -Exe 'scp' -ArgumentList $remoteArgs.ToArray() -TimeoutMs 120000
         if (-not $scp.Ok) {
             Write-BootLog ("scp_fail exit=$($scp.ExitCode) err=$($scp.Err)" -replace '[\r\n]', ' ') 'ERROR'
+            Write-BootLog ("BOOTSTRAP_EXIT exit=1 reason=scp_fail target=$target") 'ERROR'
             exit 1
         }
         if (-not (Test-GoodClientDir -Dir $stage)) {
@@ -318,6 +358,7 @@ try {
             }
             if (-not $core -or $bug) {
                 Write-BootLog 'stage incomplete or still broken update script' 'ERROR'
+                Write-BootLog 'BOOTSTRAP_EXIT exit=1 reason=stage_incomplete' 'ERROR'
                 exit 1
             }
         }
@@ -329,6 +370,7 @@ try {
                 Clear-LegacyFolderToExeOnly -Dir $Here -ExeSource $stageExe
                 Set-Content -LiteralPath $RelaunchMarker -Value $Canon -Encoding ASCII
                 Write-BootLog ("healed canon + cleaned legacy to EXE from=$Here") 'WARN'
+                Write-BootLog ("BOOTSTRAP_EXIT exit=2 reason=healed_legacy_to_exe here=$Here canon=$Canon") 'WARN'
                 exit 2
             }
         }
@@ -338,5 +380,6 @@ try {
     }
 } catch {
     try { Write-BootLog (('FAIL ' + $_.Exception.Message) -replace '[\r\n]', ' ') 'ERROR' } catch {}
+    try { Write-BootLog ('BOOTSTRAP_EXIT exit=1 reason=exception') 'ERROR' } catch {}
     exit 1
 }

@@ -86,12 +86,11 @@ if ($recoveryFn -match '(?s)^function\s+Begin-ConnectRecovery\s*\{(.*)') {
 }
 Assert ($recoveryEarly -notmatch 'Invoke-ConnectSilentUpdateCheck') 'Begin-ConnectRecovery does not call silent update at function start'
 
-Write-Host '--- 6) CONNECT_VERSION 20260721.52 ---' -ForegroundColor Cyan
-Assert ($ver -match '^20260720\.\d+$') "connect.ps1 ConnectVersion is dated ($ver)"
-Assert ($ver -eq '20260721.52') "connect.ps1 ConnectVersion is 20260721.52 (current: $ver)"
-Assert ($winVerFile -eq '20260721.52') "windows/connect-version.txt is 20260721.52 (current: $winVerFile)"
-Assert ($macVerFile -eq '20260721.52') "mac/connect-version.txt is 20260721.52 (current: $macVerFile)"
-Assert ($macConnect -match "CONNECT_VERSION='20260720\.26'") 'mac/connect.sh CONNECT_VERSION is 20260721.52'
+Write-Host "--- 6) CONNECT_VERSION consistency ($ver) ---" -ForegroundColor Cyan
+Assert ($ver -match '^\d{8}\.\d+$') "connect.ps1 ConnectVersion is dated ($ver)"
+Assert ($winVerFile -eq $ver) "windows/connect-version.txt matches connect.ps1 ($ver vs $winVerFile)"
+Assert ($macVerFile -eq $ver) "mac/connect-version.txt matches connect.ps1 ($ver vs $macVerFile)"
+Assert ($macConnect -match "CONNECT_VERSION='$([regex]::Escape($ver))'") "mac/connect.sh CONNECT_VERSION matches connect.ps1 ($ver)"
 
 Write-Host '--- 7) claude-mount git hide fail-fast (soft) ---' -ForegroundColor Cyan
 $hasTripleSleep = (

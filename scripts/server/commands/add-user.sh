@@ -244,6 +244,12 @@ else
     warn "cursor-mcp-sync not installed - run: sudo claude-server install"
 fi
 
+if [ -x /usr/local/bin/cursor-remote-proxy-sync ]; then
+    cursor-remote-proxy-sync --user "$USERNAME" || warn "cursor-remote-proxy-sync failed for $USERNAME (non-fatal)"
+else
+    warn "cursor-remote-proxy-sync not installed - run: sudo claude-server install"
+fi
+
 step "5 - SSH"
 mkdir -p "/home/$USERNAME/.ssh"
 touch "/home/$USERNAME/.ssh/authorized_keys"

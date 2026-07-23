@@ -24,6 +24,97 @@ MACHINE_ID_TXT = GOLDEN_DIR / "machine-id.txt"
 EXPORTED_AT = GOLDEN_DIR / "exported-at"
 SOURCE_HOST = GOLDEN_DIR / "source-host"
 REFRESH_LOG = Path("/var/log/cursor-auth-refresh.log")
+QUARANTINE_REASON_PATH = Path("/etc/cursor-auth/golden.quarantine-reason")
+# Never restore golden from a personal-email quarantine directory.
+QUARANTINE_DIR = Path("/etc/cursor-auth/golden.quarantined-personal")
+
+# Consumer / personal mailbox domains â€” default deny for shared golden export.
+PERSONAL_EMAIL_DOMAIN_DENYLIST = frozenset({
+    "gmail.com",
+    "googlemail.com",
+    "outlook.com",
+    "hotmail.com",
+    "live.com",
+    "msn.com",
+    "yahoo.com",
+    "ymail.com",
+    "icloud.com",
+    "me.com",
+    "mac.com",
+    "proton.me",
+    "protonmail.com",
+    "aol.com",
+    "mail.com",
+    "gmx.com",
+    "gmx.net",
+})
+
+
+def normalize_email(email: str | None) -> str:
+    return (email or "").strip().lower()
+
+
+def email_domain(email: str | None) -> str:
+    e = normalize_email(email)
+    if "@" not in e:
+        return ""
+    return e.rsplit("@", 1)[-1]
+
+
+def is_personal_email(email: str | None) -> bool:
+    dom = email_domain(email)
+    return bool(dom) and dom in PERSONAL_EMAIL_DOMAIN_DENYLIST
+
+
+def write_quarantine_reason(email: str, reason: str) -> None:
+    """Write email + reason only (no tokens/secrets)."""
+    payload = {
+        "email": normalize_email(email),
+        "domain": email_domain(email),
+        "reason": reason,
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    try:
+        QUARANTINE_REASON_PATH.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(
+            QUARANTINE_REASON_PATH,
+            json.dumps(payload, indent=2) + "\n",
+            mode=0o644,
+        )
+    except OSError:
+        pass
+
+
+def read_quarantine_reason() -> dict[str, Any] | None:
+    if not QUARANTINE_REASON_PATH.is_file():
+        return None
+    try:
+        data = json.loads(QUARANTINE_REASON_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def assert_export_email_allowed(
+    email: str | None, *, allow_personal: bool = False
+) -> None:
+    """Default-deny personal mailbox domains for golden export/import."""
+    e = normalize_email(email)
+    if not e:
+        return
+    if allow_personal:
+        return
+    if is_personal_email(e):
+        write_quarantine_reason(e, "personal_email_denylist")
+        raise SystemExit(
+            "cursor-auth-export: REFUSE personal email for shared golden "
+            f"(email={e} reason=personal_email_denylist). "
+            "Use a team/work account, or pass --allow-personal to override."
+        )
+
+
+# Module-level escape hatch set by export CLI / tests.
+ALLOW_PERSONAL_EMAIL = False
 
 OAUTH_CLIENT_ID = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB"
 
@@ -225,6 +316,63 @@ def load_golden_machine_id() -> str:
     return MACHINE_ID_TXT.read_text(encoding="utf-8").strip()
 
 
+def apply_golden_permissions() -> None:
+    """Mirror install.sh golden perms: dirs 0750, shared 0640, exported-at 0644, sidecars 0600."""
+    try:
+        parent = GOLDEN_DIR.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(parent, 0o750)
+        os.chmod(GOLDEN_DIR, 0o750)
+    except OSError:
+        pass
+    # Best-effort group (cursorauth) â€” ignore if group missing (unit tests / non-root).
+    try:
+        import grp
+
+        gid = grp.getgrnam("cursorauth").gr_gid
+        os.chown(GOLDEN_DIR.parent, -1, gid)
+        os.chown(GOLDEN_DIR, -1, gid)
+    except (KeyError, OSError, ImportError):
+        pass
+
+    shared = (AUTH_JSON, MACHINE_ID_TXT, STATE_KEYS_JSON)
+    for path in shared:
+        if not path.is_file():
+            continue
+        try:
+            os.chmod(path, 0o640)
+        except OSError:
+            pass
+        try:
+            import grp
+
+            gid = grp.getgrnam("cursorauth").gr_gid
+            os.chown(path, -1, gid)
+        except (KeyError, OSError, ImportError):
+            pass
+
+    if EXPORTED_AT.is_file():
+        try:
+            os.chmod(EXPORTED_AT, 0o644)
+        except OSError:
+            pass
+        try:
+            import grp
+
+            gid = grp.getgrnam("cursorauth").gr_gid
+            os.chown(EXPORTED_AT, -1, gid)
+        except (KeyError, OSError, ImportError):
+            pass
+
+    for path in (SOURCE_HOST, STORAGE_JSON):
+        if path.is_file():
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+
+
 def atomic_write(path: Path, content: str, mode: int = 0o640) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
@@ -246,9 +394,8 @@ def write_golden_bundle(
     *,
     require_profile_metadata: bool = False,
 ) -> None:
-    GOLDEN_DIR.mkdir(mode=0o700, exist_ok=True)
-    os.chmod(GOLDEN_DIR.parent, 0o700)
-    os.chmod(GOLDEN_DIR, 0o700)
+    GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
+    # Do not chmod 0700/0600 here â€” apply_golden_permissions() sets install.sh modes.
 
     auth_payload = {
         "accessToken": state_values.get("cursorAuth/accessToken", ""),
@@ -260,6 +407,17 @@ def write_golden_bundle(
             "cursorAuth/stripeSubscriptionStatus", ""
         ),
     }
+
+    # Default deny personal emails for shared golden (override via ALLOW_PERSONAL_EMAIL / --allow-personal).
+    assert_export_email_allowed(
+        auth_payload.get("cachedEmail"),
+        allow_personal=bool(ALLOW_PERSONAL_EMAIL),
+    )
+    # Never restore from quarantined-personal tree into live golden.
+    if QUARANTINE_DIR.is_dir() and str(GOLDEN_DIR.resolve()) == str(QUARANTINE_DIR.resolve()):
+        raise SystemExit(
+            "cursor-auth-export: REFUSE writing into quarantined-personal directory"
+        )
 
     machine_id = state_values.get("storage.serviceMachineId", "")
     if not machine_id:
@@ -291,19 +449,20 @@ def write_golden_bundle(
             "cursor-auth-export: missing required keys: " + ", ".join(missing)
         )
 
-    # Secrets: root-only 0600. Metadata (machine-id, timestamps) also 0600 — directory is 0700.
-    atomic_write(AUTH_JSON, json.dumps(auth_payload, indent=2) + "\n", mode=0o600)
+    # Modes finalized by apply_golden_permissions() (install.sh parity).
+    atomic_write(AUTH_JSON, json.dumps(auth_payload, indent=2) + "\n", mode=0o640)
     atomic_write(
-        STATE_KEYS_JSON, json.dumps(state_values, indent=2) + "\n", mode=0o600
+        STATE_KEYS_JSON, json.dumps(state_values, indent=2) + "\n", mode=0o640
     )
     atomic_write(STORAGE_JSON, json.dumps(storage_data, indent=2) + "\n", mode=0o600)
-    atomic_write(MACHINE_ID_TXT, machine_id + "\n", mode=0o600)
+    atomic_write(MACHINE_ID_TXT, machine_id + "\n", mode=0o640)
     atomic_write(
         EXPORTED_AT,
         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n",
-        mode=0o600,
+        mode=0o644,
     )
     atomic_write(SOURCE_HOST, source_host + "\n", mode=0o600)
+    apply_golden_permissions()
 
 
 def global_storage_dirs(home: Path) -> list[Path]:

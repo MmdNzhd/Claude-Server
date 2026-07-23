@@ -58,7 +58,7 @@ for h in claude-hook-pre claude-hook-stop claude-hook-logout-block; do
     [ -x "/usr/local/bin/$h" ] && ok "$h: installed" || fail "$h: missing or not executable"
 done
 
-for b in claude-automount claude-auth-sync claude-git-setup cursor-auth-sync cursor-auth-export cursor-auth-refresh cursor-mcp-sync; do
+for b in claude-automount claude-auth-sync claude-git-setup cursor-auth-sync cursor-auth-export cursor-auth-refresh cursor-mcp-sync cursor-remote-proxy-sync; do
     [ -x "/usr/local/bin/$b" ] && ok "$b: installed" || warn "$b: missing"
 done
 

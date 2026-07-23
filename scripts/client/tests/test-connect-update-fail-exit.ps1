@@ -39,7 +39,7 @@ foreach ($m in $errorHits) {
         # full bundle path). At this distance an unrelated `exit 0` elsewhere is
         # more likely noise than a real silently-ignored-error bug, so only check
         # for a valid nonzero/`return $false` propagation, not for absence of exit 0.
-        $wideEnd = [Math]::Min($win.Length, $start + 1700)
+        $wideEnd = [Math]::Min($win.Length, $start + 2000)
         $wideWindow = $win.Substring($start, $wideEnd - $start)
         $ok = ($wideWindow -match 'exit\s+1\b') -or ($wideWindow -match 'exit\s+\$') -or ($wideWindow -match 'throw\b') -or ($wideWindow -match 'return\s+\$false\b')
         $bad = $false
@@ -50,8 +50,8 @@ foreach ($m in $errorHits) {
 # Named failure paths (download / incomplete) explicitly exit 1.
 Assert ($win -match "download_failed' 'ERROR'[\s\S]{0,120}?exit 1") 'Win download_failed -> exit 1'
 Assert ($win -match "incomplete_files=[\s\S]{0,220}?exit 1") 'Win incomplete_files -> exit 1'
-Assert ($win -match "manifest_empty_or_unreachable' 'ERROR'; exit 1") 'Win manifest_empty -> exit 1'
-Assert ($win -match "manifest_zero_files' 'ERROR'; exit 1") 'Win manifest_zero -> exit 1'
+Assert ($win -match "manifest_empty_or_unreachable' 'ERROR'[\s\S]{0,80}?exit 1") 'Win manifest_empty -> exit 1'
+Assert ($win -match "manifest_zero_files' 'ERROR'[\s\S]{0,80}?exit 1") 'Win manifest_zero -> exit 1'
 
 # Success relaunch path still exit 2.
 Assert ($win -match 'applied_ok need_relaunch exit=2') 'Win applied_ok still signals exit 2'

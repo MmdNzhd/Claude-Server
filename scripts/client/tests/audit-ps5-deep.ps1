@@ -24,7 +24,7 @@ Write-Host ''
 foreach ($rel in $prodFiles) {
     $path = Get-ClientFile $rel
     if (-not (Test-Path $path)) { Assert $false "$rel exists"; continue }
-    $src = Get-Content $path -Raw
+    $src = Get-Content $path -Raw -Encoding UTF8
     $parseErrs = $null
     $null = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$parseErrs)
     Assert ((-not $parseErrs) -or ($parseErrs.Count -eq 0)) "$rel parses cleanly"
@@ -72,7 +72,7 @@ if (Test-Path $desk) {
 Write-Host ''
 Write-Host '--- connect.bat bundle guards ---' -ForegroundColor Cyan
 $bat = Get-ClientFile 'windows\connect.bat'
-$batSrc = Get-Content $bat -Raw
+$batSrc = Get-Content $bat -Raw -Encoding UTF8
 $ver = Get-ConnectVersion
 $required = @('connect-ui.ps1', 'editor-launch.ps1', 'git-mode.ps1', 'cursor-auth-laptop.ps1', 'connect-version.txt', 'Path.Combine', '@(Choose-Project', 'Acquire-TunnelPort')
 foreach ($r in $required) {

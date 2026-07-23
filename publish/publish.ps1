@@ -10,12 +10,23 @@ param(
     [switch]$SkipVersionBump,
     [switch]$SkipServerDeploy,
     [switch]$SmartOnly,
-    [switch]$SepidzOnly
+    [switch]$SepidzOnly,
+    [switch]$ForceUnfreeze
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ($SmartOnly -and $SepidzOnly) { Write-Err 'Use only one of -SmartOnly or -SepidzOnly' }
+
+$SepidzFrozenMarker = Join-Path $PSScriptRoot 'SEPIDZ_PUBLISH_FROZEN'
+$SepidzPublishFrozen = (Test-Path -LiteralPath $SepidzFrozenMarker) -and (-not $ForceUnfreeze)
+if ($SepidzPublishFrozen -and $SepidzOnly) {
+    Write-Host ''
+    Write-Host 'Sepidz publish/deploy is FROZEN (SEPIDZ_PUBLISH_FROZEN).' -ForegroundColor Red
+    Write-Host 'To unfreeze: delete publish\SEPIDZ_PUBLISH_FROZEN and pass -ForceUnfreeze' -ForegroundColor Yellow
+    Write-Host ''
+    exit 1
+}
 
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 . (Join-Path $PSScriptRoot 'bump-connect-version.ps1')
@@ -330,8 +341,14 @@ if (-not $NoZip) {
         if ($LASTEXITCODE -ne 0) { Write-Err "Smart server deploy failed (use -SkipServerDeploy to skip)" }
     }
 
-    if (-not $NoExe) {
-        Clear-PublishedWindowsToExeOnly -ClientRoot $OutDir -ExePath (Join-Path $OutBase 'Claude-Connect.exe')
+    # Keep full windows\ script tree for Smart folder handoff (Desktop\Claude-Connect primary).
+    # Outer Desktop\Claude-Connect.exe remains sibling fallback. Do not EXE-only-strip OutDir.
+    if ($env:CLAUDE_PUBLISH_STRIP_WINDOWS_EXE_ONLY -eq '1') {
+        if (-not $NoExe) {
+            Clear-PublishedWindowsToExeOnly -ClientRoot $OutDir -ExePath (Join-Path $OutBase 'Claude-Connect.exe')
+        }
+    } else {
+        Write-Host '  Smart windows\ keeps full script tree (EXE-only strip skipped; set CLAUDE_PUBLISH_STRIP_WINDOWS_EXE_ONLY=1 to enable)' -ForegroundColor DarkGray
     }
 }
 
@@ -339,6 +356,12 @@ if (-not $NoZip) {
 }
 
 if (-not $SmartOnly) {
+if ($SepidzPublishFrozen) {
+Write-Host ""
+Write-Host "SKIP Sepidz package rebuild and server deploy (FROZEN)." -ForegroundColor Yellow
+Write-Host "  Marker: publish\SEPIDZ_PUBLISH_FROZEN" -ForegroundColor DarkYellow
+Write-Host "  To unfreeze: delete marker and pass -ForceUnfreeze" -ForegroundColor DarkYellow
+} else {
 Write-Host ""
 Write-Host "Building Sepidz package (client only, IP patched)..." -ForegroundColor White
 Write-Host ""
@@ -417,9 +440,11 @@ if (-not $NoZip) {
             -ProjectRoot $ProjectRoot `
             -SepidClientRoot (Join-Path $SepidDir 'claude-code') `
             -DeploySmart:$false `
-            -DeploySepidz:$true
+            -DeploySepidz:$true `
+            -ForceUnfreeze:$ForceUnfreeze
         if ($LASTEXITCODE -ne 0) { Write-Err "Sepidz server deploy failed (use -SkipServerDeploy to skip)" }
     }
+}
 }
 }
 
@@ -430,16 +455,18 @@ if (-not $SepidzOnly) {
     if (-not $NoZip) { Write-Host "  Main ZIP         : Desktop\claude-publish\$PackageName.zip" -ForegroundColor Green }
     if (-not $NoExe) { Write-Host "  Main EXE         : Desktop\claude-publish\Claude-Connect.exe" -ForegroundColor Green }
 }
-if (-not $SmartOnly) {
+if ((-not $SmartOnly) -and (-not $SepidzPublishFrozen)) {
     Write-Host "  Sepidz (IP patch): Desktop\claude-publish\$SepidName" -ForegroundColor Green
     if (-not $NoZip) { Write-Host "  Sepidz ZIP       : Desktop\claude-publish\$SepidName.zip" -ForegroundColor Green }
+} elseif ($SepidzPublishFrozen -and (-not $SepidzOnly)) {
+    Write-Host "  Sepidz           : SKIPPED (FROZEN)" -ForegroundColor DarkYellow
 }
 
 # Remove legacy dated publish folders/zips so only the stable replace-in-place dirs remain.
 try {
     $patterns = @()
     if (-not $SepidzOnly) { $patterns += '^claude-code-client-\d{8}(\.zip)?$' }
-    if (-not $SmartOnly) { $patterns += '^claude-code-sepidz-\d{8}(\.zip)?$' }
+    if ((-not $SmartOnly) -and (-not $SepidzPublishFrozen)) { $patterns += '^claude-code-sepidz-\d{8}(\.zip)?$' }
     if ($patterns.Count -gt 0) {
         $re = ($patterns -join '|')
         Get-ChildItem -LiteralPath $OutBase -ErrorAction SilentlyContinue | Where-Object {

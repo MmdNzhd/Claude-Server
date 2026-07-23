@@ -248,6 +248,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | `scripts/server/cursor-auth-sync.sh` | deploy scripts — `cursor-auth-sync` |
 | `scripts/server/cursor-auth-refresh.sh` | deploy scripts — `cursor-auth-refresh` + cron |
 | `scripts/server/cursor-auth-lib.py` | deploy scripts — `/usr/local/lib/claude-server/cursor-auth-lib.py` |
+| `scripts/server/cursor-remote-proxy-sync.sh` | deploy scripts — `cursor-remote-proxy-sync` + `/usr/local/lib/claude-server/` |
 | `scripts/server/cursor-auth-source-path.sh` | deploy scripts — `cursor-auth-source-path` |
 | `scripts/server/audit-cursor-golden-deep.py` | deploy scripts — `/usr/local/lib/claude-server/audit-cursor-golden-deep.py` |
 | `scripts/server/laptop-exec.sh` | deploy scripts — `laptop-exec` + skill + `cursor-rules/laptop-exec.mdc` + `cursor-hooks/` |
@@ -278,7 +279,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | Both EXIT and SIGTERM traps | mac:444-445 | `kill <pid>` won't trigger EXIT alone |
 | `[Console]::Key` + `KeyChar` checks | win:610,728,784 | Physical key check so R/Q/C/X work under Persian/Arabic keyboard layouts |
 | `[Uri]::EscapeDataString` for Gateway URL | win:695 | PS5.1+PS7 safe; avoids `System.Web` dependency |
-| `$script:ConnectVersion = '20260722.24'` | win connect.ps1 | Must match connect.bat guard |
+| `$script:ConnectVersion = '20260723.3'` | win connect.ps1 | Must match connect.bat guard |
 | `@(Choose-Project -Mounts $mounts)[-1]` | win connect.ps1 | Prevents pipeline leak → Join-Path ChildPath prompt |
 | `@(Resolve-EditorChoice -CfgDir $CfgDir)[-1]` | win connect.ps1 | Same pipeline-safe capture |
 | `return ,($obj)` in Choose-Project | win connect.ps1 | Unary comma suppresses pipeline output |
@@ -286,7 +287,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | connect.bat guards | windows/connect.bat | Requires git-mode.ps1, Path.Combine, @(Choose-Project, version |
 | Dot-source git-mode.ps1 / git-mode.sh | all Windows/Mac launchers | GIT_MODE must not be duplicated in forks |
 | Push GIT_MODE to ~/.claude-connect.conf | connect.ps1/sh | Server claude-mount reads hide vs server |
-| `CONNECT_VERSION='20260722.24'` | mac connect.sh | Must match published client version |
+| `CONNECT_VERSION='20260723.3'` | mac connect.sh | Must match published client version |
 | Dot-source `connect-ui.ps1` / source `connect-ui.sh` | all launchers | UI tables, header, session box |
 | Always elevate at start of connect.ps1 (UAC) unless already admin | win | Non-admin relaunches via `RunAs`; `-AdminFix` is the elevated child / repair path; `Ensure-LaptopSshReady` still used mid-session |
 | Publish client package **12 files** | publish.ps1 | +connect-ui, editor-launch.sh (mac) |

@@ -19,6 +19,12 @@ if [ "$EUID" -ne 0 ]; then
     fail "run as root: sudo claude-server deploy-client-bundle"
 fi
 
+# Honor server freeze marker (Sepidz: /usr/local/share/claude-client.FROZEN).
+# Smart has no marker => deploy continues. Override: FORCE_UNFREEZE=1
+if [ -f /usr/local/share/claude-client.FROZEN ] && [ "${FORCE_UNFREEZE:-0}" != "1" ]; then
+    fail "client bundle FROZEN (/usr/local/share/claude-client.FROZEN). Set FORCE_UNFREEZE=1 to override."
+fi
+
 SELF="$(readlink -f "$0")"
 COMMANDS_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 REPO_DIR="${CLAUDE_SERVER_REPO:-$(cd "$COMMANDS_DIR/../../.." && pwd 2>/dev/null)}"

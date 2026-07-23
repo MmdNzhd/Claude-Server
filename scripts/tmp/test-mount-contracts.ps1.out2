@@ -1,8 +1,0 @@
-PASS: no Remove-Item -Recurse on .git
-PASS: _restore_git_body has no Remove-Item (rename-only)
-PASS: watchdog DOWN restores git with/before umount
-PASS: empty ACTIVE_MOUNT does not alphabetical-fallback
-PASS: mount _load_global strips CR (tr -d present)
-PASS: hide_try skips worktree .git file (PathType check)
-
-HARD PASS: all mount contracts

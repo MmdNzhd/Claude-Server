@@ -10,15 +10,32 @@ param(
     [string]$SepidServer = 'sepidz@192.168.250.70',
     [switch]$ContinueOnDeployError,
     [switch]$DeploySmart = $true,
-    [switch]$DeploySepidz = $true
+    [switch]$DeploySepidz = $true,
+    [switch]$ForceUnfreeze
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Get-DeployCredentials.ps1')
 if (-not $PSBoundParameters.ContainsKey('SepidServer')) { $SepidServer = Get-SepidzServerTarget }
+
+# Block Sepidz while publish/SEPIDZ_PUBLISH_FROZEN exists (unless -ForceUnfreeze).
+$sepidzFreezeMarker = Join-Path $PSScriptRoot 'SEPIDZ_PUBLISH_FROZEN'
+if ($DeploySepidz -and (Test-Path -LiteralPath $sepidzFreezeMarker) -and -not $ForceUnfreeze) {
+    if (-not $DeploySmart) {
+        Write-Host ''
+        Write-Host 'Sepidz server deploy is FROZEN (SEPIDZ_PUBLISH_FROZEN).' -ForegroundColor Red
+        Write-Host 'To unfreeze: delete publish\SEPIDZ_PUBLISH_FROZEN and pass -ForceUnfreeze' -ForegroundColor Yellow
+        Write-Host ''
+        exit 1
+    }
+    Write-Host 'WARN: Sepidz deploy skipped (FROZEN / SEPIDZ_PUBLISH_FROZEN). Smart deploy continues. Pass -ForceUnfreeze to override.' -ForegroundColor Yellow
+    $DeploySepidz = $false
+}
+
 if ($DeploySmart -and -not $SmartClientRoot) { throw 'SmartClientRoot is required when -DeploySmart is set' }
 if ($DeploySepidz -and -not $SepidClientRoot) { throw 'SepidClientRoot is required when -DeploySepidz is set' }
+
 
 
 $RemoteDeployDir = 'claude-client-bundle-deploy'
