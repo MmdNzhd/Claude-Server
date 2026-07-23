@@ -8,6 +8,14 @@ See also: [sshfs-performance.md](sshfs-performance.md) (GIT_MODE deep dive), [CL
 
 ---
 
+
+## Elevation (Windows)
+
+Connect keeps the main UI **unelevated** by default (no UAC on every start).
+UAC appears only when `Ensure-LaptopSshReady` / `Invoke-LaptopAdminOps` / `-AdminFix`
+must repair sshd, firewall, or `administrators_authorized_keys`.
+
+
 ## Architecture
 
 ```

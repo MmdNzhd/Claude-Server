@@ -219,3 +219,12 @@
 
 - Revert client package to previous Desktop ZIP; server mount via previous `claude-mount` from git.
 - Elevation policy rollback: restore always-elevate block if sshd repair regresses for non-admin users.
+
+## Why Task/subagents abort mid-wave (ops note)
+
+Cursor kills running Task Workers when the **parent chat receives a new user
+message** (`aborted` / `"User aborted/interrupted manually."`). Saying
+"continue" mid-wave is the #1 cause. Forum also reports ~256s auto-cancel
+mislabeled as user interrupt. **Mitigation:** do not ask the user during an
+open wave; prefer Coordinator-direct implementation when the user is chatting;
+see `~/.cursor/skills/parallel-phased-execution/SKILL.md`.

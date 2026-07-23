@@ -266,7 +266,7 @@ if "%OUTDATED%"=="1" (
 REM Pauses in this launcher: OUTDATED block only (pause+exit /b 1). Update paths never pause.
 REM Multi-UI (max 10): connect-boot.ps1 acquires Global\ClaudeConnect#N THEN runs connect.ps1 (no probe/release TOCTOU).
 echo.
-echo   Starting Claude Connect - accept UAC (Yes) if prompted...
+echo   Starting Claude Connect...
 echo.
 REM Detach UI so this CMD is not stuck waiting on the whole session.
 start "" /D "%HERE_NOTRAIL%" powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "%HERE%connect-boot.ps1" %*

@@ -56,7 +56,8 @@ foreach ($rel in @('windows\connect.ps1')) {
     Assert ($src -match 'function Get-InteractiveLaptopUser') "$rel resolves logged-on laptop user when elevated"
     Assert ($src -match 'Get-InteractiveLaptopUser') "$rel stores LAPTOP_USER from interactive session not elevated token"
     Assert ($src -match 'tunnelAuthRetryCount') "$rel caps tunnel auth retry loop"
-    Assert ($src -match 'Start-ProcessAsInteractiveUser|Start-Process powershell\.exe -Verb RunAs') "$rel self-elevates to administrator on launch"
+    Assert ($src -match 'Elevate-when-needed|Invoke-LaptopAdminOps') "$rel elevate-when-needed (not always on launch)"
+    Assert ($src -match 'Start-Process powershell\.exe -Verb RunAs') "$rel still has AdminFix RunAs path"
     Assert ($src -notmatch 'Verb RunAs -ArgumentList $elevArgs -PassThru -Wait') "$rel elevate does not -Wait (avoids stuck unelevated console)"
     Assert ($src -match 'Invoke-LaptopAdminOps') "$rel has laptop admin SSH helpers"
 }
@@ -146,7 +147,7 @@ $connectBat = Get-Content (Get-ClientFile 'windows\connect.bat') -Raw
 $connectUiPs1 = Get-Content (Get-ClientFile 'connect-ui.ps1') -Raw
 $connectUiSh = Get-Content (Get-ClientFile 'connect-ui.sh') -Raw
 Assert ($connectBat -match 'CLAUDE_CONNECT_RUN_ID') 'connect.bat bootstraps CLAUDE_CONNECT_RUN_ID'
-Assert ($connectBat -notmatch '-WindowStyle Hidden.*connect\.ps1') 'connect.bat runs connect.ps1 in visible console (not hidden window)'
+Assert ($connectBat -notmatch '-WindowStyle Hidden[^\r\n]*-File[^\r\n]*connect\.ps1') 'connect.bat does not -File connect.ps1 with WindowStyle Hidden'
 Assert ($connectBat -match 'start "" /D "%HERE_NOTRAIL%" powershell(\.exe)?.*connect-boot\.ps1') 'connect.bat async handoff starts connect-boot.ps1'
 Assert ($connectBat -match 'connect-boot\.ps1') 'connect.bat handoffs via connect-boot.ps1'
 Assert ($gitMode -match 'TUNNEL_DROP') 'git-mode.ps1 emits TUNNEL_DROP on tunnel soft-fail'

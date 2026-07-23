@@ -24,7 +24,7 @@ Optional: Server ──SSHFS──▶ Laptop (UI; may be stale — never prefer 
 scripts/
   client/
     mac/connect.sh                # Mac launcher (bash, runs in Terminal)
-    windows/connect.ps1           # Windows launcher (PowerShell, self-elevates to admin)
+    windows/connect.ps1           # Windows launcher (PowerShell; elevate-when-needed for sshd/firewall)
     connect-ui.sh / connect-ui.ps1 # Shared connect UI + server-only logging
     editor-launch.ps1 / .sh       # Shared VS Code/Cursor launch (dot-sourced by connect)
  windows-mcp-laptop.ps1 # Windows-MCP ensure (dot-sourced by connect.ps1)
@@ -289,7 +289,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | Push GIT_MODE to ~/.claude-connect.conf | connect.ps1/sh | Server claude-mount reads hide vs server |
 | `CONNECT_VERSION='20260723.12'` | mac connect.sh | Must match published client version |
 | Dot-source `connect-ui.ps1` / source `connect-ui.sh` | all launchers | UI tables, header, session box |
-| Always elevate at start of connect.ps1 (UAC) unless already admin | win | Non-admin relaunches via `RunAs`; `-AdminFix` is the elevated child / repair path; `Ensure-LaptopSshReady` still used mid-session |
+| Elevate only when sshd/firewall/authorized_keys repair needs admin | win | Main UI stays unelevated; `-AdminFix` / `Invoke-LaptopAdminOps` elevates on demand; `Ensure-LaptopSshReady` still used mid-session |
 | Publish client package **12 files** | publish.ps1 | +connect-ui, editor-launch.sh (mac) |
 | `CONNECT_PORT_BASE=20000` | mac connect.sh | Port formula base; guard: `base < PORT ≤ 65535` |
 | `exit_requested` menu loop + M/C/X | mac connect.sh | Post-disconnect menu parity with Windows |

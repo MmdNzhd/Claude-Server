@@ -41,49 +41,38 @@ function Dot-SourceSibling {
 
 $script:RunAdminFix = [bool]$AdminFix
 
-if (-not $script:RunAdminFix) {
-    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator)
-    if (-not $isAdmin) {
-        # connect-boot holds Global\ClaudeConnect in THIS process. An elevated child cannot
-        # inherit that Mutex handle; if we keep holding it across RunAs -Wait, the child
-        # always hits SINGLE_INSTANCE: blocked and the UI never appears.
-        if ($global:ClaudeConnectBootMutex) {
-            try { $global:ClaudeConnectBootMutex.ReleaseMutex() } catch { }
-            try { $global:ClaudeConnectBootMutex.Dispose() } catch { }
-            $global:ClaudeConnectBootMutex = $null
-        }
-        $env:CLAUDE_CONNECT_BOOT_MUTEX = $null
-        # Prefer elevating connect-boot so the admin process re-acquires the mutex atomically.
-        $bootPs1 = Join-Path $PSScriptRoot 'connect-boot.ps1'
-        $elevTarget = if (Test-Path -LiteralPath $bootPs1) { $bootPs1 } else { $PSCommandPath }
-        $elevArgs = @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', $elevTarget) + $args
-        try {
-            # Do NOT -Wait: waiting unelevated parent leaves a second console open all session.
-            Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $elevArgs | Out-Null
-            exit 0
-        } catch {
-            Write-Host ''
-            Write-Host '[X] Administrator elevation required (UAC cancelled or failed).' -ForegroundColor Red
-            Write-Host '    Click Yes on the UAC prompt, then run connect.bat again.' -ForegroundColor Yellow
-            Write-Host ''
-            try {
-                $d = Join-Path $env:USERPROFILE '.config\claude-connect\logs'
-                New-Item -ItemType Directory -Force -Path $d | Out-Null
-                $f = Join-Path $d ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd'))
-                $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
-                $sid = if ($env:CLAUDE_CONNECT_RUN_ID) { $env:CLAUDE_CONNECT_RUN_ID } else { '-' }
-                [IO.File]::AppendAllText($f, "[$ts] [ERROR] [$sid] FAIL ADMIN_ELEVATE: UAC cancelled or failed`n", [Text.UTF8Encoding]::new($false))
-            } catch {}
-            try { cmd /c pause } catch { Start-Sleep -Seconds 8 }
-            exit 1
+# Elevate-when-needed: keep the main UI unelevated by default (no UAC on every start).
+# Invoke-LaptopAdminOps / -AdminFix still elevates for sshd, firewall, and
+# administrators_authorized_keys repairs when Ensure-LaptopSshReady requires it.
+
+function Save-ConnectConfKey {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value
+    )
+    $map = [ordered]@{}
+    if (Test-Path -LiteralPath $Path) {
+        Get-Content -LiteralPath $Path -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_ -match '^\s*#' -or $_ -match '^\s*$') { return }
+            if ($_ -match '^(.+?)=(.*)$') {
+                $k = $Matches[1].Trim(); $v = $Matches[2]
+                if ($k) { $map[$k] = $v }
+            }
         }
     }
+    $map[$Key] = $Value
+    if (-not $map.Contains('LAPTOP_USER') -or -not [string]$map['LAPTOP_USER']) {
+        if (Get-Command Get-InteractiveLaptopUser -ErrorAction SilentlyContinue) {
+            $map['LAPTOP_USER'] = Get-InteractiveLaptopUser
+        }
+    }
+    $lines = foreach ($k in $map.Keys) { "{0}={1}" -f $k, $map[$k] }
+    $dir = Split-Path -Parent $Path
+    if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $lines | Set-Content -Path $Path -Encoding ASCII
 }
 
-
-# Always elevate the main connect UI (admin sshd / administrators_authorized_keys / firewall).
-# -AdminFix child still used for targeted pending fixes; unelevated launch re-execs via UAC once.
 
 trap {
     Write-Host ''
@@ -1267,12 +1256,16 @@ function Choose-Project {
                     '1' {
                         $nUser = (Read-ConnectPrompt '    New server username (Enter to cancel)' -Tag 'CFG_USER').Trim()
                         if ($nUser -and $nUser -ne $RemoteUser) {
-                            @("REMOTE_USER=$nUser", "LAPTOP_USER=$(Get-InteractiveLaptopUser)") | Set-Content -Path $Cfg -Encoding ASCII
-                            Remove-SshHostBlock $sshCfg $Alias
-                            Write-Host ''; Write-Host '    Saved. Re-run connect.bat.' -ForegroundColor Green
-                            Write-ConnectDecision 'config_username_saved_relaunch' $nUser
-                            if (Get-Command Close-ConnectLog -ErrorAction SilentlyContinue) { Close-ConnectLog }
-                            Write-Host ''; exit 0
+                            if ($nUser -match '[@/\\]') { Warn "Invalid server username." }
+                            else {
+                                Save-ConnectConfKey -Path $Cfg -Key 'REMOTE_USER' -Value $nUser
+                                Save-ConnectConfKey -Path $Cfg -Key 'LAPTOP_USER' -Value (Get-InteractiveLaptopUser)
+                                Remove-SshHostBlock $sshCfg $Alias
+                                Write-Host ''; Write-Host '    Saved. Re-run connect.bat.' -ForegroundColor Green
+                                Write-ConnectDecision 'config_username_saved_relaunch' $nUser
+                                if (Get-Command Close-ConnectLog -ErrorAction SilentlyContinue) { Close-ConnectLog }
+                                Write-Host ''; exit 0
+                            }
                         }
                     }
                     '2' { Configure-EditorPref -CfgDir $CfgDir }
@@ -1295,6 +1288,8 @@ function Choose-Project {
     }
 }
 
+
+
 # config
 New-Item -ItemType Directory -Force -Path $CfgDir | Out-Null
 if ($Setup -or -not (Test-Path $Cfg)) {
@@ -1308,7 +1303,8 @@ if ($Setup -or -not (Test-Path $Cfg)) {
     if (-not $RemoteUser) { throw "Server username is required" }
     if ($RemoteUser -match '[@/\\]') { throw "Invalid server username: $RemoteUser" }
     $laptopUser = Get-InteractiveLaptopUser
-    @("REMOTE_USER=$RemoteUser", "LAPTOP_USER=$laptopUser") | Set-Content -Path $Cfg -Encoding ASCII
+    Save-ConnectConfKey -Path $Cfg -Key 'REMOTE_USER' -Value $RemoteUser
+    Save-ConnectConfKey -Path $Cfg -Key 'LAPTOP_USER' -Value $laptopUser
     Write-Host ""
 }
 
@@ -1531,7 +1527,8 @@ if ($needsKey) {
         $fixAttemptsUsed++
         Write-ConnectDecision 'ssh_username_fix' $fix
         $RemoteUser = $fix
-        @("REMOTE_USER=$RemoteUser", "LAPTOP_USER=$(Get-InteractiveLaptopUser)") | Set-Content -Path $Cfg -Encoding ASCII
+        Save-ConnectConfKey -Path $Cfg -Key 'REMOTE_USER' -Value $RemoteUser
+        Save-ConnectConfKey -Path $Cfg -Key 'LAPTOP_USER' -Value (Get-InteractiveLaptopUser)
         Remove-SshHostBlock $sshCfg $Alias
         $sshCfgUser = Get-SshConfigUserForServer -Ip $ServerIP -FallbackUser $RemoteUser
         @"
