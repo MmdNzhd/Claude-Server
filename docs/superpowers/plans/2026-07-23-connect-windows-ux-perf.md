@@ -1,6 +1,8 @@
 # Connect Windows UX + Perf Fix Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED: `~/.cursor/skills/parallel-phased-execution/SKILL.md` (waves per step; same-file writes serialize; TDD RED then GREEN; Coordinator→Workers→Verifier). Also use task review after each Task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Commits:** Authorized for this execution run — commit after each Task gate passes (do not amend baseline `6675d76`).
 
 **Goal:** Make Windows Claude Connect start fast, quiet, and non-admin by default: kill the long pre-UAC wait, stop flash CMD/PS windows, stop mount-check double-timeouts (~56s), stop launching Cursor as Administrator, and stop sticky wrong `REMOTE_USER` / console noise.
 
@@ -88,7 +90,7 @@
 
 - [ ] **Step 5: Deploy mount script** — `sudo claude-server install` (or targeted deploy) so server `~/.local/bin/claude-mount` picks up `-k`.
 
-- [ ] **Step 6: Commit** (only if user asks) with message focusing on fail-fast stale SSHFS checks.
+- [ ] **Step 6: Commit** after gate passes with message focusing on fail-fast stale SSHFS checks.
 
 ---
 
@@ -107,7 +109,7 @@
 
 - [ ] **Step 4: Test** — `scripts\client\tests\run-all.bat` (or targeted) proves preflight path taken when file present; no regression on version guards.
 
-- [ ] **Step 5: Commit** (if requested).
+- [ ] **Step 5: Commit** after gate passes.
 
 ---
 
@@ -130,7 +132,7 @@
 
 - [ ] **Step 4: Manual check list** — fresh non-admin double-click: no UAC if sshd OK; UAC only when repair needed.
 
-- [ ] **Step 5: Commit** (if requested).
+- [ ] **Step 5: Commit** after gate passes.
 
 ---
 
@@ -145,7 +147,7 @@
 
 - [ ] **Step 3: Assert** — process snapshot after launch: profile Cursor `elevated=False` / title without `[Administrator]` when NE path works.
 
-- [ ] **Step 4: Commit** (if requested).
+- [ ] **Step 4: Commit** after gate passes.
 
 ---
 
@@ -158,7 +160,7 @@
 
 - [ ] **Step 2: Implement** — read-modify-write conf map; do not `Set-Content` with only two keys. Optional: warn if username looks like a laptop Windows user (`testsmart`) vs known server users — soft warn only.
 
-- [ ] **Step 3: Pass test + Commit** (if requested).
+- [ ] **Step 3: Pass test + Commit** after gate passes.
 
 ---
 
@@ -200,6 +202,18 @@
 | Cursor | Non-admin profile process; stderr in log file |
 | Conf | Username edit preserves keys |
 | Tests | `scripts\client\tests\run-all.bat` green for touched areas |
+
+
+## Wave execution notes (2026-07-23)
+
+- Phase = Task step. Parallel only write-disjoint + dependency-free slices.
+- Hotspots (single-writer per wave): `connect.ps1`, `connect.bat`, `editor-launch.ps1`.
+- Task 1 waves: RED tests → GREEN (`claude-mount.sh` || `connect.ps1`) → GREEN (`git-mode.ps1` needs SshX API) → verify → deploy mount → commit.
+- Task 2: one owner for `connect-preflight.ps1` + `connect.bat` (shared contract).
+- Tasks 3 and 5 both touch `connect.ps1` — serialize (Task 3 then Task 5).
+- Task 4 only `editor-launch.ps1` — can run after Task 1; parallel with Task 2 if needed.
+- Task 6: `connect-ui.ps1` first (disjoint), then auth-skip in `connect.ps1` after Tasks 3/5.
+- Task 7 last (version bump).
 
 ## Rollback
 
