@@ -1,4 +1,4 @@
-# editor-launch.ps1 - shared VS Code/Cursor launch (dot-sourced by connect.ps1)
+﻿# editor-launch.ps1 - shared VS Code/Cursor launch (dot-sourced by connect.ps1)
 # Same pattern as mac/connect.sh:  cursor|code --folder-uri "vscode-remote://..."
 
 function Get-CursorRemoteProfileSite {
@@ -802,15 +802,38 @@ function Confirm-RemoteEditorLaunchVisible {
     return $false
 }
 
-function Start-ProcessAsInteractiveUser {
+function Get-CursorLaunchDayLogPath {
+    $logDir = Join-Path $env:USERPROFILE '.config\claude-connect\logs'
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    return (Join-Path $logDir ("cursor-launch-{0}.log" -f (Get-Date -Format 'yyyyMMdd')))
+}
+
+function Start-EditorProcessQuiet {
     param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$ArgumentList = @()
+    )
+    $logPath = Get-CursorLaunchDayLogPath
+    $argStr = Format-ProcessArgumentString -ArgumentList $ArgumentList
+    $escapedFile = $FilePath -replace '"', '""'
+    $escapedLog = $logPath -replace '"', '""'
+    $command = '""{0}"{1} >> "{2}" 2>&1"' -f $escapedFile, $(if ($argStr) { " $argStr" } else { '' }), $escapedLog
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
+    $psi.Arguments = "/D /S /C $command"
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    return [System.Diagnostics.Process]::Start($psi)
+}
+
+function Start-ProcessAsInteractiveUser {    param(
         [Parameter(Mandatory)][string]$FilePath,
         [string[]]$ArgumentList = @()
     )
     $argPreview = Format-ProcessArgumentString -ArgumentList $ArgumentList
     if (-not (Test-IsElevatedShell)) {
         Write-EditorLaunchLog "PROC_START: mode=non_elevated exe=$FilePath args=$argPreview" 'DEBUG'
-        Start-Process -FilePath $FilePath -ArgumentList $ArgumentList | Out-Null
+        Start-EditorProcessQuiet -FilePath $FilePath -ArgumentList $ArgumentList | Out-Null
         Write-EditorLaunchLog 'PROC_START_OK: mode=non_elevated' 'DEBUG'
         return $true
     }
@@ -852,26 +875,22 @@ function Start-ProcessAsInteractiveUser {
     } catch {
         Write-EditorLaunchLog "PROC_START_WARN: NonElevatedLauncher exception=$($_.Exception.Message)" 'WARN'
     }
-    # If CreateProcessWithTokenW failed outright, schtasks /IT usually fails the same way -
-    # skip straight to elevated_direct_fallback to avoid ~8-10s of dead wait.
-    if ($neStarted) {
-        if (Start-ProcessViaLaunchTask -FilePath $FilePath -ArgumentList $ArgumentList) {
-            if (Test-EditorProcessEvidence -FilePath $FilePath -ArgumentList $ArgumentList -TimeoutMs $evidenceMsTask) {
-                Write-EditorLaunchLog 'PROC_START_OK: mode=elevated_launch_task' 'DEBUG'
-                return $true
-            }
-            Write-EditorLaunchLog 'PROC_START_FAIL: mode=elevated_launch_task no_process' 'WARN'
-        } else {
-            Write-EditorLaunchLog 'PROC_START_FAIL: mode=elevated_launch_task schtasks_failed' 'WARN'
+    # The LIMITED scheduled task is an independent non-admin path. Try it even when
+    # CreateProcessWithTokenW returns false (including access denied / win32=5).
+    if (Start-ProcessViaLaunchTask -FilePath $FilePath -ArgumentList $ArgumentList) {
+        if (Test-EditorProcessEvidence -FilePath $FilePath -ArgumentList $ArgumentList -TimeoutMs $evidenceMsTask) {
+            Write-EditorLaunchLog 'PROC_START_OK: mode=elevated_launch_task' 'DEBUG'
+            return $true
         }
+        Write-EditorLaunchLog 'PROC_START_FAIL: mode=elevated_launch_task no_process' 'WARN'
     } else {
-        Write-EditorLaunchLog 'PROC_START: skip_launch_task reason=non_elevated_start_false' 'DEBUG'
+        Write-EditorLaunchLog 'PROC_START_FAIL: mode=elevated_launch_task schtasks_failed' 'WARN'
     }
     # Last resort: start from the elevated token. Remote-SSH still works; better than
     # false "Cursor not found". Prefer interactive paths above whenever they work.
     try {
         Write-EditorLaunchLog 'PROC_START: mode=elevated_direct_fallback' 'DEBUG'
-        Start-Process -FilePath $FilePath -ArgumentList $ArgumentList | Out-Null
+        Start-EditorProcessQuiet -FilePath $FilePath -ArgumentList $ArgumentList | Out-Null
         if (Test-EditorProcessEvidence -FilePath $FilePath -ArgumentList $ArgumentList -TimeoutMs $evidenceMsDirect) {
             Write-EditorLaunchLog 'PROC_START_OK: mode=elevated_direct_fallback' 'DEBUG'
             return $true

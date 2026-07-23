@@ -8,7 +8,9 @@ function Assert($cond, $msg) {
     else { Write-Host "  FAIL  $msg" -ForegroundColor Red; $script:fail++ }
 }
 
-. (Get-ClientFile 'editor-launch.ps1')
+$editorLaunchPath = Get-ClientFile 'editor-launch.ps1'
+$src = Get-Content -LiteralPath $editorLaunchPath -Raw
+. $editorLaunchPath
 
 Write-Host ""
 Write-Host "=== Editor launch self-test ===" -ForegroundColor Cyan
@@ -24,6 +26,22 @@ if ($cursorCmd) {
 } else {
     Write-Host "  SKIP  cursor not installed" -ForegroundColor DarkGray
 }
+
+$startAt = $src.IndexOf('function Start-ProcessAsInteractiveUser')
+$endAt = $src.IndexOf('$script:EditorCimCache', $startAt)
+$launchFn = if ($startAt -ge 0 -and $endAt -gt $startAt) { $src.Substring($startAt, $endAt - $startAt) } else { '' }
+Assert ($src -match 'cursor-launch-\{0\}\.log' -and $src -match "Get-Date -Format 'yyyyMMdd'") 'Cursor stdout/stderr uses a day log'
+Assert ($src -match 'ProcessStartInfo' -and $src -match 'UseShellExecute\s*=\s*\$false' -and $src -match 'CreateNoWindow\s*=\s*\$true') 'quiet launch uses hidden ProcessStartInfo'
+Assert ($src -match '>> \"\{2\}\" 2>&1') 'quiet launch appends stdout and stderr'
+Assert (([regex]::Matches($launchFn, 'Start-EditorProcessQuiet -FilePath')).Count -eq 2) 'both direct launch paths use quiet launcher'
+Assert ($launchFn -notmatch 'Start-Process\s+-FilePath') 'interactive launch has no direct Start-Process call'
+$neAt = $launchFn.IndexOf('[NonElevatedLauncher]::Start')
+$taskAt = $launchFn.IndexOf('Start-ProcessViaLaunchTask')
+$directAt = $launchFn.IndexOf("PROC_START: mode=elevated_direct_fallback")
+Assert ($neAt -ge 0 -and $taskAt -gt $neAt -and $directAt -gt $taskAt) 'launch order is NE then LIMITED task then elevated fallback'
+Assert ($launchFn -notmatch 'if\s*\(\$neStarted\)' -and $launchFn -notmatch 'skip_launch_task') 'launch task is attempted when NE Start=false'
+Assert ($launchFn -match 'Start=false win32=\$winErr') 'NE Start=false logs Win32 error'
+Assert ($launchFn -match '\$evidenceMsTask\s*=\s*4000') 'launch-task evidence timeout stays short'
 
 Write-Host ""
 if ($fail -eq 0) { Write-Host "All tests passed." -ForegroundColor Green; exit 0 }
