@@ -129,7 +129,9 @@ Assert ($winConnect -match 'function Begin-ConnectRecovery') 'connect.ps1 has Be
 Assert ($winConnect -match 'RECOVERY_BEGIN trigger=') 'connect.ps1 logs RECOVERY_BEGIN'
 Assert ($winConnect -match 'STEP begin:') 'connect.ps1 logs STEP begin'
 Assert ($winConnect -match 'function SshX') 'connect.ps1 has SshX wrapper'
-Assert ($winConnect -match 'SSH_TIMEOUT exit=124') 'connect.ps1 retries SshX on timeout'
+Assert ($winConnect -match 'function SshX\(\[string\]\$Cmd, \[switch\]\$NoRetryOnTimeout\)') 'connect.ps1 SshX supports NoRetryOnTimeout'
+Assert ($winConnect -match 'if \(\$result\.Exit -eq 124 -and -not \$NoRetryOnTimeout\)') 'connect.ps1 retries SshX timeout only when NoRetryOnTimeout is unset'
+Assert ($winConnect -match 'SSH_TIMEOUT exit=124') 'connect.ps1 retains SshX timeout retry logging'
 Assert ($winConnect -match 'timeout 45 bash') 'connect.ps1 wraps SshX with timeout'
 
 $gitMode = Get-Content (Get-ClientFile 'git-mode.ps1') -Raw

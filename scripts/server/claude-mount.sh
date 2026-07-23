@@ -511,7 +511,7 @@ _in_proc_mounts() {
 _is_mounted() {
     local lpath="$1"
     _in_proc_mounts "$lpath" && \
-        timeout 2 ls "$lpath" >/dev/null 2>&1
+        timeout -k 1 2 ls "$lpath" >/dev/null 2>&1
 }
 
 # Try every available unmount method, from clean to lazy. Always returns 0.
@@ -919,7 +919,7 @@ cmd_recover_one() {
     _tunnel_up && tunnel_ok=1
     if ! _in_proc_mounts "$lpath"; then
         [ "$tunnel_ok" -eq 1 ] && _restore_git_body "$rpath"
-    elif ! timeout 2 ls "$lpath" >/dev/null 2>&1; then
+    elif ! timeout -k 1 2 ls "$lpath" >/dev/null 2>&1; then
         lpath_esc=$(printf '%s' "$lpath" | sed 's/[[\.*^$(){}+?|]/\\&/g')
         pkill -u "$USER" -f "sshfs .*${lpath_esc}" 2>/dev/null || true
         sleep 1

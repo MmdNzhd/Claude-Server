@@ -1,4 +1,4 @@
-﻿# connect.ps1 - Claude Code launcher for Windows.
+# connect.ps1 - Claude Code launcher for Windows.
 # connect.bat invariant: g git (menu footer lives in connect-ui.ps1)
 # Usage:  double-click connect.bat
 #         connect.bat -Setup   (reconfigure username)
@@ -932,7 +932,7 @@ function Invoke-SshXCore {
     }
 }
 
-function SshX([string]$Cmd) {
+function SshX([string]$Cmd, [switch]$NoRetryOnTimeout) {
     $origCmd = $Cmd
     $applyTimeout = $origCmd -notmatch '^\s*timeout\s'
     $remoteCmd = $origCmd
@@ -941,7 +941,7 @@ function SshX([string]$Cmd) {
         Write-ConnectLog "SSH_BEGIN cmd=$truncCmd"
     }
     $result = Invoke-SshXCore -RemoteCmd $remoteCmd -ApplyTimeout:$applyTimeout
-    if ($result.Exit -eq 124) {
+    if ($result.Exit -eq 124 -and -not $NoRetryOnTimeout) {
         if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
             Write-ConnectLog "SSH_TIMEOUT exit=124 cmd=$truncCmd - retrying once" 'ERROR'
         }
@@ -1951,9 +1951,7 @@ $script:WindowsMcpEnsured = $false
 
             $skipRemount = $false
             try {
-                if ((Get-GitMode) -eq 'off' -and (Get-Command Test-ProjectMountHealthy -ErrorAction SilentlyContinue)) {
-                    if (Test-ProjectMountHealthy -ProjectId $go.Id) { $skipRemount = $true }
-                }
+                if ((Get-GitMode) -eq 'off') { $skipRemount = [bool]$recoverCheckOk }
             } catch { $skipRemount = $false }
             if ($skipRemount) {
                 Write-ConnectLog "MOUNT skip_remount reason=healthy git_mode=off project=$($go.Id)" 'INFO'

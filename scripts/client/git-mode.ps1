@@ -2095,7 +2095,7 @@ function Prepare-ServerSessionParallel {
 function Test-ProjectMountHealthy {
     param([Parameter(Mandatory)][string]$ProjectId)
     # Bound the remote check - a wedged sshfs/fcb can otherwise hang SshX with no UI step.
-    $out = ((SshX "timeout 12 $CM check '$ProjectId' 2>/dev/null") -join '').Trim()
+    $out = ((SshX "timeout 12 $CM check '$ProjectId' 2>/dev/null" -NoRetryOnTimeout) -join '').Trim()
     return ($out -eq 'ok')
 }
 
