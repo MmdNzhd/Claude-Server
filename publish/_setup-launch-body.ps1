@@ -228,9 +228,29 @@ try {
 
         Log ("connect-boot started pid=$($p.Id) dir=$Dest")
 
-        # Debounce double-click EXE while first UI is coming up.
-
-        Start-Sleep -Seconds 20
+        # Bug 11/13 fix (2026-07-24, live repro): a flat 20s sleep here - while this script (and
+        # therefore the whole outer IExpress-launched Claude-Connect.exe wrapper process, since
+        # IExpress waits for it) is still holding Global\ClaudeConnectExeLaunch - was directly
+        # responsible for two separate live-observed bugs: (a) the window looking frozen for
+        # tens of seconds after a fresh launch with zero visible progress, and (b) a SECOND
+        # launch attempt (Claude-Connect.exe or Claude-Connect-Setup.exe) within that same
+        # window hitting IExpress's own "Setup has detected that Setup is currently running"
+        # single-instance collision, even though the FIRST launch's real UI (connect-boot.ps1)
+        # had already started successfully seconds earlier.
+        #
+        # Test-ConnectUiOpen only flips true once ALL 10 Global\ClaudeConnect# slots are full -
+        # it cannot detect "this one newly-spawned connect-boot.ps1 finished claiming its own
+        # slot" (that slot index isn't observable from here without added IPC), so a poll against
+        # it would almost always just burn its full timeout in the common 1-2-window case. The
+        # debounce's real purpose - stop a rapid double-click from racing a second setup attempt
+        # in before the new connect-boot.ps1 process is up - only needs a short window, not 20s:
+        # connect-boot.ps1's own slot-claim (Test-AcquireConnectUiSlot) is a handful of in-process
+        # WaitOne(0) calls, essentially instant once the new powershell.exe process starts
+        # executing. A short fixed wait covers real process-start latency without the old 20s tax
+        # on every single launch.
+        $debounceMs = 3000
+        Start-Sleep -Milliseconds $debounceMs
+        Log ("connect-boot debounce done ms=$debounceMs")
 
     }
 

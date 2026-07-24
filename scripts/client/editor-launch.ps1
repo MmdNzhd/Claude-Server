@@ -30,6 +30,35 @@ function Get-CursorRemoteProfileDir {
     return (Join-Path $env:LOCALAPPDATA 'ClaudeServerCursorProfile-Smart')
 }
 
+function Get-CursorWindowTitleTag {
+    # Single source of truth for the literal window-title tag text
+    # Initialize-CursorServerProfile actually writes for a given site ("Claude Server Smart" /
+    # "Claude Server Sepidz"). Shared by Initialize-CursorServerProfile (the writer) and
+    # Get-CursorWindowTitleNeedle (the 4 readers, bug 2) so the two can never drift apart again.
+    param(
+        [string]$Site = (Get-CursorRemoteProfileSite)
+    )
+    if ($Site -eq 'Sepidz') { return 'Claude Server Sepidz' }
+    return 'Claude Server Smart'
+}
+
+function Get-CursorWindowTitleNeedle {
+    # Bug 2 fix: the 4 window-title match call sites (Test-CursorWindowTitleIsAgentHome,
+    # Test-RemoteEditorOnCorrectFolder, Get-RemoteEditorSessionPresence,
+    # Get-RemoteEditorStateExplain) used to hardcode the literal regex '\[Claude Server\]', but
+    # Initialize-CursorServerProfile has ALWAYS written a site-qualified tag ("[Claude Server
+    # Smart]" / "[Claude Server Sepidz]") - the bare, unqualified form is never actually rendered
+    # by production code, so that literal regex was permanently dead against every real window.
+    # Build the needle dynamically from the SAME Get-CursorWindowTitleTag/
+    # Get-CursorRemoteProfileSite source of truth the writer uses, instead of a hand-maintained
+    # alternation that could silently drift from it again. The bare '\[Claude Server\]'
+    # alternative is kept only as a defensive fallback for a settings.json written to disk before
+    # this fix shipped (Initialize-CursorServerProfile never rewrites an existing settings.json,
+    # so a pre-existing profile could still carry the old bare-tag title until next profile reset).
+    $tag = Get-CursorWindowTitleTag
+    return '\[' + [regex]::Escape($tag) + '\]|\[Claude Server\]'
+}
+
 function Initialize-CursorServerProfile {
     # First-run only: make the server window visually distinct from personal Cursor.
     $userDir = Join-Path (Get-CursorRemoteProfileDir) 'User'
@@ -39,7 +68,7 @@ function Initialize-CursorServerProfile {
         New-Item -ItemType Directory -Force -Path $userDir | Out-Null
     }
     $site = Get-CursorRemoteProfileSite
-    $titleTag = if ($site -eq 'Sepidz') { 'Claude Server Sepidz' } else { 'Claude Server Smart' }
+    $titleTag = Get-CursorWindowTitleTag -Site $site
     $barBg = if ($site -eq 'Sepidz') { '#3a1e5f' } else { '#1e3a5f' }
     $barBgIn = if ($site -eq 'Sepidz') { '#2a1545' } else { '#152a45' }
     $json = @"
@@ -1007,7 +1036,6 @@ function Test-PathNeedleBoundaryMatch {
     return [bool]($CommandLine -match "$NeedleEscaped(?:[\\/`"'\s]|$)")
 }
 
-# #region agent log H11_multi_window_enum win32_enum_helper
 # .NET Process.MainWindowHandle / .MainWindowTitle only ever reflect ONE window per
 # process - specifically whichever top-level window of that process is currently topmost
 # in the system-wide Z-order. Cursor is a single-instance Electron app: all windows that
@@ -1045,6 +1073,24 @@ public static class ClaudeConnectWin32Window
 
     [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern bool AttachThreadInput(int idAttach, int idAttachTo, bool fAttach);
+
+    [DllImport("kernel32.dll")]
+    public static extern int GetCurrentThreadId();
 }
 '@ -ErrorAction Stop
     }
@@ -1085,6 +1131,48 @@ function Get-ProcessTopLevelWindows {
         }
     }
     return @($results)
+}
+
+# Bug 10 fix (2026-07-24, live repro): Cursor is launched via a background Scheduled Task
+# ("LIMITED" task, commit b394340) or a detached process, neither of which is the current
+# foreground app, so Windows' anti focus-stealing protection denies the new/detected window
+# SetForegroundWindow rights by default - the window opens but stays behind other windows or
+# minimized in the taskbar, and the user has to manually alt-tab to find it. A plain
+# SetForegroundWindow call from a background PowerShell process is silently ignored by Windows
+# for the same reason. The standard, documented workaround (AttachThreadInput) temporarily
+# attaches our calling thread's input queue to whichever thread currently owns the real
+# foreground window, which grants us the right to move foreground focus - this is the
+# conventional technique for this exact "background process must foreground someone else's
+# window" scenario (no legitimate Win32 API exists to unconditionally force foreground from a
+# background process; AttachThreadInput is the sanctioned indirect route).
+function Set-CursorWindowForeground {
+    param([Parameter(Mandatory)][System.IntPtr]$Hwnd)
+    Initialize-Win32WindowEnum
+    try {
+        if ([ClaudeConnectWin32Window]::IsIconic($Hwnd)) {
+            [void][ClaudeConnectWin32Window]::ShowWindow($Hwnd, 9)  # SW_RESTORE
+        }
+        $fgHwnd = [ClaudeConnectWin32Window]::GetForegroundWindow()
+        $fgPid = 0
+        $fgThreadId = [ClaudeConnectWin32Window]::GetWindowThreadProcessId($fgHwnd, [ref]$fgPid)
+        $targetPid = 0
+        $targetThreadId = [ClaudeConnectWin32Window]::GetWindowThreadProcessId($Hwnd, [ref]$targetPid)
+        $attached = $false
+        if ($fgThreadId -ne 0 -and $targetThreadId -ne 0 -and $fgThreadId -ne $targetThreadId) {
+            $attached = [bool][ClaudeConnectWin32Window]::AttachThreadInput($targetThreadId, $fgThreadId, $true)
+        }
+        try {
+            $ok = [bool][ClaudeConnectWin32Window]::SetForegroundWindow($Hwnd)
+        } finally {
+            if ($attached) { [void][ClaudeConnectWin32Window]::AttachThreadInput($targetThreadId, $fgThreadId, $false) }
+        }
+        return $ok
+    } catch {
+        if (Get-Command Write-EditorLaunchLog -ErrorAction SilentlyContinue) {
+            Write-EditorLaunchLog "SET_FOREGROUND_FAIL: error=$($_.Exception.Message)" 'WARN'
+        }
+        return $false
+    }
 }
 # #endregion
 
@@ -1135,18 +1223,42 @@ function Test-RemoteEditorWindowOpenWhenOnFolder {
     foreach ($p in @(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)) {
         try {
             $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
-            if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { return $true }
+            if ($wp.MainWindowHandle -ne [IntPtr]::Zero) {
+                Request-CursorWindowForegroundOnce -RemotePath $RemotePath -Hwnd $wp.MainWindowHandle
+                return $true
+            }
         } catch {}
     }
     if ($EditorCmd -eq 'cursor') {
         foreach ($p in @(Get-CursorMainProfileProcesses)) {
             try {
                 $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
-                if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { return $true }
+                if ($wp.MainWindowHandle -ne [IntPtr]::Zero) {
+                    Request-CursorWindowForegroundOnce -RemotePath $RemotePath -Hwnd $wp.MainWindowHandle
+                    return $true
+                }
             } catch {}
         }
     }
     return $false
+}
+
+# Bug 10 fix: foreground the confirmed-open window exactly once per RemotePath (not on every
+# poll tick) - repeated SetForegroundWindow calls while the user is deliberately working in a
+# different app would be its own annoyance, so only steal focus the first time this specific
+# project's window is confirmed open after a launch.
+function Request-CursorWindowForegroundOnce {
+    param(
+        [Parameter(Mandatory)][string]$RemotePath,
+        [Parameter(Mandatory)][System.IntPtr]$Hwnd
+    )
+    if (-not $script:CursorForegroundedForPath) { $script:CursorForegroundedForPath = @{} }
+    if ($script:CursorForegroundedForPath.ContainsKey($RemotePath)) { return }
+    $script:CursorForegroundedForPath[$RemotePath] = $true
+    $ok = Set-CursorWindowForeground -Hwnd $Hwnd
+    if (Get-Command Write-EditorLaunchLog -ErrorAction SilentlyContinue) {
+        Write-EditorLaunchLog "SET_FOREGROUND: path=$RemotePath ok=$ok" 'INFO'
+    }
 }
 
 function Get-RemoteFolderUri {
@@ -1189,7 +1301,7 @@ function Test-CursorWindowTitleIsAgentHome {
         [string]$ProjectRootName = ''
     )
     if (-not $Title) { return $false }
-    if ($ProjectRootName -and $Title -match '\[Claude Server\]' -and $Title -match [regex]::Escape($ProjectRootName)) {
+    if ($ProjectRootName -and $Title -match (Get-CursorWindowTitleNeedle) -and $Title -match [regex]::Escape($ProjectRootName)) {
         return $false
     }
     if ($Title -match '(?i)^cursor agents$|cursor agents\b|agent home') { return $true }
@@ -1260,7 +1372,7 @@ function Test-RemoteEditorOnCorrectFolder {
                 # default Remote-SSH title "... [SSH: <alias>] - Cursor" - the custom template doesn't
                 # apply while a built-in view (e.g. Settings) is focused, so both must be recognized.
                 if ($title -and $title -match $rootNeedle -and
-                    ($title -match '\[Claude Server\]' -or $title -match "(?i)\[SSH:\s*${aliasOnlyNeedle}\]")) {
+                    ($title -match (Get-CursorWindowTitleNeedle) -or $title -match "(?i)\[SSH:\s*${aliasOnlyNeedle}\]")) {
                     return $true
                 }
             }
@@ -1322,7 +1434,7 @@ function Get-RemoteEditorSessionPresence {
             if ($rootNeedle) {
                 $title = $wp.MainWindowTitle
                 if ($title -and $title -match $rootNeedle -and
-                    ($title -match '\[Claude Server\]' -or $title -match "(?i)\[SSH:\s*${aliasOnlyNeedle}\]")) {
+                    ($title -match (Get-CursorWindowTitleNeedle) -or $title -match "(?i)\[SSH:\s*${aliasOnlyNeedle}\]")) {
                     $onFolder = $true
                 }
             }
@@ -1401,7 +1513,7 @@ function Get-RemoteEditorStateExplain {
             $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
             $title = $wp.MainWindowTitle
             if ($rootNeedle -and $title -and $title -match $rootNeedle -and
-                ($title -match '\[Claude Server\]' -or $title -match "(?i)\[SSH:\s*${aliasOnlyNeedle}\]")) {
+                ($title -match (Get-CursorWindowTitleNeedle) -or $title -match "(?i)\[SSH:\s*${aliasOnlyNeedle}\]")) {
                 $titleHit = $true
             }
         } catch { }
@@ -2067,6 +2179,12 @@ function Launch-RemoteEditor {
     # Never force-kill the ClaudeServerCursorProfile tree before launch.
     # Multiple remote projects share one profile -- killing the tree closes ALL Cursor windows.
     # Prefer --new-window (already set via $useNewWindow) and keep other projects open.
+    # Bug 8 note: this guard intentionally keeps using the broader $useNewWindow (unlike the
+    # narrower $hasProfileWindow-based $preservedOpenWindows guard further down at the
+    # post-exhaustion LAUNCH_RECOVERY_SKIP check) - its purpose is only to avoid pre-emptively
+    # killing the profile tree before even TRYING the launch strategies, so it's fine/safe to be
+    # broad here (orphan helpers alone are reason enough not to kill before trying). Do not
+    # narrow this one to match the recovery guard - they protect against different things.
     if ($EditorCmd -eq 'cursor' -and ($agentHome -or $useNewWindow) -and ($profileProcCount -gt 0)) {
         Write-EditorLaunchLog ("LAUNCH_KILL_SKIP: reason=preserve_open_windows profile_count={0} agent_home={1} use_new_window={2}" -f $profileProcCount, $agentHome, $useNewWindow) 'INFO'
         Write-LaunchPerfLog -Mark 'launch_kill_profile' -Ms 0 -Extra 'skipped=preserve_open_windows'
@@ -2093,6 +2211,29 @@ function Launch-RemoteEditor {
         }
 
         Write-EditorLaunchLog "LAUNCH_ATTEMPT: n=$attempt strategy=$($strategy.Name) args=$(Format-ProcessArgumentString -ArgumentList $strategy.Args)" 'INFO'
+
+        # Bug 2 secondary signal: window-count-before-vs-after-this-attempt, captured fresh per
+        # attempt (not once for the whole launch) so a later strategy's baseline isn't stale from
+        # an earlier attempt's own window changes. Cursor's single-instance IPC handoff means a
+        # repeat --folder-uri/--remote request against an ALREADY-RUNNING shared-profile process
+        # hands the new window to that SAME pid via an in-process IPC channel - that pid's
+        # Win32_Process.CommandLine is fixed at original process-creation time and never reflects
+        # the newly-requested folder (see research note below Launch-RemoteEditor), so
+        # CommandLine-based detection is permanently blind to this case. Title-based detection
+        # (Test-RemoteEditorOnCorrectFolder, now fixed for the site-tag bug above) covers the
+        # common case, but a real Win32 top-level-window-COUNT delta on the known main profile
+        # pid(s) - present before this attempt started, re-checked every poll tick - is a second,
+        # title-agnostic corroborating signal that a new window genuinely materialized for THIS
+        # request, not just whatever text happens to be in a window's title at the instant we
+        # look. Scoped to the handoff scenario only ($useNewWindow -and $profileProcCount -gt 0)
+        # so cold-start launches (own fresh process, title/URI detection already reliable) are
+        # unaffected.
+        $preAttemptWindowCounts = @{}
+        if ($EditorCmd -eq 'cursor') {
+            foreach ($p in @(Get-CursorMainProfileProcesses)) {
+                $preAttemptWindowCounts[$p.ProcessId] = @(Get-ProcessTopLevelWindows -ProcessId $p.ProcessId).Count
+            }
+        }
 
         $swStart = [System.Diagnostics.Stopwatch]::StartNew()
         if (-not (Start-ProcessAsInteractiveUser -FilePath $cli -ArgumentList $strategy.Args)) {
@@ -2127,47 +2268,35 @@ function Launch-RemoteEditor {
             Clear-CursorProcessCache
             $afterFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
             $afterAgent = if ($EditorCmd -eq 'cursor') { Test-RemoteEditorInAgentHome -RemotePath $RemotePath } else { $false }
+
+            # Bug 2 secondary signal (see comment above the baseline capture): a real window-count
+            # increase on a known main profile pid during the IPC-handoff scenario, independent of
+            # title text. Corroborating only - always ORed with the handoff scenario gate itself,
+            # never trusted alone outside preserve-open-windows/new-window territory.
+            $windowCountIncreased = $false
+            if ($EditorCmd -eq 'cursor' -and $useNewWindow -and $profileProcCount -gt 0) {
+                foreach ($p in @(Get-CursorMainProfileProcesses)) {
+                    $curWinCount = @(Get-ProcessTopLevelWindows -ProcessId $p.ProcessId).Count
+                    $baseWinCount = 0
+                    if ($preAttemptWindowCounts.ContainsKey($p.ProcessId)) { $baseWinCount = $preAttemptWindowCounts[$p.ProcessId] }
+                    if ($curWinCount -gt $baseWinCount) { $windowCountIncreased = $true; break }
+                }
+            }
             $elapsedMs = $pollTick * $pollMs
             Write-EditorLaunchLog (
-                "LAUNCH_POLL: strategy=$($strategy.Name) elapsed=${elapsedMs}ms on_folder=$afterFolder agent_home=$afterAgent"
+                "LAUNCH_POLL: strategy=$($strategy.Name) elapsed=${elapsedMs}ms on_folder=$afterFolder agent_home=$afterAgent window_count_increased=$windowCountIncreased"
             ) 'DEBUG'
             Write-LaunchPerfLog -Mark "poll_${elapsedMs}ms" -Ms $elapsedMs -Extra "on_folder=$afterFolder strategy=$($strategy.Name)"
 
-            # #region agent log H2_ipc_blind_spot poll_window_snapshot
-            try {
-                $dbgProcs = @(Get-CursorMainProfileProcesses) | ForEach-Object {
-                    $dbgTitle = ''
-                    $dbgHwnd = $false
-                    try {
-                        $dbgWp = [System.Diagnostics.Process]::GetProcessById($_.ProcessId)
-                        $dbgTitle = [string]$dbgWp.MainWindowTitle
-                        $dbgHwnd = ($dbgWp.MainWindowHandle -ne [IntPtr]::Zero)
-                    } catch {}
-                    [PSCustomObject]@{ pid = $_.ProcessId; title = $dbgTitle; hwnd = $dbgHwnd; cmdTail = (Format-EditorProcessCommandLine -CommandLine $_.CommandLine -MaxLen 80) }
-                }
-                $dbgRoot = ($RemotePath.TrimEnd('/') -split '/')[-1]
-                [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H2_ipc_blind_spot';location='editor-launch.ps1:2027';message='poll_window_snapshot';data=@{strategy=$strategy.Name;attempt=$attempt;tick=$pollTick;target_root=$dbgRoot;on_folder=$afterFolder;procs=$dbgProcs};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 5) + "`n"))
-            } catch { }
-            # #endregion
-
-            # #region agent log H11_multi_window_enum window_enum_snapshot
-            try {
-                $dbgWinAll = @(Get-CursorMainProfileProcesses) | ForEach-Object {
-                    $dbgWins = @(Get-ProcessTopLevelWindows -ProcessId $_.ProcessId) | ForEach-Object {
-                        [PSCustomObject]@{ hwnd = [int64]$_.Hwnd; title = $_.Title; visible = $_.Visible }
-                    }
-                    [PSCustomObject]@{ pid = $_.ProcessId; windowCount = $dbgWins.Count; windows = $dbgWins }
-                }
-                $dbgRootW = ($RemotePath.TrimEnd('/') -split '/')[-1]
-                [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H11_multi_window_enum';location='editor-launch.ps1:poll_loop';message='window_enum_snapshot';data=@{strategy=$strategy.Name;attempt=$attempt;tick=$pollTick;target_root=$dbgRootW;on_folder=$afterFolder;procs=$dbgWinAll};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 6) + "`n"))
-            } catch { }
-            # #endregion
-
-            if ($afterFolder -and -not $afterAgent) {
+            if (($afterFolder -or $windowCountIncreased) -and -not $afterAgent) {
                 # Return on first on_folder hit - the extra recheck added latency without
-                # preventing false positives in practice.
+                # preventing false positives in practice. $windowCountIncreased corroborates (or,
+                # for the IPC-handoff case, independently substitutes for) the title/URI check.
+                if (-not $afterFolder -and $windowCountIncreased) {
+                    Write-EditorLaunchLog "LAUNCH_OK_WINDOW_COUNT: strategy=$($strategy.Name) attempt=$attempt reason=window_count_increased_no_title_match" 'INFO'
+                }
                 Write-EditorLaunchLog "LAUNCH_OK: strategy=$($strategy.Name) attempt=$attempt" 'INFO'
-                $script:LastLaunchAttempts += "${attempt}:$($strategy.Name):folder=$afterFolder:agent=$afterAgent"
+                $script:LastLaunchAttempts += "${attempt}:$($strategy.Name):folder=$afterFolder:agent=$afterAgent:wincount=$windowCountIncreased"
                 $script:LaunchPerfSw.Stop()
                 Write-LaunchPerfLog -Mark 'launch_total' -Ms $script:LaunchPerfSw.ElapsedMilliseconds -Extra "path=ok strategy=$($strategy.Name)"
                 return $true
@@ -2180,9 +2309,9 @@ function Launch-RemoteEditor {
 
         Write-EditorLaunchLog (
             "LAUNCH_ATTEMPT_RESULT: n=$attempt strategy=$($strategy.Name) on_folder=$afterFolder agent_home=$afterAgent " +
-            "$(Get-RemoteEditorLaunchDiag -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)"
+            "window_count_increased=$windowCountIncreased $(Get-RemoteEditorLaunchDiag -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)"
         ) 'INFO'
-        $script:LastLaunchAttempts += "${attempt}:$($strategy.Name):folder=$afterFolder:agent=$afterAgent"
+        $script:LastLaunchAttempts += "${attempt}:$($strategy.Name):folder=$afterFolder:agent=$afterAgent:wincount=$windowCountIncreased"
         if ($script:VerboseLaunch) {
             Write-EditorLaunchVerboseState -Label "RESULT_$($strategy.Name)" -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
         }
@@ -2234,7 +2363,30 @@ function Launch-RemoteEditor {
     # project's fully-working window (main + gpu/utility/renderer helpers) just to cold-launch
     # this one. Must mirror the same preserve_open_windows guard used before the attempts
     # (LAUNCH_KILL_SKIP above) - never destroy someone else's open Cursor session as a "recovery".
-    $preservedOpenWindows = ($EditorCmd -eq 'cursor' -and ($agentHome -or $useNewWindow) -and ($profileProcCount -gt 0))
+    #
+    # Bug 8 fix: deliberately narrower than the earlier LAUNCH_KILL_SKIP guard at ~line 2070
+    # (which uses the broader $useNewWindow). $useNewWindow is unconditionally true whenever
+    # $profileProcCount -gt 0 - either directly via $hasProfileWindow, OR via $orphanHelpers
+    # (Get-CursorLaunchWindowPlan) when $hasProfileWindow is FALSE but stale/invisible helper
+    # processes exist. Reusing $useNewWindow here made $preservedOpenWindows always mirror the
+    # very next `if`'s own "$profileProcCount -gt 0" guard, so LAUNCH_RECOVERY_SKIP fired every
+    # time and the soft_stop_profile/cold_launch recovery block below was provably unreachable
+    # (proven by test-launch-recovery-reachable-live.ps1 across all 12 (agentHome,
+    # hasProfileWindow, profileProcCount) combinations). What this guard is ACTUALLY meant to
+    # protect is a real, visible open window (or agent-home) - not the mere existence of orphan
+    # helper processes with no window at all.
+    #
+    # Bug 14 fix (2026-07-24, live repro): $hasProfileWindow is captured ONCE at function ENTRY
+    # (~line 2048), before this call's own up-to-4 launch attempts and up to ~40s of retries even
+    # begin. By the time this post-exhaustion decision runs, it can be stale by tens of seconds -
+    # confirmed live: a genuinely open, unrelated project's window (real main pid, alive the whole
+    # time) was NOT protected because entry-time $hasProfileWindow no longer reflected current
+    # reality, so Stop-CursorServerProfileTree killed that real window's whole process tree just to
+    # cold-launch this one. $mainCount (line 2254) is a FRESH re-query of the exact same signal,
+    # taken moments before this exact decision - use that instead of the stale entry-time value.
+    # Do NOT swap this back to $useNewWindow (re-collapses the Bug 8 guard) or to $hasProfileWindow
+    # (re-introduces Bug 14's stale-read window-kill).
+    $preservedOpenWindows = ($EditorCmd -eq 'cursor' -and ($agentHome -or ($mainCount -gt 0)) -and ($profileProcCount -gt 0))
     if ($EditorCmd -eq 'cursor' -and $profileProcCount -gt 0 -and $preservedOpenWindows) {
         Write-EditorLaunchLog ("LAUNCH_RECOVERY_SKIP: reason=preserve_open_windows profile_count={0} - not killing other open project windows; press O to retry" -f $profileProcCount) 'WARN'
         Write-LaunchPerfLog -Mark 'launch_total' -Ms $script:LaunchPerfSw.ElapsedMilliseconds -Extra 'path=fail_preserved_open_windows'
@@ -2242,19 +2394,6 @@ function Launch-RemoteEditor {
     }
     if ($EditorCmd -eq 'cursor' -and $profileProcCount -gt 0) {
         Write-EditorLaunchLog ("LAUNCH_RECOVERY: soft_stop_profile then cold_launch path={0}" -f $RemotePath) 'WARN'
-        # #region agent log H3_recovery_kill_context before_kill_snapshot
-        try {
-            $dbgProcsK = @(Get-CursorProfileProcesses) | ForEach-Object {
-                $dbgTitleK = ''
-                try {
-                    $dbgWpK = [System.Diagnostics.Process]::GetProcessById($_.ProcessId)
-                    $dbgTitleK = [string]$dbgWpK.MainWindowTitle
-                } catch {}
-                [PSCustomObject]@{ pid = $_.ProcessId; title = $dbgTitleK; cmdTail = (Format-EditorProcessCommandLine -CommandLine $_.CommandLine -MaxLen 100) }
-            }
-            [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H3_recovery_kill_context';location='editor-launch.ps1:2098';message='before_kill_snapshot';data=@{target_path=$RemotePath;procs=$dbgProcsK};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 5) + "`n"))
-        } catch { }
-        # #endregion
         try { Stop-CursorServerProfileTree } catch {
             Write-EditorLaunchLog ("LAUNCH_RECOVERY_KILL_FAIL: {0}" -f $_.Exception.Message) 'WARN'
         }

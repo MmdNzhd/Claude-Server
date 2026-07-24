@@ -37,7 +37,19 @@ _load_global() {
         done < "$CONNECT_CONF"
     fi
     if [ -z "$TUNNEL_PORT" ]; then
-        TUNNEL_PORT=$((20000 + $(id -u)))
+        # Deprecated fallback removed: `20000 + uid` overlapped by up to 6 of 10 ports
+        # between adjacent-UID users (see Get-TunnelPortUserBase in git-mode.ps1 /
+        # tunnel_port_user_base in git-mode.sh for the canonical formula and history).
+        # This branch should almost never run - the client normally always publishes a
+        # real TUNNEL_PORT via Push-ServerConnectConf - so treat it as a rare safety net,
+        # not a silent guess: slot is unknowable here (claude-mount.sh only has `id -u`),
+        # so default to slot 0 and warn loudly rather than guessing wrong quietly.
+        local _uid _offset
+        _uid=$(id -u)
+        _offset=$((_uid - 1000))
+        [ "$_offset" -lt 0 ] && _offset=0
+        TUNNEL_PORT=$((20000 + _offset * 10))
+        echo "warn: TUNNEL_PORT missing from $CONNECT_CONF - falling back to slot-0 guess $TUNNEL_PORT (20000+(uid-1000)*10+0); this is only a safety net and usually means the client failed to publish TUNNEL_PORT - reconnect connect.bat/connect.sh" >&2
     fi
     case "${GIT_MODE,,}" in
         server|on|yes|1|slow) GIT_MODE="server" ;;

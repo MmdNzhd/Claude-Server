@@ -78,6 +78,18 @@ $suites = @(
     @{ Name = 'sidecar-boot-reap-live'; Script = 'test-sidecar-boot-reap-live.ps1' }
     @{ Name = 'remote-editor-detect-live'; Script = 'test-remote-editor-detect-live.ps1' }
     @{ Name = 'connect-single-instance-live'; Script = 'test-connect-single-instance-live.ps1' }
+    @{ Name = 'mount-port-fallback-live'; Script = 'test-mount-port-fallback-live.ps1' }
+    @{ Name = 'window-title-site-tag-live'; Script = 'test-window-title-site-tag-live.ps1' }
+    @{ Name = 'xray-probe-worst-case-live'; Script = 'test-xray-probe-worst-case-live.ps1' }
+    @{ Name = 'job-detach-survives-close-live'; Script = 'test-job-detach-survives-close-live.ps1' }
+    @{ Name = 'concurrent-log-writers-live'; Script = 'test-concurrent-log-writers-live.ps1' }
+    @{ Name = 'known-down-selfheal-live'; Script = 'test-known-down-selfheal-live.ps1' }
+    @{ Name = 'launch-recovery-reachable-live'; Script = 'test-launch-recovery-reachable-live.ps1' }
+    @{ Name = 'window-kill-staleness-live'; Script = 'test-window-kill-staleness-live.ps1' }
+    @{ Name = 'window-foreground-live'; Script = 'test-window-foreground-live.ps1' }
+    @{ Name = 'context-log-sync-noninline-live'; Script = 'test-context-log-sync-noninline-live.ps1' }
+    @{ Name = 'server-setup-round-trip-merge-live'; Script = 'test-server-setup-round-trip-merge-live.ps1' }
+    @{ Name = 'setup-debounce-bounded-live'; Script = 'test-setup-debounce-bounded-live.ps1' }
 )
 
 $fail = 0

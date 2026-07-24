@@ -12,10 +12,6 @@ param(
 $ErrorActionPreference = "Continue"
 $script:ConnectScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 
-# #region agent log H4_H5_parse_overhead connect_ps1_top
-$script:DebugSwC46 = [System.Diagnostics.Stopwatch]::StartNew()
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H4_H5_parse_overhead';location='connect.ps1:14';message='connect_ps1_top';data=@{now=(Get-Date).ToString('HH:mm:ss.fff');pid=$PID};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-# #endregion
 
 function Test-ConnectStaleUpdateFrame {
     param([string]$ScriptDir)
@@ -124,10 +120,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260724.13'
+$script:ConnectVersion = '20260724.14'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = '7824fb86-1ab6-4b8e-bae1-3b84021adc53'
+$script:ConnectBuildId = '34703a4a-55be-4c3b-b2b5-ee095fca92c2'
 $CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
@@ -255,9 +251,6 @@ if (Test-Path -LiteralPath (Join-Path $script:ConnectScriptDir 'cursor-proxy-sid
         try { [void](Invoke-CursorProxySidecarBootReap) } catch {}
     }
 }
-# #region agent log H4_H5_parse_overhead after_proxy_sidecar_block
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H4_H5_parse_overhead';location='connect.ps1:253';message='after_proxy_sidecar_block';data=@{elapsed_ms=$script:DebugSwC46.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-# #endregion
 if (-not (Test-Path $_editorLaunch)) {
     $_editorLaunch = Join-Path (Split-Path $script:ConnectScriptDir -Parent) 'editor-launch.ps1'
 }
@@ -268,9 +261,6 @@ if (-not (Test-Path $_editorLaunch)) {
     Die "editor-launch.ps1 not found - re-copy the full windows package"
 }
 . $_editorLaunch
-# #region agent log H4_H5_parse_overhead after_editor_launch
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H4_H5_parse_overhead';location='connect.ps1:262';message='after_editor_launch';data=@{elapsed_ms=$script:DebugSwC46.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-# #endregion
 Show-ConnectConsoleIfHidden
 
 $_gitMode = Join-Path $script:ConnectScriptDir 'git-mode.ps1'
@@ -284,10 +274,6 @@ if (-not (Test-Path $_gitMode)) {
     Die "git-mode.ps1 not found - re-copy the full windows package"
 }
 . $_gitMode
-# #region agent log H4_H5_parse_overhead after_git_mode
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H4_H5_parse_overhead';location='connect.ps1:275';message='after_git_mode';data=@{elapsed_ms=$script:DebugSwC46.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-# #endregion
-
 $_cursorAuth = Join-Path $script:ConnectScriptDir 'cursor-auth-laptop.ps1'
 if (-not (Test-Path $_cursorAuth)) {
     $_cursorAuth = Join-Path (Split-Path $script:ConnectScriptDir -Parent) 'cursor-auth-laptop.ps1'
@@ -311,16 +297,9 @@ if (-not $_connectDiag) {
     }
 }
 if (Test-Path $_connectDiag) { . $_connectDiag }
-# #region agent log H4_H5_parse_overhead after_optional_sources
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H4_H5_parse_overhead';location='connect.ps1:299';message='after_optional_sources';data=@{elapsed_ms=$script:DebugSwC46.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-# #endregion
-
 $_connectUi = Dot-SourceSibling 'connect-ui.ps1'
 if (-not $_connectUi) { Die 'connect-ui.ps1 not found - re-copy the full windows package' }
 . $_connectUi
-# #region agent log H4_H5_parse_overhead after_connect_ui
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H4_H5_parse_overhead';location='connect.ps1:303';message='after_connect_ui';data=@{elapsed_ms=$script:DebugSwC46.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-# #endregion
 if (Get-Command Enter-ConnectSingleInstance -ErrorAction SilentlyContinue) {
     if (-not (Enter-ConnectSingleInstance)) {
         # Block before session-start log so blocked launches do not pollute day log.
@@ -358,9 +337,6 @@ try {
 } catch {}
 
 Initialize-ConnectLog -ScriptDir $script:ConnectScriptDir -Version $script:ConnectVersion
-# #region agent log H8_init_log_cost after_initialize_connect_log
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H8_init_log_cost';location='connect.ps1:360';message='after_initialize_connect_log';data=@{elapsed_ms=$script:DebugSwC46.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-# #endregion
 if (Get-Command Write-ConnectSessionContext -ErrorAction SilentlyContinue) { Write-ConnectSessionContext -Phase 'startup' }
 $script:ConnectPerf = @{
     SshMsTotal = 0
@@ -775,10 +751,19 @@ function Initialize-ServerSession {
         [Parameter(Mandatory)][string]$Alias,
         [Parameter(Mandatory)][string]$SshCfgPath
     )
-    $initOut = (SshX "id -u && (test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q) && cat ~/.ssh/claude_laptop.pub") -join "`n"
+    # Bug 12 fix (2026-07-24, live evidence: "Server setup" step alone took 50s across 8
+    # sequential one-shot ssh calls): the mount/git hash-check call (below, formerly issued
+    # AFTER Acquire-TunnelPort) has zero data dependency on the tunnel port - it only reads two
+    # sha256sums to decide whether claude-mount.sh/claude-git-setup.sh need re-pushing. Folded
+    # into this same initial round trip (which Acquire-TunnelPort's $uidStr parse must already
+    # wait for) removes one full ~5-7s ssh handshake from the step, with no ordering change in
+    # what any later code observes.
+    $initOut = (SshX "id -u && (test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q) && cat ~/.ssh/claude_laptop.pub && mkdir -p ~/.local/bin && echo MOUNT_HASH:`$(sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print `$1}') && echo GIT_HASH:`$(sha256sum ~/.local/bin/claude-git-setup 2>/dev/null | awk '{print `$1}')") -join "`n"
     $lines = ($initOut -replace "`r",'') -split "`n" | Where-Object { $_.Trim() -ne '' }
     $uidStr = [string]($lines | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1) -replace '\D',''
     $pubB = ([string](($lines | Where-Object { $_ -match '^ssh-' } | Select-Object -First 1) + '')).Trim()
+    $remoteHash = (($lines | Where-Object { $_ -match '^MOUNT_HASH:' } | Select-Object -First 1) -replace '^MOUNT_HASH:', '').Trim()
+    $gitRemote = (($lines | Where-Object { $_ -match '^GIT_HASH:' } | Select-Object -First 1) -replace '^GIT_HASH:', '').Trim()
     $script:ServerUidStr = $uidStr
     if (-not (Acquire-TunnelPort -UidStr $uidStr)) {
         $base = [int](Get-TunnelPortUserBase -UidStr $uidStr)
@@ -810,13 +795,9 @@ function Initialize-ServerSession {
         $gitSrc = [System.IO.Path]::Combine($dir, 'claude-git-setup.sh')
         $hasMountSrc = Test-Path $mountSrc
         $hasGitSrc = Test-Path $gitSrc
-        # Perf: mkdir + both sha256sum reads used to be up to 3 separate SshX round trips
-        # (~1.4s each of pure SSH handshake overhead). None depend on each other's result -
-        # ship as one remote script with plain-text markers, split the single reply locally.
-        $hashCmd = "mkdir -p ~/.local/bin; echo MOUNT_HASH:`$(sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print `$1}'); echo GIT_HASH:`$(sha256sum ~/.local/bin/claude-git-setup 2>/dev/null | awk '{print `$1}')"
-        $hashOut = @(SshX $hashCmd)
-        $remoteHash = (($hashOut | Where-Object { $_ -match '^MOUNT_HASH:' } | Select-Object -First 1) -replace '^MOUNT_HASH:', '').Trim()
-        $gitRemote = (($hashOut | Where-Object { $_ -match '^GIT_HASH:' } | Select-Object -First 1) -replace '^GIT_HASH:', '').Trim()
+        # Bug 12 fix: $remoteHash/$gitRemote are now fetched above, folded into the initial
+        # id-u/keygen/pubkey round trip (no data dependency on the tunnel port acquired in
+        # between) - no separate SshX call needed here any more.
         if ($hasMountSrc) {
             $uploadSrc = Get-LfNormalizedShCopy -Src $mountSrc
             $localHash = (Get-FileHash -Algorithm SHA256 -Path $uploadSrc).Hash
@@ -1416,16 +1397,9 @@ if ($LaptopUser -and (Test-Path "C:\Users\$LaptopUser")) {
 New-Item -ItemType Directory -Force -Path $CfgDir | Out-Null
 New-Item -ItemType Directory -Force -Path $SshDir  | Out-Null
 
-# #region agent log H4_H5_parse_overhead pre_header
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H6_pre_header_setup';location='connect.ps1:1396';message='pre_header';data=@{elapsed_ms=$script:DebugSwC46.ElapsedMilliseconds;is_admin=(Test-IsAdmin)};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-# #endregion
 Clear-Host
 if (Test-IsAdmin) { Initialize-EditorLaunchTask | Out-Null }
 Write-ConnectHeader -Alias $Alias -ServerIP $ServerIP -Version $script:ConnectVersion
-# #region agent log H4_H5_parse_overhead post_header
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H6_pre_header_setup';location='connect.ps1:1398';message='post_header';data=@{elapsed_ms=$script:DebugSwC46.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-# #endregion
-
 $script:ConnectSystemProxy = $null
 if (Get-Command Initialize-ConnectProxyForSsh -ErrorAction SilentlyContinue) {
     $script:ConnectSystemProxy = Initialize-ConnectProxyForSsh -ServerIP $ServerIP
@@ -1470,11 +1444,7 @@ Host $Alias
     StrictHostKeyChecking accept-new
 "@ | Add-Content -Path $sshCfg -Encoding ASCII
 Sanitize-SshAliasConfig -CfgPath $sshCfg -AliasName $Alias
-# #region agent log H16 logsync_inline_1473
-$swH16a = [System.Diagnostics.Stopwatch]::StartNew()
 if (Get-Command Request-ConnectLogSync -ErrorAction SilentlyContinue) { Request-ConnectLogSync -NoInline | Out-Null } elseif (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue) { Sync-ConnectLogToServer | Out-Null }  # ship BOOTSTRAP/UPDATE + session so far (async only - never block boot)
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';runId='post-fix';hypothesisId='H16';location='connect.ps1:1473';message='logsync_1473';data=@{block_ms=$swH16a.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n")) } catch {}
-# #endregion
 # Fix SSH config permissions silently - shown later under the step that calls StepOk
 icacls $sshCfg /reset 2>$null | Out-Null
 icacls $sshCfg /inheritance:r /grant "$env:USERNAME`:F" 2>$null | Out-Null
@@ -1653,11 +1623,7 @@ Host $Alias
 # unconditionally (Force only affected how soon the SERVER's copy saw it), and the async drain
 # still runs within ~1.5s or at the latest by session end (Complete-ConnectLogAsyncDrain -Force
 # there is unchanged) - so the audit trail lands moments later instead of immediately, not lost.
-# #region agent log H16 logsync_inline_1652
-$swH16b = [System.Diagnostics.Stopwatch]::StartNew()
 if (Get-Command Request-ConnectLogSync -ErrorAction SilentlyContinue) { Request-ConnectLogSync -NoInline | Out-Null }
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';runId='post-fix';hypothesisId='H16';location='connect.ps1:1652';message='logsync_1652';data=@{block_ms=$swH16b.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n")) } catch {}
-# #endregion
 if (-not (Warn-ForeignServerSession)) {
     Wait-ConnectExit -Reason 'foreign_session' -Code 1
 }
@@ -1677,19 +1643,11 @@ StepOk "port $Port slot=$($script:TunnelSlot) git=$(Get-GitMode)"
 $PubB = $boot.PubB
 
 Write-Host ''
-# #region agent log H16 logsync_inline_1672
-$swH16c = [System.Diagnostics.Stopwatch]::StartNew()
 if (Get-Command Request-ConnectLogSync -ErrorAction SilentlyContinue) { Request-ConnectLogSync -NoInline | Out-Null } elseif (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue) { Sync-ConnectLogToServer | Out-Null }
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';runId='post-fix';hypothesisId='H16';location='connect.ps1:1672';message='logsync_1672';data=@{block_ms=$swH16c.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n")) } catch {}
-# #endregion
 Write-Host '    Ready' -ForegroundColor Green
 Write-Host ''
 Mark-BootstrapDone -CfgDir $CfgDir
-# #region agent log H18 ensure_laptop_ssh
-$swH18 = [System.Diagnostics.Stopwatch]::StartNew()
 $laptopReady = Ensure-LaptopSshReady -PubB $PubB
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';runId='post-fix';hypothesisId='H18';location='connect.ps1:1676';message='ensure_laptop_ssh';data=@{block_ms=$swH18.ElapsedMilliseconds;ready=$laptopReady};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n")) } catch {}
-# #endregion
 if (-not $laptopReady) {
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
         Write-ConnectLog 'FAIL LAPTOP_SSH_BOOT: Ensure-LaptopSshReady returned false (continuing; tunnel auth may still work)' 'ERROR'
@@ -1703,11 +1661,7 @@ if (-not $laptopReady) {
 }
 $script:LaptopSshVerified = $false
 $script:SessionBgTunnel = $null
-# #region agent log H17 init_session_bg_tunnel
-$swH17 = [System.Diagnostics.Stopwatch]::StartNew()
 $null = Initialize-SessionBgTunnel -Alias $Alias -SshCfgPath $sshCfg -Quiet
-try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';runId='post-fix';hypothesisId='H17';location='connect.ps1:1690';message='init_session_bg_tunnel';data=@{block_ms=$swH17.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n")) } catch {}
-# #endregion
 
 $script:tunnelAuthAdminFixAttempted = $false
 $exitRequested = $false
@@ -2179,16 +2133,10 @@ $script:WindowsMcpEnsured = $false
                 $gsPath = Join-Path (Get-LocalCursorGlobalStorage) 'state.vscdb'
                 $folderSw = [System.Diagnostics.Stopwatch]::StartNew()
                 $onCorrectFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
-                # #region agent log H13_post_banner_steps auth_folder_oncorrect_done
-                try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H13_post_banner_steps';location='connect.ps1:2162';message='auth_folder_oncorrect_done';data=@{elapsed_ms=$folderSw.ElapsedMilliseconds;on_folder=$onCorrectFolder};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-                # #endregion
                 $agentHome = Test-RemoteEditorInAgentHome -RemotePath $go.Path
                 $cursorRunning = $false
                 if ($onCorrectFolder -and (Get-Command Test-RemoteEditorWindowOpenWhenOnFolder -ErrorAction SilentlyContinue)) {
                     $cursorRunning = Test-RemoteEditorWindowOpenWhenOnFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
-                    # #region agent log H13_post_banner_steps auth_folder_windowopen_done
-                    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H13_post_banner_steps';location='connect.ps1:2169';message='auth_folder_windowopen_done';data=@{elapsed_ms=$folderSw.ElapsedMilliseconds;window_open=$cursorRunning};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-                    # #endregion
                 }
                 $folderSw.Stop()
                 if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
@@ -2225,16 +2173,12 @@ $script:WindowsMcpEnsured = $false
                     $script:BgAuthStampTask = $null
                 }
                 Step "Syncing Cursor auth"
-                $authStepSw = [System.Diagnostics.Stopwatch]::StartNew()
                 # Single OpenDb session for both the completeness gate and the serviceMachineId
                 # read used below to heal Electron's machineid file (no duplicate SQLite opens).
                 $authState = if (Get-Command Get-LocalCursorAuthState -ErrorAction SilentlyContinue) {
                     Get-LocalCursorAuthState -DbPath $gsPath
                 } else { $null }
                 $authComplete = if ($authState) { [bool]$authState.Complete } else { Test-LocalCursorAuthComplete -DbPath $gsPath }
-                # #region agent log H13_post_banner_steps auth_local_state_done
-                try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H13_post_banner_steps';location='connect.ps1:2214';message='auth_local_state_done';data=@{elapsed_ms=$authStepSw.ElapsedMilliseconds;auth_complete=$authComplete};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-                # #endregion
                 $stampCurrent = $false
                 $authNeedsRefresh = $false
                 $stampCheck = $null
@@ -2262,9 +2206,6 @@ $script:WindowsMcpEnsured = $false
                         Write-ConnectLog "AUTH_DECISION needs_refresh reason=$($refreshCheck.Reasons -join ',')" 'DEBUG'
                     }
                 }
-                # #region agent log H13_post_banner_steps auth_refresh_probe_done
-                try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H13_post_banner_steps';location='connect.ps1:2247';message='auth_refresh_probe_done';data=@{elapsed_ms=$authStepSw.ElapsedMilliseconds;stamp_current=$stampCurrent;needs_refresh=$authNeedsRefresh};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-                # #endregion
                 $skipAuth = $false
                 if (-not $script:ForceCursorAuthSync -and -not $script:PostTunnelRecovery -and -not $authNeedsRefresh) {
                     if ($stampCurrent) { $skipAuth = $true }
@@ -2283,9 +2224,6 @@ $script:WindowsMcpEnsured = $false
                     if (Get-Command Heal-CursorProfileMachineIdFromLocal -ErrorAction SilentlyContinue) {
                         $null = Heal-CursorProfileMachineIdFromLocal -DbPath $gsPath -KnownState $authState
                     }
-                    # #region agent log H13_post_banner_steps auth_skip_heal_done
-                    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H13_post_banner_steps';location='connect.ps1:2266';message='auth_skip_heal_done';data=@{elapsed_ms=$authStepSw.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-                    # #endregion
                     if ($cursorRunning) {
                         StepOk 'skipped (editor open)'
                         $script:LastAuthDetail = 'skipped editor open'
@@ -2295,9 +2233,6 @@ $script:WindowsMcpEnsured = $false
                     }
                 } else {
                     $authSync = Sync-CursorGoldenAuth -Alias $Alias -Force:$script:ForceCursorAuthSync
-                    # #region agent log H13_post_banner_steps auth_golden_sync_call_done
-                    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H13_post_banner_steps';location='connect.ps1:2275';message='auth_golden_sync_call_done';data=@{elapsed_ms=$authStepSw.ElapsedMilliseconds;skipped=$authSync.Skipped;ok=$authSync.Ok};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-                    # #endregion
                     if ($authSync.Skipped) {
                         if ($authSync.AlreadyComplete) {
                             StepOk 'already ok'
@@ -2821,6 +2756,21 @@ $script:WindowsMcpEnsured = $false
         }
         if ($keepTunnelForEditor) {
             Write-ConnectLog 'FINALLY_KEEP_TUNNEL reason=editor_open' 'WARN'
+            # Bug 5 fix: without this, Windows auto-closes our un-inherited KILL_ON_JOB_CLOSE job
+            # handle the instant THIS process exits normally (right after this finally block),
+            # killing the tunnel (and every sidecar job sibling) anyway despite deliberately
+            # skipping Stop-SessionTunnelCleanup above. Duplicate the job handle into the tunnel
+            # process itself so the job (and thus every member, including sidecar relay/watchdog)
+            # survives our own exit - see Detach-CursorProxySidecarJobProcess in
+            # cursor-proxy-sidecar.ps1 for the exact Win32 DuplicateHandle mechanism.
+            if ($bgTunnel -and (Get-Command Detach-CursorProxySidecarJobProcess -ErrorAction SilentlyContinue)) {
+                try {
+                    $detachOk = [bool](Detach-CursorProxySidecarJobProcess -Process $bgTunnel)
+                    Write-ConnectLog ("FINALLY_KEEP_TUNNEL detach_from_job ok={0}" -f [int]$detachOk) 'INFO'
+                } catch {
+                    Write-ConnectLog ("FINALLY_KEEP_TUNNEL detach_from_job_fail err={0}" -f $_.Exception.Message) 'WARN'
+                }
+            }
         } else {
             if (-not $alreadyDown) {
                 Write-Host ""

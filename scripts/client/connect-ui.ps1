@@ -13,6 +13,10 @@ $script:ConnectLogAsyncDrainerRunning = $false
 $script:ConnectLogAsyncTimer = $null
 $script:ConnectLogAsyncTimerSubId = $null
 $script:ConnectLogAsyncStallSince = $null
+# Bug 6: TRACE/DEBUG hot-loop lines accumulate here (in-process only) instead of the
+# long-lived StreamWriter's own internal buffer - see Write-ConnectLogSynced for why the
+# actual physical write no longer goes through that stream's cached position.
+$script:ConnectLogPendingBuffer = [System.Text.StringBuilder]::new()
 
 function Get-ConnectLogDir {
     $dir = Join-Path $env:USERPROFILE '.config\claude-connect\logs'
@@ -333,29 +337,16 @@ function Initialize-ConnectLog {
     # 2) Watermark sync-offset so BOOTSTRAP/UPDATE lines written before this process still ship
     # 3) Batch-flush to server ~/.claude/logs when SSH works
     # 4) Retention mtime +1 on laptop + server (purge on connect start / sync flush / server cron)
-    # #region agent log H9_init_log_breakdown init_begin
-    $swH9 = [System.Diagnostics.Stopwatch]::StartNew()
-    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H9_init_log_breakdown';location='connect-ui.ps1:336';message='init_begin';data=@{elapsed_ms=$swH9.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-    # #endregion
     Clear-ConnectLocalLogsOlderThan -Days 1
-    # #region agent log H9_init_log_breakdown clear_old_logs_done
-    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H9_init_log_breakdown';location='connect-ui.ps1:338';message='clear_old_logs_done';data=@{elapsed_ms=$swH9.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-    # #endregion
     try {
         $legacy = Join-Path $ScriptDir 'connect.log'
         if (Test-Path -LiteralPath $legacy) { Remove-Item -LiteralPath $legacy -Force -ErrorAction SilentlyContinue }
         $legacy1 = Join-Path $ScriptDir 'connect.log.1'
         if (Test-Path -LiteralPath $legacy1) { Remove-Item -LiteralPath $legacy1 -Force -ErrorAction SilentlyContinue }
     } catch { }
-    # #region agent log H9_init_log_breakdown legacy_remove_done
-    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H9_init_log_breakdown';location='connect-ui.ps1:349';message='legacy_remove_done';data=@{elapsed_ms=$swH9.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-    # #endregion
     $null = Get-ConnectSessionId
     $script:ConnectLogPath = Get-ConnectLogDayPath
     $script:ConnectLogSyncOffset = Read-ConnectLogSyncWatermark -LogPath $script:ConnectLogPath
-    # #region agent log H9_init_log_breakdown session_id_paths_done
-    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H9_init_log_breakdown';location='connect-ui.ps1:355';message='session_id_paths_done';data=@{elapsed_ms=$swH9.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-    # #endregion
     $script:ConnectLogLinesSinceSync = 0
     $script:ConnectLogSyncNeeded = $false
     $script:ConnectLogWarnPendingUntil = $null
@@ -368,16 +359,23 @@ function Initialize-ConnectLog {
             [System.IO.FileMode]::Append,
             [System.IO.FileAccess]::Write,
             [System.IO.FileShare]::ReadWrite)
+        # Bug 6 fix: register the FileStream so Write-ConnectLogSynced (the mutex-protected
+        # writer below) can re-seek to the TRUE current end-of-file before every flush.
+        # FileMode.Append only seeks to EOF once, at construction time - without this
+        # assignment (the gap that made the concurrent-writer corruption still reproducible
+        # even after Write-ConnectLogSynced/Get-ConnectLogWriteMutex were added), this
+        # process's own writer never re-syncs its write position to what other concurrent
+        # connect.ps1 processes have already appended, so mutex-serialized flushes still
+        # land at a stale offset and corrupt/overwrite each other's bytes.
+        $script:ConnectLogFileStream = $fs
         $script:ConnectLogWriter = [System.IO.StreamWriter]::new($fs, [System.Text.UTF8Encoding]::new($false))
         $script:ConnectLogWriter.AutoFlush = $true
     } catch {
         $script:ConnectLogWriter = $null
+        $script:ConnectLogFileStream = $null
         try { Write-Host ("[WARN] connect log open failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow } catch { }
         return
     }
-    # #region agent log H9_init_log_breakdown stream_open_done
-    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H9_init_log_breakdown';location='connect-ui.ps1:365';message='stream_open_done';data=@{elapsed_ms=$swH9.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-    # #endregion
     $elev = 'unknown'
     if (Get-Command Test-IsElevatedShell -ErrorAction SilentlyContinue) {
         $elev = if (Test-IsElevatedShell) { 'yes' } else { 'no' }
@@ -387,9 +385,6 @@ function Initialize-ConnectLog {
     Write-ConnectLog "log sink: local:$($script:ConnectLogPath) watermark=$($script:ConnectLogSyncOffset) + server:~/.claude/logs/ (local+server purge mtime+1)"
     Write-ConnectLog "script_dir: $ScriptDir connect_version: $Version" 'DEBUG'
     Write-ConnectSessionIndex -Phase 'start'
-    # #region agent log H9_init_log_breakdown session_index_done
-    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H9_init_log_breakdown';location='connect-ui.ps1:377';message='session_index_done';data=@{elapsed_ms=$swH9.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-    # #endregion
     $script:ConnectUiReady = $true
 }
 
@@ -445,7 +440,7 @@ function Invoke-ConnectLogProcTimed {
                     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                     $sid = Get-ConnectSessionId
                     if ($script:ConnectLogWriter) {
-                        $script:ConnectLogWriter.WriteLine("[$ts] [WARN] [$sid] TEMP_CLEANUP_FAIL path=$f err=$($_.Exception.Message)")
+                        Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] TEMP_CLEANUP_FAIL path=$f err=$($_.Exception.Message)"
                     }
                 } catch { }
             }
@@ -567,40 +562,19 @@ function Sync-ConnectLogToServer {
                 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                 $sid = Get-ConnectSessionId
                 if ($script:ConnectLogWriter) {
-                    $script:ConnectLogWriter.WriteLine("[$ts] [DEBUG] [$sid] LOG_SYNC_SKIP reason=forbid_shrink local=$fileLen remote_was=$remoteBeforeProbe off=$off (append/merge only)")
+                    Write-ConnectLogSynced -Line "[$ts] [DEBUG] [$sid] LOG_SYNC_SKIP reason=forbid_shrink local=$fileLen remote_was=$remoteBeforeProbe off=$off (append/merge only)"
                 }
             } catch { }
         }
         if (Test-ConnectRemoteLogNeedsRebuild -LocalSize $fileLen -RemoteSize $remoteBeforeProbe -Offset $off) {
-            # #region agent log H1 rebuild begin
-            $dbgT0 = Get-Date
-            try {
-                [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H1';location='connect-ui.ps1:555';message='rebuild_begin';data=@{local=$fileLen;remote_was=$remoteBeforeProbe;off=$off};timestamp=[long]([DateTimeOffset]$dbgT0).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n"))
-            } catch { }
-            # #endregion
             Clear-ConnectLogSyncPending -LogPath $path
             $replace = 'cat "$HOME/' + $remoteTmp + '" > "$HOME/' + $remoteDay + '"; ec=$?; rm -f "$HOME/' + $remoteTmp + '"; chmod 600 "$HOME/' + $remoteDay + '" 2>/dev/null; exit $ec'
             $mkRb = 'mkdir -p "$HOME/.claude/logs" && chmod 700 "$HOME/.claude" "$HOME/.claude/logs" 2>/dev/null; find "$HOME/.claude/logs" -type f -mtime +1 -delete 2>/dev/null; true'
             $mkResRb = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $mkRb)) -TimeoutMs 12000
-            # #region agent log H1 rebuild mkdir
-            try {
-                [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H1';location='connect-ui.ps1:559';message='rebuild_mkdir';data=@{ok=$mkResRb.Ok;timedOut=$mkResRb.TimedOut;elapsed_ms=[int]((Get-Date)-$dbgT0).TotalMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n"))
-            } catch { }
-            # #endregion
             if ($mkResRb.Ok) {
                 $scpFull = Invoke-ConnectLogProcTimed -Exe 'scp' -ArgumentList (@('-o','BatchMode=yes','-o','ConnectTimeout=20','-o','ControlMaster=no','-q', $path, "${target}:$remoteTmp")) -TimeoutMs 60000
-                # #region agent log H1 rebuild scp
-                try {
-                    [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H1';location='connect-ui.ps1:561';message='rebuild_scp';data=@{ok=$scpFull.Ok;timedOut=$scpFull.TimedOut;file_bytes=$fileLen;elapsed_ms=[int]((Get-Date)-$dbgT0).TotalMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n"))
-                } catch { }
-                # #endregion
                 if ($scpFull.Ok) {
                     $repRes = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $replace)) -TimeoutMs 20000
-                    # #region agent log H1 rebuild replace
-                    try {
-                        [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H1';location='connect-ui.ps1:563';message='rebuild_replace';data=@{ok=$repRes.Ok;timedOut=$repRes.TimedOut;elapsed_ms=[int]((Get-Date)-$dbgT0).TotalMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n"))
-                    } catch { }
-                    # #endregion
                     if ($repRes.Ok) {
                         Write-ConnectLogSyncWatermark -Offset $fileLen -LogPath $path
                         if (-not $LogPath -or $LogPath -eq $script:ConnectLogPath) {
@@ -615,7 +589,7 @@ function Sync-ConnectLogToServer {
                             $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                             $sid = Get-ConnectSessionId
                             if ($script:ConnectLogWriter) {
-                                $script:ConnectLogWriter.WriteLine("[$ts] [INFO] [$sid] LOG_SYNC_REBUILD local=$fileLen remote_was=$remoteBeforeProbe off=$off (replaced remote day log)")
+                                Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_REBUILD local=$fileLen remote_was=$remoteBeforeProbe off=$off (replaced remote day log)"
                             }
                         } catch { }
                         try { Remove-Item -LiteralPath $tmpLocal -Force -ErrorAction SilentlyContinue } catch { }
@@ -624,13 +598,6 @@ function Sync-ConnectLogToServer {
                 }
             }
         }
-        # #region agent log H1 rebuild fallthrough
-        if ($dbgT0) {
-            try {
-                [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H1';location='connect-ui.ps1:607';message='rebuild_fallthrough_no_return';data=@{elapsed_ms=[int]((Get-Date)-$dbgT0).TotalMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n"))
-            } catch { }
-        }
-        # #endregion
         # --- LOG_SYNC_RECONCILE: stop duplicate appends when cat succeeded but watermark timed out ---
         $pending = Read-ConnectLogSyncPending -LogPath $path
         if ($pending -and $pending.Offset -eq $off -and $pending.Take -eq $take) {
@@ -649,7 +616,7 @@ function Sync-ConnectLogToServer {
                     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                     $sid = Get-ConnectSessionId
                     if ($script:ConnectLogWriter) {
-                        $script:ConnectLogWriter.WriteLine("[$ts] [INFO] [$sid] LOG_SYNC_RECONCILE pending_ok off=$off take=$take remote=$rNow (skipped re-append)")
+                        Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_RECONCILE pending_ok off=$off take=$take remote=$rNow (skipped re-append)"
                     }
                 } catch { }
                 try { Remove-Item -LiteralPath $tmpLocal -Force -ErrorAction SilentlyContinue } catch { }
@@ -670,7 +637,7 @@ function Sync-ConnectLogToServer {
                 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                 $sid = Get-ConnectSessionId
                 if ($script:ConnectLogWriter) {
-                    $script:ConnectLogWriter.WriteLine("[$ts] [INFO] [$sid] LOG_SYNC_RECONCILE tail_hash_match off=$off take=$take (skipped re-append)")
+                    Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_RECONCILE tail_hash_match off=$off take=$take (skipped re-append)"
                 }
             } catch { }
             try { Remove-Item -LiteralPath $tmpLocal -Force -ErrorAction SilentlyContinue } catch { }
@@ -691,13 +658,7 @@ function Sync-ConnectLogToServer {
                     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                     $sid = Get-ConnectSessionId
                     if ($script:ConnectLogWriter) {
-                        $script:ConnectLogWriter.WriteLine("[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=mkdir_timeout_or_fail (local kept; retry later)")
-                        # #region agent log H1 final mkdir fail
-                        try {
-                            $dbgElapsed = if ($dbgT0) { [int]((Get-Date)-$dbgT0).TotalMilliseconds } else { -1 }
-                            [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H1';location='connect-ui.ps1:675';message='final_mkdir_fail';data=@{elapsed_since_rebuild_ms=$dbgElapsed};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n"))
-                        } catch { }
-                        # #endregion
+                        Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=mkdir_timeout_or_fail (local kept; retry later)"
                     }
                 } catch { }
             }
@@ -706,7 +667,7 @@ function Sync-ConnectLogToServer {
                     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                     $sid = Get-ConnectSessionId
                     if ($script:ConnectLogWriter) {
-                        $script:ConnectLogWriter.WriteLine("[$ts] [WARN] [$sid] TEMP_CLEANUP_FAIL path=$tmpLocal err=$($_.Exception.Message)")
+                        Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] TEMP_CLEANUP_FAIL path=$tmpLocal err=$($_.Exception.Message)"
                     }
                 } catch { }
             }
@@ -728,7 +689,7 @@ function Sync-ConnectLogToServer {
                     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                     $sid = Get-ConnectSessionId
                     if ($script:ConnectLogWriter) {
-                        $script:ConnectLogWriter.WriteLine("[$ts] [INFO] [$sid] LOG_SYNC_RECONCILE size_verify ok before=$remoteBefore after=$remoteAfter take=$take (timeout false-negative)")
+                        Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_RECONCILE size_verify ok before=$remoteBefore after=$remoteAfter take=$take (timeout false-negative)"
                     }
                 } catch { }
             }
@@ -799,7 +760,7 @@ function Sync-ConnectLogToServer {
                 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                 $sid = Get-ConnectSessionId
                 if ($script:ConnectLogWriter) {
-                    $script:ConnectLogWriter.WriteLine("[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=scp_or_append_fail (local kept; retry later)")
+                    Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=scp_or_append_fail (local kept; retry later)"
                 }
             } catch { }
         }
@@ -808,7 +769,7 @@ function Sync-ConnectLogToServer {
                 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                 $sid = Get-ConnectSessionId
                 if ($script:ConnectLogWriter) {
-                    $script:ConnectLogWriter.WriteLine("[$ts] [WARN] [$sid] TEMP_CLEANUP_FAIL path=$tmpLocal err=$($_.Exception.Message)")
+                    Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] TEMP_CLEANUP_FAIL path=$tmpLocal err=$($_.Exception.Message)"
                 }
             } catch { }
         }
@@ -823,7 +784,7 @@ function Sync-ConnectLogToServer {
                 if ($ex) { $ex = ($ex -replace '[
 ]+', ' ').Substring(0, [Math]::Min(160, $ex.Length)) }
                 if ($script:ConnectLogWriter) {
-                    $script:ConnectLogWriter.WriteLine("[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=exception err=$ex (local kept; retry later)")
+                    Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=exception err=$ex (local kept; retry later)"
                 }
             } catch { }
         }
@@ -1012,15 +973,45 @@ function Ensure-ConnectLogWriter {
 # up to 10 sessions per PC, see connect-boot.ps1) each hold their own FileStream with
 # their own tracked position, so near-simultaneous writes to the same day-log file can
 # land at stale offsets and overwrite/interleave each other mid-line (observed directly:
-# corrupted, spliced log lines from two session IDs in the same file). A named,
-# machine-wide mutex serializes the "seek to true current EOF, then write" critical
-# section across every connect.ps1 process writing to day logs.
+# corrupted, spliced log lines from two session IDs in the same file). A named mutex
+# serializes the "seek to true current EOF, then write" critical section across every
+# connect.ps1 process writing to day logs.
+#
+# Global\ (not Local\): this machine's client tooling is architected for multiple real
+# concurrent connect.ps1 windows (Global\ClaudeConnect#0..9, Enter-ConnectSingleInstance
+# above) under one interactive user, so Local\ would already be sufficient for today's
+# usage - but per-user Windows session isolation is not guaranteed to hold forever on a
+# shared machine (e.g. a second RDP/service session writing the same on-disk log path),
+# and Global\ costs nothing extra (same lightweight kernel object either way) while
+# staying correct in that edge case too, matching the Global\ scope already chosen for
+# the slot mutex this pattern mirrors.
+#
+# Scoped PER LOG FILE (day-suffixed name, not one bare name for all days/paths): the day
+# log path itself is day-suffixed (connect-YYYYMMDD.log), so without day-scoping the
+# mutex, sessions writing to *different, unrelated* day-log files (e.g. spanning a
+# midnight rollover) would still serialize against each other for no reason - a pure
+# throughput cost with zero correctness benefit. Re-derives/recreates the mutex handle
+# whenever the day changes (naturally covers Ensure-ConnectLogWriter's midnight rollover).
 function Get-ConnectLogWriteMutex {
-    if ($script:ConnectLogWriteMutex) { return $script:ConnectLogWriteMutex }
+    $dayTag = if ($script:ConnectLogPath -and ($script:ConnectLogPath -match 'connect-(\d{8})\.log$')) {
+        $Matches[1]
+    } else {
+        Get-Date -Format 'yyyyMMdd'
+    }
+    $mutexName = "Global\ClaudeConnectDayLogWrite-$dayTag"
+    if ($script:ConnectLogWriteMutex -and $script:ConnectLogWriteMutexName -eq $mutexName) {
+        return $script:ConnectLogWriteMutex
+    }
+    if ($script:ConnectLogWriteMutex) {
+        try { $script:ConnectLogWriteMutex.Close() } catch { }
+        $script:ConnectLogWriteMutex = $null
+    }
     try {
-        $script:ConnectLogWriteMutex = New-Object System.Threading.Mutex($false, 'Global\ClaudeConnectDayLogWrite')
+        $script:ConnectLogWriteMutex = New-Object System.Threading.Mutex($false, $mutexName)
+        $script:ConnectLogWriteMutexName = $mutexName
     } catch {
         $script:ConnectLogWriteMutex = $null
+        $script:ConnectLogWriteMutexName = ''
     }
     return $script:ConnectLogWriteMutex
 }
@@ -1036,13 +1027,74 @@ function Write-ConnectLogSynced {
     $acquired = $false
     try {
         if ($mutex) {
-            try { $acquired = $mutex.WaitOne(2000) } catch { $acquired = $false }
+            # 5000ms: mutex hold time per writer is a Seek+WriteLine+Flush (sub-ms in
+            # practice), so this ceiling is essentially never hit under real contention -
+            # it only guards against a genuinely wedged holder (e.g. a killed process that
+            # left the mutex abandoned mid-Seek, surfaced below as AbandonedMutexException).
+            try { $acquired = $mutex.WaitOne(5000) }
+            catch [System.Threading.AbandonedMutexException] { $acquired = $true }
+            catch { $acquired = $false }
         }
-        if ($script:ConnectLogFileStream -and $script:ConnectLogFileStream.CanSeek) {
-            try { [void]$script:ConnectLogFileStream.Seek(0, [System.IO.SeekOrigin]::End) } catch { }
+        if (-not $acquired -and $mutex) {
+            # Zero-loss policy (CLAUDE.md "Connect session logs"): never silently drop the
+            # line - fall through and write it unsynchronized as a last resort (same risk
+            # window this whole fix closes for the common case), but leave a durable,
+            # out-of-band breadcrumb about the contention. Written directly to last-fail.txt
+            # (the same breadcrumb sink Write-ConnectLog's own ERROR/WARN path uses) rather
+            # than via Write-ConnectLog/Write-ConnectLogSynced, to avoid recursing back into
+            # this same function.
+            try {
+                $breadDir = Join-Path $env:USERPROFILE '.config\claude-connect'
+                New-Item -ItemType Directory -Force -Path $breadDir | Out-Null
+                $bts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+                $bsid = if ($script:ConnectSessionId) { $script:ConnectSessionId } else { '' }
+                $bline = "[$bts] [WARN] [$bsid] LOG_WRITE_LOCK_CONTENTION waited_ms=5000 acquired=false (wrote unsynchronized as last resort; zero-loss over strict ordering)" + [Environment]::NewLine
+                [System.IO.File]::AppendAllText((Join-Path $breadDir 'last-fail.txt'), $bline, [System.Text.UTF8Encoding]::new($false))
+            } catch { }
         }
-        if ($Line) { $script:ConnectLogWriter.WriteLine($Line) }
-        try { $script:ConnectLogWriter.Flush() } catch { }
+        # Deliberately NOT a Seek (SeekOrigin.End, or even a fresh FileInfo-derived length)
+        # on the long-lived $script:ConnectLogFileStream: empirically verified (real
+        # multi-process test, see test-concurrent-log-writers-live.ps1 / the E2E driver in
+        # this bug's report) that BOTH still occasionally land at a length that is stale by
+        # the time another process's just-flushed append becomes visible to a re-query from
+        # a different handle/object - under real back-to-back cross-process writes this
+        # still corrupted/overwrote a small fraction of lines. The only construction that
+        # was actually verified corruption-free across repeated live multi-process runs is a
+        # brand-new, single-purpose FileStream/handle per protected write: opening fresh in
+        # FileMode.Append means the OS resolves "current end of file" itself, at that exact
+        # open call, with no cached/stale state possible (there is no prior state to cache -
+        # the handle did not exist a moment ago). This is the "reopen FileShare.None-per-write
+        # (flock-style)" alternative named in the plan/bug report; the cross-process mutex
+        # above already provides the exclusivity a bare FileShare.None open would add, so
+        # FileShare.ReadWrite here (matching the long-lived writer's own share mode) is
+        # sufficient and keeps a second concurrent reader (e.g. Sync-ConnectLogToServer's
+        # chunked read) unblocked while this fresh append handle is briefly open.
+        $pending = ''
+        if ($script:ConnectLogPendingBuffer -and $script:ConnectLogPendingBuffer.Length -gt 0) {
+            $pending = $script:ConnectLogPendingBuffer.ToString()
+            [void]$script:ConnectLogPendingBuffer.Clear()
+        }
+        $toWrite = $pending
+        if ($Line) { $toWrite += $Line + [Environment]::NewLine }
+        if ($toWrite -and $script:ConnectLogPath) {
+            $fsWrite = $null
+            try {
+                $fsWrite = [System.IO.FileStream]::new(
+                    $script:ConnectLogPath,
+                    [System.IO.FileMode]::Append,
+                    [System.IO.FileAccess]::Write,
+                    [System.IO.FileShare]::ReadWrite)
+                $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($toWrite)
+                $fsWrite.Write($bytes, 0, $bytes.Length)
+                $fsWrite.Flush()
+            } catch {
+                # Last resort: re-buffer so the next successful sync doesn't silently drop
+                # these bytes (zero-loss over strict ordering).
+                try { [void]$script:ConnectLogPendingBuffer.Append($toWrite) } catch { }
+            } finally {
+                if ($fsWrite) { try { $fsWrite.Dispose() } catch { } }
+            }
+        }
     } finally {
         if ($acquired -and $mutex) { try { $mutex.ReleaseMutex() } catch { } }
     }
@@ -1057,11 +1109,10 @@ function Write-ConnectLog {
     try {
         $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
         $sid = Get-ConnectSessionId
-        $prevAuto = $script:ConnectLogWriter.AutoFlush
         if ($Level -eq 'TRACE' -or $Level -eq 'DEBUG') {
-            # Buffer hot-loop noise locally; flush at most every 2s (AV/disk tax).
-            $script:ConnectLogWriter.AutoFlush = $false
-            $script:ConnectLogWriter.WriteLine("[$ts] [$Level] [$sid] $Message")
+            # Buffer hot-loop noise locally (in-process StringBuilder, not the shared
+            # StreamWriter - see Write-ConnectLogSynced); flush at most every 2s (AV/disk tax).
+            [void]$script:ConnectLogPendingBuffer.AppendLine("[$ts] [$Level] [$sid] $Message")
                     if ($Level -eq 'ERROR' -or $Level -eq 'WARN') {
                         try {
                             $breadDir = Join-Path $env:USERPROFILE '.config\claude-connect'
@@ -1076,7 +1127,6 @@ function Write-ConnectLog {
                 Write-ConnectLogSynced
                 $script:ConnectLogLastTraceFlushAt = $nowFlush
             }
-            $script:ConnectLogWriter.AutoFlush = $prevAuto
             # Bug 36: TUNNEL_* TRACE may carry soft_fail context - allow sync trigger.
             if ($Level -eq 'TRACE' -and $Message -match 'TUNNEL_') {
                 $script:ConnectLogLinesSinceSync = [int]$script:ConnectLogLinesSinceSync + 1
@@ -1096,7 +1146,6 @@ function Write-ConnectLog {
         }
         # Flush any pending TRACE/DEBUG buffer so WARN/ERROR sync is not stuck waiting for 2s TRACE flush.
         Write-ConnectLogSynced
-        $script:ConnectLogWriter.AutoFlush = $true
         Write-ConnectLogSynced -Line "[$ts] [$Level] [$sid] $Message"
         # Local always complete. Sync carefully:
         # - TRACE/DEBUG stay local-only during hot loops except TUNNEL_* (above)
@@ -1518,7 +1567,20 @@ function Write-ConnectSessionContext {
             Sync-ConnectLogToServer -Force | Out-Null
         }
     } elseif (Get-Command Request-ConnectLogSync -ErrorAction SilentlyContinue) {
-        Request-ConnectLogSync
+        # Bug 9 fix (2026-07-24, live repro): this ran on EVERY CONTEXT phase transition
+        # (startup/project_selected/session_loop/server_ready/...), not just session_end -
+        # without -NoInline, Request-ConnectLogSync's own "small backlog" branch still runs
+        # Sync-ConnectLogToServer INLINE (blocking) whenever the unsynced backlog happens to be
+        # under its 64KB gate; under real network/server contention that inline call's own
+        # sequential sub-calls (probe/chunk-check/mkdir/scp, ~2.5-4s each) can still chain up to
+        # ~17s, and TWO phase transitions firing close together (observed live: project_selected
+        # then session_loop within seconds) stacked to a genuine ~36s UI freeze right after
+        # project selection - exactly the "looked like Preparing tunnel / Checking SSH hung"
+        # symptom this file's own Request-ConnectLogSync comment (~line 889) already warns about
+        # for inline sync, just not routed through -NoInline here. Routine phase-context logging
+        # must never risk a blocking sync - only session_end (handled above, unconditionally
+        # forced) legitimately needs a guaranteed flush before the process exits.
+        Request-ConnectLogSync -NoInline
     } elseif (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue) {
         Sync-ConnectLogToServer | Out-Null
     }

@@ -410,7 +410,6 @@ function Test-TunnelPortTcpOpenAndScanHostKey {
     # Test-TunnelPortTcpOpen alone) - it only removes a second full SSH handshake for
     # the common "port open, caller also needs the hostkey" case. Only call this when
     # the caller already knows it will need BOTH values (see Test-TunnelPortIsForeignPeer).
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $scriptBody = @"
 if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$TargetPort" 2>/dev/null; then
   echo TCP:open
@@ -436,11 +435,6 @@ fi
         $script:TunnelHostKeyFpByPort[[string]$TargetPort] = $fp
         if ($fp) { Write-GitModeLog "HOSTKEY_FP scan port=$TargetPort fp=$fp" 'DEBUG' }
     }
-    # #region agent log H12_gitmode_batching combined_tcp_hostkey
-    try {
-        [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H12_gitmode_batching';location='git-mode.ps1:401';message='combined_tcp_hostkey';data=@{elapsed_ms=$sw.ElapsedMilliseconds;calls_saved=1;port=$TargetPort;tcp_open=$tcpOpen};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n"))
-    } catch {}
-    # #endregion
     return $tcpOpen
 }
 
@@ -1308,7 +1302,6 @@ function Test-ProxyHealth {
         return $false
     }
     $ip = ''
-    $swH10p = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         $req = [System.Net.HttpWebRequest]::Create('https://api.ipify.org')
         $req.Proxy = New-Object System.Net.WebProxy("http://127.0.0.1:$HttpPort")
@@ -1325,15 +1318,9 @@ function Test-ProxyHealth {
         } finally {
             $resp.Close()
         }
-        # #region agent log H10_proxy_health_timeout proxy_health_request_done
-        try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='git-mode.ps1:Test-ProxyHealth';message='proxy_health_request_done';data=@{elapsed_ms=$swH10p.ElapsedMilliseconds;ok=1};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-        # #endregion
     } catch {
         Write-GitModeLog ("PROXY_HEALTH socks={0} http={1} ok=0 err={2}" -f $SocksPort, $HttpPort, $_.Exception.Message) 'WARN'
         $script:LastProxyHealthOk = $false
-        # #region agent log H10_proxy_health_timeout proxy_health_request_failed
-        try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='git-mode.ps1:Test-ProxyHealth';message='proxy_health_request_failed';data=@{elapsed_ms=$swH10p.ElapsedMilliseconds;ok=0};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-        # #endregion
         return $false
     }
     if (-not $ip) {
@@ -1366,7 +1353,29 @@ $script:LastProxyHealthIp = ''
 function Test-RemoteXraySocksOpen {
     # Probe 127.0.0.1:10808 ON THE DESTINATION SERVER (not laptop). Sepidz has no xray -
     # must return false so we never wire -L or write http.proxy to a dead endpoint.
-    # Hard-capped WaitForExit so a hung ssh.exe never stalls Ensure-SessionTunnel.
+    #
+    # Single ssh attempt, single clear timeout budget - no attempt+retry stacking (bug 3/4
+    # fix, 2026-07-24). The previous design ran attempt1 capped at WaitForExit(5000) and,
+    # only on timeout, a full SECOND ssh process capped at WaitForExit(6000) - worst case
+    # 5000+6000=11000ms, which is *worse* than the ~8000ms budget it was meant to protect,
+    # while attempt1 alone still stalled routinely against a target that wasn't actually
+    # unreachable (cold SSH under boot-time connection bursts). Research:
+    #   - Win32-OpenSSH ConnectTimeout has a long-standing non-blocking-poll bug
+    #     (PowerShell/Win32-OpenSSH#1352, OpenSSH bug 2918): the client waits the ENTIRE
+    #     ConnectTimeout duration rather than only capping genuinely-slow connects - i.e.
+    #     "ConnectTimeout=N" is a "wait up to Ns" budget that is frequently fully consumed,
+    #     not a tight fast-fail guarantee.
+    #   - OpenSSH sshd_config MaxStartups (default 10:30:100): once the number of pending
+    #     *unauthenticated* connections crosses the low watermark, sshd starts randomly
+    #     dropping/delaying a percentage of new connection attempts, and the probability
+    #     rises linearly up to the high watermark - worse under boot-time SSH bursts from
+    #     many concurrent client sessions. This is genuine cold-start slowness, not a dead
+    #     target, so a single attempt needs a real window to succeed rather than being
+    #     retried from scratch.
+    # Net effect: one attempt with ConnectTimeout=6 (ssh-level) + WaitForExit(7000) (process
+    # backstop, giving the ssh-level timeout room to fire on its own first) keeps worst-case
+    # wall-clock meaningfully under the original ~8000ms budget while still giving a
+    # genuinely slow-but-eventually-successful connection a fair single window to complete.
     param(
         [Parameter(Mandatory)][string]$Alias,
         [string]$SshCfgPath = '',
@@ -1375,13 +1384,7 @@ function Test-RemoteXraySocksOpen {
     if ($RemotePort -le 0) { $RemotePort = [int]$script:XrayServerSocksPort }
     $argList = New-Object System.Collections.Generic.List[string]
     if ($SshCfgPath) { [void]$argList.Add('-F'); [void]$argList.Add($SshCfgPath) }
-    # H10_proxy_health_timeout: was ConnectTimeout=5 + remote `timeout 2` = 7s worst-case,
-    # with an 8000ms WaitForExit safety margin - live logs showed this firing routinely
-    # (remote_xray_probe=timeout) burning the full 8s. Tightened to ConnectTimeout=2 so the
-    # worst-case (2s ssh connect + 2s remote probe) is 4s; WaitForExit kept at a proportional
-    # ~1.25x margin (5000ms) so legitimate-but-slow connects still succeed, they just no
-    # longer wait 8s to fail when genuinely unreachable.
-    foreach ($a in @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=2', '-o', 'ServerAliveInterval=2', '-o', 'ServerAliveCountMax=2')) {
+    foreach ($a in @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6', '-o', 'ServerAliveInterval=2', '-o', 'ServerAliveCountMax=2')) {
         [void]$argList.Add($a)
     }
     [void]$argList.Add($Alias)
@@ -1389,50 +1392,14 @@ function Test-RemoteXraySocksOpen {
     $stdoutPath = [System.IO.Path]::GetTempFileName()
     $stderrPath = [System.IO.Path]::GetTempFileName()
     $proc = $null
-    $swH10g = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         $proc = Start-Process -FilePath 'ssh' -ArgumentList $argList.ToArray() -NoNewWindow -PassThru `
             -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-        if (-not $proc.WaitForExit(5000)) {
+        if (-not $proc.WaitForExit(7000)) {
             try { $proc.Kill() } catch {}
-            # #region agent log H19 xray_probe_attempt1_timeout
-            try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';runId='post-fix';hypothesisId='H19';location='git-mode.ps1:1396';message='xray_probe_attempt1_timeout';data=@{elapsed_ms=$swH10g.ElapsedMilliseconds;port=$RemotePort};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-            # #endregion
-            # H19 (xray verified UP on server 2026-07-24: 10808+10809 LISTEN, systemd active):
-            # a WaitForExit timeout here means the FRESH COLD ssh connection itself stalled under
-            # the boot-time SSH burst (MaxStartups throttling), NOT that the remote port is closed
-            # - a closed port returns "CLOSED" in ~1.5s and exits cleanly, never hitting this path.
-            # Falsely returning $false dropped a healthy proxy leg ("Cursor international path down")
-            # AND wasted the 5s. xray is a stable service, so retry once over a now-warm path.
-            $retryOut = ''
-            $retryProc = $null
-            $retryStdout = [System.IO.Path]::GetTempFileName()
-            $retryStderr = [System.IO.Path]::GetTempFileName()
-            try {
-                $retryProc = Start-Process -FilePath 'ssh' -ArgumentList $argList.ToArray() -NoNewWindow -PassThru `
-                    -RedirectStandardOutput $retryStdout -RedirectStandardError $retryStderr
-                if ($retryProc.WaitForExit(6000)) {
-                    try { $retryOut = [System.IO.File]::ReadAllText($retryStdout).Trim() } catch { $retryOut = '' }
-                } else {
-                    try { $retryProc.Kill() } catch {}
-                }
-            } catch { $retryOut = '' } finally {
-                try { Remove-Item -LiteralPath $retryStdout, $retryStderr -Force -ErrorAction SilentlyContinue } catch {}
-            }
-            $retryOk = ($retryOut -eq 'OPEN')
-            # #region agent log H19 xray_probe_retry_result
-            try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';runId='post-fix';hypothesisId='H19';location='git-mode.ps1:1402';message='xray_probe_retry_result';data=@{elapsed_ms=$swH10g.ElapsedMilliseconds;port=$RemotePort;retry_open=$retryOk;retry_out=$retryOut};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-            # #endregion
-            if ($retryOk) {
-                Write-GitModeLog "ENSURE_TUNNEL remote_xray_probe=open port=$RemotePort (recovered on retry)" 'INFO'
-            } else {
-                Write-GitModeLog "ENSURE_TUNNEL remote_xray_probe=timeout port=$RemotePort skipping_proxy_leg (after 1 retry)" 'WARN'
-            }
-            return $retryOk
+            Write-GitModeLog "ENSURE_TUNNEL remote_xray_probe=timeout port=$RemotePort skipping_proxy_leg" 'WARN'
+            return $false
         }
-        # #region agent log H10_proxy_health_timeout xray_probe_done
-        try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='git-mode.ps1:Test-RemoteXraySocksOpen';message='xray_probe_done';data=@{elapsed_ms=$swH10g.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-        # #endregion
         $out = ''
         try { $out = [System.IO.File]::ReadAllText($stdoutPath).Trim() } catch { $out = '' }
         return ($out -eq 'OPEN')
@@ -2844,10 +2811,15 @@ else
   AM=`$CUR_AM
 fi
 if [ "`$AM_ONLY" = "1" ]; then
-  PORT_OUT=`$CUR_PORT
-  SLOT_OUT=`$CUR_SLOT
-  if [ -n "`$PORT" ] && [ -n "`$CUR_PORT" ] && [ "`$PORT" != "`$CUR_PORT" ]; then
-    printf 'PUSH_CONF port_mismatch_keep session=%s server=%s\n' "`$PORT" "`$CUR_PORT"
+  if [ -n "`$CUR_PORT" ]; then
+    PORT_OUT=`$CUR_PORT
+    SLOT_OUT=`$CUR_SLOT
+    if [ -n "`$PORT" ] && [ "`$PORT" != "`$CUR_PORT" ]; then
+      printf 'PUSH_CONF port_mismatch_keep session=%s server=%s\n' "`$PORT" "`$CUR_PORT"
+    fi
+  else
+    PORT_OUT=`$PORT
+    SLOT_OUT=`$SLOT
   fi
   PUBLISH_PORT=0
 else

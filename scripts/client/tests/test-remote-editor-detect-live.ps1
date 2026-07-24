@@ -20,6 +20,7 @@ foreach ($n in @(
     'Invoke-CimEditorProcessQuery', 'Invoke-CimCursorProcessQuery',
     'Get-CursorProfileProcesses', 'Test-PathNeedleBoundaryMatch',
     'Get-RemoteEditorProcesses', 'Get-CursorMainProfileProcesses',
+    'Initialize-Win32WindowEnum', 'Get-ProcessTopLevelWindows',
     'Test-CursorWindowTitleIsAgentHome', 'Test-CursorWindowShowsAgentHome',
     'Test-RemoteEditorInAgentHome', 'Get-RemoteFolderUri',
     'Test-RemoteEditorOnCorrectFolder', 'Get-RemoteEditorSessionPresence', 'Clear-CursorProcessCache'

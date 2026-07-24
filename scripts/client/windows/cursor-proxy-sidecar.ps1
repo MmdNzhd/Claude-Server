@@ -26,6 +26,30 @@ public static class ClaudeConnectSidecarJob {
   public static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
   [DllImport("kernel32.dll", SetLastError=true)]
   public static extern bool CloseHandle(IntPtr hObject);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool DuplicateHandle(IntPtr hSourceProcessHandle, IntPtr hSourceHandle, IntPtr hTargetProcessHandle, out IntPtr lpTargetHandle, uint dwDesiredAccess, bool bInheritHandle, uint dwOptions);
+  public const uint PROCESS_DUP_HANDLE = 0x0040;
+  public const uint DUPLICATE_SAME_ACCESS = 0x00000002;
+  // #14b (bug 5 fix): a KILL_ON_JOB_CLOSE job is destroyed - killing every member - only when
+  // its LAST handle closes (MS Learn "Job Objects": "the job is destroyed when its last handle
+  // has been closed and all associated processes have exited... closing the last job object
+  // handle terminates all associated processes"). Planting a second handle to the SAME job
+  // object inside a target member's own handle table (via DuplicateHandle) keeps that handle
+  // count above zero after our own process exits and its handle auto-closes, so the job (and
+  // every one of its members, not just the target) survives - until the target process itself
+  // later exits and its own handle table (including this duplicated handle) is torn down too.
+  public static bool DuplicateJobHandleIntoProcess(IntPtr hJob, int targetPid) {
+    IntPtr hTargetProcess = OpenProcess(PROCESS_DUP_HANDLE, false, targetPid);
+    if (hTargetProcess == IntPtr.Zero) return false;
+    try {
+      IntPtr dup;
+      return DuplicateHandle(GetCurrentProcess(), hJob, hTargetProcess, out dup, 0, false, DUPLICATE_SAME_ACCESS);
+    } finally { CloseHandle(hTargetProcess); }
+  }
   [StructLayout(LayoutKind.Sequential)]
   public struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
     public long PerProcessUserTimeLimit;
@@ -108,6 +132,31 @@ function Add-CursorProxySidecarJobProcess {
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
             Write-GitModeLog ("SIDECAR_JOB assign_fail pid={0} err={1}" -f $Process.Id, $_.Exception.Message) 'DEBUG'
         }
+    }
+}
+
+function Detach-CursorProxySidecarJobProcess {
+    # Bug 5 fix: call this on a job-assigned process (e.g. the reverse tunnel) right before
+    # connect.ps1 exits in a branch that deliberately wants that process (and its job siblings -
+    # relay/watchdog) to keep running afterward (keepTunnelForEditor). Without this, Windows
+    # auto-closes our un-inherited job handle on normal process exit, which - because the job has
+    # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE - immediately kills every member, silently defeating the
+    # "tunnel survives terminal close" feature. See DuplicateJobHandleIntoProcess above for the
+    # exact mechanism (verified against MS Learn Job Objects + DuplicateHandle docs).
+    param([Parameter(Mandatory)]$Process)
+    if (-not $Process) { return $false }
+    if (-not $script:CursorProxySidecarJob) { return $false }
+    try {
+        $ok = [bool][ClaudeConnectSidecarJob]::DuplicateJobHandleIntoProcess([IntPtr]$script:CursorProxySidecarJob, $Process.Id)
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("SIDECAR_JOB detach pid={0} ok={1}" -f $Process.Id, [int]$ok) 'INFO'
+        }
+        return $ok
+    } catch {
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("SIDECAR_JOB detach_fail pid={0} err={1}" -f $Process.Id, $_.Exception.Message) 'WARN'
+        }
+        return $false
     }
 }
 
@@ -394,17 +443,18 @@ function Start-CursorProxySidecar {
     return $ok
 }
 
-# H10_proxy_health_timeout finding: the ~8.3s (remote_xray_probe=timeout) and ~8.6s
-# (PROXY_HEALTH DownloadString) stalls live in git-mode.ps1 (Test-RemoteXraySocksOpen's
-# hard-coded 8000ms WaitForExit and Test-ProxyHealth's untimed WebClient.DownloadString) -
-# out of scope for this file. What we CAN do here is memoize "backend is down" for a short
-# TTL, file-based so it survives across separate connect.ps1 process launches (fast
-# reconnects), so this file's OWN checks short-circuit instead of re-probing every time.
+# Bug 7 fix + consolidation (was H10_proxy_health_timeout): Test-CursorProxySidecarListening is
+# a cheap bounded local-loopback check (native Test-LocalPortOpen, or a <=300ms BeginConnect
+# fallback) - never expensive enough to justify skipping it outright. The known-down cache below
+# is now purely an observability/"how long has it been down" signal for callers that want it
+# (e.g. future backoff heuristics); Test-CursorProxyBackendOpen itself ALWAYS performs the real
+# check so a backend recovery is detected on the very next call, not after up to a 120s blind TTL.
 $script:CursorProxyKnownDownCacheFile = Join-Path $env:TEMP 'claude-connect-proxy-known-down.json'
 $script:CursorProxyKnownDownTtlSec = 120
 
 function Test-CursorProxyKnownDown {
     # Returns $true if backend was confirmed down within the last TTL seconds (any process).
+    # Informational only - no code path may use this to skip a real check (bug 7).
     if (-not (Test-Path -LiteralPath $script:CursorProxyKnownDownCacheFile)) { return $false }
     try {
         $raw = Get-Content -LiteralPath $script:CursorProxyKnownDownCacheFile -Raw -ErrorAction Stop
@@ -422,9 +472,6 @@ function Set-CursorProxyKnownDown {
         (@{ ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); reason = $Reason } | ConvertTo-Json -Compress) |
             Set-Content -LiteralPath $script:CursorProxyKnownDownCacheFile -Encoding UTF8 -ErrorAction SilentlyContinue
     } catch {}
-    # #region agent log H10_proxy_health_timeout known_down_cache_set
-    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='cursor-proxy-sidecar.ps1:426';message='known_down_cache_set';data=@{reason=$Reason;ttl_sec=$script:CursorProxyKnownDownTtlSec};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-    # #endregion
 }
 
 function Clear-CursorProxyKnownDownCache {
@@ -436,15 +483,8 @@ function Clear-CursorProxyKnownDownCache {
 }
 
 function Test-CursorProxyBackendOpen {
-    # #region agent log H10_proxy_health_timeout backend_open_check_start
-    $swH10Backend = [System.Diagnostics.Stopwatch]::StartNew()
-    # #endregion
-    if (Test-CursorProxyKnownDown) {
-        # #region agent log H10_proxy_health_timeout backend_open_check_done
-        try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='cursor-proxy-sidecar.ps1:444';message='backend_open_check_done';data=@{elapsed_ms=$swH10Backend.ElapsedMilliseconds;cache_hit=1;result=0};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-        # #endregion
-        return $false
-    }
+    # Bug 7 fix: no known-down short-circuit here anymore - always run the real (cheap, bounded)
+    # port checks so a mid-TTL recovery is caught immediately instead of up to 120s late.
     $httpBack = 19180
     $socksBack = 19080
     if ($script:HttpProxyPort) { $httpBack = [int]$script:HttpProxyPort }
@@ -457,18 +497,12 @@ function Test-CursorProxyBackendOpen {
     } else {
         Set-CursorProxyKnownDown -Reason 'backend_probe_failed'
     }
-    # #region agent log H10_proxy_health_timeout backend_open_check_done
-    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='cursor-proxy-sidecar.ps1:461';message='backend_open_check_done';data=@{elapsed_ms=$swH10Backend.ElapsedMilliseconds;cache_hit=0;result=[int]$result};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-    # #endregion
     return $result
 }
 
 function Ensure-CursorProxySidecar {
     # Cheap heal for open Cursor sessions: if sticky front is down, restart relays.
     # Only write settings->18998 when front AND backend -L ports are up (else Clear).
-    # #region agent log H10_proxy_health_timeout ensure_sidecar_start
-    $swH10Ensure = [System.Diagnostics.Stopwatch]::StartNew()
-    # #endregion
     if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
         Write-GitModeLog 'SIDECAR_ENSURE begin' 'DEBUG'
     }
@@ -484,9 +518,6 @@ function Ensure-CursorProxySidecar {
     }
     if (-not $frontOk) {
         try { Clear-CursorProxySettingsSidecar | Out-Null } catch {}
-        # #region agent log H10_proxy_health_timeout ensure_sidecar_done
-        try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='cursor-proxy-sidecar.ps1:488';message='ensure_sidecar_done';data=@{elapsed_ms=$swH10Ensure.ElapsedMilliseconds;front_ok=0;backend_ok=0};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-        # #endregion
         return $false
     }
     $backendOk = Test-CursorProxyBackendOpen
@@ -495,16 +526,10 @@ function Ensure-CursorProxySidecar {
             Write-GitModeLog 'SIDECAR_ENSURE front_up backend_down clearing_settings' 'WARN'
         }
         try { Clear-CursorProxySettingsSidecar | Out-Null } catch {}
-        # #region agent log H10_proxy_health_timeout ensure_sidecar_done
-        try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='cursor-proxy-sidecar.ps1:499';message='ensure_sidecar_done';data=@{elapsed_ms=$swH10Ensure.ElapsedMilliseconds;front_ok=1;backend_ok=0};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-        # #endregion
         return $false
     }
     try { Repair-CursorProxySettingsToSidecar | Out-Null } catch {}
     Start-CursorProxySidecarWatchdog | Out-Null
-    # #region agent log H10_proxy_health_timeout ensure_sidecar_done
-    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='cursor-proxy-sidecar.ps1:506';message='ensure_sidecar_done';data=@{elapsed_ms=$swH10Ensure.ElapsedMilliseconds;front_ok=1;backend_ok=1};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
-    # #endregion
     return $true
 }
 
