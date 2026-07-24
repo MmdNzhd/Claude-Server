@@ -949,7 +949,8 @@ while [ "$exit_requested" -eq 0 ]; do
                     cursor_auth_needs_refresh "$_cursor_gs" "$_auth_complete" && _auth_needs_refresh=1
                 fi
                 if declare -F test_personal_cursor_dominant >/dev/null 2>&1 && test_personal_cursor_dominant; then
-                    warn 'Personal Cursor is open - close it or use [Claude Server] profile windows'
+                    # Console decluttered on user request (2026-07-24) - full detail stays in
+                    # the day log for diagnosis; matches windows/connect.ps1 treatment.
                     declare -F connect_log >/dev/null 2>&1 && connect_log 'AUTH_WARN personal_cursor_dominant' 'WARN'
                 fi
                 _skip_auth=0

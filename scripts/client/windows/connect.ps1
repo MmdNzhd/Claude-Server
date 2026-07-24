@@ -2215,7 +2215,9 @@ $script:WindowsMcpEnsured = $false
                 # Skip process enum when auth sync itself is skipped (stamp current / editor open).
                 if (-not $skipAuth -and (Get-Command Test-PersonalCursorDominant -ErrorAction SilentlyContinue)) {
                     if (Test-PersonalCursorDominant) {
-                        Warn 'Personal Cursor is open - close it or use [Claude Server] profile windows'
+                        # Console decluttered on user request (2026-07-24) - full detail stays in
+                        # the day log for diagnosis; not actionable enough mid-session to warrant
+                        # an inline console interruption every time it happens.
                         Write-ConnectLog 'AUTH_WARN personal_cursor_dominant' 'WARN'
                     }
                 }
@@ -2304,9 +2306,10 @@ $script:WindowsMcpEnsured = $false
                 }
             }
             if ($null -ne $script:LastProxyHealthOk -and -not $script:LastProxyHealthOk -and $script:SocksProxyPort) {
+                # Console decluttered on user request (2026-07-24): this fires on a large
+                # fraction of sessions (xray probe timing, see bug 3/4) and was pure noise by
+                # then - full detail stays in the day log for diagnosis.
                 Write-ConnectLog 'PROXY_HEALTH_UI warn international_path_down' 'WARN'
-                Write-Host ''
-                Write-Host '  WARN: Cursor international path down (xray proxy). Do not use laptop VPN as a fix; press R to reconnect.' -ForegroundColor Yellow
                 if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
                     try { [void](Clear-CursorProxySettingsSidecar) } catch {}
                 }

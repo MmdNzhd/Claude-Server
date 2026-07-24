@@ -90,6 +90,7 @@ $suites = @(
     @{ Name = 'context-log-sync-noninline-live'; Script = 'test-context-log-sync-noninline-live.ps1' }
     @{ Name = 'server-setup-round-trip-merge-live'; Script = 'test-server-setup-round-trip-merge-live.ps1' }
     @{ Name = 'setup-debounce-bounded-live'; Script = 'test-setup-debounce-bounded-live.ps1' }
+    @{ Name = 'console-declutter-warnings'; Script = 'test-console-declutter-warnings.ps1' }
 )
 
 $fail = 0
