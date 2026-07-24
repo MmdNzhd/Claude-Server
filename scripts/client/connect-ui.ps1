@@ -149,7 +149,8 @@ function Get-ConnectRemoteLogByteSize {
     param(
         [Parameter(Mandatory)][string]$Target,
         [Parameter(Mandatory)][string]$Day,
-        [string[]]$SshOpts
+        [string[]]$SshOpts,
+        [int]$TimeoutMs = 10000
     )
     # Lightweight remote size probe. -1 = probe failed (do not treat as reconcile success).
     # MUST use timed process: raw & ssh can hang forever and freeze Loading projects
@@ -159,7 +160,7 @@ function Get-ConnectRemoteLogByteSize {
         $argList = @()
         if ($SshOpts) { $argList += $SshOpts }
         $argList += @('-o', 'ConnectTimeout=6', $Target, $cmd)
-        $res = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList $argList -TimeoutMs 10000
+        $res = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList $argList -TimeoutMs $TimeoutMs
         if (-not $res.Ok) { return [int64](-1) }
         $raw = ([string]$res.StdOut).Trim()
         $digits = ($raw -replace '[^0-9]', '')
@@ -203,7 +204,8 @@ function Test-ConnectLogChunkAlreadyRemote {
         [Parameter(Mandatory)][string]$Day,
         [Parameter(Mandatory)][byte[]]$Chunk,
         [Parameter(Mandatory)][int]$Take,
-        [string[]]$SshOpts
+        [string[]]$SshOpts,
+        [int]$TimeoutMs = 12000
     )
     # Idempotency: if remote tail bytes match the chunk we are about to send, skip append.
     if ($Take -le 0 -or $Take -gt 524288) { return $false }
@@ -218,7 +220,7 @@ function Test-ConnectLogChunkAlreadyRemote {
         $argList = @()
         if ($SshOpts) { $argList += $SshOpts }
         $argList += @('-o', 'ConnectTimeout=8', $Target, $cmd)
-        $res = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList $argList -TimeoutMs 12000
+        $res = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList $argList -TimeoutMs $TimeoutMs
         if (-not $res.Ok) { return $false }
         $raw = ([string]$res.StdOut).Trim().ToLowerInvariant()
         $remoteHash = ($raw -replace '[^0-9a-f]', '')
@@ -331,16 +333,29 @@ function Initialize-ConnectLog {
     # 2) Watermark sync-offset so BOOTSTRAP/UPDATE lines written before this process still ship
     # 3) Batch-flush to server ~/.claude/logs when SSH works
     # 4) Retention mtime +1 on laptop + server (purge on connect start / sync flush / server cron)
+    # #region agent log H9_init_log_breakdown init_begin
+    $swH9 = [System.Diagnostics.Stopwatch]::StartNew()
+    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H9_init_log_breakdown';location='connect-ui.ps1:336';message='init_begin';data=@{elapsed_ms=$swH9.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+    # #endregion
     Clear-ConnectLocalLogsOlderThan -Days 1
+    # #region agent log H9_init_log_breakdown clear_old_logs_done
+    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H9_init_log_breakdown';location='connect-ui.ps1:338';message='clear_old_logs_done';data=@{elapsed_ms=$swH9.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+    # #endregion
     try {
         $legacy = Join-Path $ScriptDir 'connect.log'
         if (Test-Path -LiteralPath $legacy) { Remove-Item -LiteralPath $legacy -Force -ErrorAction SilentlyContinue }
         $legacy1 = Join-Path $ScriptDir 'connect.log.1'
         if (Test-Path -LiteralPath $legacy1) { Remove-Item -LiteralPath $legacy1 -Force -ErrorAction SilentlyContinue }
     } catch { }
+    # #region agent log H9_init_log_breakdown legacy_remove_done
+    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H9_init_log_breakdown';location='connect-ui.ps1:349';message='legacy_remove_done';data=@{elapsed_ms=$swH9.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+    # #endregion
     $null = Get-ConnectSessionId
     $script:ConnectLogPath = Get-ConnectLogDayPath
     $script:ConnectLogSyncOffset = Read-ConnectLogSyncWatermark -LogPath $script:ConnectLogPath
+    # #region agent log H9_init_log_breakdown session_id_paths_done
+    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H9_init_log_breakdown';location='connect-ui.ps1:355';message='session_id_paths_done';data=@{elapsed_ms=$swH9.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+    # #endregion
     $script:ConnectLogLinesSinceSync = 0
     $script:ConnectLogSyncNeeded = $false
     $script:ConnectLogWarnPendingUntil = $null
@@ -360,6 +375,9 @@ function Initialize-ConnectLog {
         try { Write-Host ("[WARN] connect log open failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow } catch { }
         return
     }
+    # #region agent log H9_init_log_breakdown stream_open_done
+    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H9_init_log_breakdown';location='connect-ui.ps1:365';message='stream_open_done';data=@{elapsed_ms=$swH9.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+    # #endregion
     $elev = 'unknown'
     if (Get-Command Test-IsElevatedShell -ErrorAction SilentlyContinue) {
         $elev = if (Test-IsElevatedShell) { 'yes' } else { 'no' }
@@ -369,6 +387,9 @@ function Initialize-ConnectLog {
     Write-ConnectLog "log sink: local:$($script:ConnectLogPath) watermark=$($script:ConnectLogSyncOffset) + server:~/.claude/logs/ (local+server purge mtime+1)"
     Write-ConnectLog "script_dir: $ScriptDir connect_version: $Version" 'DEBUG'
     Write-ConnectSessionIndex -Phase 'start'
+    # #region agent log H9_init_log_breakdown session_index_done
+    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H9_init_log_breakdown';location='connect-ui.ps1:377';message='session_index_done';data=@{elapsed_ms=$swH9.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+    # #endregion
     $script:ConnectUiReady = $true
 }
 
@@ -443,6 +464,23 @@ function Sync-ConnectLogToServer {
     if (-not $path -or -not (Test-Path -LiteralPath $path)) { return }
     $target = Get-ConnectLogSyncTarget
     if (-not $target) { return }
+
+    # #P7: this function was observed blocking the interactive boot path for 30-60s+ when
+    # the mkdir/scp/cat probe chain below hit real (not just theoretical) SSH timeouts back
+    # to back - each sub-call had its own multi-second-to-20s timeout and they run strictly
+    # sequentially, so a single degraded-network sync attempt could eat a minute of wall
+    # clock before "Connecting..."/"Server setup" even had a chance to run. Best-effort log
+    # delivery must never cost more than a small, bounded slice of boot time: non-Force
+    # attempts now use short per-call timeouts (defer + retry later via the existing async
+    # timer is always safe - it is telemetry, not functional state). -Force keeps the
+    # original longer budgets since it only fires at rare, important moments (day rollover,
+    # unhandled-error flush, final exit) where actually landing the bytes matters more than
+    # speed.
+    $script:LogSyncFastProbeMs = if ($Force) { 10000 } else { 2500 }
+    $script:LogSyncFastChunkMs = if ($Force) { 12000 } else { 2500 }
+    $script:LogSyncFastMkdirMs = if ($Force) { 12000 } else { 3000 }
+    $script:LogSyncFastScpMs   = if ($Force) { 20000 } else { 4000 }
+    $script:LogSyncFastCatMs   = if ($Force) { 12000 } else { 3000 }
 
     # Bug 72: serialize overlapping syncs (in-process + cross-process lock file).
     if ($script:ConnectLogSyncInProgress -and -not $Force) {
@@ -522,7 +560,7 @@ function Sync-ConnectLogToServer {
         $remoteTmp = ".claude/logs/.connect-buf-$PID.tmp"
         $remoteDay = ".claude/logs/connect-$day.log"
         $sshOpts = @('-o','BatchMode=yes','-o','ConnectTimeout=8','-o','ControlMaster=no')
-        $remoteBeforeProbe = Get-ConnectRemoteLogByteSize -Target $target -Day $day -SshOpts $sshOpts
+        $remoteBeforeProbe = Get-ConnectRemoteLogByteSize -Target $target -Day $day -SshOpts $sshOpts -TimeoutMs $script:LogSyncFastProbeMs
         if ($remoteBeforeProbe -lt 0) { $remoteBeforeProbe = [int64]0 }
         if ($fileLen -lt $remoteBeforeProbe) {
             try {
@@ -534,14 +572,35 @@ function Sync-ConnectLogToServer {
             } catch { }
         }
         if (Test-ConnectRemoteLogNeedsRebuild -LocalSize $fileLen -RemoteSize $remoteBeforeProbe -Offset $off) {
+            # #region agent log H1 rebuild begin
+            $dbgT0 = Get-Date
+            try {
+                [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H1';location='connect-ui.ps1:555';message='rebuild_begin';data=@{local=$fileLen;remote_was=$remoteBeforeProbe;off=$off};timestamp=[long]([DateTimeOffset]$dbgT0).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n"))
+            } catch { }
+            # #endregion
             Clear-ConnectLogSyncPending -LogPath $path
             $replace = 'cat "$HOME/' + $remoteTmp + '" > "$HOME/' + $remoteDay + '"; ec=$?; rm -f "$HOME/' + $remoteTmp + '"; chmod 600 "$HOME/' + $remoteDay + '" 2>/dev/null; exit $ec'
             $mkRb = 'mkdir -p "$HOME/.claude/logs" && chmod 700 "$HOME/.claude" "$HOME/.claude/logs" 2>/dev/null; find "$HOME/.claude/logs" -type f -mtime +1 -delete 2>/dev/null; true'
             $mkResRb = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $mkRb)) -TimeoutMs 12000
+            # #region agent log H1 rebuild mkdir
+            try {
+                [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H1';location='connect-ui.ps1:559';message='rebuild_mkdir';data=@{ok=$mkResRb.Ok;timedOut=$mkResRb.TimedOut;elapsed_ms=[int]((Get-Date)-$dbgT0).TotalMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n"))
+            } catch { }
+            # #endregion
             if ($mkResRb.Ok) {
                 $scpFull = Invoke-ConnectLogProcTimed -Exe 'scp' -ArgumentList (@('-o','BatchMode=yes','-o','ConnectTimeout=20','-o','ControlMaster=no','-q', $path, "${target}:$remoteTmp")) -TimeoutMs 60000
+                # #region agent log H1 rebuild scp
+                try {
+                    [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H1';location='connect-ui.ps1:561';message='rebuild_scp';data=@{ok=$scpFull.Ok;timedOut=$scpFull.TimedOut;file_bytes=$fileLen;elapsed_ms=[int]((Get-Date)-$dbgT0).TotalMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n"))
+                } catch { }
+                # #endregion
                 if ($scpFull.Ok) {
                     $repRes = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $replace)) -TimeoutMs 20000
+                    # #region agent log H1 rebuild replace
+                    try {
+                        [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H1';location='connect-ui.ps1:563';message='rebuild_replace';data=@{ok=$repRes.Ok;timedOut=$repRes.TimedOut;elapsed_ms=[int]((Get-Date)-$dbgT0).TotalMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n"))
+                    } catch { }
+                    # #endregion
                     if ($repRes.Ok) {
                         Write-ConnectLogSyncWatermark -Offset $fileLen -LogPath $path
                         if (-not $LogPath -or $LogPath -eq $script:ConnectLogPath) {
@@ -565,10 +624,17 @@ function Sync-ConnectLogToServer {
                 }
             }
         }
+        # #region agent log H1 rebuild fallthrough
+        if ($dbgT0) {
+            try {
+                [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H1';location='connect-ui.ps1:607';message='rebuild_fallthrough_no_return';data=@{elapsed_ms=[int]((Get-Date)-$dbgT0).TotalMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n"))
+            } catch { }
+        }
+        # #endregion
         # --- LOG_SYNC_RECONCILE: stop duplicate appends when cat succeeded but watermark timed out ---
         $pending = Read-ConnectLogSyncPending -LogPath $path
         if ($pending -and $pending.Offset -eq $off -and $pending.Take -eq $take) {
-            $rNow = Get-ConnectRemoteLogByteSize -Target $target -Day $day -SshOpts $sshOpts
+            $rNow = Get-ConnectRemoteLogByteSize -Target $target -Day $day -SshOpts $sshOpts -TimeoutMs $script:LogSyncFastProbeMs
             if ($rNow -ge 0 -and $rNow -ge ($pending.RemoteBefore + [int64]$pending.Take)) {
                 $newOff = $off + $take
                 Write-ConnectLogSyncWatermark -Offset $newOff -LogPath $path
@@ -590,7 +656,7 @@ function Sync-ConnectLogToServer {
                 return
             }
         }
-        if (Test-ConnectLogChunkAlreadyRemote -Target $target -Day $day -Chunk $chunk -Take $take -SshOpts $sshOpts) {
+        if (Test-ConnectLogChunkAlreadyRemote -Target $target -Day $day -Chunk $chunk -Take $take -SshOpts $sshOpts -TimeoutMs $script:LogSyncFastChunkMs) {
             $newOff = $off + $take
             Write-ConnectLogSyncWatermark -Offset $newOff -LogPath $path
             Clear-ConnectLogSyncPending -LogPath $path
@@ -610,14 +676,14 @@ function Sync-ConnectLogToServer {
             try { Remove-Item -LiteralPath $tmpLocal -Force -ErrorAction SilentlyContinue } catch { }
             return
         }
-        $remoteBefore = Get-ConnectRemoteLogByteSize -Target $target -Day $day -SshOpts $sshOpts
+        $remoteBefore = Get-ConnectRemoteLogByteSize -Target $target -Day $day -SshOpts $sshOpts -TimeoutMs $script:LogSyncFastProbeMs
         if ($remoteBefore -lt 0) { $remoteBefore = [int64]0 }
         Write-ConnectLogSyncPending -Offset $off -Take $take -RemoteBefore $remoteBefore -LogPath $path
 
         $mk = 'mkdir -p "$HOME/.claude/logs" && chmod 700 "$HOME/.claude" "$HOME/.claude/logs" 2>/dev/null; find "$HOME/.claude/logs" -type f -mtime +1 -delete 2>/dev/null; true'
         # Bug 11: cat must surface append failure (no trailing true).
         $cat = 'cat "$HOME/' + $remoteTmp + '" >> "$HOME/' + $remoteDay + '"; ec=$?; rm -f "$HOME/' + $remoteTmp + '"; chmod 600 "$HOME/' + $remoteDay + '" 2>/dev/null; exit $ec'
-        $mkRes = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $mk)) -TimeoutMs 12000
+        $mkRes = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $mk)) -TimeoutMs $script:LogSyncFastMkdirMs
         if (-not $mkRes.Ok) {
             if (-not $script:ConnectLogSyncFailLogged) {
                 $script:ConnectLogSyncFailLogged = $true
@@ -626,6 +692,12 @@ function Sync-ConnectLogToServer {
                     $sid = Get-ConnectSessionId
                     if ($script:ConnectLogWriter) {
                         $script:ConnectLogWriter.WriteLine("[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=mkdir_timeout_or_fail (local kept; retry later)")
+                        # #region agent log H1 final mkdir fail
+                        try {
+                            $dbgElapsed = if ($dbgT0) { [int]((Get-Date)-$dbgT0).TotalMilliseconds } else { -1 }
+                            [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H1';location='connect-ui.ps1:675';message='final_mkdir_fail';data=@{elapsed_since_rebuild_ms=$dbgElapsed};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress) + "`n"))
+                        } catch { }
+                        # #endregion
                     }
                 } catch { }
             }
@@ -640,16 +712,16 @@ function Sync-ConnectLogToServer {
             }
             return
         }
-        $scpRes = Invoke-ConnectLogProcTimed -Exe 'scp' -ArgumentList (@('-o','BatchMode=yes','-o','ConnectTimeout=12','-o','ControlMaster=no','-q', $tmpLocal, "${target}:$remoteTmp")) -TimeoutMs 20000
+        $scpRes = Invoke-ConnectLogProcTimed -Exe 'scp' -ArgumentList (@('-o','BatchMode=yes','-o','ConnectTimeout=12','-o','ControlMaster=no','-q', $tmpLocal, "${target}:$remoteTmp")) -TimeoutMs $script:LogSyncFastScpMs
         # appendOk/scpOk := remote append succeeded (scp + cat). Watermark ONLY inside this gate.
         $appendOk = $false
         if ($scpRes.Ok) {
-            $catRes = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $cat)) -TimeoutMs 12000
+            $catRes = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $cat)) -TimeoutMs $script:LogSyncFastCatMs
             if ($catRes.Ok) { $appendOk = $true }
         }
         # Even if the timed wait says fail, the remote cat may have succeeded — verify by size.
         if (-not $appendOk) {
-            $remoteAfter = Get-ConnectRemoteLogByteSize -Target $target -Day $day -SshOpts $sshOpts
+            $remoteAfter = Get-ConnectRemoteLogByteSize -Target $target -Day $day -SshOpts $sshOpts -TimeoutMs $script:LogSyncFastProbeMs
             if ($remoteAfter -ge 0 -and $remoteAfter -ge ($remoteBefore + [int64]$take)) {
                 $appendOk = $true
                 try {
@@ -1010,10 +1082,13 @@ function Write-ConnectLog {
                 $script:ConnectLogLinesSinceSync = [int]$script:ConnectLogLinesSinceSync + 1
                 if ($Message -match 'soft_fail|TUNNEL_DROP|TUNNEL_EXIT' -or $script:ConnectLogLinesSinceSync -ge 25) {
                     Write-ConnectLogSynced
+                    # Never inline-sync from here (same reasoning as the INFO path below): a
+                    # burst of TUNNEL_* trace lines mid-connect must not block the console on a
+                    # slow/degraded SSH round trip.
                     if (Get-Command Request-ConnectLogSync -ErrorAction SilentlyContinue) {
-                        Request-ConnectLogSync
+                        Request-ConnectLogSync -NoInline
                     } else {
-                        Sync-ConnectLogToServer
+                        $script:ConnectLogSyncNeeded = $true
                     }
                 }
             }
@@ -1037,10 +1112,12 @@ function Write-ConnectLog {
             # Coalesce: warn-only bursts get a 5s grace window instead of an immediate Force sync.
             $script:ConnectLogWarnPendingUntil = (Get-Date).AddSeconds(5)
             $script:ConnectLogSyncNeeded = $true
+            # -NoInline to actually honor the "5s grace window" above - calling this without
+            # -NoInline blocked the console for 8-17s per WARN line under a slow/degraded link.
             if (Get-Command Request-ConnectLogSync -ErrorAction SilentlyContinue) {
-                Request-ConnectLogSync
+                Request-ConnectLogSync -NoInline
             } else {
-                Sync-ConnectLogToServer -Force
+                $script:ConnectLogSyncNeeded = $true
             }
         } elseif ($script:ConnectLogLinesSinceSync -ge 25) {
             # Never inline-sync from Write-ConnectLog: SshX logs SSH_END via this path

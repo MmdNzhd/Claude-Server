@@ -216,7 +216,7 @@ Session: `~/.claude-connect.conf`. Cache: `~/.cache/laptop-exec/` (8 `slot-*.loc
 ### Hard rules (summary)
 
 1. Denied on mounts: Grep, Glob, Read, Write, Edit, EditNotebook, StrReplace, Delete — run `NEXT:`; never retry.
-2. First I/O = Shell + `laptop-exec -p ID` (repo-relative paths only).
+2. First I/O = Shell + `laptop-exec -p ID` (repo-relative paths only) — **except** on Windows when Cursor MCP `windows-mcp` is ready: prefer `windows-mcp` FileSystem/PowerShell/UI for that step; `git` and content `rg` always stay on `laptop-exec` (full routing table in the skill).
 3. `rg` is **not** ripgrep: `-i`/`-l`/`-n`/`--glob` rejected (old hangs pinned mux slots for hours).
 4. Mux: **8** slots; prefer ≤4 parallel; `session slots full` → wait; no raw SSH storms.
 5. Tunnel DOWN → user `connect.bat`/`connect.sh`. STALE mount + UP tunnel → still laptop-exec.
@@ -279,7 +279,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | Both EXIT and SIGTERM traps | mac:444-445 | `kill <pid>` won't trigger EXIT alone |
 | `[Console]::Key` + `KeyChar` checks | win:610,728,784 | Physical key check so R/Q/C/X work under Persian/Arabic keyboard layouts |
 | `[Uri]::EscapeDataString` for Gateway URL | win:695 | PS5.1+PS7 safe; avoids `System.Web` dependency |
-| `$script:ConnectVersion = '20260723.13'` | win connect.ps1 | Must match connect.bat guard |
+| `$script:ConnectVersion = '20260724.13'` | win connect.ps1 | Must match connect.bat guard |
 | `@(Choose-Project -Mounts $mounts)[-1]` | win connect.ps1 | Prevents pipeline leak → Join-Path ChildPath prompt |
 | `@(Resolve-EditorChoice -CfgDir $CfgDir)[-1]` | win connect.ps1 | Same pipeline-safe capture |
 | `return ,($obj)` in Choose-Project | win connect.ps1 | Unary comma suppresses pipeline output |
@@ -287,7 +287,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | connect.bat guards | windows/connect.bat | Requires git-mode.ps1, Path.Combine, @(Choose-Project, version |
 | Dot-source git-mode.ps1 / git-mode.sh | all Windows/Mac launchers | GIT_MODE must not be duplicated in forks |
 | Push GIT_MODE to ~/.claude-connect.conf | connect.ps1/sh | Server claude-mount reads hide vs server |
-| `CONNECT_VERSION='20260723.13'` | mac connect.sh | Must match published client version |
+| `CONNECT_VERSION='20260724.13'` | mac connect.sh | Must match published client version |
 | Dot-source `connect-ui.ps1` / source `connect-ui.sh` | all launchers | UI tables, header, session box |
 | Elevate only when sshd/firewall/authorized_keys repair needs admin | win | Main UI stays unelevated; `-AdminFix` / `Invoke-LaptopAdminOps` elevates on demand; `Ensure-LaptopSshReady` still used mid-session |
 | Publish client package **12 files** | publish.ps1 | +connect-ui, editor-launch.sh (mac) |

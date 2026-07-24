@@ -74,6 +74,39 @@ Assert ($launchSrc -match 'LAUNCH_RETRY_NO_KILL') 'launch retry does not force-k
 Assert ($launchSrc -notmatch "Stop-CursorServerProfileTreeIfNeeded -Reason 'pre_launch_agent_or_new_window' -Force") 'pre_launch force-kill removed'
 Assert ($launchSrc -notmatch 'retry_before_\$\(\$strategy\.Name\)' ) 'retry force-kill removed'
 
+# Multi-session race fix: a sibling connect session's window can appear microseconds after
+# our entry-time profile_main check, so "orphan_helpers" (profile_all>0, profile_main=False)
+# must request --new-window too - not just true "profile_open" (profile_main=True). Before
+# the fix, orphan_helpers computed use_new_window=False, and Cursor's single-instance IPC
+# could silently reroute our "open folder" request into the sibling session's window instead
+# of spawning ours (confirmed live: launch spent minutes retrying against the wrong project).
+Assert (Get-Command Get-CursorLaunchWindowPlan -ErrorAction SilentlyContinue) 'Get-CursorLaunchWindowPlan defined'
+
+$planCold = Get-CursorLaunchWindowPlan -AgentHome $false -HasProfileWindow $false -ProfileProcCount 0
+Assert ($planCold.Reason -eq 'cold_start') 'plan: no profile activity at all -> cold_start'
+Assert ($planCold.UseNewWindow -eq $false) 'plan: cold_start does not need --new-window (nothing to collide with)'
+
+$planOrphan = Get-CursorLaunchWindowPlan -AgentHome $false -HasProfileWindow $false -ProfileProcCount 9
+Assert ($planOrphan.Reason -eq 'orphan_helpers') 'plan: helper processes with no classified main -> orphan_helpers'
+Assert ($planOrphan.UseNewWindow -eq $true) 'plan: orphan_helpers now requests --new-window too (race fix)'
+
+$planOpen = Get-CursorLaunchWindowPlan -AgentHome $false -HasProfileWindow $true -ProfileProcCount 9
+Assert ($planOpen.Reason -eq 'profile_open') 'plan: classified main window present -> profile_open'
+Assert ($planOpen.UseNewWindow -eq $true) 'plan: profile_open requests --new-window'
+
+$planAgent = Get-CursorLaunchWindowPlan -AgentHome $true -HasProfileWindow $false -ProfileProcCount 0
+Assert ($planAgent.Reason -eq 'agent_home') 'plan: agent_home takes priority over other reasons'
+Assert ($planAgent.UseNewWindow -eq $true) 'plan: agent_home requests --new-window'
+
+Assert ($launchSrc -match 'Get-CursorLaunchWindowPlan -AgentHome \$agentHome -HasProfileWindow \$hasProfileWindow -ProfileProcCount \$profileProcCount') 'Launch-RemoteEditor delegates plan decision to the testable helper'
+
+# Recovery cold-launch poll budget: a cold Cursor.exe start after soft_stop_profile has to
+# spin up its whole process tree from disk with no warm profile process to reuse - on a
+# loaded machine this routinely exceeds the old 10s budget (20*500ms) while still succeeding
+# a bit later (confirmed live: the window appeared correctly ~30-60s after the old loop had
+# already given up and reported failure). Guard the widened budget against regression.
+Assert ($launchSrc -match 'for \(\$tick = 1; \$tick -le 90; \$tick\+\+\)') 'recovery cold-launch poll budget widened to 90 ticks (45s, was 20/10s)'
+Assert ($launchSrc -notmatch 'for \(\$tick = 1; \$tick -le 20; \$tick\+\+\)') 'old too-short 20-tick recovery budget removed'
 
 Write-Host ""
 if ($fail -eq 0) { Write-Host "All tests passed." -ForegroundColor Green; exit 0 }

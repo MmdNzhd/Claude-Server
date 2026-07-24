@@ -59,7 +59,7 @@ _deny() {
     "agent_msg=$(_le_audit_trunc "$agent_msg" 400)" \
     "user_msg=$(_le_audit_trunc "$user_msg" 200)" \
     "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8" \
-    "hint=Expected SSH-first deny. Agent must run NEXT: laptop-exec -p PROJECT — do NOT retry the blocked tool."
+    "hint=Expected SSH-first deny. Run NEXT: (hybrid: prefer windows-mcp FS/shell; laptop-exec for git/rg/fallback). Do NOT retry the blocked tool."
   jq -n --arg permission deny --arg agent_message "$agent_msg" --arg user_message "$user_msg" \
     '{permission:$permission,agent_message:$agent_message,user_message:$user_message}' 2>/dev/null \
     || echo '{"permission":"deny","agent_message":"SSH-first blocked","user_message":"Use laptop-exec"}'
@@ -253,9 +253,46 @@ _guess_project_id() {
   return 1
 }
 
+
+_windows_hybrid_ready() {
+  local os="" conf="${HOME}/.claude-connect.conf"
+  [[ -f "$conf" ]] || return 1
+  os=$(grep -E '^(LAPTOP_OS|laptop_os)=' "$conf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr '[:upper:]' '[:lower:]')
+  case "$os" in mac|darwin|osx) return 1 ;; esac
+  [[ -f "${HOME}/.config/windows-mcp/env" ]] || return 1
+  return 0
+}
+
+_remote_path_for() {
+  local pid="$1" conf="${HOME}/.claude-mounts.d/${pid}.conf" line v
+  [[ -n "$pid" && -f "$conf" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^(REMOTE_PATH|remote_path)=(.*)$ ]] || continue
+    v="${BASH_REMATCH[2]}"
+    v="${v%\"}"; v="${v#\"}"
+    v="${v%\'}"; v="${v#\'}"
+    printf '%s' "$v"
+    return 0
+  done < "$conf"
+  return 1
+}
+
+# Join Windows project root + repo-relative path -> absolute Windows path for MCP.
+_win_abs_path() {
+  local root="$1" rel="$2"
+  [[ -n "$root" && -n "$rel" ]] || return 1
+  # Normalize separators to Windows backslash (REMOTE_PATH may use D:/...).
+  root="${root//\//\\}"
+  root="${root%\\}"
+  rel="${rel#/}"
+  rel="${rel#\\}"
+  rel="${rel//\//\\}"
+  printf '%s\\%s' "$root" "$rel"
+}
+
 _remap_hint() {
   local tool="$1"
-  local pid rel paths p first_path=""
+  local pid rel paths p first_path="" rpath="" wabs="" hybrid=0
   pid=$(_guess_project_id "$tool" 2>/dev/null || true)
   paths=$(_tool_path_blob)
   while IFS= read -r p; do
@@ -267,34 +304,86 @@ _remap_hint() {
   [[ -n "$first_path" ]] && rel=$(_infer_rel_from_path "$first_path" 2>/dev/null || true)
   local pflag=""
   [[ -n "$pid" ]] && pflag=" -p $pid"
+  if _windows_hybrid_ready; then
+    hybrid=1
+    [[ -n "$pid" ]] && rpath=$(_remote_path_for "$pid" 2>/dev/null || true)
+    if [[ -n "$rpath" && -n "$rel" ]]; then
+      wabs=$(_win_abs_path "$rpath" "$rel" 2>/dev/null || true)
+    fi
+  fi
   case "$tool" in
     Read)
-      if [[ -n "$rel" ]]; then
+      if [[ "$hybrid" -eq 1 ]]; then
+        if [[ -n "$wabs" ]]; then
+          printf 'NEXT (do not retry Read): windows-mcp FileSystem read "%s" (prefer; fast). Fan-out ~8 parallel FileSystem reads in one turn when fetching many files. Fallback: laptop-exec read%s %s' "$wabs" "$pflag" "$rel"
+        elif [[ -n "$rpath" ]]; then
+          printf 'NEXT (do not retry Read): windows-mcp FileSystem read absolute path under %s + REL (prefer; fast). Fan-out ~8 parallel FileSystem reads/turn. Fallback: laptop-exec read%s REL' "$rpath" "$pflag"
+        else
+          printf 'NEXT (do not retry Read): windows-mcp FileSystem read absolute Windows path under project root (prefer; fast). Fan-out ~8 parallel FileSystem reads/turn. Fallback: laptop-exec read%s REL' "$pflag"
+        fi
+      elif [[ -n "$rel" ]]; then
         printf 'NEXT (do not retry Read): laptop-exec read%s %s' "$pflag" "$rel"
       else
         printf 'NEXT (do not retry Read): laptop-exec read%s REL' "$pflag"
       fi
       ;;
-    Write|Edit|StrReplace|Delete)
-      if [[ -n "$rel" ]]; then
+    Write|Edit|StrReplace|Delete|EditNotebook)
+      if [[ "$hybrid" -eq 1 ]]; then
+        if [[ -n "$wabs" ]]; then
+          printf 'NEXT (do not retry %s): windows-mcp FileSystem write "%s" (prefer; fast). Parallel MCP OK; keep laptop-exec git/rg <=4. Fallback: laptop-exec write%s %s' "$tool" "$wabs" "$pflag" "$rel"
+        elif [[ -n "$rpath" ]]; then
+          printf 'NEXT (do not retry %s): windows-mcp FileSystem write absolute path under %s + REL (prefer; fast). Fallback: laptop-exec write%s REL' "$tool" "$rpath" "$pflag"
+        else
+          printf 'NEXT (do not retry %s): windows-mcp FileSystem write absolute Windows path (prefer; fast). Fallback: laptop-exec write%s REL' "$tool" "$pflag"
+        fi
+      elif [[ -n "$rel" ]]; then
         printf 'NEXT (do not retry %s): laptop-exec write%s %s  <<EOF ... EOF' "$tool" "$pflag" "$rel"
       else
         printf 'NEXT (do not retry %s): laptop-exec write%s REL <<EOF ... EOF' "$tool" "$pflag"
       fi
       ;;
     Grep|Glob)
-      printf 'NEXT (do not retry %s): laptop-exec rg%s PATTERN [pathspec]' "$tool" "$pflag"
+      # Content search stays on laptop-exec (MCP FileSystem search != content grep).
+      printf 'NEXT (do not retry %s): laptop-exec rg%s PATTERN [pathspec] (git/rg always laptop-exec; not windows-mcp)' "$tool" "$pflag"
       ;;
     Shell)
-      printf 'NEXT (do not retry heavy shell on mounts): laptop-exec git|rg|run|read%s ...' "$pflag"
+      if [[ "$hybrid" -eq 1 ]]; then
+        printf 'NEXT (do not retry heavy shell on mounts): windows-mcp PowerShell (prefer; fast) OR laptop-exec git|rg|run|read%s ... (git/rg always laptop-exec)' "$pflag"
+      else
+        printf 'NEXT (do not retry heavy shell on mounts): laptop-exec git|rg|run|read%s ...' "$pflag"
+      fi
       ;;
     Task)
-      printf 'NEXT: Task spawn allowed; each child MUST use laptop-exec -p ID. Do not retry Read/Grep/Shell on /mounts/.'
+      if [[ "$hybrid" -eq 1 ]]; then
+        printf 'NEXT: Task spawn allowed; child MUST paste hybrid block: prefer windows-mcp FileSystem/PowerShell/UI; laptop-exec for git/rg/fallback; -p ID; no Read/Grep on /mounts/.'
+      else
+        printf 'NEXT: Task spawn allowed; each child MUST use laptop-exec -p ID. Do not retry Read/Grep/Shell on /mounts/.'
+      fi
       ;;
     *)
-      printf 'NEXT: use laptop-exec%s (read|rg|write|git|run)' "$pflag"
+      if [[ "$hybrid" -eq 1 ]]; then
+        printf 'NEXT: prefer windows-mcp FileSystem/PowerShell; laptop-exec%s for git|rg|fallback' "$pflag"
+      else
+        printf 'NEXT: use laptop-exec%s (read|rg|write|git|run)' "$pflag"
+      fi
       ;;
   esac
+}
+
+_deny_user_msg() {
+  local tool="$1"
+  if _windows_hybrid_ready; then
+    case "$tool" in
+      Grep|Glob)
+        printf 'SSH-first: use laptop-exec rg instead of %s (content search). Do not retry.' "$tool"
+        ;;
+      *)
+        printf 'SSH-first: prefer windows-mcp (FS/shell/UI) or laptop-exec instead of %s. Do not retry.' "$tool"
+        ;;
+    esac
+  else
+    printf 'SSH-first: use laptop-exec instead of %s. Do not retry.' "$tool"
+  fi
 }
 
 
@@ -308,7 +397,7 @@ case "$event" in
       hint=$(_remap_hint Shell)
       _deny \
         "SSH-first BLOCKED shell on /mounts/ (expected). Do NOT retry the same shell. $hint" \
-        "Use laptop-exec. Do not retry."
+        "$(_deny_user_msg Shell)"
     fi
     if [[ "$cmd" == *"laptop-exec"* ]]; then
       _le_audit_log INFO HOOK_SHELL_LAPTOP_EXEC "cwd=$(_le_audit_trunc "$cwd" 200)" \
@@ -334,13 +423,13 @@ case "$event" in
             "project=$(_guess_project_id Task 2>/dev/null || echo '?')" \
             "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8" \
             "hint=Child does NOT inherit SSH-first. Prompt MUST paste laptop-exec block. Prefer ≤4 parallel (hard cap 8 slots)."
-          _allow_msg "Task spawn OK. Child prompt MUST paste SSH-first block (laptop-exec -p ID; no Read/Grep on /mounts/; no rg -i/-l/--glob; ≤4 parallel). See laptop-exec skill."
+          _allow_msg "Task spawn OK. Child prompt MUST paste SSH-first hybrid block (prefer windows-mcp FS/shell/UI when ready; laptop-exec for git/rg/-p ID; no Read/Grep on /mounts/; no rg -i/-l/--glob; ≤4 parallel). See laptop-exec skill."
         fi
         if _tool_targets_mounts "$tool"; then
           hint=$(_remap_hint "$tool")
           _deny \
             "SSH-first BLOCKED $tool on /mounts/ (expected). Do NOT retry $tool. $hint" \
-            "SSH-first: use laptop-exec instead of $tool. Do not retry."
+            "$(_deny_user_msg "$tool")"
         fi
         ;;
     esac

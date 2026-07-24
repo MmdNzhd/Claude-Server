@@ -394,19 +394,81 @@ function Start-CursorProxySidecar {
     return $ok
 }
 
+# H10_proxy_health_timeout finding: the ~8.3s (remote_xray_probe=timeout) and ~8.6s
+# (PROXY_HEALTH DownloadString) stalls live in git-mode.ps1 (Test-RemoteXraySocksOpen's
+# hard-coded 8000ms WaitForExit and Test-ProxyHealth's untimed WebClient.DownloadString) -
+# out of scope for this file. What we CAN do here is memoize "backend is down" for a short
+# TTL, file-based so it survives across separate connect.ps1 process launches (fast
+# reconnects), so this file's OWN checks short-circuit instead of re-probing every time.
+$script:CursorProxyKnownDownCacheFile = Join-Path $env:TEMP 'claude-connect-proxy-known-down.json'
+$script:CursorProxyKnownDownTtlSec = 120
+
+function Test-CursorProxyKnownDown {
+    # Returns $true if backend was confirmed down within the last TTL seconds (any process).
+    if (-not (Test-Path -LiteralPath $script:CursorProxyKnownDownCacheFile)) { return $false }
+    try {
+        $raw = Get-Content -LiteralPath $script:CursorProxyKnownDownCacheFile -Raw -ErrorAction Stop
+        $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+        $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        $ageSec = ($nowMs - [long]$obj.ts) / 1000.0
+        if ($ageSec -lt 0 -or $ageSec -gt $script:CursorProxyKnownDownTtlSec) { return $false }
+        return $true
+    } catch { return $false }
+}
+
+function Set-CursorProxyKnownDown {
+    param([string]$Reason = 'backend_down')
+    try {
+        (@{ ts = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); reason = $Reason } | ConvertTo-Json -Compress) |
+            Set-Content -LiteralPath $script:CursorProxyKnownDownCacheFile -Encoding UTF8 -ErrorAction SilentlyContinue
+    } catch {}
+    # #region agent log H10_proxy_health_timeout known_down_cache_set
+    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='cursor-proxy-sidecar.ps1:426';message='known_down_cache_set';data=@{reason=$Reason;ttl_sec=$script:CursorProxyKnownDownTtlSec};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+    # #endregion
+}
+
+function Clear-CursorProxyKnownDownCache {
+    try {
+        if (Test-Path -LiteralPath $script:CursorProxyKnownDownCacheFile) {
+            Remove-Item -LiteralPath $script:CursorProxyKnownDownCacheFile -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
+
 function Test-CursorProxyBackendOpen {
+    # #region agent log H10_proxy_health_timeout backend_open_check_start
+    $swH10Backend = [System.Diagnostics.Stopwatch]::StartNew()
+    # #endregion
+    if (Test-CursorProxyKnownDown) {
+        # #region agent log H10_proxy_health_timeout backend_open_check_done
+        try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='cursor-proxy-sidecar.ps1:444';message='backend_open_check_done';data=@{elapsed_ms=$swH10Backend.ElapsedMilliseconds;cache_hit=1;result=0};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+        # #endregion
+        return $false
+    }
     $httpBack = 19180
     $socksBack = 19080
     if ($script:HttpProxyPort) { $httpBack = [int]$script:HttpProxyPort }
     if ($script:SocksProxyPort) { $socksBack = [int]$script:SocksProxyPort }
     $httpOk = Test-CursorProxySidecarListening -Port $httpBack
     $socksOk = Test-CursorProxySidecarListening -Port $socksBack
-    return ($httpOk -and $socksOk)
+    $result = [bool]($httpOk -and $socksOk)
+    if ($result) {
+        Clear-CursorProxyKnownDownCache
+    } else {
+        Set-CursorProxyKnownDown -Reason 'backend_probe_failed'
+    }
+    # #region agent log H10_proxy_health_timeout backend_open_check_done
+    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='cursor-proxy-sidecar.ps1:461';message='backend_open_check_done';data=@{elapsed_ms=$swH10Backend.ElapsedMilliseconds;cache_hit=0;result=[int]$result};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+    # #endregion
+    return $result
 }
 
 function Ensure-CursorProxySidecar {
     # Cheap heal for open Cursor sessions: if sticky front is down, restart relays.
     # Only write settings->18998 when front AND backend -L ports are up (else Clear).
+    # #region agent log H10_proxy_health_timeout ensure_sidecar_start
+    $swH10Ensure = [System.Diagnostics.Stopwatch]::StartNew()
+    # #endregion
     if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
         Write-GitModeLog 'SIDECAR_ENSURE begin' 'DEBUG'
     }
@@ -422,17 +484,27 @@ function Ensure-CursorProxySidecar {
     }
     if (-not $frontOk) {
         try { Clear-CursorProxySettingsSidecar | Out-Null } catch {}
+        # #region agent log H10_proxy_health_timeout ensure_sidecar_done
+        try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='cursor-proxy-sidecar.ps1:488';message='ensure_sidecar_done';data=@{elapsed_ms=$swH10Ensure.ElapsedMilliseconds;front_ok=0;backend_ok=0};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+        # #endregion
         return $false
     }
-    if (-not (Test-CursorProxyBackendOpen)) {
+    $backendOk = Test-CursorProxyBackendOpen
+    if (-not $backendOk) {
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
             Write-GitModeLog 'SIDECAR_ENSURE front_up backend_down clearing_settings' 'WARN'
         }
         try { Clear-CursorProxySettingsSidecar | Out-Null } catch {}
+        # #region agent log H10_proxy_health_timeout ensure_sidecar_done
+        try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='cursor-proxy-sidecar.ps1:499';message='ensure_sidecar_done';data=@{elapsed_ms=$swH10Ensure.ElapsedMilliseconds;front_ok=1;backend_ok=0};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+        # #endregion
         return $false
     }
     try { Repair-CursorProxySettingsToSidecar | Out-Null } catch {}
     Start-CursorProxySidecarWatchdog | Out-Null
+    # #region agent log H10_proxy_health_timeout ensure_sidecar_done
+    try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='cursor-proxy-sidecar.ps1:506';message='ensure_sidecar_done';data=@{elapsed_ms=$swH10Ensure.ElapsedMilliseconds;front_ok=1;backend_ok=1};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+    # #endregion
     return $true
 }
 

@@ -992,16 +992,101 @@ function Get-CursorProfileProcesses {
 
 function Test-PathNeedleBoundaryMatch {
     # Boundary-safe substring check: NeedleEscaped must match exactly, or be immediately
-    # followed by a path separator / quote character, or end-of-string. A bare substring
-    # test wrongly matches a shorter project path inside a longer one that shares the same
-    # prefix (e.g. ".../ai-gap" incorrectly matching inside ".../ai-gap-summay").
+    # followed by a path separator / quote character / whitespace, or end-of-string. A bare
+    # substring test wrongly matches a shorter project path inside a longer one that shares the
+    # same prefix (e.g. ".../ai-gap" incorrectly matching inside ".../ai-gap-summay"). Whitespace
+    # must be in the allowed boundary set too: the OS-reported CommandLine for a Cursor process
+    # can have a trailing/inter-argument space right after the path, which is not one of
+    # \/"' or end-of-string - confirmed live (a real --folder-uri process had a trailing space
+    # after the path and this check false-negatived, breaking on-folder detection).
     param(
         [string]$CommandLine,
         [Parameter(Mandatory)][string]$NeedleEscaped
     )
     if (-not $CommandLine) { return $false }
-    return [bool]($CommandLine -match "$NeedleEscaped(?:[\\/`"']|$)")
+    return [bool]($CommandLine -match "$NeedleEscaped(?:[\\/`"'\s]|$)")
 }
+
+# #region agent log H11_multi_window_enum win32_enum_helper
+# .NET Process.MainWindowHandle / .MainWindowTitle only ever reflect ONE window per
+# process - specifically whichever top-level window of that process is currently topmost
+# in the system-wide Z-order. Cursor is a single-instance Electron app: all windows that
+# share the ClaudeServerCursorProfile profile live inside ONE OS process, and when Cursor's
+# IPC opens a brand-new window for a different project in that same already-running
+# process, MainWindowHandle/MainWindowTitle keep reporting whichever window was already
+# topmost (typically the pre-existing one) - the new window is completely invisible to any
+# check built only on those two properties, even though it is a real, valid top-level
+# window of the target PID. EnumWindows walks every top-level window on the desktop
+# directly, so filtering by owning PID finds ALL of a process's windows, not just the
+# Z-order-topmost one.
+function Initialize-Win32WindowEnum {
+    if ($script:Win32WindowEnumReady) { return }
+    if (-not ('ClaudeConnectWin32Window' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+
+public static class ClaudeConnectWin32Window
+{
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern int GetWindowThreadProcessId(IntPtr hWnd, out int lpdwProcessId);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowTextLength(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+}
+'@ -ErrorAction Stop
+    }
+    $script:Win32WindowEnumReady = $true
+}
+
+function Get-ProcessTopLevelWindows {
+    # Returns EVERY top-level window owned by $ProcessId (visible or not), not just the
+    # single Z-order-topmost one .NET's Process class exposes. Safe to call for a dead/
+    # missing PID - EnumWindows simply yields zero matches, no exception.
+    param(
+        [Parameter(Mandatory)][int]$ProcessId
+    )
+    Initialize-Win32WindowEnum
+    $results = [System.Collections.Generic.List[object]]::new()
+    $callback = {
+        param([IntPtr]$hWnd, [IntPtr]$lParam)
+        $wpid = 0
+        [void][ClaudeConnectWin32Window]::GetWindowThreadProcessId($hWnd, [ref]$wpid)
+        if ($wpid -eq $ProcessId) {
+            $title = ''
+            $len = [ClaudeConnectWin32Window]::GetWindowTextLength($hWnd)
+            if ($len -gt 0) {
+                $sb = New-Object System.Text.StringBuilder ($len + 1)
+                [void][ClaudeConnectWin32Window]::GetWindowText($hWnd, $sb, $sb.Capacity)
+                $title = $sb.ToString()
+            }
+            $visible = [bool]([ClaudeConnectWin32Window]::IsWindowVisible($hWnd))
+            $results.Add([PSCustomObject]@{ Hwnd = $hWnd; Title = $title; Visible = $visible })
+        }
+        return $true
+    }
+    try {
+        [void][ClaudeConnectWin32Window]::EnumWindows($callback, [IntPtr]::Zero)
+    } catch {
+        if (Get-Command Write-EditorLaunchLog -ErrorAction SilentlyContinue) {
+            Write-EditorLaunchLog "WIN32_ENUM_WINDOWS_FAIL: pid=$ProcessId error=$($_.Exception.Message)" 'WARN'
+        }
+    }
+    return @($results)
+}
+# #endregion
 
 function Get-RemoteEditorProcesses {
     param(
@@ -1145,7 +1230,7 @@ function Test-RemoteEditorOnCorrectFolder {
     foreach ($p in @(Get-CursorMainProfileProcesses)) {
         $cmd = $p.CommandLine
         if ($cmd) {
-            if ($cmd -match $uriNeedle) {
+            if (Test-PathNeedleBoundaryMatch -CommandLine $cmd -NeedleEscaped $uriNeedle) {
                 if (-not (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath)) {
                     return $true
                 }
@@ -1159,9 +1244,18 @@ function Test-RemoteEditorOnCorrectFolder {
             }
         }
         if ($rootNeedle) {
-            try {
-                $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
-                $title = $wp.MainWindowTitle
+            # H11_multi_window_enum: MainWindowTitle alone is the Z-order-topmost window of
+            # this PID ONLY - when another project's window is already open+focused on this
+            # shared profile process, MainWindowTitle keeps returning THAT window's title
+            # forever and this check would never see a genuinely-opened window for a
+            # different project hosted in the very same process. Enumerate every top-level
+            # window actually owned by the PID and apply the exact same title-match rule to
+            # each one. This is strictly a superset of the single-window check (the previous
+            # MainWindowTitle is itself always one of the enumerated windows), so it can only
+            # ADD matches the old check missed - it cannot cause a false positive that the
+            # single-window check would not also have produced.
+            foreach ($win in @(Get-ProcessTopLevelWindows -ProcessId $p.ProcessId)) {
+                $title = $win.Title
                 # Accept either our custom "[Claude Server] <root>" title template or Cursor's own
                 # default Remote-SSH title "... [SSH: <alias>] - Cursor" - the custom template doesn't
                 # apply while a built-in view (e.g. Settings) is focused, so both must be recognized.
@@ -1169,7 +1263,7 @@ function Test-RemoteEditorOnCorrectFolder {
                     ($title -match '\[Claude Server\]' -or $title -match "(?i)\[SSH:\s*${aliasOnlyNeedle}\]")) {
                     return $true
                 }
-            } catch { }
+            }
         }
     }
     return $false
@@ -1216,7 +1310,7 @@ function Get-RemoteEditorSessionPresence {
         $cmd = $p.CommandLine
         $hit = $false
         if ($cmd) {
-            if ($cmd -match $uriNeedle) { $hit = $true }
+            if (Test-PathNeedleBoundaryMatch -CommandLine $cmd -NeedleEscaped $uriNeedle) { $hit = $true }
             elseif ($cmd -match $aliasNeedle -and (Test-PathNeedleBoundaryMatch -CommandLine $cmd -NeedleEscaped $pathNeedle)) { $hit = $true }
         }
         try {
@@ -1297,8 +1391,10 @@ function Get-RemoteEditorStateExplain {
             $bits += "main pid=$($p.ProcessId) empty_cmdline"
             continue
         }
-        $uriHit = $cmd -match $uriNeedle
-        $aliasPathHit = ($cmd -match $aliasNeedle) -and ($cmd -match $pathNeedle)
+        $uriHit = Test-PathNeedleBoundaryMatch -CommandLine $cmd -NeedleEscaped $uriNeedle
+        $rawAliasMatch = [bool]($cmd -match $aliasNeedle)
+        $boundaryPathMatch = [bool](Test-PathNeedleBoundaryMatch -CommandLine $cmd -NeedleEscaped $pathNeedle)
+        $aliasPathHit = $rawAliasMatch -and $boundaryPathMatch
         $titleHit = $false
         $title = ''
         try {
@@ -1772,6 +1868,26 @@ function Stop-RemoteEditor {
     }
 }
 
+function Get-CursorLaunchWindowPlan {
+    # profile_all>0 with profile_main=False ("orphan helpers") means either helpers from
+    # an existing/half-dead profile session, OR another concurrent connect session's window
+    # that is still spinning up and not yet classified as "main" in this exact CIM snapshot.
+    # Treat this the same as profile_open and request --new-window too - otherwise a race is
+    # possible where a sibling connect session's window finishes appearing microseconds after
+    # our entry-time check, and Cursor's single-instance IPC silently reroutes our "open
+    # folder" request into THAT window instead of spawning ours (confirmed live: a launch can
+    # spend minutes retrying/recovering while actually pointed at someone else's project).
+    param(
+        [Parameter(Mandatory)][bool]$AgentHome,
+        [Parameter(Mandatory)][bool]$HasProfileWindow,
+        [Parameter(Mandatory)][int]$ProfileProcCount
+    )
+    $orphanHelpers = ((-not $HasProfileWindow) -and ($ProfileProcCount -gt 0))
+    $useNewWindow = ($AgentHome -or $HasProfileWindow -or $orphanHelpers)
+    $reason = if ($AgentHome) { 'agent_home' } elseif ($HasProfileWindow) { 'profile_open' } elseif ($orphanHelpers) { 'orphan_helpers' } else { 'cold_start' }
+    return [pscustomobject]@{ UseNewWindow = $useNewWindow; Reason = $reason; OrphanHelpers = $orphanHelpers }
+}
+
 function Launch-RemoteEditor {
     param(
         [Parameter(Mandatory)][string]$EditorCmd,
@@ -1935,11 +2051,10 @@ function Launch-RemoteEditor {
         Write-EditorLaunchVerboseState -Label 'BEGIN' -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
     }
 
-    # profile_all>0 with profile_main=False = helpers from an existing/half-dead
-    # profile session. Do not mis-label that as cold_start (stacked windows).
-    $orphanHelpers = ((-not $hasProfileWindow) -and ($profileProcCount -gt 0))
-    $useNewWindow = ($agentHome -or $hasProfileWindow)
-    $planReason = if ($agentHome) { 'agent_home' } elseif ($hasProfileWindow) { 'profile_open' } elseif ($orphanHelpers) { 'orphan_helpers' } else { 'cold_start' }
+    $plan = Get-CursorLaunchWindowPlan -AgentHome $agentHome -HasProfileWindow $hasProfileWindow -ProfileProcCount $profileProcCount
+    $orphanHelpers = $plan.OrphanHelpers
+    $useNewWindow = $plan.UseNewWindow
+    $planReason = $plan.Reason
     Write-EditorLaunchLog "LAUNCH_PLAN: use_new_window=$useNewWindow reason=$planReason profile_all=$profileProcCount" 'INFO'
 
     if ($EditorCmd -eq 'code') {
@@ -1995,7 +2110,18 @@ function Launch-RemoteEditor {
         # tick of becoming ready instead of up to ~900ms late, cutting real perceived
         # launch latency without changing the worst-case per-strategy timeout.
         $pollMs = 250
-        $pollMaxTicks = 12
+        # H11_multi_window_enum: the first strategy always gets the full budget - it is the
+        # one most likely to succeed and the one the window-enum fix above targets directly.
+        # Strategies 2-4 are just different CLI arg spellings (--classic/--folder-uri vs
+        # --remote) aimed at the SAME already-running shared-profile process via the SAME
+        # single-instance IPC channel (preserve_open_windows scenario: profileProcCount>0
+        # and useNewWindow). If the now-fixed detection still finds nothing for strategy 1
+        # within a shorter window, it is very unlikely a differently-spelled retry against
+        # that identical busy target succeeds ~2s later where the previous one did not -
+        # shortening only these retries cuts real wasted time (measured ~8s/strategy x 3
+        # retries) without touching the important first attempt or genuine cold-start
+        # launches (no existing profile window), which still get the full 12-tick budget.
+        $pollMaxTicks = if ($attempt -gt 1 -and $useNewWindow -and $profileProcCount -gt 0) { 6 } else { 12 }
         for ($pollTick = 1; $pollTick -le $pollMaxTicks; $pollTick++) {
             Start-Sleep -Milliseconds $pollMs
             Clear-CursorProcessCache
@@ -2006,6 +2132,36 @@ function Launch-RemoteEditor {
                 "LAUNCH_POLL: strategy=$($strategy.Name) elapsed=${elapsedMs}ms on_folder=$afterFolder agent_home=$afterAgent"
             ) 'DEBUG'
             Write-LaunchPerfLog -Mark "poll_${elapsedMs}ms" -Ms $elapsedMs -Extra "on_folder=$afterFolder strategy=$($strategy.Name)"
+
+            # #region agent log H2_ipc_blind_spot poll_window_snapshot
+            try {
+                $dbgProcs = @(Get-CursorMainProfileProcesses) | ForEach-Object {
+                    $dbgTitle = ''
+                    $dbgHwnd = $false
+                    try {
+                        $dbgWp = [System.Diagnostics.Process]::GetProcessById($_.ProcessId)
+                        $dbgTitle = [string]$dbgWp.MainWindowTitle
+                        $dbgHwnd = ($dbgWp.MainWindowHandle -ne [IntPtr]::Zero)
+                    } catch {}
+                    [PSCustomObject]@{ pid = $_.ProcessId; title = $dbgTitle; hwnd = $dbgHwnd; cmdTail = (Format-EditorProcessCommandLine -CommandLine $_.CommandLine -MaxLen 80) }
+                }
+                $dbgRoot = ($RemotePath.TrimEnd('/') -split '/')[-1]
+                [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H2_ipc_blind_spot';location='editor-launch.ps1:2027';message='poll_window_snapshot';data=@{strategy=$strategy.Name;attempt=$attempt;tick=$pollTick;target_root=$dbgRoot;on_folder=$afterFolder;procs=$dbgProcs};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 5) + "`n"))
+            } catch { }
+            # #endregion
+
+            # #region agent log H11_multi_window_enum window_enum_snapshot
+            try {
+                $dbgWinAll = @(Get-CursorMainProfileProcesses) | ForEach-Object {
+                    $dbgWins = @(Get-ProcessTopLevelWindows -ProcessId $_.ProcessId) | ForEach-Object {
+                        [PSCustomObject]@{ hwnd = [int64]$_.Hwnd; title = $_.Title; visible = $_.Visible }
+                    }
+                    [PSCustomObject]@{ pid = $_.ProcessId; windowCount = $dbgWins.Count; windows = $dbgWins }
+                }
+                $dbgRootW = ($RemotePath.TrimEnd('/') -split '/')[-1]
+                [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H11_multi_window_enum';location='editor-launch.ps1:poll_loop';message='window_enum_snapshot';data=@{strategy=$strategy.Name;attempt=$attempt;tick=$pollTick;target_root=$dbgRootW;on_folder=$afterFolder;procs=$dbgWinAll};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 6) + "`n"))
+            } catch { }
+            # #endregion
 
             if ($afterFolder -and -not $afterAgent) {
                 # Return on first on_folder hit - the extra recheck added latency without
@@ -2069,8 +2225,36 @@ function Launch-RemoteEditor {
         Write-EditorLaunchLog 'LAUNCH_FAIL: started_but_not_on_folder' 'ERROR'
     }
 
+    # H2/H3 CONFIRMED (debug session c46ba1, live repro 2026-07-24): when another project's
+    # window is already open on this shared profile, Cursor's --new-window IPC handoff to the
+    # existing instance never produces a detectable second window (CommandLine-based on_folder
+    # check keeps inspecting the SAME pre-existing pid, whose original CommandLine points at the
+    # OTHER project and never changes) - all 4 strategies exhaust their poll budget (~56s) and
+    # this recovery block used to Stop-CursorServerProfileTree, force-closing that OTHER
+    # project's fully-working window (main + gpu/utility/renderer helpers) just to cold-launch
+    # this one. Must mirror the same preserve_open_windows guard used before the attempts
+    # (LAUNCH_KILL_SKIP above) - never destroy someone else's open Cursor session as a "recovery".
+    $preservedOpenWindows = ($EditorCmd -eq 'cursor' -and ($agentHome -or $useNewWindow) -and ($profileProcCount -gt 0))
+    if ($EditorCmd -eq 'cursor' -and $profileProcCount -gt 0 -and $preservedOpenWindows) {
+        Write-EditorLaunchLog ("LAUNCH_RECOVERY_SKIP: reason=preserve_open_windows profile_count={0} - not killing other open project windows; press O to retry" -f $profileProcCount) 'WARN'
+        Write-LaunchPerfLog -Mark 'launch_total' -Ms $script:LaunchPerfSw.ElapsedMilliseconds -Extra 'path=fail_preserved_open_windows'
+        return $false
+    }
     if ($EditorCmd -eq 'cursor' -and $profileProcCount -gt 0) {
         Write-EditorLaunchLog ("LAUNCH_RECOVERY: soft_stop_profile then cold_launch path={0}" -f $RemotePath) 'WARN'
+        # #region agent log H3_recovery_kill_context before_kill_snapshot
+        try {
+            $dbgProcsK = @(Get-CursorProfileProcesses) | ForEach-Object {
+                $dbgTitleK = ''
+                try {
+                    $dbgWpK = [System.Diagnostics.Process]::GetProcessById($_.ProcessId)
+                    $dbgTitleK = [string]$dbgWpK.MainWindowTitle
+                } catch {}
+                [PSCustomObject]@{ pid = $_.ProcessId; title = $dbgTitleK; cmdTail = (Format-EditorProcessCommandLine -CommandLine $_.CommandLine -MaxLen 100) }
+            }
+            [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H3_recovery_kill_context';location='editor-launch.ps1:2098';message='before_kill_snapshot';data=@{target_path=$RemotePath;procs=$dbgProcsK};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 5) + "`n"))
+        } catch { }
+        # #endregion
         try { Stop-CursorServerProfileTree } catch {
             Write-EditorLaunchLog ("LAUNCH_RECOVERY_KILL_FAIL: {0}" -f $_.Exception.Message) 'WARN'
         }
@@ -2081,12 +2265,20 @@ function Launch-RemoteEditor {
             $strat = $cold[0]
             Write-EditorLaunchLog ("LAUNCH_RECOVERY_ATTEMPT: strategy={0}" -f $strat.Name) 'INFO'
             if (Start-ProcessAsInteractiveUser -FilePath $cli -ArgumentList $strat.Args) {
-                for ($tick = 1; $tick -le 20; $tick++) {
+                # A cold Cursor.exe start after soft_stop_profile has to spin up its whole
+                # process tree (crashpad, gpu, utility, renderer) from disk with no warm
+                # profile process to reuse - on a loaded machine (many unrelated Cursor.exe
+                # processes competing for CPU/IO) this routinely takes well over the old
+                # 10s budget (20*500ms). Give it a much more realistic ceiling (45s) so a
+                # launch that is genuinely succeeding isn't reported as failed while the
+                # window is still on its way up (confirmed live: window appeared correctly
+                # ~30-60s after this loop used to give up).
+                for ($tick = 1; $tick -le 90; $tick++) {
                     Start-Sleep -Milliseconds 500
                     Clear-CursorProcessCache
                     if ((Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath) -and
                         -not (Test-RemoteEditorInAgentHome -RemotePath $RemotePath)) {
-                        Write-EditorLaunchLog 'LAUNCH_OK: recovery_cold_start' 'INFO'
+                        Write-EditorLaunchLog ("LAUNCH_OK: recovery_cold_start elapsed_ms={0}" -f ($tick * 500)) 'INFO'
                         Write-LaunchPerfLog -Mark 'launch_total' -Ms $script:LaunchPerfSw.ElapsedMilliseconds -Extra 'path=ok_recovery'
                         return $true
                     }

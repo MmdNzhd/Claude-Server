@@ -59,6 +59,25 @@ $suites = @(
     @{ Name = 'windows-shadow-canon'; Script = 'test-windows-shadow-canon.ps1' }
     @{ Name = 'skip-12-fingerprint-hold'; Script = 'test-skip-12-fingerprint-hold.ps1' }
     @{ Name = 'step-console-quiet'; Script = 'test-step-console-quiet.ps1' }
+    @{ Name = 'tunnel-job-object'; Script = 'test-tunnel-job-object.ps1' }
+    @{ Name = 'tunnel-job-object-live'; Script = 'test-tunnel-job-object-live.ps1' }
+    @{ Name = 'sshx-hard-kill'; Script = 'test-sshx-hard-kill.ps1' }
+    @{ Name = 'sshx-hard-kill-live'; Script = 'test-sshx-hard-kill-live.ps1' }
+    @{ Name = 'update-check-failfast'; Script = 'test-update-check-failfast.ps1' }
+    @{ Name = 'update-check-failfast-live'; Script = 'test-update-check-failfast-live.ps1' }
+    @{ Name = 'logsync-fast-timeout'; Script = 'test-logsync-fast-timeout.ps1' }
+    @{ Name = 'logsync-fast-timeout-live'; Script = 'test-logsync-fast-timeout-live.ps1' }
+    @{ Name = 'exe-atomic-swap'; Script = 'test-exe-atomic-swap.ps1' }
+    @{ Name = 'exe-atomic-swap-live'; Script = 'test-exe-atomic-swap-live.ps1' }
+    @{ Name = 'local-port-free-bind-live'; Script = 'test-local-port-free-bind-live.ps1' }
+    @{ Name = 'orphan-tunnel-kill-vs-sibling-live'; Script = 'test-orphan-tunnel-kill-vs-sibling-live.ps1' }
+    @{ Name = 'auth-stamp-current-live'; Script = 'test-auth-stamp-current-live.ps1' }
+    @{ Name = 'auth-golden-missing-cache-live'; Script = 'test-auth-golden-missing-cache-live.ps1' }
+    @{ Name = 'sidecar-listening-live'; Script = 'test-sidecar-listening-live.ps1' }
+    @{ Name = 'tcp-port-relay-live'; Script = 'test-tcp-port-relay-live.ps1' }
+    @{ Name = 'sidecar-boot-reap-live'; Script = 'test-sidecar-boot-reap-live.ps1' }
+    @{ Name = 'remote-editor-detect-live'; Script = 'test-remote-editor-detect-live.ps1' }
+    @{ Name = 'connect-single-instance-live'; Script = 'test-connect-single-instance-live.ps1' }
 )
 
 $fail = 0

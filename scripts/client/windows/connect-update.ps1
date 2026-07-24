@@ -198,6 +198,46 @@ function Get-SafeFileSha256 {
     } catch { return $null }
 }
 
+function Copy-ExeAtomicSwap {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    # #P6: a plain Copy-Item -Force onto $Destination fails silently whenever that exact
+    # file is the one currently executing (e.g. the user double-clicked Desktop\Claude-
+    # Connect.exe to launch, so this update step is now trying to overwrite its own running
+    # image) - Windows denies direct content overwrite of a mapped/running executable.
+    # Renaming the running file out of the way first DOES succeed (the OS loader opens exe
+    # images with FILE_SHARE_DELETE, so rename/move of the directory entry is allowed even
+    # while it is executing); only then copy the new build into the now-free path. This is
+    # the standard self-updating-exe rename-swap trick.
+    if (Test-Path -LiteralPath $Destination) {
+        try {
+            if ((Get-SafeFileSha256 $Source) -eq (Get-SafeFileSha256 $Destination)) {
+                return $true # already identical - skip the copy/rename dance entirely
+            }
+        } catch { }
+    }
+    try {
+        Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
+        return $true
+    } catch {
+        # Fall through to rename-swap below.
+    }
+    $old = "$Destination.old-{0}" -f (Get-Date -Format 'yyyyMMddHHmmss')
+    try {
+        if (Test-Path -LiteralPath $Destination) {
+            Rename-Item -LiteralPath $Destination -NewName (Split-Path -Leaf $old) -Force -ErrorAction Stop
+        }
+        Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
+        try { Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue } catch { } # best-effort; ok if still locked
+        return $true
+    } catch {
+        Write-UpdateFileLog ("exe_promote_fail dest=$Destination err=$($_.Exception.Message)") 'WARN'
+        return $false
+    }
+}
+
 function Sync-ConnectExeBesideClient {
     # Existing bat users: after auto-update, Claude-Connect.exe sits next to connect.bat.
     # Also mirror to Desktop so they can see/share the single-file installer.
@@ -214,9 +254,13 @@ function Sync-ConnectExeBesideClient {
         if (-not (Test-Path -LiteralPath $exe)) { return }
         $desk = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect.exe'
         $setup = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect-Setup.exe'
-        Copy-Item -LiteralPath $exe -Destination $desk -Force -ErrorAction SilentlyContinue
-        Copy-Item -LiteralPath $exe -Destination $setup -Force -ErrorAction SilentlyContinue
-        Write-UpdateFileLog ("exe_promoted path=$exe desk=1")
+        $okDesk = $true
+        $okSetup = $true
+        if ((Resolve-Path -LiteralPath $exe -ErrorAction SilentlyContinue).Path -ne (Resolve-Path -LiteralPath $desk -ErrorAction SilentlyContinue).Path) {
+            $okDesk = Copy-ExeAtomicSwap -Source $exe -Destination $desk
+        }
+        $okSetup = Copy-ExeAtomicSwap -Source $exe -Destination $setup
+        Write-UpdateFileLog ("exe_promoted path=$exe desk=$okDesk setup=$okSetup")
     } catch {
         Write-UpdateFileLog ("exe_promote_fail $($_.Exception.Message)") 'WARN'
     }
@@ -376,6 +420,50 @@ version=$RemoteVer
 until=$until
 "@ | Set-Content -LiteralPath (Get-UpdateDeferPath) -Encoding UTF8
     Write-UpdateFileLog "UPDATE_DEFER saved until=$until ver=$RemoteVer"
+}
+
+# #P1: connect-version.txt can be intentionally/persistently absent on the server
+# (e.g. a frozen/disabled update bundle) or the server can be genuinely unreachable.
+# Without a memory of that, every single launch pays the full SSH resolution cost
+# (primary + up to 2 fallback identities, 3 retries each) for a check that is known
+# to fail - observed up to 62s wasted per launch, always before the UAC prompt.
+# Cache a recent miss for a short, self-healing window so a real fix on the server
+# is picked up again automatically without needing a client restart.
+function Get-UpdateMissCachePath { return (Join-Path (Join-Path $env:USERPROFILE '.config\claude-connect') 'update-check-miss.txt') }
+
+function Test-UpdateCheckRecentlyMissed {
+    $path = Get-UpdateMissCachePath
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    try {
+        $raw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+        $until = $null
+        foreach ($line in ($raw -split "`n")) {
+            if ($line -match '^until=(.+)$') { $until = $Matches[1].Trim() }
+        }
+        if (-not $until) { return $false }
+        $dt = [datetime]::Parse($until, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
+        if ($dt -gt (Get-Date).ToUniversalTime()) { return $true }
+    } catch {}
+    return $false
+}
+
+function Save-UpdateCheckMiss {
+    param([int]$Hours = 6, [string]$Reason = 'unreachable_or_missing')
+    $dir = Join-Path $env:USERPROFILE '.config\claude-connect'
+    try { New-Item -ItemType Directory -Force -Path $dir | Out-Null } catch {}
+    $until = (Get-Date).ToUniversalTime().AddHours($Hours).ToString('o')
+    @"
+until=$until
+reason=$Reason
+"@ | Set-Content -LiteralPath (Get-UpdateMissCachePath) -Encoding UTF8
+    Write-UpdateFileLog "UPDATE_CHECK_MISS_CACHED until=$until reason=$Reason hours=$Hours"
+}
+
+function Clear-UpdateCheckMiss {
+    $path = Get-UpdateMissCachePath
+    if (Test-Path -LiteralPath $path) {
+        try { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue } catch {}
+    }
 }
 
 function Test-UpdateForceRequired {
@@ -910,14 +998,21 @@ function Resolve-UpdateEndpoint {
 }
 
 
+if (Test-UpdateCheckRecentlyMissed) {
+    Write-UpdateFileLog 'SSH_STAGE skip reason=recently_missed_cache'
+    Complete-UpdateCheckHandoff
+    exit 0
+}
 $resolved = Resolve-UpdateEndpoint
 if (-not $resolved) {
     $ep = Get-ServerEndpoint
     Write-UpdateMsg ("Client update check skipped (unreachable: {0})" -f $ep.Display) 'DarkYellow'
     Write-UpdateFileLog ("unreachable ep=$($ep.Display)") 'WARN'
+    Save-UpdateCheckMiss -Hours 6 -Reason 'resolve_exhausted'
     Complete-UpdateCheckHandoff
     exit 0
 }
+Clear-UpdateCheckMiss
 $ep = @{ Target = $resolved.Target; Display = $resolved.Display }
 $remoteVer = $resolved.RemoteVer
 Write-UpdateMsg ("Update source: {0}" -f $ep.Display) 'DarkGray'

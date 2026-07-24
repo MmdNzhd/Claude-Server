@@ -399,6 +399,51 @@ function Test-TunnelPortTcpOpen {
     return ($out -eq 'open')
 }
 
+function Test-TunnelPortTcpOpenAndScanHostKey {
+    param([Parameter(Mandatory)][int]$TargetPort)
+    # Perf (H12): fold the tcp-open re-check (normally Test-TunnelPortTcpOpen) and the
+    # ssh-keyscan hostkey fingerprint scan (normally Get-TunnelHostKeyFingerprint) into
+    # ONE SSH round trip instead of two (~1.2-1.6s of pure SSH-exec overhead each on
+    # Windows - see Invoke-SshXCore comment, no ControlMaster mux available here). The
+    # remote script only runs ssh-keyscan when the tcp probe itself succeeded, so this
+    # never adds latency to the "port is closed" case (identical to calling
+    # Test-TunnelPortTcpOpen alone) - it only removes a second full SSH handshake for
+    # the common "port open, caller also needs the hostkey" case. Only call this when
+    # the caller already knows it will need BOTH values (see Test-TunnelPortIsForeignPeer).
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $scriptBody = @"
+if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$TargetPort" 2>/dev/null; then
+  echo TCP:open
+  FP=`$(timeout 4 ssh-keyscan -p $TargetPort -T 3 -t ed25519,rsa,ecdsa 127.0.0.1 2>/dev/null | ssh-keygen -lf - 2>/dev/null | awk '{print `$2}' | head -1)
+  echo "HOSTKEY:`$FP"
+else
+  echo TCP:closed
+fi
+"@
+    # Bash remote payloads must be LF-only: Windows CRLF in here-strings breaks `bash -c`.
+    $scriptBody = (($scriptBody -replace "`r`n", "`n") -replace "`r", "`n")
+    $out = @(SshX $scriptBody 2>$null)
+    $tcpLine = ($out | Where-Object { $_ -match '^TCP:' } | Select-Object -First 1)
+    $tcpOpen = [bool]($tcpLine -match '^TCP:open')
+    if ($tcpOpen) {
+        $hkLine = ($out | Where-Object { $_ -match '^HOSTKEY:' } | Select-Object -First 1)
+        $fp = ''
+        if ($hkLine -match '^HOSTKEY:(.*)$') {
+            $fp = (($Matches[1] -replace "`r", '') -replace '\s', '').Trim()
+            if ($fp -and $fp -notmatch '^(SHA256:|MD5:)') { $fp = '' }
+        }
+        if (-not $script:TunnelHostKeyFpByPort) { $script:TunnelHostKeyFpByPort = @{} }
+        $script:TunnelHostKeyFpByPort[[string]$TargetPort] = $fp
+        if ($fp) { Write-GitModeLog "HOSTKEY_FP scan port=$TargetPort fp=$fp" 'DEBUG' }
+    }
+    # #region agent log H12_gitmode_batching combined_tcp_hostkey
+    try {
+        [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H12_gitmode_batching';location='git-mode.ps1:401';message='combined_tcp_hostkey';data=@{elapsed_ms=$sw.ElapsedMilliseconds;calls_saved=1;port=$TargetPort;tcp_open=$tcpOpen};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n"))
+    } catch {}
+    # #endregion
+    return $tcpOpen
+}
+
 function Clear-ServerStaleTunnelForward {
     param([int]$TargetPort = $Port)
     if (-not $TargetPort) { return }
@@ -899,7 +944,26 @@ function Test-TunnelPortIsForeignPeer {
         if (Test-RecentlyClearedTunnelPort -TargetPort $TargetPort) { return $false }
     }
 $tcpOpen = $false
-    try { $tcpOpen = [bool](Test-TunnelPortTcpOpen -TargetPort $TargetPort) } catch { $tcpOpen = $false }
+    # Perf (H12): Test-TunnelHostKeyMismatch below is about to call
+    # Get-TunnelHostKeyFingerprint (its own ssh-keyscan SSH round trip) whenever a
+    # stored laptop host-key fingerprint exists and this port hasn't been scanned yet.
+    # Prefetch it in the SAME call as the tcp-open re-check via
+    # Test-TunnelPortTcpOpenAndScanHostKey - Test-TunnelHostKeyMismatch then just hits
+    # the (now warm) per-port cache and issues zero extra SSH calls. When there is no
+    # stored fingerprint yet, Test-TunnelHostKeyMismatch never scans at all (returns
+    # early) - so behavior there is unchanged and we skip the combined probe too.
+    $hkAlreadyCached = [bool]($script:TunnelHostKeyFpByPort -and $script:TunnelHostKeyFpByPort.ContainsKey([string]$TargetPort))
+    $hkStored = ''
+    if (-not $hkAlreadyCached -and (Get-Command Get-StoredLaptopHostKeyFingerprint -ErrorAction SilentlyContinue)) {
+        $hkStored = Get-StoredLaptopHostKeyFingerprint
+    }
+    try {
+        if ($hkStored -and -not $hkAlreadyCached) {
+            $tcpOpen = [bool](Test-TunnelPortTcpOpenAndScanHostKey -TargetPort $TargetPort)
+        } else {
+            $tcpOpen = [bool](Test-TunnelPortTcpOpen -TargetPort $TargetPort)
+        }
+    } catch { $tcpOpen = $false }
         if (-not $tcpOpen) {
             # Closed port cannot be a live foreign peer ÃƒÆ'Ã†'Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â skip expensive banner/hostkey SSH.
             return $false
@@ -1227,7 +1291,12 @@ function Complete-CursorProxyAfterTunnel {
 }
 
 function Test-ProxyHealth {
-    param([int]$HttpPort = 0, [int]$SocksPort = 0, [int]$TimeoutSec = 10)
+    # H10_proxy_health_timeout: default was 10s and, worse, was NEVER actually applied to the
+    # request (WebClient has no .Timeout property) - a dead backend leg made DownloadString hang
+    # until the OS/TCP layer detected the reset (~8.6s observed live). Switched to HttpWebRequest,
+    # which does honor .Timeout, and lowered the default to 3s (api.ipify.org is a tiny response;
+    # a genuinely-working proxy answers in well under 1s, so 3s is still a generous margin).
+    param([int]$HttpPort = 0, [int]$SocksPort = 0, [int]$TimeoutSec = 3)
     if ($HttpPort -le 0) { $HttpPort = Get-CursorHttpFrontPort }
     if ($SocksPort -le 0) { $SocksPort = Get-CursorSocksFrontPort }
     if ($HttpPort -le 0) {
@@ -1239,14 +1308,32 @@ function Test-ProxyHealth {
         return $false
     }
     $ip = ''
+    $swH10p = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        $wc = New-Object System.Net.WebClient
-        $wc.Proxy = New-Object System.Net.WebProxy("http://127.0.0.1:$HttpPort")
-        $wc.Headers.Add('User-Agent', 'claude-connect-proxy-health')
-        $ip = $wc.DownloadString('https://api.ipify.org').Trim()
+        $req = [System.Net.HttpWebRequest]::Create('https://api.ipify.org')
+        $req.Proxy = New-Object System.Net.WebProxy("http://127.0.0.1:$HttpPort")
+        $req.UserAgent = 'claude-connect-proxy-health'
+        $timeoutMs = [Math]::Max(500, $TimeoutSec * 1000)
+        $req.Timeout = $timeoutMs
+        $req.ReadWriteTimeout = $timeoutMs
+        $resp = $req.GetResponse()
+        try {
+            $stream = $resp.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($stream)
+            $ip = $reader.ReadToEnd().Trim()
+            $reader.Close()
+        } finally {
+            $resp.Close()
+        }
+        # #region agent log H10_proxy_health_timeout proxy_health_request_done
+        try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='git-mode.ps1:Test-ProxyHealth';message='proxy_health_request_done';data=@{elapsed_ms=$swH10p.ElapsedMilliseconds;ok=1};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+        # #endregion
     } catch {
         Write-GitModeLog ("PROXY_HEALTH socks={0} http={1} ok=0 err={2}" -f $SocksPort, $HttpPort, $_.Exception.Message) 'WARN'
         $script:LastProxyHealthOk = $false
+        # #region agent log H10_proxy_health_timeout proxy_health_request_failed
+        try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='git-mode.ps1:Test-ProxyHealth';message='proxy_health_request_failed';data=@{elapsed_ms=$swH10p.ElapsedMilliseconds;ok=0};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+        # #endregion
         return $false
     }
     if (-not $ip) {
@@ -1288,7 +1375,13 @@ function Test-RemoteXraySocksOpen {
     if ($RemotePort -le 0) { $RemotePort = [int]$script:XrayServerSocksPort }
     $argList = New-Object System.Collections.Generic.List[string]
     if ($SshCfgPath) { [void]$argList.Add('-F'); [void]$argList.Add($SshCfgPath) }
-    foreach ($a in @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=2', '-o', 'ServerAliveCountMax=2')) {
+    # H10_proxy_health_timeout: was ConnectTimeout=5 + remote `timeout 2` = 7s worst-case,
+    # with an 8000ms WaitForExit safety margin - live logs showed this firing routinely
+    # (remote_xray_probe=timeout) burning the full 8s. Tightened to ConnectTimeout=2 so the
+    # worst-case (2s ssh connect + 2s remote probe) is 4s; WaitForExit kept at a proportional
+    # ~1.25x margin (5000ms) so legitimate-but-slow connects still succeed, they just no
+    # longer wait 8s to fail when genuinely unreachable.
+    foreach ($a in @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=2', '-o', 'ServerAliveInterval=2', '-o', 'ServerAliveCountMax=2')) {
         [void]$argList.Add($a)
     }
     [void]$argList.Add($Alias)
@@ -1296,14 +1389,50 @@ function Test-RemoteXraySocksOpen {
     $stdoutPath = [System.IO.Path]::GetTempFileName()
     $stderrPath = [System.IO.Path]::GetTempFileName()
     $proc = $null
+    $swH10g = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         $proc = Start-Process -FilePath 'ssh' -ArgumentList $argList.ToArray() -NoNewWindow -PassThru `
             -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
-        if (-not $proc.WaitForExit(8000)) {
+        if (-not $proc.WaitForExit(5000)) {
             try { $proc.Kill() } catch {}
-            Write-GitModeLog "ENSURE_TUNNEL remote_xray_probe=timeout port=$RemotePort skipping_proxy_leg" 'WARN'
-            return $false
+            # #region agent log H19 xray_probe_attempt1_timeout
+            try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';runId='post-fix';hypothesisId='H19';location='git-mode.ps1:1396';message='xray_probe_attempt1_timeout';data=@{elapsed_ms=$swH10g.ElapsedMilliseconds;port=$RemotePort};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+            # #endregion
+            # H19 (xray verified UP on server 2026-07-24: 10808+10809 LISTEN, systemd active):
+            # a WaitForExit timeout here means the FRESH COLD ssh connection itself stalled under
+            # the boot-time SSH burst (MaxStartups throttling), NOT that the remote port is closed
+            # - a closed port returns "CLOSED" in ~1.5s and exits cleanly, never hitting this path.
+            # Falsely returning $false dropped a healthy proxy leg ("Cursor international path down")
+            # AND wasted the 5s. xray is a stable service, so retry once over a now-warm path.
+            $retryOut = ''
+            $retryProc = $null
+            $retryStdout = [System.IO.Path]::GetTempFileName()
+            $retryStderr = [System.IO.Path]::GetTempFileName()
+            try {
+                $retryProc = Start-Process -FilePath 'ssh' -ArgumentList $argList.ToArray() -NoNewWindow -PassThru `
+                    -RedirectStandardOutput $retryStdout -RedirectStandardError $retryStderr
+                if ($retryProc.WaitForExit(6000)) {
+                    try { $retryOut = [System.IO.File]::ReadAllText($retryStdout).Trim() } catch { $retryOut = '' }
+                } else {
+                    try { $retryProc.Kill() } catch {}
+                }
+            } catch { $retryOut = '' } finally {
+                try { Remove-Item -LiteralPath $retryStdout, $retryStderr -Force -ErrorAction SilentlyContinue } catch {}
+            }
+            $retryOk = ($retryOut -eq 'OPEN')
+            # #region agent log H19 xray_probe_retry_result
+            try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';runId='post-fix';hypothesisId='H19';location='git-mode.ps1:1402';message='xray_probe_retry_result';data=@{elapsed_ms=$swH10g.ElapsedMilliseconds;port=$RemotePort;retry_open=$retryOk;retry_out=$retryOut};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+            # #endregion
+            if ($retryOk) {
+                Write-GitModeLog "ENSURE_TUNNEL remote_xray_probe=open port=$RemotePort (recovered on retry)" 'INFO'
+            } else {
+                Write-GitModeLog "ENSURE_TUNNEL remote_xray_probe=timeout port=$RemotePort skipping_proxy_leg (after 1 retry)" 'WARN'
+            }
+            return $retryOk
         }
+        # #region agent log H10_proxy_health_timeout xray_probe_done
+        try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H10_proxy_health_timeout';location='git-mode.ps1:Test-RemoteXraySocksOpen';message='xray_probe_done';data=@{elapsed_ms=$swH10g.ElapsedMilliseconds};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+        # #endregion
         $out = ''
         try { $out = [System.IO.File]::ReadAllText($stdoutPath).Trim() } catch { $out = '' }
         return ($out -eq 'OPEN')
@@ -2480,6 +2609,12 @@ function Ensure-SessionTunnel {
     # extensions) through xray on the server so it egresses via the VLESS exit IP for
     # every developer, rather than each laptop's own network or the shared office IP.
     $BgTunnel.Value = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList ($sshArgs + @($Alias))
+    # #P2: tie the reverse-tunnel lifetime to this Connect process via the same
+    # KILL_ON_JOB_CLOSE job used for the sidecar tree, so an abrupt exit (X button,
+    # crash, force-kill) cannot leave the tunnel process orphaned holding its port.
+    if (Get-Command Add-CursorProxySidecarJobProcess -ErrorAction SilentlyContinue) {
+        Add-CursorProxySidecarJobProcess -Process $BgTunnel.Value
+    }
     Write-GitModeLog "ENSURE_TUNNEL spawned pid=$($BgTunnel.Value.Id) port=$Port slot=$($script:TunnelSlot) socks_port=$($script:SocksProxyPort) http_port=$($script:HttpProxyPort)" 'INFO'
     if (Wait-ForTunnelUp -TunnelProc $BgTunnel.Value -Quiet:$WaitQuiet) {
         $script:LastTunnelSpawnSuccessAt = Get-Date
@@ -2628,21 +2763,13 @@ function Push-ServerConnectConf {
         }
     }
     # Stage 5: refuse overwriting ACTIVE_MOUNT when another project is still mounted.
-    if ($preferAm -and -not $ClearActiveMount -and (Get-Command Test-ProjectMountHealthy -ErrorAction SilentlyContinue)) {
-        $currentAm = ''
-        if ($script:LastPushConfActive) { $currentAm = [string]$script:LastPushConfActive }
-        if (-not $currentAm -and $Cfg -and (Test-Path $Cfg)) {
-            # Local hint only; server truth is LastPushConfActive / remote body keep path.
-        }
-        if ($currentAm -and $currentAm -ne $preferAm) {
-            $otherLive = $false
-            try { $otherLive = [bool](Test-ProjectMountHealthy -ProjectId $currentAm) } catch { $otherLive = $false }
-            if ($otherLive) {
-                Write-GitModeLog ("ACTIVE_MOUNT_GUARD keep={0} prefer={1} reason=other_still_mounted" -f $currentAm, $preferAm) 'WARN'
-                $preferAm = $currentAm
-            }
-        }
-    }
+    # Perf: this used to pre-check via a separate `claude-mount check <currentAm>` SSH round
+    # trip (~1.5s) before deciding $preferAm. That is pure duplicate work - the remoteBody
+    # script shipped below (search ACTIVE_MOUNT_GUARD) already re-derives CUR_AM fresh from
+    # the server conf file and applies the identical guard via a local `mountpoint -q` test
+    # (no extra round trip), which is also more correct since it reads the server's live
+    # conf instead of the client's possibly-stale $script:LastPushConfActive cache. Whatever
+    # $preferAm we pass in, the remote script will still refuse to clobber a live other mount.
     $clearFlag = if ($ClearActiveMount) { '1' } else { '0' }
     $sessionPort = Get-SessionTunnelPort
     if ($Port -and $script:Port -and ([int]$Port -ne [int]$script:Port)) {
@@ -2982,6 +3109,9 @@ function Invoke-MountProject {
     # WS4: only assert BANNER_OK when this client already ran its own successful banner probe
     # this session (Test-TunnelUp) AND the caller trusts the tunnel - never on its own.
     $bannerOk = if ($TrustedTunnel -and $script:TunnelBannerCacheUp) { 'CLAUDE_TUNNEL_BANNER_OK=1 ' } else { '' }
+    # DEBUG c46ba1: opt-in server-side perf breakdown (PERF_HIDE_MS / PERF_SSHFS_MS) so a slow
+    # `claude-mount up` can be split into git-hide-over-reverse-SSH vs the sshfs mount itself.
+    $perfEnv = if ((Get-Command Test-ConnectPerfEnabled -ErrorAction SilentlyContinue) -and (Test-ConnectPerfEnabled)) { 'CLAUDE_CONNECT_PERF_LOG=1 ' } else { '' }
     Write-GitModeLog "MOUNT_UP begin project=$ProjectId trusted=$TrustedTunnel banner_ok=$([bool]$bannerOk) check_hint=$CheckOkHint" 'DEBUG'
     # A caller (e.g. Invoke-RecoverIfNeeded) may already have run the `check` probe this same
     # iteration - reuse that result to skip our own redundant SSH round-trip. This NEVER skips
@@ -2992,7 +3122,7 @@ function Invoke-MountProject {
         Write-GitModeLog "MOUNT_UP off_mode_apply project=$ProjectId reason=check_ok_still_up" 'DEBUG'
     }
     $swMount = [System.Diagnostics.Stopwatch]::StartNew()
-    $mountOut = (SshX "${trusted}${bannerOk}$CM up '$ProjectId' 2>&1") | Out-String
+    $mountOut = (SshX "${perfEnv}${trusted}${bannerOk}$CM up '$ProjectId' 2>&1") | Out-String
     $exitCode = $LASTEXITCODE
     $swMount.Stop()
     if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
@@ -3016,7 +3146,7 @@ function Invoke-MountProject {
         Write-Host '      -> server mount script outdated, pushing update...' -ForegroundColor DarkGray
         if (Push-ClaudeServerScripts -ConnectScriptDir $ConnectScriptDir -Alias $Alias) {
             $swRetry = [System.Diagnostics.Stopwatch]::StartNew()
-            $mountOut = (SshX "${trusted}${bannerOk}$CM up '$ProjectId' 2>&1") | Out-String
+            $mountOut = (SshX "${perfEnv}${trusted}${bannerOk}$CM up '$ProjectId' 2>&1") | Out-String
             $exitCode = $LASTEXITCODE
             $swRetry.Stop()
             if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {

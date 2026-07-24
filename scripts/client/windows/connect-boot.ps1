@@ -55,6 +55,9 @@ if (-not (Test-Path -LiteralPath $connectPs1)) {
     exit 1
 }
 
+# #region agent log H7_boot_mutex_cost boot_before_invoke
+try { [System.IO.File]::AppendAllText('D:\Smart\Claude-Code-Server\debug-c46ba1.log', ((@{sessionId='c46ba1';hypothesisId='H7_boot_mutex_cost';location='connect-boot.ps1:59';message='boot_before_invoke';data=@{now=(Get-Date).ToString('HH:mm:ss.fff');pid=$PID;slot=$slot};timestamp=[long]([DateTimeOffset](Get-Date)).ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress -Depth 3) + "`n")) } catch {}
+# #endregion
 try {
     & $connectPs1 @args
     $ec = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
