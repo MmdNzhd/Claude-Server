@@ -2,7 +2,8 @@
 # deploy-smart-bundle.ps1 - upload + install Smart auto-update bundle only
 param(
     [string]$ProjectRoot = '',
-    [string]$SmartClientRoot = ''
+    [string]$SmartClientRoot = '',
+    [switch]$ForceServerUnfreeze
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -24,4 +25,5 @@ Write-Host ''
     -ProjectRoot $ProjectRoot `
     -SmartClientRoot $SmartClientRoot `
     -DeploySmart:$true `
-    -DeploySepidz:$false
+    -DeploySepidz:$false `
+    -ForceServerUnfreezeSmart:$ForceServerUnfreeze
