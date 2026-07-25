@@ -31,17 +31,50 @@ Assert (Get-Command Stop-CursorServerProfileTreeIfNeeded -ErrorAction SilentlyCo
 
 $cursorStrategies = @(Get-RemoteEditorLaunchStrategies -EditorCmd 'cursor' -Alias $alias -RemotePath $path -Uri $uri -NewWindow)
 Assert ($cursorStrategies.Count -eq 4) 'cursor has 4 launch strategies'
-Assert ($cursorStrategies[0].Name -eq 'folder-uri-classic') 'first strategy is folder-uri-classic'
-Assert ($cursorStrategies[0].Args -contains '--classic') 'folder-uri-classic includes --classic'
-Assert ($cursorStrategies[0].Args -contains '--folder-uri') 'folder-uri-classic includes --folder-uri'
+
+# ORDER: --remote MUST be first. Live-verified 2026-07-25 - `--remote ssh-remote+<alias> <path>`
+# opens the REAL folder in a new window on a WARM handoff (Cursor already running), whereas
+# `--folder-uri=<uri>` lands on the Welcome/Agents page and never opens the folder on a warm
+# handoff (Cursor forum #153009/#165329). folder-uri was previously first, which is why picking a
+# 2nd/3rd project ("smart"/"deploy") opened Welcome and the folder "did not open".
+Assert ($cursorStrategies[0].Name -eq 'remote') 'first strategy is remote (opens the real folder on a warm handoff)'
+Assert ($cursorStrategies[0].Args -contains '--remote') 'remote includes --remote'
+Assert ($cursorStrategies[0].Args -contains 'ssh-remote+claude-server') 'remote authority matches alias'
+Assert ($cursorStrategies[0].Args -contains $path) 'remote includes absolute remote path'
+Assert (-not ($cursorStrategies[0].Args -contains '--classic')) 'primary remote strategy omits --classic (not needed for the folder to open)'
+Assert (-not ($cursorStrategies[0].Args | Where-Object { $_ -like '--folder-uri*' })) 'primary remote strategy does NOT use --folder-uri (the warm-handoff welcome-page trap)'
 Assert ($cursorStrategies[0].Args -contains '--new-window') 'cursor strategies use --new-window when requested'
 Assert ($cursorStrategies[0].Args -contains '--user-data-dir') 'cursor strategies use isolated profile'
+
+# --remote must come strictly BEFORE any --folder-uri strategy.
+$idxRemote = [array]::IndexOf(($cursorStrategies | ForEach-Object { $_.Name }), 'remote')
+$idxFolderUri = [array]::IndexOf(($cursorStrategies | ForEach-Object { $_.Name }), 'folder-uri')
+$idxFolderUriClassic = [array]::IndexOf(($cursorStrategies | ForEach-Object { $_.Name }), 'folder-uri-classic')
+Assert ($idxRemote -lt $idxFolderUri) 'remote strategy ordered before folder-uri'
+Assert ($idxRemote -lt $idxFolderUriClassic) 'remote strategy ordered before folder-uri-classic'
 
 $remoteClassic = $cursorStrategies | Where-Object { $_.Name -eq 'remote-classic' } | Select-Object -First 1
 Assert ($null -ne $remoteClassic) 'remote-classic strategy exists'
 Assert ($remoteClassic.Args -contains '--remote') 'remote-classic includes --remote'
 Assert ($remoteClassic.Args -contains 'ssh-remote+claude-server') 'remote-classic authority matches alias'
 Assert ($remoteClassic.Args -contains $path) 'remote-classic includes absolute remote path'
+
+# folder-uri kept only as a cold-start fallback - must still use the combined '=' form (single
+# argv token) so Windows Electron/Chromium does not filter the standalone 'vscode-remote://' token
+# (microsoft/vscode #209072/#308150).
+$folderUri = $cursorStrategies | Where-Object { $_.Name -eq 'folder-uri' } | Select-Object -First 1
+Assert ($null -ne $folderUri) 'folder-uri fallback strategy exists'
+Assert ($folderUri.Args -contains "--folder-uri=$uri") 'folder-uri fallback uses combined --folder-uri=<uri>'
+Assert (-not ($folderUri.Args -contains '--folder-uri')) 'folder-uri fallback does NOT pass a lone --folder-uri flag'
+
+# Warm handoff: ONLY --remote. Cascading folder-uri/classic within seconds of the first IPC
+# handoff interrupts Cursor mid-connect (live 2026-07-25: connect LAUNCH_FAIL, then a single
+# manual --remote opened the project).
+$warmStrategies = @(Get-RemoteEditorLaunchStrategies -EditorCmd 'cursor' -Alias $alias -RemotePath $path -Uri $uri -NewWindow -WarmHandoff)
+Assert ($warmStrategies.Count -eq 1) 'warm handoff uses exactly 1 strategy (remote only)'
+Assert ($warmStrategies[0].Name -eq 'remote') 'warm handoff strategy is remote'
+Assert ($warmStrategies[0].Args -contains '--remote') 'warm handoff includes --remote'
+Assert (-not ($warmStrategies[0].Args | Where-Object { $_ -like '--folder-uri*' })) 'warm handoff does NOT use --folder-uri'
 
 $codeStrategies = @(Get-RemoteEditorLaunchStrategies -EditorCmd 'code' -Alias $alias -RemotePath $path -Uri $uri -NewWindow)
 Assert ($codeStrategies.Count -eq 2) 'code has 2 launch strategies'
@@ -62,7 +95,9 @@ $launchSrc = Get-Content (Get-ClientFile 'editor-launch.ps1') -Raw
 Assert ($launchSrc -match 'param\([\s\S]*KnownOnFolder') 'Launch-RemoteEditor has KnownOnFolder param'
 Assert ($launchSrc -match 'AuthRelaunch') 'Launch-RemoteEditor has AuthRelaunch param'
 Assert ($launchSrc -match 'auth_relaunch_never_kill|hard_refuse_') 'AuthRelaunch never soft-stops profile'
-Assert ($launchSrc -match 'if \(\$onFolder -and -not \$agentHome\)[\s\S]{0,600}LAUNCH_SKIP') 'F1 early skip before verbose'
+# on_folder is now project-scoped and authoritative on its own (a standalone "Cursor Agents" window
+# no longer vetoes the skip); the entry skip is gated on $onFolder alone, NOT -and -not $agentHome.
+Assert ($launchSrc -match 'if \(\$onFolder\)[\s\S]{0,700}LAUNCH_SKIP') 'F1 early skip (on_folder authoritative) before verbose'
 Assert ($launchSrc -notmatch 'SKIP_ALREADY_ON_FOLDER') 'F1 removed SKIP verbose block'
 Assert ($launchSrc -match '\$script:VerboseLaunch') 'F3 VerboseLaunch defined'
 Assert ($launchSrc -match 'Invoke-CimCursorProcessQuery') 'F5 CIM cache wrapper'

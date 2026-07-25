@@ -29,9 +29,13 @@ $mountPath = Join-Path $repoRoot 'scripts\server\claude-mount.sh'
 $mount = if (Test-Path $mountPath) { Get-Content -LiteralPath $mountPath -Raw } else { '' }
 
 Write-Host '--- V) Version lockstep ---' -ForegroundColor Cyan
-Assert ($verTxt -eq '20260723.13') ("connect-version.txt is 20260723.13 (got $verTxt)")
-Assert ($win -match "ConnectVersion = '20260723.13'") 'connect.ps1 ConnectVersion 20260723.13'
-Assert (($macVer -eq '20260723.13') -or ($macVer -eq '')) ("mac connect-version.txt lockstep (got '$macVer')")
+# Lockstep, not a frozen literal: the three version sources must AGREE with each other. Hardcoding
+# a specific version here just rots on every legitimate version bump (it broke on 20260725.x). Use
+# connect.ps1's ConnectVersion as the single source of truth and assert the others match it.
+$winVer = if ($win -match "ConnectVersion = '([^']+)'") { $Matches[1] } else { '' }
+Assert ($winVer -ne '') 'connect.ps1 ConnectVersion present'
+Assert ($verTxt -eq $winVer) ("connect-version.txt lockstep with connect.ps1 (txt='$verTxt' ps1='$winVer')")
+Assert (($macVer -eq $winVer) -or ($macVer -eq '')) ("mac connect-version.txt lockstep (got '$macVer' expected '$winVer')")
 
 Write-Host '--- T1) Mount fail-fast ---' -ForegroundColor Cyan
 Assert ($win -match 'function SshX\(\[string\]\$Cmd, \[switch\]\$NoRetryOnTimeout\)') 'SshX has NoRetryOnTimeout'

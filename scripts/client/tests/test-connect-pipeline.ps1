@@ -50,7 +50,10 @@ foreach ($rel in @('windows\connect.ps1')) {
     Assert ($bundle -match 'Sanitize-SshAliasConfig') "$rel sanitizes ssh config (no RemoteForward)"
     Assert ($bundle -match 'Ensure-LaptopReverseSshCached') "$rel caches laptop SSH verify"
     Assert ($src -match 'Ensure-SessionTunnel') "$rel uses Ensure-SessionTunnel"
-    Assert ($src -match 'TrustedTunnel') "$rel uses trusted tunnel mount"
+    # Bug: mount step backgrounded (2026-07-24) - Invoke-MountProject's -TrustedTunnel switch
+    # call site was replaced by Start-MountProjectBackground's own remote CLAUDE_TRUSTED_TUNNEL=1
+    # env-var prefix (same trust semantic, sent directly in the detached runner's ssh command).
+    Assert ($src -match 'TrustedTunnel|CLAUDE_TRUSTED_TUNNEL=1') "$rel uses trusted tunnel mount"
     Assert ($src -notmatch 'RemoteForward \$Port') "$rel ssh config has no RemoteForward"
     Assert ($src -notmatch 'Select-String -Path \$userAk -Pattern \[regex\]::Escape') "$rel Select-String uses safe Pattern variable"
     Assert ($src -match 'function Get-InteractiveLaptopUser') "$rel resolves logged-on laptop user when elevated"

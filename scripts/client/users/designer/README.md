@@ -2,7 +2,7 @@
 
 SSHFS mount of laptop design folder + noVNC browser desktop. No Cursor/VS Code.
 
-Client scripts: **v20260724.16** (Windows developer package uses same git-mode modules).
+Client scripts: **v20260725.37** (Windows developer package uses same git-mode modules).
 
 Ships in the **Sepidz** ZIP under `designer/` (IP `192.168.250.70`). Smart developer ZIPs do not include designer.
 
@@ -52,11 +52,11 @@ EXIT / SIGTERM / **SIGHUP** traps clean up the server mount when the Terminal cl
 
 ## One Connect UI per PC
 
-Run **one** connect window at a time on the laptop. Windows designer uses the same `Enter-ConnectSingleInstance` lock as developer connect (via `connect-ui.ps1`). Do not run designer and developer connect together — the second launch shows `[X] Another Claude Connect is already running.`
+Run **one** connect window at a time on the laptop. Windows designer uses the same `Enter-ConnectSingleInstance` lock as developer connect (via `connect-ui.ps1`). Do not run designer and developer connect together â€” the second launch shows `[X] Another Claude Connect is already running.`
 
 ## What This Does
 
-- Reverse SSH tunnel → server
+- Reverse SSH tunnel â†’ server
 - SSHFS: server `/home/designer/mounts/laptop`
 - SSH local forward: laptop `127.0.0.1:27015` (noVNC binds localhost only)
 - Chrome on server downloads to mounted laptop folder (managed policy)

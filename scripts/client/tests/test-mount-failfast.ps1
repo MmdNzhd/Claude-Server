@@ -37,9 +37,14 @@ $mountHealth = Get-FunctionSource $gitMode 'Test-ProjectMountHealthy'
 Assert ($mountHealth.Length -gt 100) 'Test-ProjectMountHealthy exists'
 Assert ($mountHealth -match '(?s)SshX.*check.*NoRetryOnTimeout|SshX.*NoRetryOnTimeout.*check') 'Mount health check disables timeout retry'
 
+# Mount step backgrounded (2026-07-24): the old synchronous "$mountResult = Invoke-MountProject"
+# end-anchor no longer exists on this path (Start-MountProjectBackground replaced it, see
+# connect.ps1 - the mount runs detached, doesn't block Opening Cursor). Match either form so
+# this test still proves its real intent (skipRemount correctly reuses the recover health
+# result, no redundant health re-check) regardless of which mount call style is current.
 $sessionMount = [regex]::Match(
     $connect,
-    '(?ms)\$recoverCheckOk\s*=\s*Invoke-RecoverIfNeeded.*?\$mountResult\s*=\s*Invoke-MountProject'
+    '(?ms)\$recoverCheckOk\s*=\s*Invoke-RecoverIfNeeded.*?(?:\$mountResult\s*=\s*Invoke-MountProject|Start-MountProjectBackground)'
 ).Value
 Assert ($sessionMount.Length -gt 100) 'Session mount path exists'
 Assert ($sessionMount -match '\$skipRemount\s*=\s*(?:\[bool\]\s*)?\$recoverCheckOk') 'Session remount decision reuses recover health result'

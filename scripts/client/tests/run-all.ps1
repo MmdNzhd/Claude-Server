@@ -16,7 +16,16 @@ $suites = @(
     @{ Name = 'cursor-proxy-lifetime'; Script = 'test-cursor-proxy-lifetime.ps1' }
     @{ Name = 'editor-launch';        Script = 'test-editor-launch.ps1' }
     @{ Name = 'editor-launch-strategies'; Script = 'test-editor-launch-strategies.ps1' }
+    @{ Name = 'folder-uri-equals-arg-live'; Script = 'test-folder-uri-equals-arg-live.ps1' }
     @{ Name = 'connect-diagnostic';     Script = 'test-connect-diagnostic.ps1' }
+    @{ Name = 'mounts-cache';           Script = 'test-mounts-cache.ps1' }
+    @{ Name = 'xray-probe-cache';       Script = 'test-xray-probe-cache.ps1' }
+    @{ Name = 'pushconf-tcp-gate';      Script = 'test-pushconf-tcp-gate.ps1' }
+    @{ Name = 'tunnel-tcp-state-cache'; Script = 'test-tunnel-tcp-state-cache.ps1' }
+    @{ Name = 'xray-http-leg-resilience'; Script = 'test-xray-http-leg-resilience.ps1' }
+    @{ Name = 'launch-fresh-project-windows-open'; Script = 'test-launch-fresh-project-windows-open.ps1' }
+    @{ Name = 'title-project-match';    Script = 'test-title-project-match.ps1' }
+    @{ Name = 'agent-home-launch-gate'; Script = 'test-agent-home-launch-gate.ps1' }
     @{ Name = 'parse-connect-perf';     Script = 'test-parse-connect-perf.ps1' }
     @{ Name = 'verify-perf-gates';      Script = 'test-verify-perf-gates.ps1' }
     @{ Name = 'launch-perf-live';       Script = 'test-launch-perf-live.ps1' }
@@ -45,6 +54,7 @@ $suites = @(
     @{ Name = 'hard-multi-agent-regressions'; Script = 'test-hard-multi-agent-regressions.ps1' }
     @{ Name = 'p0-connect-fixes'; Script = 'test-p0-connect-fixes.ps1' }
     @{ Name = 'windows-mcp-no-orphan-cmd'; Script = 'test-windows-mcp-no-orphan-cmd.ps1' }
+    @{ Name = 'windows-mcp-ports'; Script = 'test-windows-mcp-ports.ps1' }
     @{ Name = 'connect-bat-max-ps-starts'; Script = 'test-connect-bat-max-ps-starts.ps1' }
     @{ Name = 'client-update-policy-optional'; Script = 'test-client-update-policy-optional.ps1' }
     @{ Name = 'smartscreen-docs-contract'; Script = 'test-smartscreen-docs-contract.ps1' }
@@ -91,6 +101,7 @@ $suites = @(
     @{ Name = 'server-setup-round-trip-merge-live'; Script = 'test-server-setup-round-trip-merge-live.ps1' }
     @{ Name = 'setup-debounce-bounded-live'; Script = 'test-setup-debounce-bounded-live.ps1' }
     @{ Name = 'console-declutter-warnings'; Script = 'test-console-declutter-warnings.ps1' }
+    @{ Name = 'mount-backgrounded-live'; Script = 'test-mount-backgrounded-live.ps1' }
 )
 
 $fail = 0

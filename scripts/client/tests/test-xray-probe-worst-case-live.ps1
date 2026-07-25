@@ -43,6 +43,15 @@ Write-Host '=== Xray-probe worst-case retry-stacking bugs 3/4 (LIVE) ===' -Foreg
 # pulling in the real logger's global state/file handles/mutex.
 function Write-GitModeLog { param([string]$Message, [string]$Level = 'INFO') }
 
+# The probe now hydrates/persists a disk cache of verdicts (Import-/Save-XrayProbeDiskCache).
+# Stub both so the extracted body runs standalone without pulling in the real cache's file IO -
+# and, critically, so a missing-command lookup does not trigger PowerShell's full PATH/module
+# command-discovery scan on every call (which silently inflated this test's wall-clock timing).
+function Import-XrayProbeDiskCache { }
+function Save-XrayProbeDiskCache { }
+$script:XrayProbeCache = @{}
+$script:XrayProbeCacheTtlSec = 1800
+
 $gmContent = Get-Content (Get-ClientFile 'git-mode.ps1') -Raw
 $src = Get-FunctionSource -Content $gmContent -Name 'Test-RemoteXraySocksOpen'
 if (-not $src) {

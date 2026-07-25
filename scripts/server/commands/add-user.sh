@@ -111,6 +111,18 @@ if [ -f "$SKILL_SRC" ]; then
     chown "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor/skills" 2>/dev/null || true
     ok "~/.cursor/skills/laptop-exec installed"
 fi
+# Plan-flow skills (heavy-task-plan family) — golden copies under system skills/
+for _plan_skill in heavy-task-plan evidence-gated-stages parallel-phased-execution writing-plans; do
+    _psrc="/usr/local/lib/claude-server/skills/$_plan_skill"
+    if [ -d "$_psrc" ] && [ -f "$_psrc/SKILL.md" ]; then
+        mkdir -p "/home/$USERNAME/.cursor/skills"
+        rm -rf "/home/$USERNAME/.cursor/skills/$_plan_skill"
+        cp -a "$_psrc" "/home/$USERNAME/.cursor/skills/$_plan_skill"
+        chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor/skills/$_plan_skill"
+        ok "~/.cursor/skills/$_plan_skill installed"
+    fi
+done
+unset _plan_skill _psrc
 RULE_SRC="/usr/local/lib/claude-server/cursor-rules/laptop-exec.mdc"
 if [ ! -f "$RULE_SRC" ]; then
     REPO_RULE="$(cd "$(dirname "$0")/.." && pwd)/cursor-rules/laptop-exec.mdc"
@@ -122,6 +134,13 @@ if [ -f "$RULE_SRC" ]; then
     chown "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor/rules/laptop-exec.mdc"
     chown "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor/rules" 2>/dev/null || true
     ok "~/.cursor/rules/laptop-exec.mdc installed (alwaysApply)"
+fi
+PLAN_GATE_SRC="/usr/local/lib/claude-server/cursor-rules/plan-gate.mdc"
+if [ -f "$PLAN_GATE_SRC" ]; then
+    mkdir -p "/home/$USERNAME/.cursor/rules"
+    install -m 644 "$PLAN_GATE_SRC" "/home/$USERNAME/.cursor/rules/plan-gate.mdc"
+    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor/rules/plan-gate.mdc"
+    ok "~/.cursor/rules/plan-gate.mdc installed (alwaysApply)"
 fi
 if [ -x /usr/local/bin/laptop-exec-setup ]; then
     chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor" 2>/dev/null || true

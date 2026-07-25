@@ -6,9 +6,27 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-# In repo mode: commands/ is inside scripts/server/
-# In installed mode: /usr/local/lib/claude-server/ - repo must be cloned nearby
-REPO_DIR="${CLAUDE_SERVER_REPO:-$(cd "$SCRIPT_DIR/../../.." && pwd 2>/dev/null)}"
+# Resolve the real repo root, in priority order:
+#   1. $CLAUDE_SERVER_REPO (explicit override, e.g. from update-server.sh)
+#   2. repo mode: this script is at <repo>/scripts/server/commands/install.sh,
+#      so 3 levels up is <repo> - only valid when actually run from a checkout
+#   3. canonical server-side clone used by update-server.sh (/opt/claude-code-server)
+# Do NOT trust step 2's relative math once this script is deployed flat/nested
+# under /usr/local/lib/claude-server/ (via `sudo claude-server install` step 13's
+# self-deploy) - there, 3-levels-up lands under /usr or /usr/local, which is not
+# a repo at all, and every "$SERVER_DIR/..." lookup below silently breaks.
+REPO_DIR="${CLAUDE_SERVER_REPO:-}"
+if [ -z "$REPO_DIR" ] || [ ! -f "$REPO_DIR/scripts/server/commands/install.sh" ]; then
+    _candidate="$(cd "$SCRIPT_DIR/../../.." 2>/dev/null && pwd)"
+    if [ -n "$_candidate" ] && [ -f "$_candidate/scripts/server/commands/install.sh" ]; then
+        REPO_DIR="$_candidate"
+    elif [ -f /opt/claude-code-server/scripts/server/commands/install.sh ]; then
+        REPO_DIR=/opt/claude-code-server
+    else
+        REPO_DIR="$_candidate"
+    fi
+    unset _candidate
+fi
 SERVER_DIR="$REPO_DIR/scripts/server"
 
 GREEN='\033[0;32m'
@@ -37,6 +55,10 @@ atomic_install() {
 }
 
 [ "$EUID" -ne 0 ] && fail "must run as root: sudo claude-server install"
+
+if [ ! -f "$SERVER_DIR/commands/add-user.sh" ]; then
+    fail "repo not found at $REPO_DIR (SERVER_DIR=$SERVER_DIR) - set CLAUDE_SERVER_REPO=/path/to/checkout or clone/refresh /opt/claude-code-server"
+fi
 
 echo ""
 echo -e "${BOLD}Claude Code Server - Full Install${NC}"
@@ -332,23 +354,36 @@ if [ -f "$SERVER_DIR/skills/context7/SKILL.md" ]; then
     install -m 644 "$SERVER_DIR/skills/context7/SKILL.md"         /usr/local/lib/claude-server/skills/context7/SKILL.md
     ok "context7 skill -> /usr/local/lib/claude-server/skills/"
 fi
-for rule in figma-design backend-agent; do
+for rule in figma-design backend-agent plan-gate; do
     if [ -f "$SERVER_DIR/cursor-rules/${rule}.mdc" ]; then
         mkdir -p /usr/local/lib/claude-server/cursor-rules
         install -m 644 "$SERVER_DIR/cursor-rules/${rule}.mdc"             "/usr/local/lib/claude-server/cursor-rules/${rule}.mdc"
         ok "${rule} cursor rule -> /usr/local/lib/claude-server/cursor-rules/"
     fi
 done
-if [ -f "$SERVER_DIR/skills/context7/SKILL.md" ] || [ -f "$SERVER_DIR/cursor-rules/figma-design.mdc" ] || [ -f "$SERVER_DIR/cursor-rules/backend-agent.mdc" ]; then
+# Plan-flow skills (heavy-task-plan family)
+for _plan_skill in heavy-task-plan evidence-gated-stages parallel-phased-execution writing-plans; do
+    if [ -f "$SERVER_DIR/skills/$_plan_skill/SKILL.md" ]; then
+        mkdir -p "/usr/local/lib/claude-server/skills/$_plan_skill"
+        rm -rf "/usr/local/lib/claude-server/skills/$_plan_skill"
+        cp -a "$SERVER_DIR/skills/$_plan_skill" "/usr/local/lib/claude-server/skills/$_plan_skill"
+        find "/usr/local/lib/claude-server/skills/$_plan_skill" -type f -exec chmod 644 {} +
+        find "/usr/local/lib/claude-server/skills/$_plan_skill" -type d -exec chmod 755 {} +
+        ok "$_plan_skill skill -> /usr/local/lib/claude-server/skills/"
+    fi
+done
+unset _plan_skill
+if [ -f "$SERVER_DIR/skills/context7/SKILL.md" ] || [ -f "$SERVER_DIR/cursor-rules/figma-design.mdc" ] || [ -f "$SERVER_DIR/cursor-rules/backend-agent.mdc" ] || [ -f "$SERVER_DIR/skills/heavy-task-plan/SKILL.md" ]; then
     for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
         [ -d "/home/$u" ] || continue
+        [ "$u" = "designer" ] && continue
         if [ -f "$SERVER_DIR/skills/context7/SKILL.md" ]; then
             mkdir -p "/home/$u/.cursor/skills/context7"
             install -m 644 "$SERVER_DIR/skills/context7/SKILL.md"                 "/home/$u/.cursor/skills/context7/SKILL.md"
             chown -R "$u:$u" "/home/$u/.cursor/skills/context7"
             chown "$u:$u" "/home/$u/.cursor/skills" 2>/dev/null || true
         fi
-        for rule in figma-design backend-agent; do
+        for rule in figma-design backend-agent plan-gate; do
             if [ -f "$SERVER_DIR/cursor-rules/${rule}.mdc" ]; then
                 mkdir -p "/home/$u/.cursor/rules"
                 install -m 644 "$SERVER_DIR/cursor-rules/${rule}.mdc"                     "/home/$u/.cursor/rules/${rule}.mdc"
@@ -356,8 +391,17 @@ if [ -f "$SERVER_DIR/skills/context7/SKILL.md" ] || [ -f "$SERVER_DIR/cursor-rul
                 chown "$u:$u" "/home/$u/.cursor/rules" 2>/dev/null || true
             fi
         done
+        for _plan_skill in heavy-task-plan evidence-gated-stages parallel-phased-execution writing-plans; do
+            if [ -f "$SERVER_DIR/skills/$_plan_skill/SKILL.md" ]; then
+                mkdir -p "/home/$u/.cursor/skills"
+                rm -rf "/home/$u/.cursor/skills/$_plan_skill"
+                cp -a "$SERVER_DIR/skills/$_plan_skill" "/home/$u/.cursor/skills/$_plan_skill"
+                chown -R "$u:$u" "/home/$u/.cursor/skills/$_plan_skill"
+            fi
+        done
+        unset _plan_skill
     done
-    ok "context7 skill + MCP cursor rules -> all users ~/.cursor/"
+    ok "context7 + plan skills + MCP cursor rules -> all users ~/.cursor/"
 fi
 if [ -f "$SERVER_DIR/cursor-auth-refresh.sh" ]; then
     install -m 755 "$SERVER_DIR/cursor-auth-refresh.sh" /usr/local/bin/cursor-auth-refresh

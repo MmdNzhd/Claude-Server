@@ -50,7 +50,7 @@ if [ -f "$_update_script" ]; then
     fi
 fi
 
-CONNECT_VERSION='20260724.16'
+CONNECT_VERSION='20260725.38'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).
@@ -123,8 +123,8 @@ step_fail() {
 
 sshx() {
     local orig_cmd="$*" remote_cmd ec=0 ms=0 trunc_cmd out b64
-    # Base64-wrap so nested quotes survive Mac ssh Ã¢â€ â€™ server.
-    # Old: bash -lc '$esc' broke on any single quote (grep -E '^X=', ssh-keygen -N '', Ã¢â‚¬Â¦)
+    # Base64-wrap so nested quotes survive Mac ssh ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ server.
+    # Old: bash -lc '$esc' broke on any single quote (grep -E '^X=', ssh-keygen -N '', ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦)
     # and made warn_foreign_server_session show "unexpected EOF" instead of the real laptop name.
     if ! printf '%s' "$orig_cmd" | grep -qE '^[[:space:]]*timeout[[:space:]]'; then
         b64="$(printf '%s' "$orig_cmd" | base64 | tr -d '\n\n')"
@@ -293,7 +293,7 @@ if declare -F enter_connect_single_instance >/dev/null 2>&1; then
 fi
 if declare -F log_session_context >/dev/null 2>&1; then log_session_context 'startup'; fi
 # Upload+wipe temp log on any early exit (before session cleanup_session trap).
-# CONNECT_LOG_EARLY_FLUSH Ã¢â‚¬â€ nonzero exit: ERROR then force flush (set -u/pipefail has no ERR without -e).
+# CONNECT_LOG_EARLY_FLUSH ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â nonzero exit: ERROR then force flush (set -u/pipefail has no ERR without -e).
 trap 'ec=$?; if [ "$ec" -ne 0 ] && [ -n "${CONNECT_LOG_PATH:-}" ] && declare -F connect_log >/dev/null 2>&1; then connect_log "FAIL UNHANDLED: exit=$ec" "ERROR"; connect_log "FAIL EXIT reason=trap_exit code=$ec" "ERROR" || true; fi; if declare -F flush_connect_log_to_server >/dev/null 2>&1; then flush_connect_log_to_server || true; fi' EXIT
 # Unexpected error flush (fires if errexit enabled later / in sourced helpers).
 trap 'ec=$?; if declare -F connect_log >/dev/null 2>&1; then connect_log "FAIL UNHANDLED: exit=$ec line=$LINENO cmd=$BASH_COMMAND" "ERROR" || true; fi; if declare -F flush_connect_log_to_server >/dev/null 2>&1; then flush_connect_log_to_server || true; fi' ERR
@@ -827,7 +827,7 @@ while [ "$exit_requested" -eq 0 ]; do
 
             recover_mounts_if_needed "$go_id" "$(( TUNNEL_REUSED ^ 1 ))"
 
-            # Win Test-TunnelUp parity Ã¢â‚¬â€ banner/TCP, not PID-only.
+            # Win Test-TunnelUp parity ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â banner/TCP, not PID-only.
             if ! tunnel_up; then
                 printf '      -> tunnel dropped during recover, restarting...\n'
                 LAPTOP_SSH_VERIFIED=0
@@ -1017,12 +1017,23 @@ while [ "$exit_requested" -eq 0 ]; do
             elif [ "$_auth_relaunch" -eq 1 ] && declare -F cursor_profile_main_count >/dev/null 2>&1; then
                 [ "$(cursor_profile_main_count)" -gt 0 ] && _profile_already_open=1
             fi
-            if [ "$_auth_relaunch" -eq 1 ] && [ "$_profile_already_open" -eq 1 ]; then
+            # Preserve existing windows ONLY when already on the target folder (pure auth refresh
+            # after a tunnel flap). If the picked project folder is NOT open yet, still open it:
+            # this branch used to swallow a FRESH project pick whenever any profile window was open
+            # + auth was re-synced, leaving CURSOR_NOT_OPEN with no launch (Win parity fix, live
+            # repro 2026-07-25). launch_remote_editor opens a --new-window and never kills on auth
+            # relaunch, so the other windows are undisturbed.
+            _skip_for_preserve=0
+            if [ "$_auth_relaunch" -eq 1 ] && [ "$_profile_already_open" -eq 1 ] && [ "$_on_folder" -eq 1 ]; then
+                _skip_for_preserve=1
+            fi
+            if [ "$_skip_for_preserve" -eq 1 ]; then
                 declare -F connect_log >/dev/null 2>&1 && connect_log 'EDITOR_LAUNCH skip_auth_relaunch reason=profile_windows_open_preserve_after_tunnel_recovery' 'WARN'
-                if [ "$_on_folder" -eq 1 ]; then
-                    _launch_ok=1
-                fi
+                _launch_ok=1
             elif [ "$_auth_relaunch" -eq 1 ] || [ "$_editor_opened" -eq 0 ]; then
+                if [ "$_auth_relaunch" -eq 1 ] && [ "$_profile_already_open" -eq 1 ] && [ "$_on_folder" -eq 0 ]; then
+                    declare -F connect_log >/dev/null 2>&1 && connect_log 'EDITOR_LAUNCH new_project_new_window despite_profile_windows_open reason=target_folder_not_open' 'INFO'
+                fi
                 if [ "$_auth_relaunch" -eq 1 ] && [ "$_on_folder" -eq 1 ]; then
                     step "Reloading $EDITOR_NAME (auth refresh)"
                     if declare -F connect_log >/dev/null 2>&1; then
@@ -1041,7 +1052,7 @@ while [ "$exit_requested" -eq 0 ]; do
                         _editor_seen_open=1
                         export CURSOR_AUTH_RELAUNCH=0
                         if [ "$EDITOR_CMD" = "cursor" ]; then
-                            printf '      -> \033[0;33mIf Cursor asks to log in: [Claude Server] window Ã¢â€ â€™ Developer Ã¢â€ â€™ Reload Window\033[0m\n'
+                            printf '      -> \033[0;33mIf Cursor asks to log in: [Claude Server] window ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Developer ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Reload Window\033[0m\n'
                             printf '      -> \033[0;90mDo NOT use a personal login in that window\033[0m\n'
 
                             printf '      -> \033[0;90mServer profile [Claude Server] - personal Cursor is separate\033[0m\n'
@@ -1061,8 +1072,6 @@ while [ "$exit_requested" -eq 0 ]; do
                 else
                     step_fail "$EDITOR_NAME not found (install Cursor or VS Code + Remote-SSH)"
                 fi
-                echo ""
-                printf "    \033[0;90mRun 'claude' in the %s terminal.\033[0m\n" "$EDITOR_NAME"
             elif [ "$_on_folder" -eq 1 ]; then
                 declare -F connect_log >/dev/null 2>&1 && connect_log 'EDITOR_LAUNCH_SKIP reason=known_on_folder'
             fi
@@ -1152,7 +1161,7 @@ while [ "$exit_requested" -eq 0 ]; do
                         o) _resolved="o" ;;
                         q|$'\n'|$'\r') _resolved="q" ;;
                     esac
-                    # Non-ASCII printable (e.g. Ã˜Â¶): ignore and keep waiting.
+                    # Non-ASCII printable (e.g. ÃƒËœÃ‚Â¶): ignore and keep waiting.
                     if [ -z "$_resolved" ]; then
                         _ord="$(printf '%s' "$_key" | od -An -tuC | tr -s ' ' | awk '{print $1; exit}')"
                         if [ -n "$_ord" ] && [ "$_ord" -gt 127 ]; then

@@ -1776,16 +1776,10 @@ function Write-SessionBox {
     param(
         [string[]]$ExtraLines = @()
     )
+    # Compact one-liner (the framed multi-line "Session active" box was visual noise).
+    # Hotkeys still work; the live status line prints right after this.
     Write-Host ''
-    Write-Host '    ============================================' -ForegroundColor DarkGray
-    Write-Host '    Session active -- keep this window open' -ForegroundColor Cyan
-    Write-Host '    G = git mode   R = reconnect   O = reopen editor   Q or Enter = disconnect' -ForegroundColor DarkGray
-    Write-Host '    Tip: File > Exit Cursor before Q so Agent chat history saves' -ForegroundColor DarkGray
-    foreach ($ln in $ExtraLines) {
-        Write-Host "    $ln" -ForegroundColor Yellow
-    }
-    Write-Host '    ============================================' -ForegroundColor DarkGray
-    Write-Host ''
+    Write-Host '    G git   R reconnect   O reopen   Q disconnect' -ForegroundColor DarkGray
 }
 
 

@@ -1,13 +1,21 @@
 ---
-description: SSH-first HARD STOP — never Read/Grep/Write /mounts/; Windows+MCP ready prefers windows-mcp for FS/shell/UI; laptop-exec for git/rg/fallback; Task prompts must paste block
+description: Windows-MCP first for FS/shell/UI when ready; fan out ~8 parallel MCP calls in one turn; laptop-exec fallback + always for git/rg/Mac; never Read/Grep/Write /mounts/; Task prompts must paste block
 alwaysApply: true
 ---
 
-# Laptop Exec - SSH-First (hybrid on Windows)
+# Laptop Exec — Windows-MCP first; LE fallback
 
 `~/mounts/` is optional SSHFS (may be STALE). Do not ask to enable SSHFS.
 
-## Hybrid routing (read this first)
+## Priority (read this first)
+
+```
+1. Windows + MCP ready  →  windows-mcp for FileSystem / PowerShell / UI
+2. Else                 →  laptop-exec (-p PROJECT)
+3. Always               →  laptop-exec for git + content rg
+```
+
+Do **not** default file I/O or shell to `laptop-exec` when MCP is ready.
 
 On **Windows** when Cursor MCP `windows-mcp` / `user-windows-mcp` is **ready**:
 
@@ -20,13 +28,20 @@ On **Windows** when Cursor MCP `windows-mcp` / `user-windows-mcp` is **ready**:
 | Content search | **`laptop-exec rg` only** (MCP search ≠ content grep) |
 | Mac / MCP down | **`laptop-exec` only** |
 
-Do **not** default every file I/O to `laptop-exec` when MCP is ready. Keep laptop-exec forever for git/rg/Mac/fallback — never uninstall it.
+Keep laptop-exec forever for git/rg/Mac/fallback — never uninstall it.
 
-**Speed:** On Windows+MCP, fan out **~8 parallel** `windows-mcp` `FileSystem` (and PowerShell) calls in one turn to fetch many files fast. MCP has no SSH mux limit. Reserve the ≤4 / hard-cap-8 parallelism advice for **`laptop-exec` only** (shared ControlMaster slots).
+## Parallel MCP (mandatory)
+
+When MCP is ready and you need **multiple independent** file/shell ops:
+
+- Fire them **in one turn** as parallel `windows-mcp` calls (~8 `FileSystem` / `PowerShell`).
+- **Do not** serialize independent MCP requests one-by-one across turns.
+- Only wait/sequence when a later call **depends** on earlier output.
+- MCP has **no** SSH mux limit. Reserve ≤4 / hard-cap-8 parallelism for **`laptop-exec` only**.
 
 ## No trial-and-error
 
-Hooks deny on `/mounts/`: Read, Write, Edit, EditNotebook, StrReplace, Delete, Grep, Glob, and heavy Shell. Deny is **expected**. **Do not retry.** First allowed I/O = windows-mcp (hybrid table) **or** Shell + `laptop-exec`. Project `hooks.json` must stay `{"version":1,"hooks":{}}`.
+Hooks deny on `/mounts/`: Read, Write, Edit, EditNotebook, StrReplace, Delete, Grep, Glob, and heavy Shell. Deny is **expected**. **Do not retry.** First allowed I/O = **windows-mcp when ready**, else Shell + `laptop-exec`. Project `hooks.json` must stay `{"version":1,"hooks":{}}`.
 
 | Denied | Use |
 |--------|-----|
@@ -37,7 +52,7 @@ Hooks deny on `/mounts/`: Read, Write, Edit, EditNotebook, StrReplace, Delete, G
 
 **rg is NOT ripgrep:** never `-i`/`-l`/`-n`/`--glob` (rejected; old hangs). Pathspecs only.
 
-**Task spawn is ALWAYS allowed.** Every Task `prompt` MUST paste the SSH-first block from the `laptop-exec` skill (`-p ID`; no Read/Grep on mounts; no `rg -i/--glob`; hybrid note). Prefer ~8 parallel windows-mcp FileSystem when hybrid; ≤4 parallel `laptop-exec` (hard cap 8 SSH slots). On deny, run `NEXT:`.
+**Task spawn is ALWAYS allowed.** Every Task `prompt` MUST paste the block from the `laptop-exec` skill (Windows-MCP first; `-p ID`; no Read/Grep on mounts; no `rg -i/--glob`). Prefer ~8 parallel windows-mcp FileSystem when ready; ≤4 parallel `laptop-exec` (hard cap 8 SSH slots). On deny, run `NEXT:`.
 
 Both flag orders: `laptop-exec -p ID read REL` and `laptop-exec read -p ID REL`.
 
@@ -45,9 +60,9 @@ Both flag orders: `laptop-exec -p ID read REL` and `laptop-exec read -p ID REL`.
 
 - Repo-relative only for laptop-exec — never `/home/$USER/mounts/ID/...`
 - windows-mcp paths: absolute Windows under project root (from `LAPTOP_REMOTE_PATH` / mount `REMOTE_PATH` + REL; not Desktop-relative)
-- Windows `laptop-exec read` may mojibake non-ASCII; `write` is binary-safe
+- Windows `laptop-exec read` may mojibake non-ASCII; prefer MCP FileSystem for Persian/UTF-8 text; `write` is binary-safe
 - `laptop-exec status` → DOWN => user `connect.bat/sh`; STALE mount + UP tunnel => still use laptop path (MCP or LE)
-- Resolve project: `-p` > workspace env/`PWD` under mounts > `ACTIVE_MOUNT`
+- Resolve project: `-p` > `-w` / workspace env/`PWD` under mounts > `ACTIVE_MOUNT`
 
 ## Allowed without laptop-exec
 

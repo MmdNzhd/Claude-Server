@@ -44,7 +44,7 @@ Assert ($bat -match 'CLAUDE_CONNECT_UPDATE_UI=1') 'connect.bat enables update pr
 Assert ($win -match 'Show-UpdateProgressUi') 'connect-update.ps1 has progress modal'
 Assert ($win -match 'Get-SafeFileSha256') 'connect-update.ps1 guards FileHash under StrictMode'
 Assert ($bat -match "GEQ 3") 'connect.bat relaunch depth limit is 3'
-Assert ($bat -match 'start "" /D "%HERE%" powershell -NoProfile -STA -ExecutionPolicy Bypass -File "%HERE%connect-boot\.ps1"') 'connect.bat async handoff to connect-boot.ps1'
+Assert ($bat -match 'start "" /D "%HERE(_NOTRAIL)?%" powershell(\.exe)? -NoProfile -STA -ExecutionPolicy Bypass -File "%HERE%connect-boot\.ps1"') 'connect.bat async handoff to connect-boot.ps1'
 Assert ($bat -notmatch '-WindowStyle Hidden -ExecutionPolicy Bypass -File "%HERE%connect\.ps1"') 'connect.bat does not inline-hidden connect.ps1'
 Assert ($bat -match 'exit /b 0') 'connect.bat exits after connect.ps1 handoff'
 

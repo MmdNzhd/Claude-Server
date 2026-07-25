@@ -387,16 +387,50 @@ function Sanitize-SshAliasConfig {
     Write-AsciiFileRetry -Path $CfgPath -Value $out
 }
 
+# Short-TTL cache of remote loopback tcp-open verdicts per port. The acquire batch probe
+# (Get-ServerOpenTunnelPorts) already learns the open/closed state of every candidate port in ONE
+# ssh; the very same port is then re-probed moments later by the push-conf safety gate and the
+# ENSURE_TUNNEL stale-forward check - each a fresh ~1.4s one-shot ssh (no ControlMaster on
+# Windows). Opt-in callers (-MaxCacheAgeMs) reuse the batch verdict when it is only seconds old.
+# TTL is kept short and only trusted by pre-spawn checks: we ourselves spawn a listener on the
+# chosen port during the same connect, and the port sits inside our own non-overlapping UID block
+# (so nobody else claims it in the few-second window). Polling/wait loops pass no MaxCacheAgeMs and
+# therefore always probe fresh.
+$script:TunnelTcpStateCache = @{}
+
+function Set-TunnelTcpState {
+    param([Parameter(Mandatory)][int]$Port, [Parameter(Mandatory)][bool]$Open)
+    if ($Port -le 0) { return }
+    if (-not $script:TunnelTcpStateCache) { $script:TunnelTcpStateCache = @{} }
+    $script:TunnelTcpStateCache[[string]$Port] = @{ Open = $Open; At = (Get-Date) }
+}
+
+function Clear-TunnelTcpState {
+    param([int]$Port = 0)
+    if (-not $script:TunnelTcpStateCache) { return }
+    if ($Port -gt 0) { $script:TunnelTcpStateCache.Remove([string]$Port) | Out-Null }
+    else { $script:TunnelTcpStateCache.Clear() }
+}
+
 function Test-TunnelPortTcpOpen {
-    param([int]$TargetPort = 0)
+    param([int]$TargetPort = 0, [int]$MaxCacheAgeMs = 0)
     $probePort = 0
     if ($TargetPort -gt 0) { $probePort = [int]$TargetPort }
     elseif (Get-Command Get-SessionTunnelPort -ErrorAction SilentlyContinue) { $probePort = [int](Get-SessionTunnelPort) }
     elseif ($Port) { $probePort = [int]$Port }
     if ($probePort -le 0) { return $false }
+    if ($MaxCacheAgeMs -gt 0 -and $script:TunnelTcpStateCache -and $script:TunnelTcpStateCache.ContainsKey([string]$probePort)) {
+        $e = $script:TunnelTcpStateCache[[string]$probePort]
+        if ($e -and ((Get-Date) - $e.At).TotalMilliseconds -lt $MaxCacheAgeMs) {
+            Write-GitModeLog "TCP_STATE cache_hit port=$probePort open=$($e.Open)" 'TRACE'
+            return [bool]$e.Open
+        }
+    }
     $r = SshX "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$probePort 2>/dev/null' && echo open || echo closed" 2>$null
     $out = (($r -join '') -replace "`r",'').Trim()
-    return ($out -eq 'open')
+    $isOpen = ($out -eq 'open')
+    Set-TunnelTcpState -Port $probePort -Open $isOpen
+    return $isOpen
 }
 
 function Test-TunnelPortTcpOpenAndScanHostKey {
@@ -1041,6 +1075,12 @@ wait
     foreach ($line in @($out -split "`n")) {
         if ($line -match 'OPEN:(\d+)') { [void]$set.Add([int]$Matches[1]) }
     }
+    # Seed the short-TTL tcp-state cache for EVERY probed port (open and closed). The push-conf
+    # safety gate and the ENSURE_TUNNEL stale-forward check re-examine the chosen port within a few
+    # seconds; reusing this verdict removes two fresh ~1.4s one-shot ssh probes per connect.
+    foreach ($p in @($Ports)) {
+        if ([int]$p -gt 0) { Set-TunnelTcpState -Port ([int]$p) -Open ([bool]$set.Contains([int]$p)) }
+    }
     Write-GitModeLog ("ACQUIRE_BATCH open_ports={0} probed={1}" -f (($set | Sort-Object) -join ','), @($Ports).Count) 'DEBUG'
     # Unary comma prevents PS from enumerating HashSet into ints/$null on assignment.
     return ,$set
@@ -1290,7 +1330,7 @@ function Test-ProxyHealth {
     # until the OS/TCP layer detected the reset (~8.6s observed live). Switched to HttpWebRequest,
     # which does honor .Timeout, and lowered the default to 3s (api.ipify.org is a tiny response;
     # a genuinely-working proxy answers in well under 1s, so 3s is still a generous margin).
-    param([int]$HttpPort = 0, [int]$SocksPort = 0, [int]$TimeoutSec = 3)
+    param([int]$HttpPort = 0, [int]$SocksPort = 0, [int]$TimeoutSec = 2)
     if ($HttpPort -le 0) { $HttpPort = Get-CursorHttpFrontPort }
     if ($SocksPort -le 0) { $SocksPort = Get-CursorSocksFrontPort }
     if ($HttpPort -le 0) {
@@ -1300,6 +1340,17 @@ function Test-ProxyHealth {
     if (-not (Test-LocalPortOpen -PortNum $HttpPort)) {
         Write-GitModeLog ("PROXY_HEALTH socks={0} http={1} ok=0 reason=http_not_listening" -f $SocksPort, $HttpPort) 'WARN'
         return $false
+    }
+    # Fast-fail when the sidecar backend legs are down: the front door (18998) can be up while
+    # its upstream backend (-L 19080/19180) is dead, in which case the HTTPS probe below would
+    # forward into a dead backend and hang until the full timeout (~4.5s observed live). A cheap
+    # bounded local port check on the backend short-circuits that stall straight to server_direct.
+    if (Get-Command Test-CursorProxyBackendOpen -ErrorAction SilentlyContinue) {
+        if (-not (Test-CursorProxyBackendOpen)) {
+            Write-GitModeLog ("PROXY_HEALTH socks={0} http={1} ok=0 reason=backend_not_listening" -f $SocksPort, $HttpPort) 'WARN'
+            $script:LastProxyHealthOk = $false
+            return $false
+        }
     }
     $ip = ''
     try {
@@ -1349,6 +1400,61 @@ $script:TunnelWaitFailStreak = 0
 $script:CursorProxyOwner = $null
 $script:LastProxyHealthOk = $false
 $script:LastProxyHealthIp = ''
+# Cache for the remote xray SOCKS/HTTP probe. Each probe opens a FRESH one-shot ssh (no
+# ControlMaster on Windows) and, thanks to the Win32-OpenSSH ConnectTimeout bug, can burn the
+# full ~7s budget. It is probed at least twice per connect (boot Ensure-Tunnel + session-loop
+# Test-TunnelNeedsProxyReseed), and every new connect.bat is a FRESH process, so without a cache
+# the ~7s "Server setup" probe is paid on every single launch. The cache is disk-backed so the
+# (usually 'closed') verdict survives across processes; a reconnect after the TTL re-probes, so a
+# genuinely changed xray state still recovers. One TTL governs both the in-process reuse and the
+# cross-process disk reuse.
+$script:XrayProbeCache = @{}
+$script:XrayProbeCacheTtlSec = 1800
+$script:XrayProbeDiskLoaded = $false
+
+function Get-XrayProbeCachePath {
+    $dir = if ($script:CfgDir) { $script:CfgDir } elseif ($CfgDir) { $CfgDir } else { Join-Path $env:USERPROFILE '.config\claude-connect' }
+    return (Join-Path $dir 'xray-probe-cache.json')
+}
+
+function Import-XrayProbeDiskCache {
+    # Lazy, once-per-process: hydrate the in-memory cache from disk so a fresh connect.bat can skip
+    # the ~7s boot probe. Entries older than the TTL are dropped on load.
+    if ($script:XrayProbeDiskLoaded) { return }
+    $script:XrayProbeDiskLoaded = $true
+    try {
+        $p = Get-XrayProbeCachePath
+        if (-not (Test-Path -LiteralPath $p)) { return }
+        $raw = Get-Content -LiteralPath $p -Raw -ErrorAction Stop
+        # A JSON *object* deserializes to a single PSCustomObject (no array-unroll quirk here).
+        $obj = $raw | ConvertFrom-Json
+        if (-not $obj) { return }
+        foreach ($prop in $obj.PSObject.Properties) {
+            $val = $prop.Value
+            $t = $null
+            try { $t = [datetime]::Parse([string]$val.Time, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) } catch { $t = $null }
+            if ($null -eq $t) { continue }
+            if (((Get-Date) - $t).TotalSeconds -ge $script:XrayProbeCacheTtlSec) { continue }
+            if (-not $script:XrayProbeCache.ContainsKey($prop.Name)) {
+                $script:XrayProbeCache[$prop.Name] = @{ Result = [bool]$val.Result; Time = $t }
+            }
+        }
+    } catch {}
+}
+
+function Save-XrayProbeDiskCache {
+    try {
+        $p = Get-XrayProbeCachePath
+        $dir = Split-Path -Parent $p
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        $flat = @{}
+        foreach ($k in @($script:XrayProbeCache.Keys)) {
+            $e = $script:XrayProbeCache[$k]
+            $flat[$k] = @{ Result = [bool]$e.Result; Time = ([datetime]$e.Time).ToString('o') }
+        }
+        ($flat | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $p -Encoding UTF8
+    } catch {}
+}
 
 function Test-RemoteXraySocksOpen {
     # Probe 127.0.0.1:10808 ON THE DESTINATION SERVER (not laptop). Sepidz has no xray -
@@ -1379,9 +1485,25 @@ function Test-RemoteXraySocksOpen {
     param(
         [Parameter(Mandatory)][string]$Alias,
         [string]$SshCfgPath = '',
-        [int]$RemotePort = 0
+        [int]$RemotePort = 0,
+        [switch]$ForceProbe
     )
     if ($RemotePort -le 0) { $RemotePort = [int]$script:XrayServerSocksPort }
+    Import-XrayProbeDiskCache
+    $cacheKey = "$Alias`:$RemotePort"
+    if (-not $ForceProbe -and $script:XrayProbeCache -and $script:XrayProbeCache.ContainsKey($cacheKey)) {
+        $entry = $script:XrayProbeCache[$cacheKey]
+        if (((Get-Date) - $entry.Time).TotalSeconds -lt $script:XrayProbeCacheTtlSec) {
+            Write-GitModeLog "ENSURE_TUNNEL remote_xray_probe=cache_hit port=$RemotePort result=$($entry.Result)" 'DEBUG'
+            return $entry.Result
+        }
+    }
+    $result = $false
+    # A timeout/error is INCONCLUSIVE (Win32-OpenSSH ConnectTimeout can spuriously burn the full
+    # budget against a target that is actually up). Never persist an inconclusive verdict as a
+    # definitive "closed" - that poisoned the cache for the whole TTL and permanently dropped the
+    # proxy leg on a healthy xray. Only cache a real OPEN/CLOSED reply from the remote.
+    $conclusive = $true
     $argList = New-Object System.Collections.Generic.List[string]
     if ($SshCfgPath) { [void]$argList.Add('-F'); [void]$argList.Add($SshCfgPath) }
     foreach ($a in @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=6', '-o', 'ServerAliveInterval=2', '-o', 'ServerAliveCountMax=2')) {
@@ -1398,16 +1520,25 @@ function Test-RemoteXraySocksOpen {
         if (-not $proc.WaitForExit(7000)) {
             try { $proc.Kill() } catch {}
             Write-GitModeLog "ENSURE_TUNNEL remote_xray_probe=timeout port=$RemotePort skipping_proxy_leg" 'WARN'
-            return $false
+            $result = $false
+            $conclusive = $false
+        } else {
+            $out = ''
+            try { $out = [System.IO.File]::ReadAllText($stdoutPath).Trim() } catch { $out = '' }
+            if ($out -eq 'OPEN' -or $out -eq 'CLOSED') { $result = ($out -eq 'OPEN') }
+            else { $result = $false; $conclusive = $false }
         }
-        $out = ''
-        try { $out = [System.IO.File]::ReadAllText($stdoutPath).Trim() } catch { $out = '' }
-        return ($out -eq 'OPEN')
     } catch {
-        return $false
+        $result = $false
+        $conclusive = $false
     } finally {
         try { Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue } catch {}
     }
+    if ($conclusive -and $script:XrayProbeCache -ne $null) {
+        $script:XrayProbeCache[$cacheKey] = @{ Result = $result; Time = (Get-Date) }
+        Save-XrayProbeDiskCache
+    }
+    return $result
 }
 
 function Set-SocksProxyPortOnReuse {
@@ -1482,7 +1613,18 @@ function Add-TunnelHttpProxyLeg {
     if (-not $script:SocksProxyPort) { return }
     $httpCandidate = Get-HttpProxyPort
     $xrayHttpPort = [int]$script:XrayServerHttpPort
-    if (-not (Test-RemoteXraySocksOpen -Alias $Alias -SshCfgPath $SshCfgPath -RemotePort $xrayHttpPort)) {
+    $httpXrayOk = Test-RemoteXraySocksOpen -Alias $Alias -SshCfgPath $SshCfgPath -RemotePort $xrayHttpPort
+    if (-not $httpXrayOk) {
+        # The first probe can spuriously time out (Win32-OpenSSH ConnectTimeout burns its full
+        # budget even against a live target) - and the SOCKS leg on the SAME transport just
+        # succeeded, so xray is almost certainly up. Retry once, bypassing the cache, so a single
+        # transient timeout cannot permanently drop the HTTP proxy leg. A missing HTTP leg makes
+        # Test-CursorProxyBackendOpen fail -> the sidecar CLEARS Cursor's proxy settings -> Cursor
+        # egresses server_direct instead of through xray (the exact bug seen live 2026-07-25).
+        $httpXrayOk = Test-RemoteXraySocksOpen -Alias $Alias -SshCfgPath $SshCfgPath -RemotePort $xrayHttpPort -ForceProbe
+        if ($httpXrayOk) { Write-GitModeLog "ENSURE_TUNNEL remote_xray_http=open_on_retry port=$xrayHttpPort" 'INFO' }
+    }
+    if (-not $httpXrayOk) {
         Write-GitModeLog "ENSURE_TUNNEL remote_xray_http=closed port=$xrayHttpPort skipping_http_proxy_leg" 'INFO'
         return
     }
@@ -1505,16 +1647,26 @@ function Test-TunnelNeedsProxyReseed {
         [Parameter(Mandatory)][string]$Alias,
         [string]$SshCfgPath = ''
     )
-    if (-not (Test-RemoteXraySocksOpen -Alias $Alias -SshCfgPath $SshCfgPath)) { return $false }
+    # Cheap local cmdline check FIRST: if the existing tunnel already has the proxy leg ('ok') or
+    # the process is gone/unreadable ('unknown'), no reseed is needed regardless of xray state, so
+    # we can skip the expensive remote xray probe (a fresh ~7s one-shot ssh) entirely. Only when the
+    # leg is actually missing/legacy do we need to know whether xray is up to decide about adding it.
     $state = Get-TunnelProxyLegState -TunnelPid $TunnelPid
     if ($state -eq 'ok') { return $false }
     if ($state -eq 'unknown') { return $false }
+    if (-not (Test-RemoteXraySocksOpen -Alias $Alias -SshCfgPath $SshCfgPath)) { return $false }
     if ($state -eq 'missing' -or $state -eq 'missing_http') {
         $socksCandidate = Get-SocksProxyPort
         $httpCandidate = Get-HttpProxyPort
         $backendsOk = (Test-LocalPortOpen -PortNum $socksCandidate) -and (Test-LocalPortOpen -PortNum $httpCandidate)
         $frontsOk = $false
-        if (-not $backendsOk) {
+        # Sticky-front adoption only makes sense for a FULL non-owner ('missing': no -L legs at all),
+        # which legitimately rides another window's proxy. For 'missing_http' (this tunnel already
+        # owns the SOCKS -L but lost the HTTP -L), a listening front whose HTTP backend (19180) is
+        # actually DOWN is a FALSE positive - it is exactly what left every window on server_direct
+        # (front up, http backend dead -> sidecar clears Cursor proxy). So for missing_http, only a
+        # genuinely-listening HTTP backend may suppress the reseed; never a front alone.
+        if (-not $backendsOk -and $state -eq 'missing') {
             $frontSocks = Get-CursorSocksFrontPort
             $frontHttp = Get-CursorHttpFrontPort
             if (Get-Command Test-CursorProxySidecarListening -ErrorAction SilentlyContinue) {
@@ -2504,7 +2656,9 @@ function Ensure-SessionTunnel {
         $haveLocal = (@(Get-LocalTunnelSshPids -TargetPort $Port).Count -gt 0)
         if (-not $haveLocal) {
             $tcpOpen2 = $false
-            try { $tcpOpen2 = [bool](Test-TunnelPortTcpOpen) } catch { $tcpOpen2 = $false }
+            # Reuse the recent acquire/push tcp verdict for this port (still pre-spawn, so the port
+            # is unchanged); a live probe still runs on cache miss/expiry.
+            try { $tcpOpen2 = [bool](Test-TunnelPortTcpOpen -MaxCacheAgeMs 12000) } catch { $tcpOpen2 = $false }
             if ($tcpOpen2) { $needStaleClear = $true }
         }
     }
@@ -2582,6 +2736,8 @@ function Ensure-SessionTunnel {
     if (Get-Command Add-CursorProxySidecarJobProcess -ErrorAction SilentlyContinue) {
         Add-CursorProxySidecarJobProcess -Process $BgTunnel.Value
     }
+    # We just started a listener on $Port: any cached pre-spawn "closed" verdict is now stale.
+    if (Get-Command Clear-TunnelTcpState -ErrorAction SilentlyContinue) { Clear-TunnelTcpState -Port ([int]$Port) }
     Write-GitModeLog "ENSURE_TUNNEL spawned pid=$($BgTunnel.Value.Id) port=$Port slot=$($script:TunnelSlot) socks_port=$($script:SocksProxyPort) http_port=$($script:HttpProxyPort)" 'INFO'
     if (Wait-ForTunnelUp -TunnelProc $BgTunnel.Value -Quiet:$WaitQuiet) {
         $script:LastTunnelSpawnSuccessAt = Get-Date
@@ -2760,18 +2916,39 @@ function Push-ServerConnectConf {
         Write-GitModeLog "PUSH_CONF skip_duplicate key=$dedupeKey" 'INFO'
         return
     }
-    # Never publish another peer's reverse port into ~/.claude-connect.conf.
-    if ($sessionPort -and (Get-Command Test-TunnelPortIsForeignPeer -ErrorAction SilentlyContinue)) {
-        if (Test-TunnelPortIsForeignPeer -TargetPort ([int]$sessionPort)) {
-            Write-GitModeLog "PUSH_CONF blocked: foreign_peer port=$sessionPort" 'ERROR'
-            return
-        }
+    # Perf (2026-07-25, live evidence: "Server setup" burned ~4.1s here on every fresh connect):
+    # both safety probes below only mean something when a process is ACTUALLY LISTENING on the
+    # port. On a fresh connect our own reverse tunnel is not up yet, so the port is closed - a
+    # closed port cannot host a foreign peer and has no host key to mismatch, so both checks are
+    # guaranteed to say "fine". Test-TunnelHostKeyMismatch, however, still runs an ssh-keyscan
+    # (Get-TunnelHostKeyFingerprint) that waits its full `timeout 4` against the dead loopback
+    # port and returns empty. Gate BOTH checks on one cheap tcp-open probe: this REPLACES the
+    # tcp probe that Test-TunnelPortIsForeignPeer would have run internally on the closed path
+    # (so the common case adds no round trip) while removing the wasted keyscan entirely. The
+    # open/reconnect path is unchanged in behavior (it just pays one extra ~1.4s tcp probe, and
+    # only there both safety checks still run in full, in the same order as before).
+    $pushPortListening = $true
+    if ($sessionPort -and (Get-Command Test-TunnelPortTcpOpen -ErrorAction SilentlyContinue)) {
+        # Reuse the acquire batch verdict (issued ~1-2s earlier for this exact port) instead of a
+        # fresh ssh probe; falls back to a live probe on a cache miss/expiry.
+        $pushPortListening = [bool](Test-TunnelPortTcpOpen -TargetPort ([int]$sessionPort) -MaxCacheAgeMs 8000)
     }
-    if ($sessionPort -and (Get-Command Test-TunnelHostKeyMismatch -ErrorAction SilentlyContinue)) {
-        if (Test-TunnelHostKeyMismatch -TargetPort ([int]$sessionPort)) {
-            Write-GitModeLog "PUSH_CONF blocked: hostkey_mismatch port=$sessionPort" 'ERROR'
-            return
+    if ($pushPortListening) {
+        # Never publish another peer's reverse port into ~/.claude-connect.conf.
+        if ($sessionPort -and (Get-Command Test-TunnelPortIsForeignPeer -ErrorAction SilentlyContinue)) {
+            if (Test-TunnelPortIsForeignPeer -TargetPort ([int]$sessionPort)) {
+                Write-GitModeLog "PUSH_CONF blocked: foreign_peer port=$sessionPort" 'ERROR'
+                return
+            }
         }
+        if ($sessionPort -and (Get-Command Test-TunnelHostKeyMismatch -ErrorAction SilentlyContinue)) {
+            if (Test-TunnelHostKeyMismatch -TargetPort ([int]$sessionPort)) {
+                Write-GitModeLog "PUSH_CONF blocked: hostkey_mismatch port=$sessionPort" 'ERROR'
+                return
+            }
+        }
+    } else {
+        Write-GitModeLog "PUSH_CONF safety_probes_skipped port=$sessionPort reason=tcp_closed" 'DEBUG'
     }
     # Escape for embedding inside a single-quoted bash assignment (avoid double quotes).
     $lu = ($LaptopUser -replace "'", "'\''")

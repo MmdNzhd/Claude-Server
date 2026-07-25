@@ -139,14 +139,14 @@ id designer &>/dev/null && ok "designer user: exists" || warn "designer user: mi
 echo ""
 
 
-# --- Laptop exec (SSH-first) ---
-echo -e "${BOLD}Laptop Exec (SSH-first)${NC}"
+# --- Laptop exec (Windows-MCP first; LE fallback) ---
+echo -e "${BOLD}Laptop Exec (Windows-MCP first; LE fallback)${NC}"
 [ -x /usr/local/bin/laptop-exec ] && ok "laptop-exec: installed" || fail "laptop-exec: missing"
 if [ -x /usr/local/bin/laptop-exec ]; then
     grep -q 'mount-status' /usr/local/bin/laptop-exec && ok "laptop-exec: mount-status/write/health" || fail "laptop-exec: outdated (run: sudo claude-server deploy-laptop-exec)"
     grep -q 'ControlPersist' /usr/local/bin/laptop-exec && ok "laptop-exec: multiplex SSH (fast)" || warn "laptop-exec: old (no ControlPersist)"
     grep -q 'git grep' /usr/local/bin/laptop-exec && ok "laptop-exec: git-grep search (accurate)" || warn "laptop-exec: old rg (findstr)"
-    grep -q 'SSH-first' /usr/local/lib/claude-server/cursor-rules/laptop-exec.mdc 2>/dev/null && ok "cursor rule: SSH-first" || warn "cursor rule outdated"
+    grep -qE 'Windows-MCP first|Parallel MCP' /usr/local/lib/claude-server/cursor-rules/laptop-exec.mdc 2>/dev/null && ok "cursor rule: Windows-MCP first" || warn "cursor rule outdated"
     grep -q '\-w' /usr/local/lib/claude-server/cursor-rules/laptop-exec.mdc 2>/dev/null && ok "cursor rule: -w workspace" || warn "cursor rule: missing -w flag docs"
     grep -q 'Read|Write' /usr/local/lib/claude-server/cursor-hooks/laptop-exec-guard.sh 2>/dev/null && ok "cursor hook: blocks Read/Write on /mounts/" || warn "cursor hook outdated"
     [ -x /usr/local/bin/laptop-exec-setup ] && ok "laptop-exec-setup: installed" || warn "laptop-exec-setup missing"
@@ -243,8 +243,8 @@ PY
     _user_readable "$h/.cursor/rules/laptop-exec.mdc" && has_le_rule=true
     _user_readable "$h/.cursor/hooks/laptop-exec-guard.sh" && has_le_hook=true
     $has_le && ok "laptop-exec CLI" || warn "laptop-exec missing (~/.local/bin)"
-    $has_le_rule && ok "SSH-first rule" || warn "laptop-exec.mdc missing"
-    $has_le_hook && ok "SSH-first hook" || warn "laptop-exec-guard.sh missing"
+    $has_le_rule && ok "laptop-exec rule" || warn "laptop-exec.mdc missing"
+    $has_le_hook && ok "laptop-exec hook" || warn "laptop-exec-guard.sh missing"
     if _user_readable "$h/.cursor/mcp.json"; then
         for _mcp_key in figma context7 playwright sequential-thinking memory sqlserver; do
             _user_grep "$h/.cursor/mcp.json" "\"$_mcp_key\"" && ok "Cursor MCP: $_mcp_key" || warn "Cursor MCP: $_mcp_key missing in ~/.cursor/mcp.json"
@@ -258,6 +258,45 @@ PY
     else
         info "Cursor MCP: ~/.cursor/mcp.json not present (run: sudo claude-server sync-cursor-mcp $u)"
     fi
+    # windows-mcp hybrid (Windows laptops only): per-UID forward, no shared 18000.
+    _wmcp_env="$h/.config/windows-mcp/env"
+    if _user_readable "$_wmcp_env"; then
+        _uid=$(id -u "$u" 2>/dev/null || echo 0)
+        _expect=$((28000 + _uid - 1000))
+        _fport=""; _lport=""
+        if [ -r "$_wmcp_env" ] || [ "$EUID" -eq 0 ]; then
+            _fport=$(awk -F= '/^WINDOWS_MCP_FORWARD_PORT=/{print $2; exit}' "$_wmcp_env")
+            _lport=$(awk -F= '/^WINDOWS_MCP_LOCAL_PORT=/{print $2; exit}' "$_wmcp_env")
+        fi
+        if [ -n "$_fport" ] && [ "$_fport" = "$_expect" ]; then
+            ok "windows-mcp forward port $_fport (per-UID)"
+        elif [ -n "$_fport" ]; then
+            warn "windows-mcp forward port $_fport != expected $_expect (stale shared-port config; reconnect Windows client)"
+        else
+            warn "windows-mcp env present but FORWARD_PORT missing"
+        fi
+        if [ "$_fport" = "18000" ]; then
+            warn "windows-mcp still on shared 18000 (multi-user collision risk)"
+        fi
+        if [ "$_lport" = "8000" ]; then
+            info "windows-mcp laptop port 8000 (Hyper-V may block; client prefers 18765)"
+        fi
+        _tp=""
+        if _user_readable "$h/.claude-connect.conf"; then
+            if [ -r "$h/.claude-connect.conf" ] || [ "$EUID" -eq 0 ]; then
+                _tp=$(awk -F= '/^TUNNEL_PORT=/{print $2; exit}' "$h/.claude-connect.conf")
+            fi
+        fi
+        if [ -n "$_tp" ] && [ -n "$_fport" ] && nc -zw1 127.0.0.1 "$_tp" 2>/dev/null; then
+            if ss -ltn "( sport = :$_fport )" 2>/dev/null | grep -q ":$_fport"; then
+                ok "windows-mcp forward listening :$_fport (tunnel up)"
+            else
+                warn "windows-mcp forward DOWN on :$_fport while tunnel $_tp is up (watchdog should restart)"
+            fi
+        fi
+        unset _uid _expect _fport _lport _tp
+    fi
+    unset _wmcp_env
     if _user_readable "$h/.claude/settings.json"; then
         _user_grep "$h/.claude/settings.json" "Bearer figu_" && ok "Claude MCP: figma OAuth bearer" || warn "Claude MCP: figma missing Bearer figu_"
         _user_grep "$h/.claude/settings.json" "\"sqlserver\"" && ok "Claude MCP: sqlserver" || warn "Claude MCP: sqlserver missing"

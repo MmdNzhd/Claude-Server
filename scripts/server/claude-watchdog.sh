@@ -202,4 +202,15 @@ while true; do
         mkdir -p "$(dirname "$LAST_ACTIVE")" 2>/dev/null || true
         printf '%s\n' "$ACTIVE_MOUNT" > "$LAST_ACTIVE" 2>/dev/null || true
     fi
+
+    # Keep windows-mcp forward alive while tunnel is UP. Connect sync starts it
+    # once in the background; without this, a dead one-shot ssh -L leaves MCP
+    # on ECONNREFUSED until the next full reconnect (seen on amir 2026-07-25).
+    if [ -f "$HOME/.config/windows-mcp/env" ]; then
+        if [ -x "$HOME/.local/bin/windows-mcp-forward" ]; then
+            "$HOME/.local/bin/windows-mcp-forward" start >/dev/null 2>&1 || true
+        elif [ -x /usr/local/bin/windows-mcp-forward ]; then
+            /usr/local/bin/windows-mcp-forward start >/dev/null 2>&1 || true
+        fi
+    fi
 done

@@ -44,6 +44,15 @@ try {
     $launchPath = Join-Path $stage 'setup-launch.ps1'
     [System.IO.File]::WriteAllText($launchPath, ($launchPs -replace "`n", "`r`n"), [System.Text.UTF8Encoding]::new($false))
 
+    # Detached worker: setup-launch.ps1 copies this to Desktop\Claude-Connect and spawns it, then
+    # exits fast so the IExpress wextract single-instance mutex is released immediately (fixes the
+    # "Setup is currently running" dialog + the lingering extractor cmd window).
+    $workerBodyPath = Join-Path $PSScriptRoot '_setup-worker-body.ps1'
+    if (-not (Test-Path -LiteralPath $workerBodyPath)) { Write-ExeErr "_setup-worker-body.ps1 missing: $workerBodyPath" }
+    $workerPs = Get-Content -LiteralPath $workerBodyPath -Raw -Encoding UTF8
+    $workerPath = Join-Path $stage 'setup-worker.ps1'
+    [System.IO.File]::WriteAllText($workerPath, ($workerPs -replace "`n", "`r`n"), [System.Text.UTF8Encoding]::new($false))
+
     $userReadme = @'
 Claude Connect - for end users
 ==============================

@@ -12,13 +12,57 @@
 #   C. uv python install 3.12   (uv-managed CPython; no system Python)
 #   D. uv tool install --managed-python windows-mcp   (retry x3)
 #   E. last resort: pip install --user windows-mcp (needs system Python from B3)
-#   F. auth --force + install scheduled task + schtasks /Run + listen :8000
+#   F. auth --force + install scheduled task + schtasks /Run + listen :LPORT
 #   G. SSH sync auth -> server ~/.config/windows-mcp/env + mcp.json + forward
 #
 # Notes:
 # - Background child inherits connect.ps1 elevation (UAC at connect start).
 # - Never treat WindowsApps\python*.exe stubs as real Python.
 # - Secrets: auth_key in config.toml (auth.key mirrored when present); Bearer sync over SSH alias.
+# - Default local port is NOT 8000: Hyper-V/WSL often reserves 7916-8015 (WinError
+#   10013 on bind). Prefer 18765; fall back to the first bindable candidate.
+
+# Laptop-side streamable-http listen port (server forward targets this).
+$script:WindowsMcpLocalPortDefault = 18765
+$script:WindowsMcpLocalPort = $null
+
+function Test-WindowsMcpPortBindable {
+    param([Parameter(Mandatory)][int]$Port)
+    try {
+        $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+        $l.Start()
+        $l.Stop()
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-WindowsMcpLocalPort {
+    if ($script:WindowsMcpLocalPort -and $script:WindowsMcpLocalPort -gt 0) {
+        return [int]$script:WindowsMcpLocalPort
+    }
+    # Prefer an already-listening windows-mcp port (survives reconnect without churn).
+    foreach ($cand in @($script:WindowsMcpLocalPortDefault, 18765, 17654, 19000, 19100, 8000)) {
+        try {
+            $c = @(Get-NetTCPConnection -State Listen -LocalPort $cand -ErrorAction SilentlyContinue |
+                Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1', '0.0.0.0') })
+            if ($c.Count -gt 0) {
+                $script:WindowsMcpLocalPort = $cand
+                return $cand
+            }
+        } catch { }
+    }
+    foreach ($cand in @($script:WindowsMcpLocalPortDefault, 18765, 17654, 19000, 19100)) {
+        if (Test-WindowsMcpPortBindable -Port $cand) {
+            $script:WindowsMcpLocalPort = $cand
+            return $cand
+        }
+    }
+    # Last resort: keep old default even if bind may fail (surface in logs).
+    $script:WindowsMcpLocalPort = 8000
+    return 8000
+}
 
 function Update-WindowsMcpPath {
     try {
@@ -169,12 +213,13 @@ function Get-PythonLauncher {
 }
 
 function Test-WindowsMcpListening {
+    $port = Get-WindowsMcpLocalPort
     try {
-        $c = @(Get-NetTCPConnection -State Listen -LocalPort 8000 -ErrorAction SilentlyContinue |
+        $c = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue |
             Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1', '0.0.0.0') })
         return ($c.Count -gt 0)
     } catch {
-        $ns = cmd /c 'netstat -ano | findstr "LISTENING" | findstr ":8000"' 2>$null
+        $ns = cmd /c "netstat -ano | findstr `"LISTENING`" | findstr `":$port`"" 2>$null
         return [bool]$ns
     }
 }
@@ -407,7 +452,8 @@ function Ensure-WindowsMcpAuth {
     $script:WindowsMcpAuthRotated = $true
     try {
         # CLI may exit 1 after save (UnicodeEncodeError on cp1252) — key still written to config.toml.
-        & $WmExe auth --transport streamable-http --host 127.0.0.1 --port 8000 --force 2>&1 | Out-Null
+        $lport = Get-WindowsMcpLocalPort
+        & $WmExe auth --transport streamable-http --host 127.0.0.1 --port $lport --force 2>&1 | Out-Null
     } catch {
         Write-WindowsMcpEnsureLog ("auth_failed {0}" -f $_.Exception.Message) 'WARN'
     }
@@ -429,13 +475,28 @@ function Ensure-WindowsMcpAuth {
 
 function Ensure-WindowsMcpTask {
     param([string]$WmExe)
-    $task = Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue
-    if ($task) { return $true }
     if (-not $WmExe) { return $false }
-    Write-WindowsMcpHost '      -> registering windows-mcp login task...'
-    Write-WindowsMcpEnsureLog 'registering scheduled task'
+    $lport = Get-WindowsMcpLocalPort
+    $task = Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue
+    # Reinstall when missing, OR when start-server.cmd still pins a Hyper-V-blocked
+    # port (old default :8000) so reconnect cannot revive a dead bind.
+    $needInstall = -not [bool]$task
+    if (-not $needInstall) {
+        $startCmd = Join-Path $env:USERPROFILE '.windows-mcp\start-server.cmd'
+        if (Test-Path -LiteralPath $startCmd) {
+            $raw = (Get-Content -LiteralPath $startCmd -Raw -ErrorAction SilentlyContinue) + ''
+            if ($raw -notmatch [regex]::Escape("--port',$lport") -and $raw -notmatch "--port['\s]+$lport") {
+                $needInstall = $true
+            }
+        } else {
+            $needInstall = $true
+        }
+    }
+    if (-not $needInstall) { return $true }
+    Write-WindowsMcpHost ("      -> registering windows-mcp login task (port {0})..." -f $lport)
+    Write-WindowsMcpEnsureLog ("registering scheduled task port={0}" -f $lport)
     try {
-        & $WmExe install --transport streamable-http --host 127.0.0.1 --port 8000 --force 2>&1 | Out-Null
+        & $WmExe install --transport streamable-http --host 127.0.0.1 --port $lport --force 2>&1 | Out-Null
         return [bool](Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue)
     } catch {
         Write-WindowsMcpEnsureLog ("install_task_failed {0}" -f $_.Exception.Message) 'WARN'
@@ -449,10 +510,11 @@ function Start-WindowsMcpProcessDirect {
     $filePath = $null
     $argStr = $null
     $via = $null
+    $lport = Get-WindowsMcpLocalPort
     $exe = Get-WindowsMcpExe
     if ($exe) {
         $filePath = $exe
-        $argStr = 'serve --transport streamable-http --host 127.0.0.1 --port 8000'
+        $argStr = "serve --transport streamable-http --host 127.0.0.1 --port $lport"
         $via = 'windows_mcp_exe'
     } else {
         $py = Get-PythonLauncher
@@ -461,7 +523,7 @@ function Start-WindowsMcpProcessDirect {
             return $false
         }
         $filePath = $py
-        $argStr = '-m windows_mcp serve --transport streamable-http --host 127.0.0.1 --port 8000'
+        $argStr = "-m windows_mcp serve --transport streamable-http --host 127.0.0.1 --port $lport"
         $via = 'python_direct'
     }
     try {
@@ -490,7 +552,7 @@ function Start-WindowsMcpProcessDirect {
 }
 
 function Stop-WindowsMcpOrphanCmdWrappers {
-    # Reap leftover cmd.exe /c parents that launched start-server.cmd once :8000 listens.
+    # Reap leftover cmd.exe /c parents that launched start-server.cmd once LPORT listens.
     if (-not (Test-WindowsMcpListening)) { return }
     try {
         $orphans = @(Get-CimInstance Win32_Process -Filter "Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
@@ -513,9 +575,10 @@ function Restart-WindowsMcpServer {
     Write-WindowsMcpEnsureLog 'restarting_server_after_auth_rotate'
     try { schtasks /End /TN 'windows-mcp-server' 2>&1 | Out-Null } catch { }
     Start-Sleep -Seconds 1
-    # Kill stray listeners on :8000 (task End can leave orphan python)
+    # Kill stray listeners on LPORT (task End can leave orphan python)
+    $lport = Get-WindowsMcpLocalPort
     try {
-        Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue |
+        Get-NetTCPConnection -LocalPort $lport -State Listen -ErrorAction SilentlyContinue |
             ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
     } catch { }
     Start-Sleep -Seconds 1
@@ -566,18 +629,29 @@ function Sync-WindowsMcpAuthToServer {
         Write-WindowsMcpEnsureLog 'auth_key_charset_rejected' 'WARN'
         return $false
     }
+    $lport = Get-WindowsMcpLocalPort
+    if ($lport -notmatch '^\d+$' -or [int]$lport -lt 1024 -or [int]$lport -gt 65535) {
+        Write-WindowsMcpEnsureLog ("local_port_invalid {0}" -f $lport) 'WARN'
+        return $false
+    }
     $pyLines = @(
         'import json, pathlib, os',
         "auth = os.environ.get('WMCP_AUTH','')",
+        "lport = os.environ.get('WMCP_LPORT','18765')",
         'home = pathlib.Path.home()',
+        '# Per-UID forward port: 127.0.0.1:PORT is bound server-wide (single netns), so a',
+        '# fixed literal (old: 18000) let only the first connected user ever bind it.',
+        'uid = os.getuid()',
+        'port = 28000 + (uid - 1000) if uid >= 1000 else 18000',
+        'if port > 65535: port = 18000',
         "envd = home / '.config' / 'windows-mcp'",
         'envd.mkdir(parents=True, exist_ok=True)',
         "envf = envd / 'env'",
         'envf.write_text(',
         "    'WINDOWS_MCP_AUTH_KEY=' + auth + chr(10) +",
-        "    'WINDOWS_MCP_LOCAL_PORT=8000' + chr(10) +",
-        "    'WINDOWS_MCP_FORWARD_PORT=18000' + chr(10) +",
-        "    'WINDOWS_MCP_URL=http://127.0.0.1:18000/mcp' + chr(10),",
+        "    'WINDOWS_MCP_LOCAL_PORT=' + str(lport) + chr(10) +",
+        "    'WINDOWS_MCP_FORWARD_PORT=' + str(port) + chr(10) +",
+        "    'WINDOWS_MCP_URL=http://127.0.0.1:' + str(port) + '/mcp' + chr(10),",
         "    encoding='utf-8')",
         'os.chmod(envf, 0o600)',
         "p = home / '.cursor' / 'mcp.json'",
@@ -589,27 +663,56 @@ function Sync-WindowsMcpAuthToServer {
         '        cfg = {}',
         "cfg.setdefault('mcpServers', {})",
         "cfg['mcpServers']['windows-mcp'] = {",
-        "    'url': 'http://127.0.0.1:18000/mcp',",
+        "    'url': 'http://127.0.0.1:' + str(port) + '/mcp',",
         "    'headers': {'Authorization': 'Bearer ' + auth},",
         '}',
         'p.parent.mkdir(parents=True, exist_ok=True)',
         "p.write_text(json.dumps(cfg, indent=2) + chr(10), encoding='utf-8')",
-        "print('mcp_json_ok')"
+        "print('mcp_json_ok port=' + str(port) + ' lport=' + str(lport))"
     )
     $py = ($pyLines -join "`n")
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($py))
-    $remote = "export WMCP_AUTH='$AuthKey'; echo $b64 | base64 -d | python3 -; " +
+    # After writing env/mcp.json: start forward, then HTTP-probe through it.
+    # WMCP_PROBE=200 means end-to-end OK; 000 means forward/laptop still broken
+    # (old bug: sync printed OK even when forward was dead — amir 2026-07-25).
+    $remote = "export WMCP_AUTH='$AuthKey' WMCP_LPORT='$lport'; echo $b64 | base64 -d | python3 -; " +
               'F="$HOME/.local/bin/windows-mcp-forward"; G=/usr/local/bin/windows-mcp-forward; ' +
-              'if [ -x "$F" ]; then "$F" start >/dev/null 2>&1 || true; elif [ -x "$G" ]; then "$G" start >/dev/null 2>&1 || true; fi; ' +
+              'FWD=""; if [ -x "$F" ]; then FWD="$F"; elif [ -x "$G" ]; then FWD="$G"; fi; ' +
+              'if [ -n "$FWD" ]; then "$FWD" start >/dev/null 2>&1 || true; fi; ' +
               'S="$HOME/.local/bin/windows-mcp-seed-agent-tools"; T=/usr/local/bin/windows-mcp-seed-agent-tools; ' +
               'if [ -x "$S" ]; then "$S" >/dev/null 2>&1 || true; elif [ -x "$T" ]; then "$T" >/dev/null 2>&1 || true; fi; ' +
-              'echo WMCP_SYNC_OK'
+              'ENVF="$HOME/.config/windows-mcp/env"; code=000; ' +
+              'if [ -f "$ENVF" ]; then . "$ENVF"; ' +
+              'code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:${WINDOWS_MCP_FORWARD_PORT}/mcp" ' +
+              '-H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" ' +
+              '-H "Authorization: Bearer ${WINDOWS_MCP_AUTH_KEY}" ' +
+              '-d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"wmcp-sync\",\"version\":\"0\"}}}" ' +
+              '--max-time 5 2>/dev/null || echo 000); ' +
+              'if [ "$code" != "200" ] && [ -n "$FWD" ]; then "$FWD" start >/dev/null 2>&1 || true; ' +
+              'code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:${WINDOWS_MCP_FORWARD_PORT}/mcp" ' +
+              '-H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" ' +
+              '-H "Authorization: Bearer ${WINDOWS_MCP_AUTH_KEY}" ' +
+              '-d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"wmcp-sync\",\"version\":\"0\"}}}" ' +
+              '--max-time 5 2>/dev/null || echo 000); fi; fi; ' +
+              'echo WMCP_PROBE=$code; echo WMCP_SYNC_OK'
     try {
         $out = ((SshX $remote) -join "`n")
-        if ($out -match 'WMCP_SYNC_OK') { return $true }
-        $clip = ($out -replace '\s+', ' ')
-        if ($clip.Length -gt 200) { $clip = $clip.Substring(0, 200) }
-        Write-WindowsMcpEnsureLog ("server_sync_unexpected {0}" -f $clip) 'WARN'
+        if ($out -notmatch 'WMCP_SYNC_OK') {
+            $clip = ($out -replace '\s+', ' ')
+            if ($clip.Length -gt 200) { $clip = $clip.Substring(0, 200) }
+            Write-WindowsMcpEnsureLog ("server_sync_unexpected {0}" -f $clip) 'WARN'
+            return $false
+        }
+        if ($out -match 'WMCP_PROBE=(\d+)') {
+            $probe = $Matches[1]
+            if ($probe -eq '200') {
+                Write-WindowsMcpEnsureLog ("server_sync_probe_ok http={0} lport={1}" -f $probe, $lport)
+                return $true
+            }
+            Write-WindowsMcpEnsureLog ("server_sync_probe_bad http={0} lport={1}" -f $probe, $lport) 'WARN'
+            return $false
+        }
+        Write-WindowsMcpEnsureLog 'server_sync_probe_missing' 'WARN'
         return $false
     } catch {
         Write-WindowsMcpEnsureLog ("server_sync_failed {0}" -f $_.Exception.Message) 'WARN'
@@ -660,19 +763,30 @@ function Ensure-WindowsMcp {
             $script:WindowsMcpAuthRotated = $false
         }
         $result.Listening = [bool]$listening
-        if ($auth -and (Get-Command SshX -ErrorAction SilentlyContinue)) {
+        $haveSsh = [bool](Get-Command SshX -ErrorAction SilentlyContinue)
+        if ($auth -and $haveSsh) {
             $result.Synced = [bool](Sync-WindowsMcpAuthToServer -AuthKey $auth)
+            # One retry: forward can race the first laptop listen after auth rotate.
+            if (-not $result.Synced -and $listening) {
+                Start-Sleep -Seconds 2
+                $result.Synced = [bool](Sync-WindowsMcpAuthToServer -AuthKey $auth)
+            }
         }
-        if ($listening) {
+        if ($listening -and ((-not $haveSsh) -or $result.Synced)) {
             $result.Ok = $true
             $bits = New-Object System.Collections.Generic.List[string]
             if ($result.Installed) { [void]$bits.Add('installed') }
-            [void]$bits.Add('listening :8000')
+            [void]$bits.Add(('listening :{0}' -f (Get-WindowsMcpLocalPort)))
             if ($result.Synced) { [void]$bits.Add('server sync ok') }
+            elseif (-not $haveSsh) { [void]$bits.Add('local only (no ssh)') }
             $result.Summary = ($bits -join ', ')
         } else {
             $result.Ok = $false
-            $result.Summary = 'installed but not listening (unlock interactive desktop / Session 0)'
+            if (-not $listening) {
+                $result.Summary = 'installed but not listening (unlock interactive desktop / Session 0)'
+            } else {
+                $result.Summary = 'listening but server forward/probe failed (will retry via maintain/watchdog)'
+            }
         }
         Write-WindowsMcpEnsureLog ("done ok={0} listening={1} synced={2} installed={3} summary={4}" -f `
             $result.Ok, $result.Listening, $result.Synced, $result.Installed, $result.Summary)
@@ -681,6 +795,29 @@ function Ensure-WindowsMcp {
         $result.Summary = $_.Exception.Message
         Write-WindowsMcpEnsureLog ("ensure_exception {0}" -f $_.Exception.Message) 'WARN'
         return $result
+    }
+}
+
+function Maintain-WindowsMcpSession {
+    # Lightweight mid-session heal: keep laptop listen + server forward alive.
+    # Safe for live sessions (does not touch SSH tunnels / editor). Call every few minutes.
+    try {
+        Update-WindowsMcpPath
+        $exe = Get-WindowsMcpExe
+        if (-not $exe) { return $false }
+        $cfgDir = Join-Path $env:USERPROFILE '.windows-mcp'
+        $auth = Ensure-WindowsMcpAuth -WmExe $exe -CfgDir $cfgDir
+        if (-not (Test-WindowsMcpListening)) {
+            [void](Start-WindowsMcpIfNeeded)
+        }
+        if (-not $auth) { return $false }
+        if (-not (Get-Command SshX -ErrorAction SilentlyContinue)) { return (Test-WindowsMcpListening) }
+        $synced = [bool](Sync-WindowsMcpAuthToServer -AuthKey $auth)
+        Write-WindowsMcpEnsureLog ("maintain listening={0} synced={1}" -f [int](Test-WindowsMcpListening), [int]$synced)
+        return ($synced -and (Test-WindowsMcpListening))
+    } catch {
+        Write-WindowsMcpEnsureLog ("maintain_exception {0}" -f $_.Exception.Message) 'WARN'
+        return $false
     }
 }
 

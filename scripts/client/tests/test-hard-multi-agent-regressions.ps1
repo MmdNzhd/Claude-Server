@@ -79,11 +79,13 @@ Assert ($gm -match 'Get-SiblingConnectTunnelPids') 'git-mode Get-SiblingConnectT
 Assert ($gm -match 'sticky_shared|sibling_live') 'git-mode Acquire sticky_shared / sibling_live'
 Assert ($gm -match 'am_only|Test-IsPrimaryTunnelPublisher') 'git-mode am_only PushConf keeps primary TUNNEL_PORT'
 $exeBody = Get-Content (Join-Path $Client '..\..\publish\_setup-launch-body.ps1') -Raw
+$exeWorker = Get-Content (Join-Path $Client '..\..\publish\_setup-worker-body.ps1') -Raw
 Assert ($exeBody -match 'function Test-ConnectUiOpen') 'EXE setup defines Test-ConnectUiOpen'
 Assert ($exeBody -match 'return \(\$free -eq 0\)') 'EXE setup blocks only when zero free ClaudeConnect# slots'
 Assert ($exeBody -notmatch 'Get-CimInstance Win32_Process') 'EXE setup does not scan Win32_Process for false single-instance'
 Assert ($exeBody -match '10 Claude Connect windows already open') 'EXE MessageBox matches 10 already-open text'
-Assert ($exeBody -match 'ClaudeConnectExeLaunch') 'EXE keeps ExeLaunch debounce mutex'
+Assert ($exeWorker -match 'ClaudeConnectExeLaunch') 'ExeLaunch double-launch gate lives in the detached worker (setup-launch exits fast)'
+Assert ($exeBody -match 'setup-worker\.ps1') 'EXE setup spawns the detached worker'
 Write-Host '--- B) Ensure-ConnectRunId define-before-use ---' -ForegroundColor Cyan
 $defLine = Get-LineIndex $upd 'function Ensure-ConnectRunId'
 # first call after param/setup (not inside function body) â€" find "$null = Ensure-ConnectRunId"

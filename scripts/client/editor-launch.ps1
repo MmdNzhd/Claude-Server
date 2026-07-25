@@ -59,21 +59,110 @@ function Get-CursorWindowTitleNeedle {
     return '\[' + [regex]::Escape($tag) + '\]|\[Claude Server\]'
 }
 
+function Test-CursorWindowTitleMatchesProject {
+    # A server-profile window title belongs to THIS project iff the project's root folder name
+    # appears at the exact position the title templates place it, with a trailing non-path boundary:
+    #   custom template : "${dirty}${editor}${sep}[Claude Server <Site>] <rootName>"  (root AFTER the tag)
+    #   Cursor SSH title: "<...> <rootName> [SSH: <alias>] - Cursor"                   (root BEFORE [SSH:])
+    #
+    # Matching $rootName ANYWHERE in the title (the old '$title -match $rootNeedle') is wrong on two
+    # counts, both hit live 2026-07-25:
+    #   1) Site-tag collision: the tag itself is "[Claude Server Smart]", so a project literally named
+    #      "smart" matched EVERY open server window - selecting project "smart" foregrounded an
+    #      unrelated window and skipped the launch (reason=known_on_folder), so smart never opened.
+    #   2) Prefix-sibling collision: a bare/word-boundary substring also matched "smart" inside
+    #      "smartdesk" and "ai" inside "ai-gap-summay" (hyphen is a \b boundary), cross-detecting
+    #      siblings. Anchor to the template position and require the boundary so "smart" != "smartdesk".
+    param(
+        [string]$Title,
+        [Parameter(Mandatory)][string]$RootName,
+        [string]$TitleTag = (Get-CursorWindowTitleTag),
+        [string]$AliasNeedleEscaped = ''
+    )
+    if (-not $Title -or -not $RootName) { return $false }
+    $rootEsc = [regex]::Escape($RootName)
+    $boundary = '(?![\w./-])'
+    if ($Title -match ('\[' + [regex]::Escape($TitleTag) + '\]\s+' + $rootEsc + $boundary)) { return $true }
+    # Defensive: a settings.json written before the site-qualified tag shipped uses the bare tag.
+    if ($Title -match ('\[Claude Server\]\s+' + $rootEsc + $boundary)) { return $true }
+    # Cursor's own default Remote-SSH title places the folder name IMMEDIATELY before the [SSH: <alias>]
+    # marker: "<rootName> [SSH: <alias>] - Cursor". The gap here must be whitespace only (\s*), NOT the
+    # old greedy [^\[]* - live regression 2026-07-25: with the site-qualified custom title
+    # "[Claude Server Smart] refactoreoldclub [SSH: claude-server]", a search for project "smart"
+    # case-insensitively matched the "Smart" in the SITE TAG, then [^\[]* skipped across
+    # "] refactoreoldclub " to "[SSH:", so on_folder returned TRUE for "smart" even though no smart
+    # window was open -> connect skipped the launch and project "smart" never opened. \s* anchors the
+    # root right before [SSH:, so the site-tag "Smart" (followed by "]") can no longer reach the marker.
+    if ($AliasNeedleEscaped -and
+        $Title -match ('(?<![\w./-])' + $rootEsc + $boundary + '\s*\[SSH:\s*' + $AliasNeedleEscaped + '\]')) { return $true }
+    return $false
+}
+
+function Get-CursorServerWindowTitleTemplate {
+    param([string]$TitleTag)
+    # The VS Code ${...} tokens MUST reach settings.json literally. The old code built this inside a
+    # double-quoted here-string, so PowerShell expanded ${dirty}/${activeEditorShort}/${separator}/
+    # ${rootName} to EMPTY - settings.json ended up as "[Claude Server Smart] " with no folder name.
+    # Remote windows then never showed the project name, and title-based on_folder / agent-home
+    # detection could not tell one project window from another (live regression 2026-07-25: every
+    # launch reported failure / "drifted to Agent/home" because the folder was invisible in the title).
+    # Build it via string concatenation so the tokens stay literal regardless of quoting.
+    return ('${dirty}${activeEditorShort}${separator}[' + $TitleTag + '] ${rootName}')
+}
+
+function Repair-CursorServerWindowTitle {
+    param(
+        [Parameter(Mandatory)][string]$SettingsPath,
+        [Parameter(Mandatory)][string]$TitleTag
+    )
+    # In-place repair for profiles created before the here-string bug fix: if window.title is present
+    # but lost its ${rootName} token, rewrite ONLY that value (string-level, so JSONC comments / other
+    # user settings survive). No-op when the token is already there.
+    try {
+        if (-not (Test-Path $SettingsPath)) { return $false }
+        $raw = Get-Content -LiteralPath $SettingsPath -Raw -Encoding UTF8
+        if ($raw -notmatch '"window\.title"\s*:\s*"') { return $false }
+        if ($raw -match '"window\.title"\s*:\s*"[^"]*\$\{rootName\}') { return $false }
+        $correctVal = Get-CursorServerWindowTitleTemplate -TitleTag $TitleTag
+        $replacement = '"window.title": "' + $correctVal + '"'
+        $new = [regex]::Replace(
+            $raw,
+            '"window\.title"\s*:\s*"[^"]*"',
+            [System.Text.RegularExpressions.MatchEvaluator] { param($m) $replacement },
+            [System.Text.RegularExpressions.RegexOptions]::Singleline
+        )
+        if ($new -ne $raw) {
+            Set-Content -LiteralPath $SettingsPath -Value $new -Encoding UTF8
+            if (Get-Command Write-EditorLaunchLog -ErrorAction SilentlyContinue) {
+                Write-EditorLaunchLog 'PROFILE_REPAIR: window.title restored ${rootName} token' 'INFO'
+            }
+            return $true
+        }
+    } catch { }
+    return $false
+}
+
 function Initialize-CursorServerProfile {
-    # First-run only: make the server window visually distinct from personal Cursor.
+    # First-run: make the server window visually distinct from personal Cursor. On later runs, repair
+    # a window.title that lost its ${rootName} token (older here-string bug) so remote windows show the
+    # project name and detection can identify them.
     $userDir = Join-Path (Get-CursorRemoteProfileDir) 'User'
     $settingsPath = Join-Path $userDir 'settings.json'
-    if (Test-Path $settingsPath) { return }
+    $site = Get-CursorRemoteProfileSite
+    $titleTag = Get-CursorWindowTitleTag -Site $site
+    if (Test-Path $settingsPath) {
+        Repair-CursorServerWindowTitle -SettingsPath $settingsPath -TitleTag $titleTag | Out-Null
+        return
+    }
     if (-not (Test-Path $userDir)) {
         New-Item -ItemType Directory -Force -Path $userDir | Out-Null
     }
-    $site = Get-CursorRemoteProfileSite
-    $titleTag = Get-CursorWindowTitleTag -Site $site
     $barBg = if ($site -eq 'Sepidz') { '#3a1e5f' } else { '#1e3a5f' }
     $barBgIn = if ($site -eq 'Sepidz') { '#2a1545' } else { '#152a45' }
+    $titleTemplate = Get-CursorServerWindowTitleTemplate -TitleTag $titleTag
     $json = @"
 {
-  "window.title": "${dirty}${activeEditorShort}${separator}[$titleTag] ${rootName}",
+  "window.title": "$titleTemplate",
   "workbench.colorCustomizations": {
     "titleBar.activeBackground": "$barBg",
     "titleBar.activeForeground": "#e8e8e8",
@@ -838,6 +927,12 @@ function Get-CursorLaunchDayLogPath {
 }
 
 function Start-EditorProcessQuiet {
+    # DO NOT use this for Cursor/VS Code launch. Live 2026-07-25: wrapping Cursor.exe in
+    # `cmd.exe /C "... >> log 2>&1"` (CreateNoWindow + stdout redirect) breaks Electron's
+    # single-instance IPC handoff - the second process starts but the warm --remote /
+    # --new-window request never opens the folder. Direct Start-Process works in <1s
+    # (confirmed: temp opened immediately; connect's Quiet path polled 20s and failed).
+    # Kept only as a last-resort elevated fallback when interactive launchers are unavailable.
     param(
         [Parameter(Mandatory)][string]$FilePath,
         [string[]]$ArgumentList = @()
@@ -855,16 +950,63 @@ function Start-EditorProcessQuiet {
     return [System.Diagnostics.Process]::Start($psi)
 }
 
+function Start-EditorProcessDirect {
+    # Canonical Cursor/VS Code launch: Start-Process with ArgumentList array (no cmd.exe wrap).
+    # Warm --remote IPC handoff requires a direct Start-Process of Cursor.exe - NOT cmd /C.
+    #
+    # Stdio: Cursor's Node/Electron dumps DeprecationWarning / "disable-http2 is not in the list
+    # of known options" / "Error mutex already exists" to the *parent console* when the child
+    # inherits it. That noise showed up inside the connect.bat window even though launch succeeded.
+    # Redirect stdout/stderr to the day log (and set ELECTRON_NO_ATTACH_CONSOLE) so connect stays
+    # clean - without going back to the cmd Quiet wrap that broke IPC.
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$ArgumentList = @()
+    )
+    $logPath = Get-CursorLaunchDayLogPath
+    $stdoutPath = $logPath -replace '\.log$', '.stdout.log'
+    $stderrPath = $logPath -replace '\.log$', '.stderr.log'
+    try {
+        $stamp = '---- {0} pid-parent={1} ----' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $PID
+        Add-Content -LiteralPath $logPath -Value $stamp -Encoding UTF8
+    } catch { }
+
+    $prevNoAttach = $env:ELECTRON_NO_ATTACH_CONSOLE
+    $prevNoWarn = $env:NODE_NO_WARNINGS
+    $env:ELECTRON_NO_ATTACH_CONSOLE = '1'
+    $env:NODE_NO_WARNINGS = '1'
+    try {
+        # Redirect* forces UseShellExecute=$false (required for redirect) while still creating the
+        # normal GUI window. ArgumentList array keeps argv tokens intact for Electron IPC.
+        return (Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -PassThru `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath)
+    } finally {
+        if ($null -eq $prevNoAttach) { Remove-Item Env:\ELECTRON_NO_ATTACH_CONSOLE -ErrorAction SilentlyContinue }
+        else { $env:ELECTRON_NO_ATTACH_CONSOLE = $prevNoAttach }
+        if ($null -eq $prevNoWarn) { Remove-Item Env:\NODE_NO_WARNINGS -ErrorAction SilentlyContinue }
+        else { $env:NODE_NO_WARNINGS = $prevNoWarn }
+    }
+}
+
 function Start-ProcessAsInteractiveUser {    param(
         [Parameter(Mandatory)][string]$FilePath,
         [string[]]$ArgumentList = @()
     )
     $argPreview = Format-ProcessArgumentString -ArgumentList $ArgumentList
     if (-not (Test-IsElevatedShell)) {
-        Write-EditorLaunchLog "PROC_START: mode=non_elevated exe=$FilePath args=$argPreview" 'DEBUG'
-        Start-EditorProcessQuiet -FilePath $FilePath -ArgumentList $ArgumentList | Out-Null
-        Write-EditorLaunchLog 'PROC_START_OK: mode=non_elevated' 'DEBUG'
-        return $true
+        Write-EditorLaunchLog "PROC_START: mode=non_elevated_direct exe=$FilePath args=$argPreview" 'DEBUG'
+        try {
+            $p = Start-EditorProcessDirect -FilePath $FilePath -ArgumentList $ArgumentList
+            if (-not $p) {
+                Write-EditorLaunchLog 'PROC_START_FAIL: mode=non_elevated_direct Start-Process returned null' 'ERROR'
+                return $false
+            }
+            Write-EditorLaunchLog ("PROC_START_OK: mode=non_elevated_direct pid={0}" -f $p.Id) 'DEBUG'
+            return $true
+        } catch {
+            Write-EditorLaunchLog ("PROC_START_FAIL: mode=non_elevated_direct ex={0}" -f $_.Exception.Message) 'ERROR'
+            return $false
+        }
     }
     Write-EditorLaunchLog "PROC_START: mode=elevated exe=$FilePath args=$argPreview" 'DEBUG'
     # Refresh the scheduled task once per connect run (so RU/helper fixes apply after an
@@ -915,11 +1057,11 @@ function Start-ProcessAsInteractiveUser {    param(
     } else {
         Write-EditorLaunchLog 'PROC_START_FAIL: mode=elevated_launch_task schtasks_failed' 'WARN'
     }
-    # Last resort: start from the elevated token. Remote-SSH still works; better than
-    # false "Cursor not found". Prefer interactive paths above whenever they work.
+    # Last resort: start from the elevated token via DIRECT Start-Process (not cmd Quiet wrap -
+    # Quiet breaks Electron warm IPC handoff). Prefer interactive NonElevated/Task paths above.
     try {
         Write-EditorLaunchLog 'PROC_START: mode=elevated_direct_fallback' 'DEBUG'
-        Start-EditorProcessQuiet -FilePath $FilePath -ArgumentList $ArgumentList | Out-Null
+        Start-EditorProcessDirect -FilePath $FilePath -ArgumentList $ArgumentList | Out-Null
         if (Test-EditorProcessEvidence -FilePath $FilePath -ArgumentList $ArgumentList -TimeoutMs $evidenceMsDirect) {
             Write-EditorLaunchLog 'PROC_START_OK: mode=elevated_direct_fallback' 'DEBUG'
             return $true
@@ -1301,7 +1443,10 @@ function Test-CursorWindowTitleIsAgentHome {
         [string]$ProjectRootName = ''
     )
     if (-not $Title) { return $false }
-    if ($ProjectRootName -and $Title -match (Get-CursorWindowTitleNeedle) -and $Title -match [regex]::Escape($ProjectRootName)) {
+    # If the title shows THIS project at the template-anchored position, it is a real project window,
+    # not the agent-home splash. Use the anchored matcher (not a bare substring) so the "Smart" site
+    # tag / prefix siblings do not spoof a project match.
+    if ($ProjectRootName -and (Test-CursorWindowTitleMatchesProject -Title $Title -RootName $ProjectRootName)) {
         return $false
     }
     if ($Title -match '(?i)^cursor agents$|cursor agents\b|agent home') { return $true }
@@ -1331,13 +1476,19 @@ function Test-RemoteEditorOnCorrectFolder {
     if ($EditorCmd -ne 'cursor') {
         return (Test-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath).Count -gt 0
     }
-    if (Test-RemoteEditorInAgentHome -RemotePath $RemotePath) { return $false }
+    # NOTE: intentionally NO global "if (Test-RemoteEditorInAgentHome) return false" short-circuit here.
+    # A standalone "Cursor Agents" window is normal in Cursor 3.x and coexists with real project windows;
+    # the old global veto made on_folder=false for EVERY project whenever any agent-home window existed,
+    # which blocked launch success and triggered the "drifted to Agent/home" relaunch loop even though the
+    # project WAS open. Per-window agent-home is still checked below (only a window that BOTH matches this
+    # project AND is itself on agent-home is rejected), which is the correct, project-scoped test.
     $uri = Get-RemoteFolderUri -Alias $Alias -RemotePath $RemotePath
     $pathNeedle = [regex]::Escape($RemotePath.TrimEnd('/'))
     $aliasNeedle = [regex]::Escape("ssh-remote+${Alias}")
     $uriNeedle = [regex]::Escape($uri)
     $rootName = ($RemotePath.TrimEnd('/') -split '/')[-1]
     $rootNeedle = if ($rootName) { [regex]::Escape($rootName) } else { '' }
+    $titleTag = Get-CursorWindowTitleTag
     $aliasOnlyNeedle = [regex]::Escape($Alias)
     foreach ($p in @(Get-CursorMainProfileProcesses)) {
         $cmd = $p.CommandLine
@@ -1368,11 +1519,11 @@ function Test-RemoteEditorOnCorrectFolder {
             # single-window check would not also have produced.
             foreach ($win in @(Get-ProcessTopLevelWindows -ProcessId $p.ProcessId)) {
                 $title = $win.Title
-                # Accept either our custom "[Claude Server] <root>" title template or Cursor's own
-                # default Remote-SSH title "... [SSH: <alias>] - Cursor" - the custom template doesn't
-                # apply while a built-in view (e.g. Settings) is focused, so both must be recognized.
-                if ($title -and $title -match $rootNeedle -and
-                    ($title -match (Get-CursorWindowTitleNeedle) -or $title -match "(?i)\[SSH:\s*${aliasOnlyNeedle}\]")) {
+                # Accept either our custom "[Claude Server <Site>] <root>" title template or Cursor's
+                # own default Remote-SSH title "... [SSH: <alias>] - Cursor". Match the root ONLY at the
+                # template-anchored position (never anywhere in the title) so project "smart" does not
+                # match the "Smart" in the site tag, nor "smartdesk"/prefix siblings.
+                if (Test-CursorWindowTitleMatchesProject -Title $title -RootName $rootName -TitleTag $titleTag -AliasNeedleEscaped $aliasOnlyNeedle) {
                     return $true
                 }
             }
@@ -1401,48 +1552,22 @@ function Get-RemoteEditorSessionPresence {
         }
         return [pscustomobject]@{ OnFolder = [bool]$onFolder; WindowOpen = [bool]$windowOpen }
     }
-    if (Test-RemoteEditorInAgentHome -RemotePath $RemotePath) {
-        $mains = @(Get-CursorMainProfileProcesses)
-        foreach ($p in $mains) {
-            try {
-                $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
-                if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { $windowOpen = $true; break }
-            } catch { }
-        }
-        return [pscustomobject]@{ OnFolder = $false; WindowOpen = [bool]$windowOpen }
-    }
-    $uri = Get-RemoteFolderUri -Alias $Alias -RemotePath $RemotePath
-    $pathNeedle = [regex]::Escape($RemotePath.TrimEnd('/'))
-    $aliasNeedle = [regex]::Escape("ssh-remote+${Alias}")
-    $uriNeedle = [regex]::Escape($uri)
-    $rootName = ($RemotePath.TrimEnd('/') -split '/')[-1]
-    $rootNeedle = if ($rootName) { [regex]::Escape($rootName) } else { '' }
-    $aliasOnlyNeedle = [regex]::Escape($Alias)
+    # OnFolder MUST match Test-RemoteEditorOnCorrectFolder (multi-window title enum). The old
+    # version short-circuited on Test-RemoteEditorInAgentHome (standalone Agents window poisoned
+    # every project) AND only inspected MainWindowTitle (Z-order-topmost of the shared PID), so
+    # when refactoreoldclub was focused and dakhl was open in a second window of the SAME process,
+    # presence.OnFolder stayed False forever even though on_folder=True - connect status showed
+    # "agent" / "Opening Cursor failed" while the project window was visibly open (live 2026-07-25).
+    $onFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
     foreach ($p in @(Get-CursorMainProfileProcesses)) {
-        $cmd = $p.CommandLine
-        $hit = $false
-        if ($cmd) {
-            if (Test-PathNeedleBoundaryMatch -CommandLine $cmd -NeedleEscaped $uriNeedle) { $hit = $true }
-            elseif ($cmd -match $aliasNeedle -and (Test-PathNeedleBoundaryMatch -CommandLine $cmd -NeedleEscaped $pathNeedle)) { $hit = $true }
+        foreach ($win in @(Get-ProcessTopLevelWindows -ProcessId $p.ProcessId)) {
+            if ($win.Title) { $windowOpen = $true; break }
         }
+        if ($windowOpen) { break }
         try {
             $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
-            if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { $windowOpen = $true }
-            if ($hit -and -not (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath)) {
-                $onFolder = $true
-            }
-            if ($rootNeedle) {
-                $title = $wp.MainWindowTitle
-                if ($title -and $title -match $rootNeedle -and
-                    ($title -match (Get-CursorWindowTitleNeedle) -or $title -match "(?i)\[SSH:\s*${aliasOnlyNeedle}\]")) {
-                    $onFolder = $true
-                }
-            }
-        } catch {
-            if ($hit -and -not (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath)) {
-                $onFolder = $true
-            }
-        }
+            if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { $windowOpen = $true; break }
+        } catch { }
     }
     return [pscustomobject]@{ OnFolder = [bool]$onFolder; WindowOpen = [bool]$windowOpen }
 }
@@ -1495,6 +1620,7 @@ function Get-RemoteEditorStateExplain {
     $uriNeedle = [regex]::Escape($uri)
     $rootName = ($path -split '/')[-1]
     $rootNeedle = if ($rootName) { [regex]::Escape($rootName) } else { '' }
+    $titleTag = Get-CursorWindowTitleTag
     $aliasOnlyNeedle = [regex]::Escape($Alias)
     $onFolder = $false
     foreach ($p in $mains) {
@@ -1512,8 +1638,7 @@ function Get-RemoteEditorStateExplain {
         try {
             $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
             $title = $wp.MainWindowTitle
-            if ($rootNeedle -and $title -and $title -match $rootNeedle -and
-                ($title -match (Get-CursorWindowTitleNeedle) -or $title -match "(?i)\[SSH:\s*${aliasOnlyNeedle}\]")) {
+            if ($rootNeedle -and (Test-CursorWindowTitleMatchesProject -Title $title -RootName $rootName -TitleTag $titleTag -AliasNeedleEscaped $aliasOnlyNeedle)) {
                 $titleHit = $true
             }
         } catch { }
@@ -1576,13 +1701,20 @@ function Test-RemoteEditorInAgentHome {
         if (-not $cmd) { continue }
         # Agent/home title wins even when folder-uri is present (Cursor 3.x forum #153009).
         if (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath) { return $true }
-        if ($cmd -notmatch 'folder-uri') {
+        # A main process opens a folder via EITHER --folder-uri=... OR --remote ssh-remote+<alias> <path>
+        # (equivalently a vscode-remote:// uri). The cmd-line fallback below must only flag agent-home
+        # when the launch opened NO folder at all - otherwise the --remote-first strategy (the reliable
+        # warm-handoff path) is misread as agent-home on EVERY poll, and the success gate (-not agent_home)
+        # rejects every launch even though the window actually opened. Live regression 2026-07-25: after
+        # reordering strategies to --remote first, project windows never "succeeded" (agent_home=True stuck).
+        $opensFolder = ($cmd -match 'folder-uri') -or ($cmd -match '(?i)(^|\s)--remote(\s|=)') -or ($cmd -match 'ssh-remote\+') -or ($cmd -match 'vscode-remote://')
+        if (-not $opensFolder) {
             $title = ''
             try {
                 $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
                 $title = [string]$wp.MainWindowTitle
             } catch { }
-            # Settings (and similar) often lack folder-uri - do not treat as agent-home.
+            # Settings (and similar) often lack a folder - do not treat as agent-home.
             if ($title -match '(?i)settings') { continue }
             return $true
         }
@@ -1729,11 +1861,39 @@ function Get-RemoteEditorLaunchStrategies {
         [Parameter(Mandatory)][string]$Alias,
         [Parameter(Mandatory)][string]$RemotePath,
         [Parameter(Mandatory)][string]$Uri,
-        [switch]$NewWindow
+        [switch]$NewWindow,
+        # When the shared profile already has windows open, ONLY try --remote. Live 2026-07-25:
+        # cascading to remote-classic / folder-uri / folder-uri-classic within ~5s of the first
+        # --remote IPC handoff interrupts Cursor mid-connect; the folder never settles, connect
+        # reports LAUNCH_FAIL, then a SINGLE later --remote (manual) opens the project fine.
+        # Warm handoff also often navigates the EXISTING window (title changes, window-count does
+        # not) - folder-uri warm paths are known to land on Welcome and only make that worse.
+        [switch]$WarmHandoff
     )
     $path = $RemotePath.TrimEnd('/')
     $remoteArg = "ssh-remote+${Alias}"
     $strategies = @()
+
+    # Strategy ORDER matters. Live-verified 2026-07-25 (Cursor 3.x, Windows, warm instance):
+    #
+    #   --remote ssh-remote+<alias> <path>      -> opens the REAL folder in a new window, both
+    #                                              cold AND when Cursor is already running (warm
+    #                                              IPC handoff). Confirmed via screenshot: a fresh
+    #                                              window loaded "<PROJECT> [SSH: <alias>]" in the
+    #                                              explorer, not the Welcome/Agents splash.
+    #   --folder-uri=vscode-remote://ssh-remote+.../<path>  -> works when Cursor is CLOSED, but on
+    #                                              a warm handoff Cursor lands on the Welcome/Agents
+    #                                              page and NEVER opens the folder (Cursor forum
+    #                                              #153009, #165329; microsoft/vscode #209072). The
+    #                                              '=' form survives Chromium's '://' arg filter but
+    #                                              does NOT fix the warm-handoff welcome-page bug.
+    #
+    # So --remote MUST come first. It was previously last, behind folder-uri-classic/folder-uri,
+    # so every warm launch (picking a 2nd/3rd project while a window is open) opened Welcome and
+    # the real folder never loaded (project "smart"/"deploy" "did not open" reports 2026-07-25).
+    # folder-uri variants are kept only as cold-start fallbacks. --classic is not needed for the
+    # folder to open (the verified working invocation had no --classic) and is demoted to fallback.
+    $folderUriArg = "--folder-uri=$Uri"
 
     if ($EditorCmd -eq 'cursor') {
         $profileDir = Get-CursorRemoteProfileDir
@@ -1741,20 +1901,24 @@ function Get-RemoteEditorLaunchStrategies {
         $common += @(Get-CursorProxyLaunchArgs)
         if ($NewWindow) { $common += '--new-window' }
         $strategies += [PSCustomObject]@{
-            Name = 'folder-uri-classic'
-            Args = $common + @('--classic', '--folder-uri', $Uri)
+            Name = 'remote'
+            Args = $common + @('--remote', $remoteArg, $path)
         }
-        $strategies += [PSCustomObject]@{
-            Name = 'folder-uri'
-            Args = $common + @('--folder-uri', $Uri)
+        if ($WarmHandoff) {
+            # One strategy, long poll outside - do NOT cascade folder-uri / classic (interrupts IPC).
+            return $strategies
         }
         $strategies += [PSCustomObject]@{
             Name = 'remote-classic'
             Args = $common + @('--classic', '--remote', $remoteArg, $path)
         }
         $strategies += [PSCustomObject]@{
-            Name = 'remote'
-            Args = $common + @('--remote', $remoteArg, $path)
+            Name = 'folder-uri'
+            Args = $common + @($folderUriArg)
+        }
+        $strategies += [PSCustomObject]@{
+            Name = 'folder-uri-classic'
+            Args = $common + @('--classic', $folderUriArg)
         }
         return $strategies
     }
@@ -1762,13 +1926,15 @@ function Get-RemoteEditorLaunchStrategies {
     $profileDir = Get-CodeRemoteProfileDir
     $common = @('--user-data-dir', $profileDir)
     if ($NewWindow) { $common += '--new-window' }
-    $strategies += [PSCustomObject]@{
-        Name = 'folder-uri'
-        Args = $common + @('--folder-uri', $Uri)
-    }
+    # --remote first (see cursor branch above): it opens the real folder on a warm handoff,
+    # whereas --folder-uri lands on Welcome when the editor is already running.
     $strategies += [PSCustomObject]@{
         Name = 'remote'
         Args = $common + @('--remote', $remoteArg, $path)
+    }
+    $strategies += [PSCustomObject]@{
+        Name = 'folder-uri'
+        Args = $common + @($folderUriArg)
     }
     return $strategies
 }
@@ -2148,7 +2314,11 @@ function Launch-RemoteEditor {
         "elevated=$(Test-IsElevatedShell) known_on_folder=$KnownOnFolder auth_relaunch=$AuthRelaunch"
     ) 'INFO'
 
-    if ($onFolder -and -not $agentHome) {
+    # $onFolder is now a project-scoped title/URI/cmd check (it no longer globally short-circuits on a
+    # standalone "Cursor Agents" window), so it is authoritative on its own: if THIS project's window is
+    # open, skip relaunch even when an unrelated agents window is also present. Gating on -not $agentHome
+    # here made connect relaunch a project that was already open whenever a Cursor Agents window existed.
+    if ($onFolder) {
         Write-EditorLaunchLog (
             "EDITOR_DECISION: skip_launch reason=already_on_folder on_folder=$onFolder agent_home=$agentHome " +
             "profile_main=$hasProfileWindow profile_all=$profileProcCount"
@@ -2191,10 +2361,13 @@ function Launch-RemoteEditor {
     }
 
     $swPlan = [System.Diagnostics.Stopwatch]::StartNew()
-    $strategies = @(Get-RemoteEditorLaunchStrategies -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -Uri $uri -NewWindow:$useNewWindow)
+    # Warm = profile already has activity (windows or helpers). Use --remote ONLY so we do not
+    # barrage Cursor's IPC with folder-uri retries that interrupt the in-flight handoff.
+    $warmHandoff = ($useNewWindow -and $profileProcCount -gt 0)
+    $strategies = @(Get-RemoteEditorLaunchStrategies -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -Uri $uri -NewWindow:$useNewWindow -WarmHandoff:$warmHandoff)
     $swPlan.Stop()
-    Write-LaunchPerfLog -Mark 'launch_strategies_plan' -Ms $swPlan.ElapsedMilliseconds -Extra "count=$($strategies.Count)"
-    Write-EditorLaunchLog "LAUNCH_STRATEGIES: count=$($strategies.Count) names=$($strategies.Name -join ',')" 'INFO'
+    Write-LaunchPerfLog -Mark 'launch_strategies_plan' -Ms $swPlan.ElapsedMilliseconds -Extra "count=$($strategies.Count) warm=$warmHandoff"
+    Write-EditorLaunchLog "LAUNCH_STRATEGIES: count=$($strategies.Count) warm=$warmHandoff names=$($strategies.Name -join ',')" 'INFO'
 
     $attempt = 0
     $anyStarted = $false
@@ -2262,7 +2435,17 @@ function Launch-RemoteEditor {
         # shortening only these retries cuts real wasted time (measured ~8s/strategy x 3
         # retries) without touching the important first attempt or genuine cold-start
         # launches (no existing profile window), which still get the full 12-tick budget.
-        $pollMaxTicks = if ($attempt -gt 1 -and $useNewWindow -and $profileProcCount -gt 0) { 6 } else { 12 }
+        # Warm handoff: Cursor often navigates the EXISTING profile window to the new folder
+        # (title changes, window-count does NOT increase - live 2026-07-25 dakhl). Remote-SSH
+        # title update routinely takes 8-15s. The old 5s ceiling (20 ticks) exhausted before
+        # on_folder became true, then cascaded into folder-uri retries that interrupted IPC and
+        # reported LAUNCH_FAIL even though a single later --remote would open the project.
+        # Warm attempt 1 now waits up to 20s (80 ticks); success still returns on the first tick
+        # that sees on_folder / window-count, so the happy path pays nothing extra.
+        $pollMaxTicks =
+            if ($attempt -gt 1 -and $useNewWindow -and $profileProcCount -gt 0) { 6 }
+            elseif ($attempt -eq 1 -and $useNewWindow -and $profileProcCount -gt 0) { 80 }
+            else { 12 }
         for ($pollTick = 1; $pollTick -le $pollMaxTicks; $pollTick++) {
             Start-Sleep -Milliseconds $pollMs
             Clear-CursorProcessCache
@@ -2288,14 +2471,21 @@ function Launch-RemoteEditor {
             ) 'DEBUG'
             Write-LaunchPerfLog -Mark "poll_${elapsedMs}ms" -Ms $elapsedMs -Extra "on_folder=$afterFolder strategy=$($strategy.Name)"
 
-            if (($afterFolder -or $windowCountIncreased) -and -not $afterAgent) {
-                # Return on first on_folder hit - the extra recheck added latency without
-                # preventing false positives in practice. $windowCountIncreased corroborates (or,
-                # for the IPC-handoff case, independently substitutes for) the title/URI check.
-                if (-not $afterFolder -and $windowCountIncreased) {
-                    Write-EditorLaunchLog "LAUNCH_OK_WINDOW_COUNT: strategy=$($strategy.Name) attempt=$attempt reason=window_count_increased_no_title_match" 'INFO'
-                }
-                Write-EditorLaunchLog "LAUNCH_OK: strategy=$($strategy.Name) attempt=$attempt" 'INFO'
+            # Success model (2026-07-25, "opening matters, not the title"):
+            #   1) $afterFolder  -> the target project window is detected (title/URI/cmd for THIS
+            #      project). This is authoritative and is NOT vetoed by the global agent_home flag: a
+            #      standalone "Cursor Agents" window coexisting with the project window is normal in
+            #      Cursor 3.x and must not turn a real success into a failure.
+            #   2) $windowCountIncreased -> a brand-new top-level window materialized for our launch
+            #      (the reliable --remote-handoff signal). Only this fallback stays gated by
+            #      -not $afterAgent, to guard the rare folder-uri case where a NEW window lands on the
+            #      agents splash instead of the folder.
+            $launchOk = $false
+            $okReason = ''
+            if ($afterFolder) { $launchOk = $true; $okReason = 'on_folder' }
+            elseif ($windowCountIncreased -and -not $afterAgent) { $launchOk = $true; $okReason = 'window_count_increased_no_title_match' }
+            if ($launchOk) {
+                Write-EditorLaunchLog "LAUNCH_OK: strategy=$($strategy.Name) attempt=$attempt reason=$okReason agent_home=$afterAgent" 'INFO'
                 $script:LastLaunchAttempts += "${attempt}:$($strategy.Name):folder=$afterFolder:agent=$afterAgent:wincount=$windowCountIncreased"
                 $script:LaunchPerfSw.Stop()
                 Write-LaunchPerfLog -Mark 'launch_total' -Ms $script:LaunchPerfSw.ElapsedMilliseconds -Extra "path=ok strategy=$($strategy.Name)"
@@ -2317,6 +2507,24 @@ function Launch-RemoteEditor {
         }
 
         Write-EditorLaunchLog "LAUNCH_RETRY: strategy=$($strategy.Name) did not reach target folder - next strategy" 'WARN'
+    }
+
+    # Warm grace: the --remote IPC handoff may still be settling (same-window title update).
+    # One more short poll for on_folder before declaring failure - covers the case where the
+    # primary poll ceiling just barely missed the title flip.
+    if ($anyStarted -and $warmHandoff) {
+        Write-EditorLaunchLog 'LAUNCH_GRACE: warm handoff - waiting up to 10s more for on_folder' 'INFO'
+        for ($g = 1; $g -le 40; $g++) {
+            Start-Sleep -Milliseconds 250
+            Clear-CursorProcessCache
+            if (Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath) {
+                Write-EditorLaunchLog ("LAUNCH_OK: strategy=grace attempt=post reason=on_folder elapsed={0}ms" -f ($g * 250)) 'INFO'
+                $script:LastLaunchAttempts += "grace:on_folder"
+                $script:LaunchPerfSw.Stop()
+                Write-LaunchPerfLog -Mark 'launch_total' -Ms $script:LaunchPerfSw.ElapsedMilliseconds -Extra 'path=ok strategy=grace'
+                return $true
+            }
+        }
     }
 
     Write-EditorLaunchVerboseState -Label 'EXHAUSTED' -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot -ForceLog

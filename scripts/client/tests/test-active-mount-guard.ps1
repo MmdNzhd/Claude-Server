@@ -22,7 +22,12 @@ $push = Get-FunctionSource $gm 'Push-ServerConnectConf'
 Assert ($push.Length -gt 100) 'Push-ServerConnectConf exists'
 Assert ($push -match 'ACTIVE_MOUNT_GUARD') 'Logs ACTIVE_MOUNT_GUARD'
 Assert ($push -match 'other_still_mounted|still_mounted') 'Guard reason other_still_mounted'
-Assert ($push -match 'Test-ProjectMountHealthy') 'Guard checks live mount of current ACTIVE_MOUNT'
+# The live-mount guard runs REMOTELY inside the shipped ACTIVE_MOUNT_GUARD body via `mountpoint -q`
+# on $HOME/mounts/$CUR_AM (perf: 2026-07-25 this replaced a separate client-side
+# `claude-mount check` / Test-ProjectMountHealthy pre-check that cost an extra ~1.5s SSH round trip
+# and read a possibly-stale client cache instead of the server's live conf). Assert the guard by
+# the mechanism that actually enforces it now, not the removed client-side pre-check.
+Assert ($push -match 'mountpoint -q "`?\$HOME/mounts/`?\$CUR_AM"') 'Guard checks live mount of current ACTIVE_MOUNT (remote mountpoint -q, no extra round trip)'
 
 Write-Host ''
 Write-Host "Passed: $passed  Failed: $failed" -ForegroundColor $(if ($failed -eq 0) { 'Green' } else { 'Red' })

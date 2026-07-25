@@ -20,13 +20,24 @@ function Assert($cond, $msg) {
 Write-Host ''
 Write-Host '=== Setup-launch debounce bounded wait (Bug 11/13) LIVE ===' -ForegroundColor Cyan
 
-$setupFile = Join-Path $script:RepoRoot 'publish\_setup-launch-body.ps1'
-if (-not (Test-Path -LiteralPath $setupFile)) {
-    Write-Host "  FAIL  could not find publish/_setup-launch-body.ps1 at $setupFile" -ForegroundColor Red
+# The debounce + Global\ClaudeConnectExeLaunch mutex release moved into the DETACHED worker
+# (publish/_setup-worker-body.ps1) so setup-launch.ps1 exits fast and no longer holds wextract's
+# single-instance mutex through the debounce. The bounded-debounce contract now applies to the
+# worker file; setup-launch.ps1 must have NO sleep at all.
+$launchFile = Join-Path $script:RepoRoot 'publish\_setup-launch-body.ps1'
+$setupFile = Join-Path $script:RepoRoot 'publish\_setup-worker-body.ps1'
+if (-not (Test-Path -LiteralPath $launchFile)) {
+    Write-Host "  FAIL  could not find publish/_setup-launch-body.ps1 at $launchFile" -ForegroundColor Red
     exit 1
 }
+if (-not (Test-Path -LiteralPath $setupFile)) {
+    Write-Host "  FAIL  could not find publish/_setup-worker-body.ps1 at $setupFile" -ForegroundColor Red
+    exit 1
+}
+$launchContent = Get-Content -LiteralPath $launchFile -Raw
 $content = Get-Content -LiteralPath $setupFile -Raw
 
+Assert ($launchContent -notmatch 'Start-Sleep') 'FIXED: setup-launch.ps1 holds NO sleep (does not block wextract''s single-instance mutex)'
 Assert ($content -notmatch 'Start-Sleep -Seconds 20\b') 'FIXED: the old unconditional Start-Sleep -Seconds 20 debounce is gone from source'
 
 if ($content -match '\$debounceMs\s*=\s*(\d+)') {

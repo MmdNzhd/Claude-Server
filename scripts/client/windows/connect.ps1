@@ -120,10 +120,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260724.16'
+$script:ConnectVersion = '20260725.38'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = 'd502e33a-c903-4aed-a90d-20d8116b2a87'
+$script:ConnectBuildId = 'c657a031-06ee-4137-bed9-9778e96aa9e7'
 $CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
@@ -1019,6 +1019,77 @@ function SshX([string]$Cmd, [switch]$NoRetryOnTimeout) {
     return $result.Lines
 }
 
+function Start-MountProjectBackground {
+    # User request (2026-07-24): "Mounting files" only matters for Cursor's remote file-tree
+    # UI (SSHFS mounts the laptop disk onto the server) - agent work goes through laptop-exec /
+    # SSH-first per CLAUDE.md, never through this mount, so nothing actually needs to wait on
+    # it. Cold mounts measured 13-25s in real sessions; kicking it off detached and moving
+    # straight to "Opening Cursor" removes that whole wait from the visible critical path.
+    # Deliberately minimal (own plain `ssh` call, not the full Invoke-MountProject/SshX chain)
+    # matching the established Start-WindowsMcpEnsureBackground pattern - a detached child
+    # process cannot safely reuse this script's own top-level state.
+    param(
+        [Parameter(Mandatory)][string]$ProjectId,
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][string]$LogDir,
+        [Parameter(Mandatory)][string]$SessionId
+    )
+    $runnerDir = Join-Path $env:TEMP 'claude-connect-mountbg'
+    if (-not (Test-Path -LiteralPath $runnerDir)) { New-Item -ItemType Directory -Force -Path $runnerDir | Out-Null }
+    $runnerPath = Join-Path $runnerDir ("mount-bg-{0}.ps1" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $runner = @'
+param(
+    [Parameter(Mandatory)][string]$ProjectId,
+    [Parameter(Mandatory)][string]$Alias,
+    [Parameter(Mandatory)][string]$LogDir,
+    [Parameter(Mandatory)][string]$SessionId
+)
+$ErrorActionPreference = 'Continue'
+function Write-MountBgLog([string]$Msg, [string]$Level = 'INFO') {
+    try {
+        if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null }
+        $day = Join-Path $LogDir ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd'))
+        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+        [System.IO.File]::AppendAllText($day, "[$ts] [$Level] [$SessionId] $Msg`r`n", [System.Text.UTF8Encoding]::new($false))
+    } catch { }
+}
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+Write-MountBgLog "MOUNT_BG_BEGIN project=$ProjectId"
+try {
+    $mountCmd = "CLAUDE_TRUSTED_TUNNEL=1 CLAUDE_TUNNEL_BANNER_OK=1 `$HOME/.local/bin/claude-mount up '$ProjectId' 2>&1"
+    $out = & ssh -n -o BatchMode=yes -o ConnectTimeout=15 $Alias $mountCmd 2>&1
+    $ec = $LASTEXITCODE
+    $sw.Stop()
+    $outJoined = (($out -join ' ') -replace '\s+', ' ').Trim()
+    if ($ec -eq 0) {
+        Write-MountBgLog ("MOUNT_BG_OK project=$ProjectId ms={0} out={1}" -f $sw.ElapsedMilliseconds, $outJoined)
+    } else {
+        Write-MountBgLog ("MOUNT_BG_FAIL project=$ProjectId exit=$ec ms={0} out={1} - press O to reopen editor after fixing, or R to reconnect" -f $sw.ElapsedMilliseconds, $outJoined) 'WARN'
+    }
+} catch {
+    Write-MountBgLog ("MOUNT_BG_EXCEPTION project=$ProjectId error=$($_.Exception.Message)") 'WARN'
+}
+'@
+    Set-Content -LiteralPath $runnerPath -Value $runner -Encoding UTF8
+    try {
+        $argList = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+            '-File', $runnerPath,
+            '-ProjectId', $ProjectId, '-Alias', $Alias, '-LogDir', $LogDir, '-SessionId', $SessionId
+        )
+        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WindowStyle Hidden -PassThru -ErrorAction Stop
+        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+            Write-ConnectLog "MOUNT_BG_STARTED project=$ProjectId pid=$($p.Id)" 'INFO'
+        }
+        return $true
+    } catch {
+        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+            Write-ConnectLog "MOUNT_BG_START_FAILED project=$ProjectId error=$($_.Exception.Message)" 'WARN'
+        }
+        return $false
+    }
+}
+
 function Begin-ConnectRecovery {
     param(
         [Parameter(Mandatory)][ValidateSet('manual', 'auto')][string]$Trigger,
@@ -1104,7 +1175,14 @@ function Write-SessionDiagnosticReport {
     if (-not (Get-Command Write-ConnectDiagnosticReport -ErrorAction SilentlyContinue)) { return $null }
     $agentHome = $false
     $windowOpen = $false
-    if ($EditorCmd -eq 'cursor') {
+    # Happy-path SESSION_OPEN (folder open + mount ok + auth not broken): the verdict returns
+    # CURSOR_ON_FOLDER_OK before AgentHome/WindowOpen are ever consulted, so skip these two
+    # process-scan probes - they were adding avoidable work right after the window already opened.
+    # AuthOk=$false is the NORMAL steady state (auth-sync skipped when stamp current), so gate on
+    # "auth not genuinely failed" - otherwise the light path never fires on a happy reconnect.
+    $authFine = ($AuthOk -ne $false) -or ($AuthDetail -match 'skip')
+    $lightOpen = ($Phase -eq 'SESSION_OPEN' -and $OnFolder -and $MountOk -and $authFine)
+    if ($EditorCmd -eq 'cursor' -and -not $lightOpen) {
         if (Get-Command Test-RemoteEditorInAgentHome -ErrorAction SilentlyContinue) {
             $agentHome = Test-RemoteEditorInAgentHome
         }
@@ -1188,7 +1266,54 @@ function Get-Mounts {
             }
         }
     } catch {}
+    # Write-through cache: the catalog changes rarely, but every SSH here costs a full ~1.6s
+    # handshake (no ControlMaster on Windows). Persist the freshest good result so the NEXT
+    # launch can render the menu instantly from disk (Get-MountsCached) while this session
+    # still shows live data. Only cache non-empty results (never poison the cache on a failed
+    # fetch). add/edit/delete call Get-Mounts directly, so they rewrite the cache too.
+    if (@($out).Count -gt 0) {
+        try {
+            $cp = Get-MountsCachePath
+            $cdir = Split-Path -Parent $cp
+            if ($cdir -and -not (Test-Path -LiteralPath $cdir)) { New-Item -ItemType Directory -Force -Path $cdir | Out-Null }
+            (@($out) | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $cp -Encoding UTF8
+        } catch {}
+    }
     return $out
+}
+
+function Get-MountsCachePath {
+    $dir = if ($script:CfgDir) { $script:CfgDir } elseif ($CfgDir) { $CfgDir } else { Join-Path $env:USERPROFILE '.config\claude-connect' }
+    return (Join-Path $dir 'mounts-cache.json')
+}
+
+function Get-MountsCached {
+    # Menu-path loader: return the on-disk catalog instantly when it is recent, else fall back to
+    # a live Get-Mounts (which also refreshes the cache). TTL bounds staleness; add/edit/delete
+    # always go through Get-Mounts, so user-driven changes are reflected immediately.
+    param([int]$CacheTtlSec = 900)
+    $cachePath = Get-MountsCachePath
+    try {
+        if (Test-Path -LiteralPath $cachePath) {
+            $ageSec = ((Get-Date) - (Get-Item -LiteralPath $cachePath).LastWriteTime).TotalSeconds
+            if ($ageSec -lt $CacheTtlSec) {
+                $raw = Get-Content -LiteralPath $cachePath -Raw -ErrorAction Stop
+                # PS 5.1 quirk: ConvertFrom-Json emits a JSON array as ONE non-enumerated pipeline
+                # object, so wrapping that pipeline directly in an array subexpression collapses all
+                # rows into a single element whose properties are arrays (the "1 garbled project"
+                # bug). Assign the parse result to a variable FIRST, THEN wrap it in @().
+                $parsed = $raw | ConvertFrom-Json
+                $cached = @($parsed)
+                if (@($cached).Count -gt 0) {
+                    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                        Write-ConnectLog ("MENU: mounts_cache_hit count={0} age_s={1}" -f @($cached).Count, [int]$ageSec) 'DEBUG'
+                    }
+                    return $cached
+                }
+            }
+        }
+    } catch {}
+    return @(Get-Mounts)
 }
 
 function Select-Mount($mounts, $n) {
@@ -1670,7 +1795,7 @@ $exitRequested = $false
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
         Write-ConnectLog 'MENU: loading_projects begin' 'DEBUG'
     }
-    $null = ($allMounts = @(Get-Mounts))
+    $null = ($allMounts = @(Get-MountsCached))
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
         Write-ConnectLog ("MENU: mounts_loaded count={0}" -f @($allMounts).Count) 'DEBUG'
     }
@@ -2025,71 +2150,26 @@ $script:WindowsMcpEnsured = $false
                 $mountOut = $mountResult.Out
                 $mountT = 0
             } else {
+                # User request (2026-07-24): don't block the connect UI on a cold SSHFS mount -
+                # it only serves Cursor's remote file-tree view (agent work goes through
+                # laptop-exec, never this mount, per CLAUDE.md). Kick it off detached and
+                # proceed straight to Opening Cursor; the background runner logs
+                # MOUNT_BG_OK/MOUNT_BG_FAIL to this same day log (grep by session id) for
+                # after-the-fact diagnosis instead of blocking with a synchronous retry/fail
+                # prompt here.
                 Step "Mounting files"
-                $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
-                $mountResult = Invoke-MountProject -ProjectId $go.Id -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias -TrustedTunnel -CheckOkHint $recoverCheckOk
+                [void](Start-MountProjectBackground -ProjectId $go.Id -Alias $Alias -LogDir (Join-Path $env:USERPROFILE '.config\claude-connect\logs') -SessionId (Get-ConnectSessionId))
+                $mountResult = [pscustomobject]@{ Ok = $true; Out = 'started_in_background'; Skipped = $true }
                 $mountOut = $mountResult.Out
-                $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
+                $mountT = 0
             }
             $mountOk  = $mountResult.Ok
 
-            if (-not $mountOk -and $mountOut -match 'key auth failed|connection reset|reset by peer|publickey|Permission denied') {
-                Write-Host ' retrying...' -ForegroundColor DarkGray
-                Write-Host "      -> $($mountOut.Trim())" -ForegroundColor DarkGray
-                if ($mountOut -match 'connection reset|reset by peer') {
-                    Warn 'Connection reset - killing stale mounts, fixing firewall, restarting sshd'
-                    SshX 'pkill -u "$USER" sshfs 2>/dev/null; true' 2>$null | Out-Null
-                    $null = Invoke-LaptopAdminOps -PubB '' -FirewallFix -ForceRestart:$false
-                } else {
-                    Warn 'Key rejected - reinstalling server key and restarting sshd'
-                }
-                $newPub = ((SshX 'cat ~/.ssh/claude_laptop.pub') -join '').Trim()
-                if (-not $newPub) { Warn 'Could not fetch server public key - skipping key reinstall' }
-                if ($newPub) {
-                    $null = Invoke-LaptopAdminOps -PubB $newPub -ForceRestart
-                    Write-Host '      -> waiting for sshd to stabilize...' -ForegroundColor DarkGray
-                    Start-Sleep -Seconds 2
-                    $script:LaptopSshVerified = $false
-                    if (-not (Test-TunnelUp)) {
-                        Write-Host ''; Warn 'Tunnel dropped after sshd restart - reconnecting...'
-                        continue
-                    }
-                    $postRestartRc = Ensure-LaptopReverseSshCached -PubB $newPub
-                    if ($postRestartRc -ne 0) {
-                        StepFail 'tunnel auth failed after sshd restart'
-                        continue
-                    }
-                    Write-Host '      -> tunnel: alive' -ForegroundColor DarkGray
-                    Step 'Mounting files'
-                    $mountSW = [System.Diagnostics.Stopwatch]::StartNew()
-                    $mountResult = Invoke-MountProject -ProjectId $go.Id -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias -TrustedTunnel
-                    $mountOut = $mountResult.Out
-                    $mountSW.Stop(); $mountT = [math]::Round($mountSW.Elapsed.TotalSeconds, 1)
-                    $mountOk  = $mountResult.Ok
-                }
+            if ($mountOut -eq 'started_in_background') {
+                StepOk 'started in background'
+            } else {
+                StepOk "${mountT}s"
             }
-
-            if (-not $mountOk) {
-                if ($script:adminFixAttempted) {
-                    Warn ('Auto-fix exhausted: {0} - try e edit path, then R' -f $mountOut.Trim())
-                }
-                StepFail $mountOut.Trim()
-                if ($mountOut -match 'No such file|cannot find|path does not exist' -and $mountOut -notmatch 'command not found|_emit_git') {
-                    Warn "Path not found on laptop. Use 'e edit' to correct the project path."
-                } elseif ($mountOut -match 'command not found|_emit_git_hide_warn') {
-                    Warn "Server mount script broken/outdated - reconnect to re-push claude-mount (or re-run publish deploy)."
-                }
-                Complete-PostTunnelRecovery -MountOk $false -AuthDetail 'mount_failed' `
-                    -ProjectId $go.Id -RemotePath $go.Path -EditorCmd $EditorCmd -EditorName $EditorName
-                Write-Host ""
-                Write-Host "    R = retry   Q = quit" -ForegroundColor DarkGray
-                $rk = Read-RetryQuitKey
-                if ($rk -eq 'r') { Write-Host ""; continue }
-                Push-ServerConnectConf -ClearActiveMount
-                $alreadyDown = $true; break sessionLoop
-            }
-
-            StepOk "${mountT}s"
             $alreadyDown = $false
             # Windows-MCP install/start/sync is intentionally backgrounded: uv/tool
             # install can take tens of seconds and must never slow the connect UI.
@@ -2322,13 +2402,23 @@ $script:WindowsMcpEnsured = $false
             if ($authRelaunch -and $EditorCmd -eq 'cursor' -and (Get-Command Get-CursorProfileProcesses -ErrorAction SilentlyContinue)) {
                 try { $profileAlreadyOpen = (@(Get-CursorProfileProcesses).Count -gt 0) } catch { $profileAlreadyOpen = $false }
             }
-            if ($authRelaunch -and $profileAlreadyOpen) {
+            # Preserve existing windows ONLY when we are already on the target folder (a pure auth
+            # refresh after a tunnel flap - nothing new to open). If the target project folder is
+            # NOT open yet, we MUST still open it: this branch used to swallow a FRESH project pick
+            # whenever ANY profile window was open + auth was re-synced (e.g. daily golden refresh),
+            # leaving CURSOR_NOT_OPEN with no launch attempt (live repro 2026-07-25, project=deploy
+            # while 25 other-project windows were open). Launch-RemoteEditor never kills on
+            # AuthRelaunch and opens a --new-window, so opening the picked project does not disturb
+            # the other windows.
+            $skipForPreserve = ($authRelaunch -and $profileAlreadyOpen -and $onCorrectFolder)
+            if ($skipForPreserve) {
                 Write-ConnectLog 'EDITOR_LAUNCH skip_auth_relaunch reason=profile_windows_open_preserve_after_tunnel_recovery' 'WARN'
-                if ($onCorrectFolder) {
-                    $launchOk = $true
-                }
+                $launchOk = $true
             }
-            if ((-not $profileAlreadyOpen) -and ($authRelaunch -or (-not $editorOpened -and -not $onCorrectFolder))) {
+            if ($authRelaunch -and $profileAlreadyOpen -and -not $onCorrectFolder) {
+                Write-ConnectLog 'EDITOR_LAUNCH new_project_new_window despite_profile_windows_open reason=target_folder_not_open' 'INFO'
+            }
+            if ((-not $skipForPreserve) -and ($authRelaunch -or (-not $editorOpened -and -not $onCorrectFolder))) {
                 if ($authRelaunch -and $onCorrectFolder) {
                     Step "Reloading $EditorName (auth refresh)"
                     Write-ConnectLog 'EDITOR_LAUNCH auth_relaunch despite already_on_folder' 'INFO'
@@ -2360,8 +2450,6 @@ $script:WindowsMcpEnsured = $false
                             Write-Host '      -> Server profile [Claude Server Code] - personal VS Code is separate' -ForegroundColor DarkGray
                         }
                     }
-                    Write-Host ""
-                    Write-Host "    Run 'claude' in the $EditorName terminal." -ForegroundColor DarkGray
                 }
             } elseif ($onCorrectFolder) {
                 Write-ConnectLog 'EDITOR_LAUNCH_SKIP reason=known_on_folder'
@@ -2439,6 +2527,7 @@ $script:WindowsMcpEnsured = $false
             $script:lastToastAt = $null
             $tunnelSyncOk = $true
                         $lastEditorCheckAt = [DateTime]::MinValue
+            $lastWmcpMaintainAt = [DateTime]::MinValue
             $onFolderNow = $editorOpened
             $editorLabel = if ($editorOpened) { $EditorName } else { 'closed' }
             $script:EditorClosedPollStreak = 0
@@ -2446,6 +2535,20 @@ $script:WindowsMcpEnsured = $false
                 # Sync is authoritative (reattach + probe). Do NOT call Test-TunnelUp every tick.
                 $tunnelSyncOk = [bool](Sync-SessionTunnelProcess -BgTunnel ([ref]$bgTunnel))
                 if (-not $tunnelSyncOk) { break }
+                # Keep windows-mcp forward alive without touching the reverse tunnel /
+                # Cursor session. Every 3 min: listen + sync + HTTP probe (fail-soft).
+                if ((Get-Date) - $lastWmcpMaintainAt -gt [TimeSpan]::FromMinutes(3)) {
+                    $lastWmcpMaintainAt = Get-Date
+                    try {
+                        if (Get-Command Maintain-WindowsMcpSession -ErrorAction SilentlyContinue) {
+                            [void](Maintain-WindowsMcpSession)
+                        }
+                    } catch {
+                        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                            Write-ConnectLog ("WINDOWS_MCP: maintain_failed {0}" -f $_.Exception.Message) 'WARN'
+                        }
+                    }
+                }
                 # Editor CIM queries are expensive - at most every 2s (was every 200ms).
                 if ($EditorCmd -eq 'cursor' -and ((Get-Date) - $lastEditorCheckAt -gt [TimeSpan]::FromSeconds(2))) {
                     # WS5: single-pass presence query (was two separate CIM walks: OnFolder + WindowOpen).

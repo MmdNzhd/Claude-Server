@@ -16,11 +16,24 @@ $bodyPath = Join-Path $RepoRoot 'publish\_setup-launch-body.ps1'
 Assert (Test-Path -LiteralPath $bodyPath) '_setup-launch-body.ps1 exists'
 $body = Get-Content -LiteralPath $bodyPath -Raw
 
+# Worker: the slow update + boot + the ClaudeConnectExeLaunch double-launch gate now live in the
+# detached worker so setup-launch.ps1 can exit fast and release wextract's single-instance mutex.
+$workerPath = Join-Path $RepoRoot 'publish\_setup-worker-body.ps1'
+Assert (Test-Path -LiteralPath $workerPath) '_setup-worker-body.ps1 exists'
+$worker = Get-Content -LiteralPath $workerPath -Raw
+
 Assert ($body -match 'function Test-ConnectUiOpen') 'defines Test-ConnectUiOpen'
 Assert ($body -match 'Global\\ClaudeConnect#') 'probes Global\ClaudeConnect# slots'
-Assert ($body -match 'ClaudeConnectExeLaunch') 'keeps ExeLaunch debounce mutex'
+Assert ($worker -match 'ClaudeConnectExeLaunch') 'ExeLaunch double-launch gate lives in the detached worker'
 Assert ($body -match '10 Claude Connect') 'MessageBox/text mentions 10 Claude Connect'
 Assert ($body -match 'already open') 'MessageBox/text mentions already open'
+
+# setup-launch.ps1 must exit fast: spawn the detached worker, and NOT run the update inline.
+Assert ($body -match 'setup-worker\.ps1') 'setup-launch spawns the detached setup-worker.ps1'
+Assert (-not ($body -match '&\s+\$upd\b')) 'setup-launch does NOT run the update inline (moved to worker - keeps wextract mutex hold short)'
+Assert (-not ($body -match 'Start-Sleep')) 'setup-launch has no debounce sleep (would hold wextract mutex) - debounce moved to worker'
+Assert ($worker -match '&\s+\$upd\b') 'worker runs the update check'
+Assert ($worker -match 'connect-boot\.ps1') 'worker starts connect-boot.ps1'
 
 # Must NOT gate on connect.ps1/connect-boot.ps1 process CommandLine (false single-instance)
 Assert (-not ($body -match "(?i)CommandLine -match '\(\?i\)connect-boot")) 'no connect-boot CommandLine process gate'

@@ -1,0 +1,26 @@
+---
+description: >-
+  Opt-in routing for the custom planning flow. Agents MUST NOT proactively
+  offer or ask about planning on their own — only route to the
+  heavy-task-plan skill when the user explicitly requests a plan.
+alwaysApply: true
+---
+
+# Plan Routing (opt-in only)
+
+Do **not** proactively ask the user whether to plan, and do not bring up
+planning on your own initiative — not even for heavy/multi-file tasks. Stay
+silent about this and just work normally.
+
+Only act when the **user's own words** ask for a plan first — e.g. "plan
+this", "make a plan before doing it", "برنامه بریز", "پلن کن", "let's design
+this first", or they explicitly name the skill.
+
+- User did not ask for a plan → proceed with the normal agent workflow.
+  Never mention this rule or offer a plan unprompted.
+- User explicitly asked for a plan → read and follow
+  `~/.cursor/skills/heavy-task-plan/SKILL.md` before writing any code.
+
+If unsure whether the user is asking for a plan (ambiguous wording), it's
+fine to ask a direct clarifying question — but only after they've already
+signaled they want one, never as an unprompted offer.

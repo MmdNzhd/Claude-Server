@@ -37,15 +37,18 @@ Assert ($initSrc -notmatch '\[Claude Server\]\s*\$\{rootName\}"') 'Initialize-Cu
 # writer and the 4 readers (via Get-CursorWindowTitleNeedle) can never drift apart again.
 Assert ($initSrc -match 'Get-CursorWindowTitleTag') 'Initialize-CursorServerProfile delegates the title tag to the shared Get-CursorWindowTitleTag helper (single source of truth with the 4 reader call sites), instead of inlining its own literal ternary'
 
-# Bug 2 GREEN-phase: the 4 call sites named in the bug report no longer hardcode the literal
-# '\[Claude Server\]' regex - they now call the shared (Get-CursorWindowTitleNeedle) helper,
-# which builds the needle dynamically from the real site tag. Count occurrences of THAT call
-# pattern instead of the old literal, so this test tracks source drift rather than re-deriving
-# the (now-fixed) bug.
-$needleCallSites = [regex]::Matches($content, '-match\s+\(Get-CursorWindowTitleNeedle\)')
-Assert ($needleCallSites.Count -ge 4) "found >= 4 call sites using the shared (Get-CursorWindowTitleNeedle) dynamic needle in editor-launch.ps1 (found $($needleCallSites.Count)) - matches the bug report's 4 line numbers (~1192,~1263,~1325,~1404), now building the needle from the real site tag instead of a hardcoded dead literal"
+# Bug 2 FINAL fix (supersedes the earlier Get-CursorWindowTitleNeedle approach): the 4 title-match
+# call sites now delegate to the shared, template-ANCHORED Test-CursorWindowTitleMatchesProject
+# helper. Anchoring the root name to its exact position in the title template ("[Claude Server
+# <Site>] <root>" / "<root> [SSH: <alias>]") fixes BOTH the original site-tag collision (project
+# "smart" matching the "Smart" in the tag) AND the prefix-sibling collision ("smart" in
+# "smartdesk", "ai" in "ai-gap-summay") that a bare dynamic needle could not. Count occurrences of
+# THAT call so this test tracks the current source of truth. (Behavioral proof that the real
+# site-tagged window is still detected follows below via the unmodified Test-RemoteEditorOnCorrectFolder.)
+$anchoredCallSites = [regex]::Matches($content, 'Test-CursorWindowTitleMatchesProject -Title')
+Assert ($anchoredCallSites.Count -ge 4) "found >= 4 call sites using the anchored Test-CursorWindowTitleMatchesProject helper in editor-launch.ps1 (found $($anchoredCallSites.Count)) - the 4 title-match sites (~1339,~1411,~1473,~1552) now anchor the root to the template position instead of a bare/needle substring"
 $staleLiteralSites = [regex]::Matches($content, "-match\s+'\\\[Claude Server\\\]'")
-Assert ($staleLiteralSites.Count -eq 0) "zero remaining hardcoded literal -match '\[Claude Server\]' call sites (found $($staleLiteralSites.Count)) - all 4 were migrated to the dynamic needle helper"
+Assert ($staleLiteralSites.Count -eq 0) "zero remaining hardcoded literal -match '\[Claude Server\]' call sites (found $($staleLiteralSites.Count)) - all migrated to the anchored matcher"
 
 # Extract the REAL production functions needed to exercise one full call site
 # (Test-RemoteEditorOnCorrectFolder's Get-ProcessTopLevelWindows loop, ~line 1263) plus the

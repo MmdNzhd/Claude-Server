@@ -1397,7 +1397,15 @@ proxy_health() {
         declare -F connect_log >/dev/null 2>&1 && connect_log "PROXY_HEALTH socks=$socks_port http=$http_port ok=0 reason=http_not_listening" 'WARN'
         return 1
     fi
-    ip="$(curl -sf --max-time 10 -x "http://127.0.0.1:${http_port}" -A claude-connect-proxy-health https://api.ipify.org 2>/dev/null | tr -d '
+    # Fast-fail when backend legs are down (front up + dead backend makes the probe hang to timeout).
+    local back_s back_h
+    back_s="${SOCKS_PROXY_PORT:-$(socks_proxy_port)}"
+    back_h="${HTTP_PROXY_PORT:-$(http_proxy_port)}"
+    if ! test_local_port_open "$back_s" || ! test_local_port_open "$back_h"; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log "PROXY_HEALTH socks=$socks_port http=$http_port ok=0 reason=backend_not_listening" 'WARN'
+        return 1
+    fi
+    ip="$(curl -sf --max-time 3 -x "http://127.0.0.1:${http_port}" -A claude-connect-proxy-health https://api.ipify.org 2>/dev/null | tr -d '
 ' || true)"
     if [ -z "$ip" ]; then
         declare -F connect_log >/dev/null 2>&1 && connect_log "PROXY_HEALTH socks=$socks_port http=$http_port ok=0 reason=empty_ip" 'WARN'

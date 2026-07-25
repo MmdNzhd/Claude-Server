@@ -22,8 +22,28 @@ fi
 # shellcheck disable=SC1090
 source "$CONF"
 KEY="${HOME}/.ssh/claude_laptop"
-FPORT="${WINDOWS_MCP_FORWARD_PORT:-18000}"
-LPORT="${WINDOWS_MCP_LOCAL_PORT:-8000}"
+# Default must be per-UID, NOT a shared literal: this forward binds 127.0.0.1:$FPORT
+# server-wide (single network namespace). A fixed 18000 for every user meant only the
+# first connected user could ever bind it; everyone else either got ECONNREFUSED (no
+# one holds it) or silently rode another user's tunnel (whoever holds it already).
+# ~/.config/windows-mcp/env normally pins the exact value the laptop computed the same
+# way (see Sync-WindowsMcpAuthToServer in windows-mcp-laptop.ps1); this is just the
+# fallback for a stale/missing env file.
+_default_wmcp_port() {
+  local uid base
+  uid="$(id -u)"
+  if [ "$uid" -ge 1000 ]; then
+    base=$((28000 + uid - 1000))
+  else
+    base=18000
+  fi
+  if [ "$base" -gt 65535 ]; then base=18000; fi
+  echo "$base"
+}
+FPORT="${WINDOWS_MCP_FORWARD_PORT:-$(_default_wmcp_port)}"
+# Default local port must match windows-mcp-laptop.ps1 (18765). Do NOT use 8000:
+# Hyper-V/WSL on Windows often reserves 7916-8015 (WinError 10013 on bind).
+LPORT="${WINDOWS_MCP_LOCAL_PORT:-18765}"
 TUNNEL_PORT="${TUNNEL_PORT:-}"
 LAPTOP_USER="${LAPTOP_USER:-}"
 
@@ -36,8 +56,27 @@ _listening() {
   ss -ltn "( sport = :$FPORT )" 2>/dev/null | grep -q ":$FPORT"
 }
 
+_listener_pids() {
+  # PIDs holding 127.0.0.1:FPORT — includes ControlMaster muxes whose argv
+  # no longer shows -L (so pkill -f on the forward string misses them).
+  ss -ltnp "( sport = :$FPORT )" 2>/dev/null \
+    | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
+    | sort -u
+}
+
 _stop() {
-  pkill -f "ssh.*-L 127.0.0.1:${FPORT}:127.0.0.1:${LPORT}" 2>/dev/null || true
+  # Prefer killing our dedicated forward argv (ControlMaster=no below). Fall
+  # back to FPORT holders only when they look like an ssh forward — never
+  # blindly kill laptop-exec's shared ControlMaster mux.
+  pkill -f "ssh.*-L 127.0.0.1:${FPORT}:127.0.0.1:" 2>/dev/null || true
+  local pid cmd
+  for pid in $(_listener_pids); do
+    cmd="$(tr '\0' ' ' </proc/$pid/cmdline 2>/dev/null || true)"
+    case "$cmd" in
+      *"-L 127.0.0.1:${FPORT}:127.0.0.1:"*) kill "$pid" 2>/dev/null || true ;;
+    esac
+  done
+  sleep 0.3
 }
 
 case "$CMD" in
@@ -55,14 +94,37 @@ case "$CMD" in
     exit 0
     ;;
   start|"")
-    if _listening; then
-      echo "windows-mcp-forward: already up on $FPORT"
+    # If a dedicated forward already targets the current LPORT, leave it.
+    # If FPORT is held by something else but HTTP already works, leave it too
+    # (never steal a live working path / never kill laptop-exec mux).
+    # Otherwise recreate (Hyper-V port moves, dead one-shot ssh -f -N).
+    # ControlMaster=no: keep this off laptop-exec's shared mux.
+    if _listening && pgrep -af "ssh.*-L 127.0.0.1:${FPORT}:127.0.0.1:${LPORT}" >/dev/null 2>&1; then
+      echo "windows-mcp-forward: already up on $FPORT -> laptop:$LPORT"
       exit 0
     fi
+    if _listening && [ -n "${WINDOWS_MCP_AUTH_KEY:-}" ]; then
+      _code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${FPORT}/mcp" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
+        -H "Authorization: Bearer ${WINDOWS_MCP_AUTH_KEY}" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"wmcp-fwd","version":"0"}}}' \
+        --max-time 3 2>/dev/null || echo 000)"
+      if [ "$_code" = "200" ]; then
+        echo "windows-mcp-forward: already healthy on $FPORT (http=200, leave live session)"
+        exit 0
+      fi
+    fi
     _stop
+    if _listening; then
+      echo "windows-mcp-forward: FPORT $FPORT still held after stop (not our forward); cannot bind" >&2
+      exit 1
+    fi
     ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
       -o StrictHostKeyChecking=accept-new \
-      -o IdentitiesOnly=yes -i "$KEY" \
+      -o IdentitiesOnly=yes \
+      -o ControlMaster=no -o ControlPath=none \
+      -i "$KEY" \
       -L "127.0.0.1:${FPORT}:127.0.0.1:${LPORT}" \
       -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1"
     echo "windows-mcp-forward: UP 127.0.0.1:${FPORT} -> laptop:${LPORT}"

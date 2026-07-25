@@ -226,9 +226,27 @@ function Write-ConnectDiagnosticReport {
         $localPortOpen = PortOpen '127.0.0.1' $Port
     }
     $mountPoint = ''; $pathExists = ''
-    $serverMount = Get-ServerMountDiagnostic -ProjectId $ProjectId -RemotePath $RemotePath
-    if ($serverMount -match 'mountpoint=(\w+)') { $mountPoint = $Matches[1] }
-    if ($serverMount -match 'path_exists=(\w+)') { $pathExists = $Matches[1] }
+    # Happy-path SESSION_OPEN (folder open + mount ok + auth not broken): the editor is already on the
+    # project folder, so Get-ServerMountDiagnostic's ~5 server-side SSH probes below
+    # (active/list/mountpoint/test-d/ls) are pure logging and were stalling the session ~5-7s
+    # AFTER the window had already opened. Skip them here - the verdict returns CURSOR_ON_FOLDER_OK
+    # (INFO) before MountPoint is ever consulted, and MountPoint='' can never trip the
+    # SSHFS_NOT_MOUNTED branch (which needs the literal 'no'). Any non-happy phase (a real problem
+    # to diagnose, RECOVERY, or OnFolder=false) still gathers the full picture.
+    #
+    # AuthOk=$false is the NORMAL steady state: auth-sync is skipped when the stamp is current
+    # (detail='skipped ...'), so gating on ($AuthOk -ne $false) made the light path never fire and
+    # the ~15s of heavy probes ran on every happy reconnect. Treat skipped auth as fine; only a
+    # genuine auth failure (AuthOk=$false with a non-skip detail) keeps the full diagnostic.
+    $authFine = ($AuthOk -ne $false) -or ($AuthDetail -match 'skip')
+    $lightDiag = ($Phase -eq 'SESSION_OPEN' -and $OnFolder -and $MountOk -and $authFine)
+    if ($lightDiag) {
+        $serverMount = 'skipped=light_session_open'
+    } else {
+        $serverMount = Get-ServerMountDiagnostic -ProjectId $ProjectId -RemotePath $RemotePath
+        if ($serverMount -match 'mountpoint=(\w+)') { $mountPoint = $Matches[1] }
+        if ($serverMount -match 'path_exists=(\w+)') { $pathExists = $Matches[1] }
+    }
 
     $expectedUri = ''
     if (Get-Command Get-RemoteFolderUri -ErrorAction SilentlyContinue) {
@@ -294,7 +312,7 @@ function Write-ConnectDiagnosticReport {
         $lines += "AUTH storage=$(Get-CursorProfileStorageDiag)"
     }
     $lines += "EDITOR on_folder=$OnFolder agent=$AgentHome window=$WindowOpen launch=$DidLaunch"
-    $lightDiag = ($Phase -eq 'SESSION_OPEN' -and $OnFolder -and $MountOk -and ($AuthOk -ne $false))
+    # $lightDiag already computed above (gates both Get-ServerMountDiagnostic and the process snapshot).
     if ($lightDiag) {
         $lines += "EDITOR summary=on_folder=$OnFolder launch=$DidLaunch (light SESSION_OPEN)"
         if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
@@ -351,11 +369,6 @@ function Write-ConnectDiagnosticReport {
         }
         Write-Host "    -> Log: $(Split-Path -Leaf $logPath) (search DIAGNOSTIC REPORT)" -ForegroundColor DarkGray
         Write-Host '    ============================================' -ForegroundColor Yellow
-        Write-Host ''
-    } elseif ($Phase -eq 'SESSION_OPEN') {
-        Write-Host ''
-        Write-Host '    [OK] Session ready - Cursor on project folder' -ForegroundColor Green
-        Write-Host "    Log: $(Split-Path -Leaf $logPath)" -ForegroundColor DarkGray
         Write-Host ''
     }
     return $verdict
