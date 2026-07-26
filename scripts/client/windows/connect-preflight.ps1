@@ -14,10 +14,42 @@ $ErrorActionPreference = 'Stop'
 
 $Here = $Here.TrimEnd('\', '/')
 $PowerShellExe = Join-Path $PSHOME 'powershell.exe'
+$PreflightHandoff = Join-Path $env:TEMP 'claude-connect-preflight.ok'
 
 function ConvertTo-ProcessArgument {
     param([Parameter(Mandatory = $true)][string]$Value)
     return ('"{0}"' -f ($Value -replace '"', '\"'))
+}
+
+function Read-PreflightHandoff {
+    $result = @{}
+    if (-not (Test-Path -LiteralPath $PreflightHandoff)) { return $result }
+    try {
+        foreach ($line in Get-Content -LiteralPath $PreflightHandoff -ErrorAction Stop) {
+            if ($line -match '^([^=]+)=(.*)$') { $result[$Matches[1].Trim()] = $Matches[2].Trim() }
+        }
+    } catch {}
+    return $result
+}
+
+function Test-HealthyDeploy {
+    param([string]$Dir)
+    if ([string]::IsNullOrWhiteSpace($Dir) -or -not (Test-Path -LiteralPath $Dir)) { return $false }
+    foreach ($n in @('connect.bat', 'connect.ps1', 'connect-boot.ps1', 'connect-update.ps1', 'cursor-proxy-sidecar.ps1', 'connect-version.txt')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Dir $n))) { return $false }
+    }
+    try {
+        $verFile = Join-Path $Dir 'connect-version.txt'
+        $verTxt = (Get-Content -LiteralPath $verFile -TotalCount 1 -ErrorAction Stop).Trim()
+        if (-not $verTxt) { return $false }
+        $ps1 = Join-Path $Dir 'connect.ps1'
+        $raw = Get-Content -LiteralPath $ps1 -Raw -ErrorAction Stop
+        if ($raw -notmatch [regex]::Escape("ConnectVersion = '$verTxt'")) { return $false }
+        $upd = Join-Path $Dir 'connect-update.ps1'
+        $updRaw = Get-Content -LiteralPath $upd -Raw -ErrorAction Stop
+        if ($updRaw -match 'UpdateEndpointTarget') { return $false }
+    } catch { return $false }
+    return $true
 }
 
 function Invoke-PreflightScript {
@@ -62,25 +94,32 @@ try {
     )
 } catch {}
 
+$handoff = @{}
 $bootstrapPath = Join-Path $Here 'connect-bootstrap.ps1'
 if ($env:CLAUDE_CONNECT_SKIP_BOOTSTRAP -ne '1' -and (Test-Path -LiteralPath $bootstrapPath)) {
     $bootstrapExit = Invoke-PreflightScript -Path $bootstrapPath -Arguments @(
         '-Here', (ConvertTo-ProcessArgument -Value $Here), '-Quiet'
     )
     if ($bootstrapExit -eq 2) { exit 2 }
+    $handoff = Read-PreflightHandoff
 }
 
+$skipHealFromHandoff = ($handoff['SKIP_HEAL'] -eq '1') -and (Test-HealthyDeploy -Dir $Here)
 $healPath = Join-Path $Here 'connect-heal.ps1'
-if ($env:CLAUDE_CONNECT_SKIP_HEAL -ne '1' -and (Test-Path -LiteralPath $healPath)) {
+if (-not $skipHealFromHandoff -and $env:CLAUDE_CONNECT_SKIP_HEAL -ne '1' -and (Test-Path -LiteralPath $healPath)) {
     $healExit = Invoke-PreflightScript -Path $healPath -Arguments @(
         '-Here', (ConvertTo-ProcessArgument -Value $Here)
     )
     if ($healExit -eq 2) { exit 2 }
+    if ($healExit -eq 0) {
+        $env:CLAUDE_CONNECT_SKIP_HEAL = '1'
+    }
 }
 
 $isSepidz = $Here -match '(?i)claude-code-sepidz|Claude-Connect-Sepidz'
+$skipUpdateFromHandoff = ($handoff['SKIP_UPDATE'] -eq '1') -and (Test-HealthyDeploy -Dir $Here)
 $updatePath = Join-Path $Here 'connect-update.ps1'
-if (-not $isSepidz -and (Test-Path -LiteralPath $updatePath)) {
+if (-not $skipUpdateFromHandoff -and -not $isSepidz -and (Test-Path -LiteralPath $updatePath)) {
     $env:CLAUDE_CONNECT_UPDATE_UI = '1'
     $updateExit = Invoke-PreflightScript -Path $updatePath -Sta -Arguments @(
         '-ScriptDir', (ConvertTo-ProcessArgument -Value $Here), '-Quiet'

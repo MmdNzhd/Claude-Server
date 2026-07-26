@@ -51,10 +51,18 @@ Assert ($fnSrc -notmatch 'SshX\s+\$hashCmd') 'FIXED: no second SshX call issues 
 # for real via Git Bash against a real temp HOME with real dummy files, proving the shell syntax
 # (command substitution, awk, echo markers) is correct - not merely well-formed-looking text.
 $rawTail = $null
-if ($fnSrc -match 'SshX\s+"([^"]*)"') {
+if ($fnSrc -match 'SshX\s+\("([^"]+)"\s*\+\s*\$portProbeBash\)') {
     $fullRawCmd = $Matches[1]
     $tailIdx = $fullRawCmd.IndexOf('mkdir -p ~/.local/bin')
-    if ($tailIdx -ge 0) { $rawTail = $fullRawCmd.Substring($tailIdx) }
+    if ($tailIdx -ge 0) {
+        $rawTail = $fullRawCmd.Substring($tailIdx) -replace '\s*&&\s*$', ''
+    }
+} elseif ($fnSrc -match 'SshX\s+"([^"]*)"') {
+    $fullRawCmd = $Matches[1]
+    $tailIdx = $fullRawCmd.IndexOf('mkdir -p ~/.local/bin')
+    if ($tailIdx -ge 0) {
+        $rawTail = $fullRawCmd.Substring($tailIdx) -replace '\s*&&\s*$', ''
+    }
 }
 if ($rawTail) {
     Assert $true 'extracted the real merged hash-check tail verbatim from source (full command string, no embedded double-quote to truncate on)'

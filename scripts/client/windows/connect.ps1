@@ -6,7 +6,9 @@
 param(
     [switch]$Setup,
     [switch]$AdminFix,
-    [ValidateSet('cursor','code','vscode')][string]$Ide = ''
+    [ValidateSet('cursor','code','vscode')][string]$Ide = '',
+    [switch]$DeferredServerSetupOnly,
+    [string]$DeferredSetupResultPath = ''
 )
 
 $ErrorActionPreference = "Continue"
@@ -120,7 +122,7 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260725.41'
+$script:ConnectVersion = '20260726.05'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
 $script:ConnectBuildId = '21059021-b14e-4c6c-87a9-87815dbcbece'
@@ -291,7 +293,7 @@ if (-not (Test-Path $_editorLaunch)) {
     Die "editor-launch.ps1 not found - re-copy the full windows package"
 }
 . $_editorLaunch
-Show-ConnectConsoleIfHidden
+if (-not $DeferredServerSetupOnly) { Show-ConnectConsoleIfHidden }
 
 $_gitMode = Join-Path $script:ConnectScriptDir 'git-mode.ps1'
 if (-not (Test-Path $_gitMode)) {
@@ -331,7 +333,15 @@ $_connectUi = Dot-SourceSibling 'connect-ui.ps1'
 if (-not $_connectUi) { Die 'connect-ui.ps1 not found - re-copy the full windows package' }
 . $_connectUi
 if (Get-Command Enter-ConnectSingleInstance -ErrorAction SilentlyContinue) {
-    if (-not (Enter-ConnectSingleInstance)) {
+    if ($DeferredServerSetupOnly) {
+        # Background Server-setup worker for an existing Connect UI.
+        # Must NOT take a second Global\ClaudeConnect# slot (would cut multi-UI
+        # capacity from 10 to ~5) and must keep parent CLAUDE_CONNECT_UI_SLOT so
+        # Acquire-TunnelPort prefers the same tunnel port as the visible UI.
+        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+            Write-ConnectLog ("MULTI_INSTANCE: deferred_setup_skip_mutex pid={0} inherit_slot={1}" -f $PID, ($env:CLAUDE_CONNECT_UI_SLOT + '')) 'INFO'
+        }
+    } elseif (-not (Enter-ConnectSingleInstance)) {
         # Block before session-start log so blocked launches do not pollute day log.
         Write-Host ''
         Write-Host '  [i] 10 Claude Connect windows already open - close one, then retry.' -ForegroundColor Yellow
@@ -342,7 +352,7 @@ if (Get-Command Enter-ConnectSingleInstance -ErrorAction SilentlyContinue) {
 }
 # Heal/redirect away from dated publish folders (fleet: old dated shortcuts stay broken otherwise).
 try {
-    if ($env:CLAUDE_CONNECT_SKIP_HEAL -ne '1' -and $script:ConnectScriptDir) {
+    if (-not $DeferredServerSetupOnly -and $env:CLAUDE_CONNECT_SKIP_HEAL -ne '1' -and $script:ConnectScriptDir) {
         $healPs1 = Join-Path $script:ConnectScriptDir 'connect-heal.ps1'
         if (Test-Path -LiteralPath $healPs1) {
             $hp = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
@@ -542,6 +552,7 @@ function Invoke-LaptopAdminOps {
     if (Test-IsAdmin) {
         if ($PubB) { Install-ServerKey $PubB -ForceRestart:$ForceRestart }
         if ($FirewallFix) {
+            Clear-LaptopFirewallDiskCache
             $fw = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
             if (-not $fw) {
                 New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH SSH Server (sshd)' `
@@ -626,15 +637,54 @@ function Test-WindowsAccountIsLocalAdmin {
     }
 }
 
+function Get-LaptopFirewallCachePath {
+    return Join-Path $env:TEMP 'claude-connect-fw-ok.txt'
+}
+
+function Test-LaptopFirewallDiskCacheOk {
+    $cacheFile = Get-LaptopFirewallCachePath
+    if (-not (Test-Path -LiteralPath $cacheFile)) { return $false }
+    try {
+        $age = (Get-Date) - (Get-Item -LiteralPath $cacheFile).LastWriteTime
+        return ($age.TotalHours -lt 24)
+    } catch {
+        return $false
+    }
+}
+
+function Set-LaptopFirewallDiskCacheOk {
+    try {
+        Set-Content -LiteralPath (Get-LaptopFirewallCachePath) -Value (Get-Date -Format 'o') -Encoding ASCII
+    } catch {}
+}
+
+function Clear-LaptopFirewallDiskCache {
+    Remove-Item -LiteralPath (Get-LaptopFirewallCachePath) -Force -ErrorAction SilentlyContinue
+}
+
 function Test-LaptopSshReady {
     param([string]$PubFragment = '')
     $reasons = [System.Collections.Generic.List[string]]::new()
     $svc = Get-Service sshd -ErrorAction SilentlyContinue
-    if (-not $svc -or $svc.Status -ne 'Running') { $reasons.Add('OpenSSH Server (sshd) is not running') }
+    if (-not $svc -or $svc.Status -ne 'Running') {
+        Clear-LaptopFirewallDiskCache
+        $reasons.Add('OpenSSH Server (sshd) is not running')
+    }
     try {
-        $fw = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction Stop
-        if ($fw.Enabled.ToString() -ne 'True') { $reasons.Add('SSH firewall rule disabled') }
+        if (-not $script:LaptopFirewallCheckedOk) {
+            if ($svc -and $svc.Status -eq 'Running' -and (Test-LaptopFirewallDiskCacheOk)) {
+                $script:LaptopFirewallCheckedOk = $true
+            } else {
+                $fw = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction Stop
+                if ($fw.Enabled.ToString() -ne 'True') { $reasons.Add('SSH firewall rule disabled') }
+                else {
+                    $script:LaptopFirewallCheckedOk = $true
+                    if ($svc -and $svc.Status -eq 'Running') { Set-LaptopFirewallDiskCacheOk }
+                }
+            }
+        }
     } catch {
+        Clear-LaptopFirewallDiskCache
         if (-not (Test-IsAdmin)) { $reasons.Add('Cannot verify SSH firewall rule (need administrator)') }
     }
     if ($PubFragment) {
@@ -672,6 +722,7 @@ function Ensure-LaptopSshReady {
     $frag = if ($PubB) { ($PubB -split '\s+')[1] } else { '' }
     $check = Test-LaptopSshReady -PubFragment $frag
     if ($check.Ready) { return $true }
+    Clear-LaptopFirewallDiskCache
     Write-Host ''
     foreach ($r in $check.Reasons) { Warn $r }
     return (Invoke-LaptopAdminOps -PubB $PubB -FirewallFix -ForceRestart)
@@ -708,6 +759,7 @@ if ($script:RunAdminFix) {
     $pub = $fixLines.PUB
     if ($pub) { Install-ServerKey $pub -ForceRestart:($fixLines.FORCE_RESTART -eq '1') }
     if ($fixLines.FIREWALL -eq '1') {
+        Clear-LaptopFirewallDiskCache
         $fw = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue
         if (-not $fw) {
             New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH SSH Server (sshd)' `
@@ -789,9 +841,15 @@ function Initialize-ServerSession {
     # wait for) removes one full ~5-7s ssh handshake from the step, with no ordering change in
     # what any later code observes.
     if (Get-Command Update-StepProgress -ErrorAction SilentlyContinue) { Update-StepProgress 'key' }
-    $initOut = (SshX "id -u && (test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q) && cat ~/.ssh/claude_laptop.pub && mkdir -p ~/.local/bin && echo MOUNT_HASH:`$(sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print `$1}') && echo GIT_HASH:`$(sha256sum ~/.local/bin/claude-git-setup 2>/dev/null | awk '{print `$1}')") -join "`n"
+    # Fold UID-block open-port batch into the same initial ssh as id-u/keygen/hashes (Task 7):
+    # removes the separate Get-ServerOpenTunnelPorts round trip during Server setup.
+    $portProbeBash = 'uid=$(id -u); off=$((uid-1000)); [ $off -lt 0 ] && off=0; base=$((20000+off*10)); for slot in 0 1 2 3 4 5 6 7 8 9; do p=$((base+slot)); if [ $p -gt 20000 ] && [ $p -le 65535 ]; then ( timeout 0.25 bash -c "exec 3<>/dev/tcp/127.0.0.1/$p" 2>/dev/null && echo OPEN:$p ) & fi; done; wait'
+    $initOut = (SshX ("id -u && (test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q) && cat ~/.ssh/claude_laptop.pub && mkdir -p ~/.local/bin && echo MOUNT_HASH:`$(sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print `$1}') && echo GIT_HASH:`$(sha256sum ~/.local/bin/claude-git-setup 2>/dev/null | awk '{print `$1}') && " + $portProbeBash)) -join "`n"
     $lines = ($initOut -replace "`r",'') -split "`n" | Where-Object { $_.Trim() -ne '' }
     $uidStr = [string]($lines | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1) -replace '\D',''
+    if ($uidStr -and (Get-Command Import-PrefetchedOpenTunnelPorts -ErrorAction SilentlyContinue)) {
+        $null = Import-PrefetchedOpenTunnelPorts -Lines $lines -UidStr $uidStr
+    }
     $pubB = ([string](($lines | Where-Object { $_ -match '^ssh-' } | Select-Object -First 1) + '')).Trim()
     $remoteHash = (($lines | Where-Object { $_ -match '^MOUNT_HASH:' } | Select-Object -First 1) -replace '^MOUNT_HASH:', '').Trim()
     $gitRemote = (($lines | Where-Object { $_ -match '^GIT_HASH:' } | Select-Object -First 1) -replace '^GIT_HASH:', '').Trim()
@@ -858,6 +916,7 @@ function Initialize-ServerSession {
     if (-not (Ensure-LaptopSshReady -PubB $pubB)) {
         return @{ Ok = $false; Error = 'laptop SSH key setup failed'; PubB = $pubB }
     }
+    $script:LaptopFirewallOk = $true
 
     if (Get-Command Update-StepProgress -ErrorAction SilentlyContinue) { Update-StepProgress 'ssh config' }
     Remove-SshHostBlock $SshCfgPath $Alias
@@ -932,6 +991,123 @@ Host $Alias
 
     # Script push failure is non-fatal (same as Mac v20260717.6+); port/key already OK.
     return @{ Ok = $true; PubB = $pubB; Error = ''; PushOk = $pushOk }
+}
+
+function Apply-ServerSessionBootResult {
+    param(
+        [Parameter(Mandatory)]$Boot,
+        [switch]$FromDeferredWait
+    )
+    if ($Boot.Error) {
+        StepFail $Boot.Error
+        Warn "Tip: confirm server username with: connect.bat -Setup"
+        Wait-ConnectExit -Reason "boot_error:$($Boot.Error)" -Code 1
+    }
+    if (-not $Boot.Ok) {
+        StepFail ($script:pendingFixes -join ', ')
+        Wait-ConnectExit -Reason 'boot_not_ok' -Code 1
+    }
+    if ($Boot.ContainsKey('PushOk') -and -not $Boot.PushOk) {
+        Write-Host '    [!] server script push failed (continuing)' -ForegroundColor Yellow
+        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+            Write-ConnectLog 'FAIL SERVER_SCRIPT_PUSH: continuing without refreshed server scripts' 'ERROR'
+        }
+    }
+    if ($FromDeferredWait) {
+        StepOk "port $script:Port slot=$($script:TunnelSlot) git=$(Get-GitMode)"
+    }
+}
+
+function Import-DeferredServerSetupResult {
+    param([Parameter(Mandatory)][string]$ResultPath)
+    if (-not (Test-Path -LiteralPath $ResultPath)) {
+        return @{ Ok = $false; Error = 'deferred setup result missing'; PubB = '' }
+    }
+    try {
+        $raw = Get-Content -LiteralPath $ResultPath -Raw -ErrorAction Stop
+        $j = $raw | ConvertFrom-Json
+        if ($j.Port) { $script:Port = [int]$j.Port }
+        if ($null -ne $j.PSObject.Properties['TunnelSlot']) { $script:TunnelSlot = [int]$j.TunnelSlot }
+        if ($j.ServerUidStr) { $script:ServerUidStr = [string]$j.ServerUidStr }
+        if ($j.ClaudeMountSyncVerifiedHash) { $script:ClaudeMountSyncVerifiedHash = [string]$j.ClaudeMountSyncVerifiedHash }
+        if ($j.PSObject.Properties['LaptopFirewallOk']) { $script:LaptopFirewallOk = [bool]$j.LaptopFirewallOk }
+        return @{
+            Ok     = [bool]$j.Ok
+            Error  = [string]$j.Error
+            PubB   = [string]$j.PubB
+            PushOk = if ($null -ne $j.PSObject.Properties['PushOk']) { [bool]$j.PushOk } else { $true }
+        }
+    } catch {
+        return @{ Ok = $false; Error = "deferred setup result parse failed: $($_.Exception.Message)"; PubB = '' }
+    }
+}
+
+function Start-DeferredServerSetup {
+    param(
+        [Parameter(Mandatory)][string]$ConnectScriptDir,
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][string]$SshCfgPath
+    )
+    if ($script:ServerSessionBoot) { return }
+    if ($script:DeferredSetupProc -and -not $script:DeferredSetupProc.HasExited) { return }
+
+    $script:DeferredSetupConnectScriptDir = $ConnectScriptDir
+    $script:DeferredSetupAlias = $Alias
+    $script:DeferredSetupSshCfgPath = $SshCfgPath
+    $script:DeferredSetupResultPath = Join-Path $env:TEMP ("claude-connect-deferred-setup-{0}.json" -f [guid]::NewGuid().ToString('N'))
+    $connectPs1 = Join-Path $ConnectScriptDir 'connect.ps1'
+    # Inherit parent UI slot for tunnel preference; child must not call Enter-ConnectSingleInstance.
+    $parentSlot = ($env:CLAUDE_CONNECT_UI_SLOT + '').Trim()
+    if ($parentSlot -match '^\d+$') { $env:CLAUDE_CONNECT_UI_SLOT = $parentSlot }
+    $env:CLAUDE_CONNECT_SKIP_HEAL = '1'
+    $env:CLAUDE_CONNECT_SKIP_BOOTSTRAP = '1'
+    $argList = @(
+        '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+        '-File', $connectPs1,
+        '-DeferredServerSetupOnly',
+        '-DeferredSetupResultPath', $script:DeferredSetupResultPath
+    )
+    try {
+        $script:DeferredSetupProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -PassThru -WindowStyle Hidden -ErrorAction Stop
+        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+            Write-ConnectLog ("SERVER_SETUP deferred=1 bg pid=$($script:DeferredSetupProc.Id) inherit_slot=$parentSlot") 'INFO'
+        }
+    } catch {
+        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+            Write-ConnectLog ("SERVER_SETUP deferred=1 bg_start_fail error=$($_.Exception.Message)") 'WARN'
+        }
+        $script:DeferredSetupProc = $null
+    }
+}
+
+function Wait-DeferredServerSetup {
+    if ($script:ServerSessionBoot) { return $script:ServerSessionBoot }
+
+    $showStep = $false
+    if ($script:DeferredSetupProc -and -not $script:DeferredSetupProc.HasExited) { $showStep = $true }
+    if (-not $script:DeferredSetupProc) { $showStep = $true }
+
+    if ($showStep) { Step "Server setup" }
+
+    if ($script:DeferredSetupProc) {
+        while (-not $script:DeferredSetupProc.HasExited) {
+            Start-Sleep -Milliseconds 50
+        }
+        $boot = Import-DeferredServerSetupResult -ResultPath $script:DeferredSetupResultPath
+        try { Remove-Item -LiteralPath $script:DeferredSetupResultPath -Force -ErrorAction SilentlyContinue } catch {}
+    } else {
+        $boot = Initialize-ServerSession -ConnectScriptDir $script:DeferredSetupConnectScriptDir -Alias $script:DeferredSetupAlias -SshCfgPath $script:DeferredSetupSshCfgPath
+    }
+
+    Apply-ServerSessionBootResult -Boot $boot -FromDeferredWait
+    $script:ServerSessionBoot = $boot
+    return $boot
+}
+
+function Ensure-ServerSessionReady {
+    if (-not $script:ServerSessionBoot) {
+        $null = Wait-DeferredServerSetup
+    }
 }
 
 function Add-SshRecentLog([string]$Line) {
@@ -1403,6 +1579,7 @@ function Add-Project {
     Write-ConnectDecision 'project_add' ("id={0} label={1} path={2}" -f $nId, $nLbl, $nPath)
     if (-not $nId) { $nId = $nLbl.ToLower() -replace '[^a-z0-9_-]','-' -replace '-+','-' -replace '^-|-$','' }
     if (-not $nId) { Warn "Could not derive a project name."; return $null }
+    Ensure-ServerSessionReady
     $existing = @(Get-Mounts) | Where-Object { $_.Id -eq $nId }
     if ($existing.Count -gt 0) {
         Warn "Project '$nId' already exists. Enter a different name."
@@ -1427,6 +1604,7 @@ function Choose-Project {
                 Write-Host "    No PC projects ($hiddenCount Mac-only on server)." -ForegroundColor DarkGray
                 Write-Host ''
             }
+            Ensure-ServerSessionReady
             $null = ($added = Add-Project)
             if (-not $added) { return $null }
             return ,$added
@@ -1441,6 +1619,7 @@ function Choose-Project {
             $null = ($m = Select-Mount $mounts $c)
             if (-not $m) { Write-ConnectDecision 'project_select' "not_found:$c" 'WARN'; Warn "Not found."; continue }
             if (-not (Warn-InvalidProjectRpath -Rpath $m.Rpath -Num $c -Os 'windows')) { Write-ConnectDecision 'project_select' "invalid_rpath:$c"; continue }
+            Ensure-ServerSessionReady
             Write-ConnectDecision 'project_select' ("id={0} path={1} rpath={2}" -f $m.Id, $m.Path, $m.Rpath)
             return ,([PSCustomObject]@{ Id = $m.Id; Path = $m.Path; Rpath = $m.Rpath })
         }
@@ -1448,6 +1627,7 @@ function Choose-Project {
         switch ($c) {
             "a" {
                 Write-ConnectDecision 'project_menu' 'add'
+                Ensure-ServerSessionReady
                 $null = ($r = Add-Project)
                 if ($r) { return ,$r }
                 $null = ($allMounts = @(Get-Mounts))
@@ -1456,6 +1636,7 @@ function Choose-Project {
             }
             'e' {
                 Write-ConnectDecision 'project_menu' 'edit'
+                Ensure-ServerSessionReady
                 $null = ($cur = Select-Mount $mounts (Read-ConnectPrompt '    Edit number' -Tag 'MENU_EDIT_NUM').Trim())
                 if (-not $cur) { Warn 'Not found.'; continue }
                 Write-Host ''
@@ -1473,6 +1654,7 @@ function Choose-Project {
             }
             "d" {
                 Write-ConnectDecision 'project_menu' 'delete'
+                Ensure-ServerSessionReady
                 $null = ($m = Select-Mount $mounts (Read-ConnectPrompt "    Delete number" -Tag 'MENU_DEL_NUM').Trim())
                 if (-not $m) { Warn "Not found."; continue }
                 if ((Read-ConnectPrompt "    Delete '$($m.Label)'? [y/N]" -Tag 'MENU_DEL_CONFIRM').Trim().ToLower() -eq "y") {
@@ -1538,6 +1720,58 @@ function Choose-Project {
 
 
 # config
+if ($DeferredServerSetupOnly) {
+    New-Item -ItemType Directory -Force -Path $CfgDir | Out-Null
+    if (-not (Test-Path -LiteralPath $Cfg)) {
+        Write-Error "connect.conf missing for deferred server setup"
+        exit 1
+    }
+    $conf = @{}
+    Get-Content $Cfg | ForEach-Object { if ($_ -match '^(.+?)=(.*)$') { $conf[$matches[1]] = $matches[2] } }
+    $RemoteUser = $conf['REMOTE_USER']
+    if ($ServerIP -eq '192.168.250.70' -and $RemoteUser -eq 'smart') { $RemoteUser = 'sepidz' }
+    if ($ServerIP -eq '192.168.210.240' -and $RemoteUser -eq 'sepidz') { $RemoteUser = 'smart' }
+    $LaptopUser = $conf['LAPTOP_USER']
+    $script:LaptopUser = $LaptopUser
+    if ($LaptopUser -and (Test-Path "C:\Users\$LaptopUser")) {
+        $CfgDir = [System.IO.Path]::Combine("C:\Users\$LaptopUser", '.config', 'claude-connect')
+        $Cfg    = [System.IO.Path]::Combine($CfgDir, 'connect.conf')
+        $SshDir = [System.IO.Path]::Combine("C:\Users\$LaptopUser", '.ssh')
+    }
+    New-Item -ItemType Directory -Force -Path $SshDir | Out-Null
+    $sshCfg = [System.IO.Path]::Combine($SshDir, 'config')
+    if (-not (Test-Path $sshCfg)) { New-Item -ItemType File -Path $sshCfg | Out-Null }
+    Remove-SshHostBlock $sshCfg $Alias
+    $sshCfgUser = Get-SshConfigUserForServer -Ip $ServerIP -FallbackUser $RemoteUser
+    @"
+
+Host $Alias
+    HostName $ServerIP
+    User $sshCfgUser
+    IdentityFile ~/.ssh/id_ed25519
+    StrictHostKeyChecking accept-new
+"@ | Add-Content -Path $sshCfg -Encoding ASCII
+    Sanitize-SshAliasConfig -CfgPath $sshCfg -AliasName $Alias
+    $boot = Initialize-ServerSession -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias -SshCfgPath $sshCfg
+    $result = [ordered]@{
+        Ok                          = [bool]$boot.Ok
+        Error                       = [string]$boot.Error
+        PubB                        = [string]$boot.PubB
+        PushOk                      = if ($boot.ContainsKey('PushOk')) { [bool]$boot.PushOk } else { $true }
+        Port                        = [int]$script:Port
+        TunnelSlot                  = [int]$script:TunnelSlot
+        ServerUidStr                = [string]$script:ServerUidStr
+        ClaudeMountSyncVerifiedHash = [string]$script:ClaudeMountSyncVerifiedHash
+        LaptopFirewallOk            = [bool]$script:LaptopFirewallOk
+    }
+    if ($DeferredSetupResultPath) {
+        try {
+            ($result | ConvertTo-Json -Compress) | Set-Content -LiteralPath $DeferredSetupResultPath -Encoding UTF8
+        } catch { }
+    }
+    exit $(if ($boot.Ok) { 0 } else { 1 })
+}
+
 New-Item -ItemType Directory -Force -Path $CfgDir | Out-Null
 if ($Setup -or -not (Test-Path $Cfg)) {
     Write-Host "  First-time setup" -ForegroundColor Cyan
@@ -1811,42 +2045,15 @@ if (-not (Warn-ForeignServerSession)) {
     Wait-ConnectExit -Reason 'foreign_session' -Code 1
 }
 
-# Server setup (port + key + scripts in one step; script push runs parallel to local key install)
-Step "Server setup"
-$boot = Initialize-ServerSession -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias -SshCfgPath $sshCfg
-if ($boot.Error) { StepFail $boot.Error; Warn "Tip: confirm server username with: connect.bat -Setup"; Wait-ConnectExit -Reason "boot_error:$($boot.Error)" -Code 1 }
-if (-not $boot.Ok) { StepFail ($script:pendingFixes -join ', '); Wait-ConnectExit -Reason 'boot_not_ok' -Code 1 }
-if ($boot.ContainsKey('PushOk') -and -not $boot.PushOk) {
-    Write-Host '    [!] server script push failed (continuing)' -ForegroundColor Yellow
-    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
-        Write-ConnectLog 'FAIL SERVER_SCRIPT_PUSH: continuing without refreshed server scripts' 'ERROR'
-    }
-}
-StepOk "port $Port slot=$($script:TunnelSlot) git=$(Get-GitMode)"
-$PubB = $boot.PubB
-
 Write-Host ''
 if (Get-Command Request-ConnectLogSync -ErrorAction SilentlyContinue) { Request-ConnectLogSync -NoInline | Out-Null } elseif (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue) { Sync-ConnectLogToServer | Out-Null }
 Write-Host '    Ready' -ForegroundColor Green
 Write-Host ''
 Mark-BootstrapDone -CfgDir $CfgDir
-$laptopReady = Ensure-LaptopSshReady -PubB $PubB
-if (-not $laptopReady) {
-    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
-        Write-ConnectLog 'FAIL LAPTOP_SSH_BOOT: Ensure-LaptopSshReady returned false (continuing; tunnel auth may still work)' 'ERROR'
-    }
-    Warn 'Laptop SSH admin fix incomplete - continuing; tunnel auth may fail until fixed'
-} else {
-    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
-        $script:LaptopFirewallOk = $true
-        Write-ConnectLog 'LAPTOP_SSH: boot_ready ok'
-    }
-}
 $script:LaptopSshVerified = $false
 $script:SessionBgTunnel = $null
 $script:LastMountCheckOkAt = $null
 $script:LastMountCheckOkProject = $null
-$null = Initialize-SessionBgTunnel -Alias $Alias -SshCfgPath $sshCfg -Quiet
 
 $script:tunnelAuthAdminFixAttempted = $false
 $exitRequested = $false
@@ -1864,6 +2071,7 @@ $exitRequested = $false
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
         Write-ConnectLog ("INTERACTIVE: project_menu_shown mounts={0}" -f @($allMounts).Count) 'INFO'
     }
+    Start-DeferredServerSetup -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias -SshCfgPath $sshCfg
     $go = @(Choose-Project -Mounts $allMounts)[-1]
     if (-not $go) {
         if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
@@ -1871,6 +2079,8 @@ $exitRequested = $false
         }
         break
     }
+    $boot = Wait-DeferredServerSetup
+    $PubB = $boot.PubB
     Write-ConnectLog "PROJECT: id=$($go.Id) server_path=$($go.Path) laptop_path=$($go.Rpath)"
     if (Get-Command Write-ConnectDecision -ErrorAction SilentlyContinue) {
         Write-ConnectDecision 'project_selected' $go.Id
@@ -1988,15 +2198,14 @@ if (Get-Command Write-ConnectSessionContext -ErrorAction SilentlyContinue) { Wri
     }
 
     if ($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) {
-        # Tunnel already spawned before project menu - do not re-probe via SSH (and do not
-        # open a "Preparing tunnel" step that can look hung while logs sync).
+        # Recovery/M-key paths may spawn tunnel before project pick - do not re-probe.
         Write-ConnectLog "PREPARE_TUNNEL skip reason=session_bg_alive pid=$($script:SessionBgTunnel.Id)" 'DEBUG'
     } else {
         Step "Preparing tunnel"
         $null = Initialize-SessionBgTunnel -Alias $Alias -SshCfgPath $sshCfg -Quiet
         StepOk
     }
-    # First session-loop Ensure after this init is redundant (~7s). Reuse the bg tunnel.
+    # Tunnel starts here after project pick (Mac parity); reuse if recovery already spawned one.
     $script:SessionTunnelInitedForPick = [bool]($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited)
 
     $editorOpened = $false

@@ -23,6 +23,12 @@ if exist "%HERE%connect-preflight.ps1" (
     if exist "%TEMP%\claude-connect-run-id.txt" (
         for /f "usebackq delims=" %%I in ("%TEMP%\claude-connect-run-id.txt") do set "CLAUDE_CONNECT_RUN_ID=%%I"
     )
+    if exist "%TEMP%\claude-connect-preflight.ok" (
+        for /f "usebackq tokens=1,* delims==" %%A in ("%TEMP%\claude-connect-preflight.ok") do (
+            if /I "%%A"=="SKIP_UPDATE" if "%%B"=="1" set "CLAUDE_CONNECT_SKIP_UPDATE=1"
+            if /I "%%A"=="SKIP_HEAL" if "%%B"=="1" set "CLAUDE_CONNECT_SKIP_HEAL=1"
+        )
+    )
     if "!PRE_EC!"=="2" (
         echo.%HERE%| find /I "claude-code-sepidz" >nul && goto AFTER_CLIENT_UPDATE
         echo.%HERE%| find /I "Claude-Connect-Sepidz" >nul && goto AFTER_CLIENT_UPDATE
@@ -46,6 +52,9 @@ if exist "%HERE%connect-preflight.ps1" (
         )
         exit
     )
+    REM Preflight child env does not inherit to connect-boot; bat sets skip flags on success.
+    set "CLAUDE_CONNECT_SKIP_HEAL=1"
+    set "CLAUDE_CONNECT_SKIP_BOOTSTRAP=1"
     goto AFTER_CLIENT_UPDATE
 )
 

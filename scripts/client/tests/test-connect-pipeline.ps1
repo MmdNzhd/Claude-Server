@@ -43,13 +43,30 @@ foreach ($rel in @('windows\connect.ps1')) {
     Assert ($src -match '"g" \{.*Configure-GitMode') "$rel has git menu option"
     Assert ($bundle -match 'Push-ServerConnectConf') "$rel has Push-ServerConnectConf"
     Assert ($src -match '@\(Choose-Project -Mounts \$allMounts\)\[-1\]') "$rel uses safe Choose-Project capture"
-    Assert ($src -match 'Initialize-SessionBgTunnel') "$rel pre-warms tunnel after Ready"
+    Assert ($src -match 'Initialize-SessionBgTunnel') "$rel still defines/uses session bg tunnel"
+    $bootToMenuStart = [regex]::Match($src, '(?s)Mark-BootstrapDone[\s\S]*?:menuLoop\s+while').Value
+    Assert ($bootToMenuStart -and ($bootToMenuStart -notmatch 'Initialize-SessionBgTunnel')) `
+        "$rel must not pre-warm tunnel between Ready bootstrap and menuLoop"
+    Assert ($bootToMenuStart -and ($bootToMenuStart -notmatch 'Initialize-ServerSession')) `
+        "$rel must not run Initialize-ServerSession before menuLoop"
+    Assert ($bootToMenuStart -and ($bootToMenuStart -notmatch 'Step "Server setup"')) `
+        "$rel must not show Server setup step before menuLoop"
+    $bootToMenu = [regex]::Match($src, '(?s)Mark-BootstrapDone[\s\S]*?:menuLoop\s+while').Value
+    Assert ($bootToMenu -and ($bootToMenu -notmatch 'Ensure-LaptopSshReady')) `
+        "$rel must not call Ensure-LaptopSshReady between Ready and menuLoop"
+    $initSession = [regex]::Match($src, '(?ms)^function\s+Initialize-ServerSession\s*\{.*?(?=^function\s+|\z)').Value
+    Assert (($initSession -match 'Ensure-LaptopSshReady') -and ($initSession -match '\$script:LaptopFirewallOk\s*=\s*\$true')) `
+        "$rel sets LaptopFirewallOk on Ensure#1 success in Initialize-ServerSession"
+    Assert ($src -match 'LaptopFirewallCheckedOk') "$rel caches firewall check in Test-LaptopSshReady"
+    Assert ($src -match 'Test-LaptopFirewallDiskCacheOk|claude-connect-fw-ok\.txt') "$rel has disk firewall OK cache"
+    Assert ($src -match 'Clear-LaptopFirewallDiskCache') "$rel invalidates firewall cache on Ensure/AdminFix failure"
     Assert ($src -match '@\(Resolve-EditorChoice -CfgDir \$CfgDir\)\[-1\]') "$rel uses safe Resolve-EditorChoice capture"
     Assert ($src -match 'Test-AuthorizedKeyFragment|Test-LaptopSshReady') "$rel has laptop SSH key check helper"
     Assert ($bundle -match 'Acquire-TunnelPort') "$rel uses tunnel slot acquisition"
     Assert ($bundle -match 'Sanitize-SshAliasConfig') "$rel sanitizes ssh config (no RemoteForward)"
     Assert ($bundle -match 'Ensure-LaptopReverseSshCached') "$rel caches laptop SSH verify"
-    Assert ($src -match 'Ensure-SessionTunnel') "$rel uses Ensure-SessionTunnel"
+    Assert ($src -match 'Wait-DeferredServerSetup') "$rel waits for deferred server setup after project pick"
+    Assert ($src -match 'Start-DeferredServerSetup') "$rel starts deferred server setup after menu shown"
     # Bug: mount step backgrounded (2026-07-24) - Invoke-MountProject's -TrustedTunnel switch
     # call site was replaced by Start-MountProjectBackground's own remote CLAUDE_TRUSTED_TUNNEL=1
     # env-var prefix (same trust semantic, sent directly in the detached runner's ssh command).

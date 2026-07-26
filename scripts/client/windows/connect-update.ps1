@@ -753,6 +753,55 @@ function Test-LocalExeMatchesRemoteHash {
     return $true
 }
 
+function Resolve-ConnectContentDrift {
+    param(
+        [Parameter(Mandatory)][string]$RemoteVer,
+        [Parameter(Mandatory)][string]$LocalVer,
+        [Parameter(Mandatory)][string]$Target
+    )
+    $versionNewer = [bool](Test-RemoteVersionNewer -Remote $RemoteVer -Local $LocalVer)
+    $contentDrift = $false
+    if (-not $versionNewer) {
+        $localExe = Get-LocalConnectExePath
+        if (-not $localExe) {
+            $contentDrift = $false
+            Write-UpdateFileLog 'drift_gate=script_only_ok'
+        } else {
+            $remoteSums = Invoke-SshCat -Target $Target -RemotePath "$RemoteBundle/checksums.txt"
+            if ($remoteSums) {
+                $exeMatch = Test-LocalExeMatchesRemoteHash -ChecksumText $remoteSums
+                if ($exeMatch -eq $true) {
+                    $contentDrift = $false
+                    Write-UpdateFileLog 'drift_gate=exe_ok'
+                } elseif ($exeMatch -eq $false) {
+                    $contentDrift = $true
+                    Write-UpdateFileLog 'drift_gate=exe_mismatch'
+                } else {
+                    # No EXE in remote checksums - legacy full-file compare.
+                    $leafGate = Split-Path -Leaf $ScriptDir
+                    $winDirGate = $ScriptDir
+                    $pkgGate = $ScriptDir
+                    if ($leafGate -eq 'windows') {
+                        $pkgGate = Split-Path -Parent $ScriptDir
+                        $winDirGate = $ScriptDir
+                    } elseif (Test-Path (Join-Path $ScriptDir 'windows')) {
+                        $winDirGate = Join-Path $ScriptDir 'windows'
+                        $pkgGate = $ScriptDir
+                    }
+                    $macDirGate = Join-Path $pkgGate 'mac'
+                    if (-not (Test-Path -LiteralPath $macDirGate)) { $macDirGate = '' }
+                    if (-not (Test-LocalMatchesRemoteChecksums -ChecksumText $remoteSums -WindowsDir $winDirGate -MacDir $macDirGate)) {
+                        $contentDrift = $true
+                    }
+                }
+            } else {
+                Write-UpdateFileLog 'local_checksum_skip remote_checksums_unreachable' 'WARN'
+            }
+        }
+    }
+    return @{ VersionNewer = $versionNewer; ContentDrift = $contentDrift }
+}
+
 function Test-ConnectExePeValid {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return $false }
@@ -1017,41 +1066,9 @@ $ep = @{ Target = $resolved.Target; Display = $resolved.Display }
 $remoteVer = $resolved.RemoteVer
 Write-UpdateMsg ("Update source: {0}" -f $ep.Display) 'DarkGray'
 
-$versionNewer = [bool](Test-RemoteVersionNewer -Remote $remoteVer -Local $localVer)
-$contentDrift = $false
-if (-not $versionNewer) {
-    # Prefer EXE-only drift check: if server ships Claude-Connect.exe, only that hash matters.
-    $remoteSums = Invoke-SshCat -Target $ep.Target -RemotePath "$RemoteBundle/checksums.txt"
-    if ($remoteSums) {
-        $exeMatch = Test-LocalExeMatchesRemoteHash -ChecksumText $remoteSums
-        if ($exeMatch -eq $true) {
-            $contentDrift = $false
-            Write-UpdateFileLog 'drift_gate=exe_ok'
-        } elseif ($exeMatch -eq $false) {
-            $contentDrift = $true
-            Write-UpdateFileLog 'drift_gate=exe_mismatch'
-        } else {
-            # No EXE in remote checksums - legacy full-file compare.
-            $leafGate = Split-Path -Leaf $ScriptDir
-            $winDirGate = $ScriptDir
-            $pkgGate = $ScriptDir
-            if ($leafGate -eq 'windows') {
-                $pkgGate = Split-Path -Parent $ScriptDir
-                $winDirGate = $ScriptDir
-            } elseif (Test-Path (Join-Path $ScriptDir 'windows')) {
-                $winDirGate = Join-Path $ScriptDir 'windows'
-                $pkgGate = $ScriptDir
-            }
-            $macDirGate = Join-Path $pkgGate 'mac'
-            if (-not (Test-Path -LiteralPath $macDirGate)) { $macDirGate = '' }
-            if (-not (Test-LocalMatchesRemoteChecksums -ChecksumText $remoteSums -WindowsDir $winDirGate -MacDir $macDirGate)) {
-                $contentDrift = $true
-            }
-        }
-    } else {
-        Write-UpdateFileLog 'local_checksum_skip remote_checksums_unreachable' 'WARN'
-    }
-}
+$driftState = Resolve-ConnectContentDrift -RemoteVer $remoteVer -LocalVer $localVer -Target $ep.Target
+$versionNewer = $driftState.VersionNewer
+$contentDrift = $driftState.ContentDrift
 
 if (-not $versionNewer -and -not $contentDrift) {
     Write-UpdateMsg "Client up to date (v$localVer)" 'DarkGray'

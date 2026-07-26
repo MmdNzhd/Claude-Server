@@ -86,6 +86,11 @@ Assert ($exeBody -notmatch 'Get-CimInstance Win32_Process') 'EXE setup does not 
 Assert ($exeBody -match '10 Claude Connect windows already open') 'EXE MessageBox matches 10 already-open text'
 Assert ($exeWorker -match 'ClaudeConnectExeLaunch') 'ExeLaunch double-launch gate lives in the detached worker (setup-launch exits fast)'
 Assert ($exeBody -match 'setup-worker\.ps1') 'EXE setup spawns the detached worker'
+# Deferred Server-setup child must not steal a second ClaudeConnect# slot / UI_SLOT.
+Assert ($win -match 'DeferredServerSetupOnly') 'Win: DeferredServerSetupOnly child mode exists'
+Assert ($win -match 'deferred_setup_skip_mutex') 'Win: deferred setup skips Enter-ConnectSingleInstance (no 2nd UI slot)'
+Assert ($win -match '(?s)if \(\$DeferredServerSetupOnly\)[\s\S]{0,900}elseif \(-not \(Enter-ConnectSingleInstance\)\)') 'Win: Enter-ConnectSingleInstance gated behind DeferredServerSetupOnly skip'
+Assert ($win -match 'inherit_slot') 'Win: deferred setup logs/preserves parent UI_SLOT for tunnel acquire'
 Write-Host '--- B) Ensure-ConnectRunId define-before-use ---' -ForegroundColor Cyan
 $defLine = Get-LineIndex $upd 'function Ensure-ConnectRunId'
 # first call after param/setup (not inside function body) â€" find "$null = Ensure-ConnectRunId"
@@ -170,7 +175,11 @@ Assert ($win -match 'CONNECT_ATTEMPT') 'connect retry attempts logged'
 Assert ($win -match 'FAIL CONNECT_UNREACHABLE') 'unreachable after 10 attempts logs FAIL CONNECT_UNREACHABLE'
 Assert ($win -match 'INTERACTIVE: project_menu_shown') 'project menu wait is logged'
 Assert ($win -match 'FAIL MENU_ABORT') 'empty Choose-Project logs FAIL MENU_ABORT'
-Assert ($win -match 'FAIL LAPTOP_SSH_BOOT') 'Ensure-LaptopSshReady false logs FAIL LAPTOP_SSH_BOOT'
+$bootToMenu = [regex]::Match($win, '(?s)Mark-BootstrapDone[\s\S]*?:menuLoop\s+while').Value
+$initSession = [regex]::Match($win, '(?ms)^function\s+Initialize-ServerSession\s*\{.*?(?=^function\s+|\z)').Value
+Assert ($bootToMenu -and ($bootToMenu -notmatch 'Initialize-ServerSession')) 'no Initialize-ServerSession between Ready and menuLoop'
+Assert ($bootToMenu -and ($bootToMenu -notmatch 'Ensure-LaptopSshReady')) 'no duplicate Ensure-LaptopSshReady between Ready and menuLoop'
+Assert (($initSession -match 'Ensure-LaptopSshReady') -and ($initSession -match '\$script:LaptopFirewallOk\s*=\s*\$true')) 'Ensure#1 success sets LaptopFirewallOk in Initialize-ServerSession'
 Assert ($win -match 'FAIL SERVER_SCRIPT_PUSH') 'server script push fail logged'
 Assert ($uiSh -match 'connect_log_ts') 'Mac connect_log has millisecond timestamps helper'
 Assert ((Get-Content (Join-Path $Client 'mac\connect.sh') -Raw) -match 'FAIL CONNECT_UNREACHABLE') 'Mac unreachable logs FAIL CONNECT_UNREACHABLE'

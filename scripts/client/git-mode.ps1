@@ -1033,6 +1033,76 @@ function Get-LocalTunnelPortPidMap {
     return $map
 }
 
+function Import-PrefetchedOpenTunnelPorts {
+    param(
+        [Parameter(Mandatory)][string[]]$Lines,
+        [Parameter(Mandatory)][string]$UidStr
+    )
+    if (-not $UidStr) { return $null }
+    $openSet = New-Object "System.Collections.Generic.HashSet[int]"
+    foreach ($line in @($Lines)) {
+        if ($line -match 'OPEN:(\d+)') { [void]$openSet.Add([int]$Matches[1]) }
+    }
+    $portBase = Get-TunnelPortUserBase -UidStr $UidStr
+    $probed = New-Object "System.Collections.Generic.List[int]"
+    0..9 | ForEach-Object {
+        $p = $portBase + $_
+        if ($p -gt 20000 -and $p -le 65535) { [void]$probed.Add($p) }
+    }
+    if ($probed.Count -eq 0) { return $null }
+    foreach ($p in $probed) {
+        Set-TunnelTcpState -Port $p -Open $openSet.Contains($p)
+    }
+    $script:PrefetchedOpenTunnelPorts = @{
+        Probed = @($probed)
+        Open   = $openSet
+    }
+    Write-GitModeLog ("PREFETCH_OPEN_PORTS open={0} probed={1}" -f (($openSet | Sort-Object) -join ','), $probed.Count) 'DEBUG'
+    return $script:PrefetchedOpenTunnelPorts
+}
+
+function Get-PrefetchedOpenTunnelPortSet {
+    param([Parameter(Mandatory)][int[]]$Ports)
+    if (-not $script:PrefetchedOpenTunnelPorts) { return $null }
+    $batch = $script:PrefetchedOpenTunnelPorts
+    $probedSet = New-Object "System.Collections.Generic.HashSet[int]"
+    foreach ($p in @($batch.Probed)) { [void]$probedSet.Add([int]$p) }
+    foreach ($p in @($Ports)) {
+        if (-not $probedSet.Contains([int]$p)) {
+            Write-GitModeLog "PREFETCH_OPEN_PORTS miss port=$p - need live batch" 'DEBUG'
+            return $null
+        }
+    }
+    $openSet = New-Object "System.Collections.Generic.HashSet[int]"
+    foreach ($p in @($Ports)) {
+        if ($batch.Open.Contains([int]$p)) { [void]$openSet.Add([int]$p) }
+    }
+    $script:PrefetchedOpenTunnelPorts = $null
+    Write-GitModeLog ("ACQUIRE_BATCH open_ports={0} probed={1} source=prefetch" -f (($openSet | Sort-Object) -join ','), @($Ports).Count) 'DEBUG'
+    return ,$openSet
+}
+
+function Test-WarmLocalConfForeignSkip {
+    # Skip server LU/OS/PORT probe when laptop conf already reflects this user's sticky slot.
+    if (-not $Cfg -or -not (Test-Path -LiteralPath $Cfg)) { return $false }
+    $mine = if ($script:LaptopUser) { [string]$script:LaptopUser } elseif ($env:USERNAME) { [string]$env:USERNAME } else { [string]$env:USER }
+    if ([string]::IsNullOrWhiteSpace($mine)) { return $false }
+    $lu = ''; $port = ''; $slot = ''
+    foreach ($ln in @(Get-Content -LiteralPath $Cfg -ErrorAction SilentlyContinue)) {
+        if ($ln -match '^LAPTOP_USER=(.+)$') { $lu = $Matches[1].Trim() }
+        elseif ($ln -match '^(PORT|TUNNEL_PORT)=(2\d{4})$') { $port = $Matches[2] }
+        elseif ($ln -match '^TUNNEL_SLOT=(\d+)$') { $slot = $Matches[1] }
+    }
+    if (-not $lu -or ($lu -ne $mine)) { return $false }
+    if (-not $port -or -not ($slot -match '^\d+$')) { return $false }
+    $portInt = 0
+    if (-not [int]::TryParse($port, [ref]$portInt)) { return $false }
+    if ($portInt -le 20000 -or $portInt -gt 65535) { return $false }
+    $slotInt = [int]$slot
+    if ($slotInt -lt 0 -or $slotInt -gt 9) { return $false }
+    return $true
+}
+
 function Get-ServerOpenTunnelPorts {
     param([int[]]$Ports = @())
     $set = New-Object "System.Collections.Generic.HashSet[int]"
@@ -1854,7 +1924,13 @@ function Acquire-TunnelPort {
         Write-GitModeLog ("ACQUIRE_FAST fail_empty_probe ms={0} port={1}" -f $sw.ElapsedMilliseconds, $script:Port) 'WARN'
         return $false
     }
-    $openSet = Get-ServerOpenTunnelPorts -Ports $probePorts
+    $openSet = $null
+    if (Get-Command Get-PrefetchedOpenTunnelPortSet -ErrorAction SilentlyContinue) {
+        $openSet = Get-PrefetchedOpenTunnelPortSet -Ports $probePorts
+    }
+    if ($null -eq $openSet) {
+        $openSet = Get-ServerOpenTunnelPorts -Ports $probePorts
+    }
     if ($null -eq $openSet) {
         $openSet = New-Object "System.Collections.Generic.HashSet[int]"
     } elseif ($openSet -isnot [System.Collections.Generic.HashSet[int]]) {
@@ -2809,6 +2885,12 @@ function Warn-ForeignServerSession {
     # Return $true to continue, $false when user aborts a likely wrong-account takeover.
     # Self-heal: stale conf + no listening reverse tunnel -> clear and continue.
     # Speed (stable): one SSH reads conf (+ live port check when foreign), instead of 3-4 greps.
+    if (Get-Command Test-WarmLocalConfForeignSkip -ErrorAction SilentlyContinue) {
+        if (Test-WarmLocalConfForeignSkip) {
+            Write-GitModeLog 'FOREIGN_SESSION skip reason=warm_local_conf' 'DEBUG'
+            return $true
+        }
+    }
     $probeCmd = 'set +e; CONF="$HOME/.claude-connect.conf"; LU=""; OS=""; PORT=""; if [ -f "$CONF" ]; then LU=$(grep -E "^LAPTOP_USER=" "$CONF" 2>/dev/null | tail -1 | cut -d= -f2-); OS=$(grep -E "^LAPTOP_OS=" "$CONF" 2>/dev/null | tail -1 | cut -d= -f2-); PORT=$(grep -E "^TUNNEL_PORT=" "$CONF" 2>/dev/null | tail -1 | cut -d= -f2-); fi; printf "LU=%s\nOS=%s\nPORT=%s\n" "$LU" "$OS" "$PORT"'
     $probe = @((SshX $probeCmd) -join "`n")
     $existingLu = ''; $existingOs = ''; $existingPort = ''

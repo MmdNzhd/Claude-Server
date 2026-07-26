@@ -9,6 +9,11 @@ $suites = @(
     @{ Name = 'connect-ui';           Script = 'test-connect-ui.ps1' }
     @{ Name = 'select-project';       Script = 'test-select-project.ps1' }
     @{ Name = 'connect-pipeline';     Script = 'test-connect-pipeline.ps1' }
+    @{ Name = 'connect-preflight-skip-heal'; Script = 'test-connect-preflight-skip-heal.ps1' }
+    @{ Name = 'connect-preflight-skip-update'; Script = 'test-connect-preflight-skip-update.ps1' }
+    @{ Name = 'connect-task7-prefetch-foreign-cache'; Script = 'test-connect-task7-prefetch-foreign-cache.ps1' }
+    @{ Name = 'connect-task8-deferred-setup'; Script = 'test-connect-task8-deferred-setup.ps1' }
+    @{ Name = 'connect-update-script-only-drift'; Script = 'test-connect-update-script-only-drift.ps1' }
     @{ Name = 'baseline-connect-working-invariants'; Script = 'test-baseline-connect-working-invariants.ps1' }
     @{ Name = 'ssh-user-fix-retry';  Script = 'test-ssh-user-fix-retry.ps1' }
     @{ Name = 'auth-stamp-skip';      Script = 'test-auth-stamp-skip.ps1' }

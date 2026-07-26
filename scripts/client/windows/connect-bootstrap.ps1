@@ -19,7 +19,53 @@ $ErrorActionPreference = 'Stop'
 $Canon = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
 $RemoteBundle = if ($env:CLAUDE_CLIENT_BUNDLE) { $env:CLAUDE_CLIENT_BUNDLE.TrimEnd('/') } else { '/usr/local/share/claude-client' }
 $RelaunchMarker = Join-Path $env:TEMP 'claude-connect-relaunch.dir'
+$PreflightHandoff = Join-Path $env:TEMP 'claude-connect-preflight.ok'
+$RemoteVerCacheFile = Join-Path $env:TEMP 'claude-connect-remote-ver.cache'
+$RemoteVerCacheTtlMinutes = 15
 if ($Here) { $Here = $Here.TrimEnd('\', '/') }
+
+function Clear-RemoteVerDiskCache {
+    Remove-Item -LiteralPath $RemoteVerCacheFile -Force -ErrorAction SilentlyContinue
+}
+
+function Read-RemoteVerDiskCache {
+    param([Parameter(Mandatory)][string]$LocalVer)
+    if (-not (Test-Path -LiteralPath $RemoteVerCacheFile)) { return $null }
+    try {
+        $map = @{}
+        foreach ($ln in @(Get-Content -LiteralPath $RemoteVerCacheFile -ErrorAction Stop)) {
+            if ($ln -match '^([^=]+)=(.*)$') { $map[$Matches[1]] = $Matches[2] }
+        }
+        if (-not $map['VER'] -or -not $map['TS']) { return $null }
+        if ($map['VER'] -ne $LocalVer) { return $null }
+        $ts = [datetime]::ParseExact($map['TS'], 'yyyy-MM-dd HH:mm:ss.fff', $null)
+        if (((Get-Date) - $ts).TotalMinutes -ge $RemoteVerCacheTtlMinutes) { return $null }
+        return [string]$map['VER']
+    } catch { return $null }
+}
+
+function Write-RemoteVerDiskCache {
+    param([Parameter(Mandatory)][string]$Ver)
+    try {
+        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+        [IO.File]::WriteAllLines($RemoteVerCacheFile, @("VER=$Ver", "TS=$ts"), [Text.UTF8Encoding]::new($false))
+    } catch {}
+}
+
+function Clear-PreflightHandoff {
+    Remove-Item -LiteralPath $PreflightHandoff -Force -ErrorAction SilentlyContinue
+}
+
+function Write-PreflightHandoff {
+    param([hashtable]$Fields)
+    try {
+        $lines = New-Object System.Collections.Generic.List[string]
+        foreach ($k in ($Fields.Keys | Sort-Object)) {
+            [void]$lines.Add(('{0}={1}' -f $k, [string]$Fields[$k]))
+        }
+        [IO.File]::WriteAllLines($PreflightHandoff, $lines.ToArray(), [Text.UTF8Encoding]::new($false))
+    } catch {}
+}
 
 $PullNames = @(
     'connect.bat',
@@ -277,6 +323,8 @@ function Copy-DirFiles {
 }
 
 try {
+    Clear-PreflightHandoff
+    if ($Force) { Clear-RemoteVerDiskCache }
     if ($env:CLAUDE_CONNECT_SKIP_BOOTSTRAP -eq '1') {
         Write-BootLog 'skip reason=CLAUDE_CONNECT_SKIP_BOOTSTRAP=1'
         exit 0
@@ -305,22 +353,46 @@ try {
 
     $target = Get-ServerTarget
     Write-BootLog ("target_chosen=$target here=$Here force=$([bool]$Force) canon=$Canon")
-    $cat = Invoke-SshTimed -Exe 'ssh' -ArgumentList ($SshOpts + @($target, "cat '$RemoteBundle/connect-version.txt'")) -TimeoutMs 15000
-    if (-not $cat.Ok -or -not $cat.Out) {
-        Write-BootLog ("ssh_fail target=$target err=$($cat.Err)" -replace '[\r\n]', ' ') 'ERROR'
-        Write-BootLog ("BOOTSTRAP_EXIT exit=1 reason=ssh_fail target=$target") 'ERROR'
-        exit 1
+    $canonVerEarly = Get-DirVersion -Dir $Canon
+    $remoteVer = $null
+    if (-not $Force -and $canonGood) {
+        $remoteVer = Read-RemoteVerDiskCache -LocalVer $canonVerEarly
+        if ($remoteVer) {
+            Write-BootLog ("skip remote ver ssh cache hit ver=$remoteVer ttl_min=$RemoteVerCacheTtlMinutes")
+        }
     }
-    $remoteVer = ($cat.Out -split '\r?\n' | Select-Object -First 1).Trim()
     if (-not $remoteVer) {
-        Write-BootLog 'empty remote version' 'ERROR'
-        Write-BootLog 'BOOTSTRAP_EXIT exit=1 reason=empty_remote_version' 'ERROR'
-        exit 1
+        $cat = Invoke-SshTimed -Exe 'ssh' -ArgumentList ($SshOpts + @($target, "cat '$RemoteBundle/connect-version.txt'")) -TimeoutMs 15000
+        if (-not $cat.Ok -or -not $cat.Out) {
+            Write-BootLog ("ssh_fail target=$target err=$($cat.Err)" -replace '[\r\n]', ' ') 'ERROR'
+            Write-BootLog ("BOOTSTRAP_EXIT exit=1 reason=ssh_fail target=$target") 'ERROR'
+            exit 1
+        }
+        $remoteVer = ($cat.Out -split '\r?\n' | Select-Object -First 1).Trim()
+        if (-not $remoteVer) {
+            Write-BootLog 'empty remote version' 'ERROR'
+            Write-BootLog 'BOOTSTRAP_EXIT exit=1 reason=empty_remote_version' 'ERROR'
+            exit 1
+        }
+        if ($canonGood -and $canonVerEarly -eq $remoteVer) {
+            Write-RemoteVerDiskCache -Ver $remoteVer
+        } else {
+            Clear-RemoteVerDiskCache
+        }
     }
 
     $canonVer = Get-DirVersion -Dir $Canon
     if (-not $needPull -and $canonGood -and ((Compare-Ver -A $remoteVer -B $canonVer) -le 0)) {
         Write-BootLog ("skip canon already current ver=$canonVer remote=$remoteVer")
+        if ($canonVer -eq $remoteVer) { Write-RemoteVerDiskCache -Ver $remoteVer }
+        $hereHealthy = (-not $Here) -or (Test-GoodClientDir -Dir $Here)
+        $handoff = @{
+            SKIP_UPDATE = '1'
+            REMOTE_VER  = $remoteVer
+            LOCAL_VER   = $canonVer
+        }
+        if ($hereHealthy) { $handoff['SKIP_HEAL'] = '1' }
+        Write-PreflightHandoff -Fields $handoff
         if ($Here -and $legacy -and -not [string]::Equals($Here, $Canon, [StringComparison]::OrdinalIgnoreCase)) {
             Clear-LegacyFolderToExeOnly -Dir $Here
             Set-Content -LiteralPath $RelaunchMarker -Value $Canon -Encoding ASCII
@@ -330,6 +402,8 @@ try {
         }
         exit 0
     }
+
+    Clear-RemoteVerDiskCache
 
     $stage = Join-Path $env:TEMP ('claude-client-bootstrap-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
