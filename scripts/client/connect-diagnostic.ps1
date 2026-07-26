@@ -68,8 +68,28 @@ function Get-ConnectProblemVerdict {
             NextAction = 'R'
         }
     }
-    if (-not $Ctx.MountOk) {
-        $mo = [string]$Ctx.MountOut
+    # Live server truth / bg-mount kickoff must not paint a red MOUNT_FAILED box.
+    # Connect starts SSHFS detached (Out=started_in_background, Ok=$false) then opens
+    # Cursor; diagnostic often runs before MOUNT_BG_OK while mountpoint is already yes.
+    $mo = [string]$Ctx.MountOut
+    $mountPending = ($mo -match 'started_in_background') -or ($Ctx.MountPending -eq $true)
+    $effectiveMountOk = [bool]$Ctx.MountOk
+    if (-not $effectiveMountOk) {
+        if ($Ctx.MountPoint -eq 'yes') {
+            $effectiveMountOk = $true
+        } elseif ($mountPending -and ($Ctx.OnFolder -or $Ctx.PathExists -eq 'yes')) {
+            $effectiveMountOk = $true
+        } elseif ($mountPending) {
+            return @{
+                Code = 'MOUNT_PENDING'; Severity = 'INFO'
+                Summary = 'SSHFS mount started in background.'
+                Cause = 'started_in_background'
+                Fix = ''
+                NextAction = ''
+            }
+        }
+    }
+    if (-not $effectiveMountOk) {
         if ($mo -match 'No such file|not found|cannot find') {
             return @{
                 Code = 'MOUNT_PATH_MISSING'; Severity = 'ERROR'; Summary = 'Laptop project path missing.'
@@ -239,13 +259,20 @@ function Write-ConnectDiagnosticReport {
     # the ~15s of heavy probes ran on every happy reconnect. Treat skipped auth as fine; only a
     # genuine auth failure (AuthOk=$false with a non-skip detail) keeps the full diagnostic.
     $authFine = ($AuthOk -ne $false) -or ($AuthDetail -match 'skip')
-    $lightDiag = ($Phase -eq 'SESSION_OPEN' -and $OnFolder -and $MountOk -and $authFine)
+    # Bg mount kickoff reports MountOk=$false with Out=started_in_background; treat as
+    # light-path OK when Cursor is already on the folder (no red DIAGNOSTIC box).
+    $mountPendingLight = ($MountOut -match 'started_in_background') -and $OnFolder
+    $mountOkForLight = $MountOk -or $mountPendingLight
+    $lightDiag = ($Phase -eq 'SESSION_OPEN' -and $OnFolder -and $mountOkForLight -and $authFine)
     if ($lightDiag) {
         $serverMount = 'skipped=light_session_open'
+        if ($mountPendingLight) { $MountOk = $true }
     } else {
         $serverMount = Get-ServerMountDiagnostic -ProjectId $ProjectId -RemotePath $RemotePath
         if ($serverMount -match 'mountpoint=(\w+)') { $mountPoint = $Matches[1] }
         if ($serverMount -match 'path_exists=(\w+)') { $pathExists = $Matches[1] }
+        # Reconcile: live mountpoint beats stale Ok=$false from detached mount start.
+        if (-not $MountOk -and $mountPoint -eq 'yes') { $MountOk = $true }
     }
 
     $expectedUri = ''

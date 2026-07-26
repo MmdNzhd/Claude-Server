@@ -3,6 +3,5 @@
   "latest": "20260722.40",
   "force_min_version": null,
   "message_optional": "A newer Claude Connect is available. Update now?",
-  "message_force": "Update required: fixes Cursor auth-sync, stuck tunnels/mounts, and visible cmd windows. Updating now.",
-  "defer_hours": 48
+  "message_force": "Update required: fixes Cursor auth-sync, stuck tunnels/mounts, and visible cmd windows. Updating now."
 }

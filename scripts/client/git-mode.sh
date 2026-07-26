@@ -159,6 +159,12 @@ EOF
     if [ "$push_ec" -ne 0 ] || [ -z "$result_line" ]; then
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "PUSH_CONF fail exit=$push_ec out=${result_line:-no_result} $(printf '%s' "$push_out" | tr '\n' ' ')" 'ERROR'
+            for _push_sig in ABORT_EMPTY port_empty_recovered port_mismatch_keep; do
+                case "${result_line:-} ${push_out:-}" in
+                    *"$_push_sig"*) connect_log "PUSH_CONF signal=$_push_sig out=${result_line:-no_result}" 'WARN' ;;
+                esac
+            done
+            unset _push_sig
         fi
         # Do not record dedupe on failure - allow immediate retry.
         if [ "$push_ec" -ne 0 ]; then
@@ -170,6 +176,12 @@ EOF
     _LAST_PUSH_CONF_AT="$now_ts"
     if declare -F connect_log >/dev/null 2>&1; then
         connect_log "PUSH_CONF ok exit=0 $result_line" 'INFO'
+        for _push_sig in ABORT_EMPTY port_empty_recovered port_mismatch_keep; do
+            case "${result_line:-} ${push_out:-}" in
+                *"$_push_sig"*) connect_log "PUSH_CONF signal=$_push_sig out=${result_line:-no_result}" 'WARN' ;;
+            esac
+        done
+        unset _push_sig
     fi
 }
 
@@ -844,12 +856,13 @@ sync_session_tunnel_forward() {
             if [ "$_TUNNEL_SOFT_FAIL_COUNT" -lt 4 ]; then
                 return 0
             fi
+            # TCP/banner still healthy: lost local ssh PID only. Keep session up
+            # (do not force "Connection dropped" recovery).
             if declare -F connect_log >/dev/null 2>&1; then
-                LAST_TUNNEL_SYNC_DROP_REASON=no_ssh_proc_tcp_open_budget
-                log_tunnel_drop no_ssh_proc_tcp_open_budget "${ACTIVE_PROJECT_ID:-?}" false "${_editor_opened:-0}" "${_editor_seen_open:-0}" "${RECOVERY_GENERATION:-0}"
+                connect_log "TUNNEL_SYNC soft_fail_exhausted_keep_alive port=$PORT reason=no_ssh_proc_tcp_open pid=$bg_pid$(_tunnel_session_diag_suffix)" 'WARN'
             fi
             _TUNNEL_SOFT_FAIL_COUNT=0
-            return 1
+            return 0
         fi
         _TUNNEL_SYNC_FAIL_COUNT=$(( _TUNNEL_SYNC_FAIL_COUNT + 1 ))
         if [ "$_TUNNEL_SYNC_FAIL_COUNT" -lt "$fail_threshold" ]; then

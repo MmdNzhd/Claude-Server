@@ -2325,17 +2325,19 @@ function Launch-RemoteEditor {
                 } catch { Write-EditorLaunchLog "CURSOR_PROXY_SET_FAIL: $($_.Exception.Message)" 'WARN' }
             } else {
                 # No healthy socks/http after Ensure - clear dead 18998; last resort = direct.
+                # Clear-CursorProxySettingsSidecar: CLEAR_SKIP+repair when windows open AND
+                # 18998 up; FORCE clear when windows open AND 18998 down (avoid ECONNREFUSED).
                 try {
                     $cleared = $false
                     $nOpen = 0
                     try { $nOpen = @(Get-CursorProfileProcesses -ForceRefresh).Count } catch { $nOpen = 0 }
                     if ($nOpen -gt 0) {
                         Write-EditorLaunchLog ("CURSOR_PROXY_CLEAR_SKIP: reason=windows_open action=repair_sidecar_only profile_count={0}" -f $nOpen) 'WARN'
-                        if (Get-Command Repair-CursorProxySettingsToSidecar -ErrorAction SilentlyContinue) {
-                            try { [void](Repair-CursorProxySettingsToSidecar) } catch {}
-                        }
-                    } elseif (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
+                    }
+                    if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
                         try { $cleared = [bool](Clear-CursorProxySettingsSidecar) } catch { $cleared = $false }
+                    } elseif ($nOpen -gt 0 -and (Get-Command Repair-CursorProxySettingsToSidecar -ErrorAction SilentlyContinue)) {
+                        try { [void](Repair-CursorProxySettingsToSidecar) } catch {}
                     }
                     if (-not $cleared -and (Test-MayClearCursorProxySettings -AllowClear)) {
                         $proxyCleared = [bool](Clear-CursorProxySettings)

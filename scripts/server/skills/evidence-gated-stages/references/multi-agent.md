@@ -44,9 +44,9 @@ Guns: <exact substrings>
 Sync set roots: <list>
 Suite command: <cmd>
 
-SSH-first if on mounts: laptop-exec -p PROJECT for read/rg/git/run/write;
-never Cursor Read/Grep/Write on /mounts/; never rg -i/-l/-n/--glob;
-prefer ≤4 parallel; on deny run NEXT:.
+Hybrid if on mounts: paste laptop-exec PRIORITY block (Read/Grep mount-first
+~16-32; Write MCP-first ~8-10; Glob MCP; git LE -p PROJECT; never
+rg -i/-l/-n/--glob; LE ≤4); on deny run NEXT:.
 
 Rules:
 - READ-ONLY lane: do not edit production code or rewrite packs to force green.

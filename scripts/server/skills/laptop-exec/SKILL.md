@@ -1,65 +1,72 @@
 ﻿---
 name: laptop-exec
 description: >-
-  Use for ~/mounts/ work and laptop routing. On Windows when windows-mcp /
-  user-windows-mcp is ready: DEFAULT to MCP FileSystem/PowerShell/UI first;
-  laptop-exec is fallback (and always for git + content rg). Also use when
-  Cursor Read/Grep/Glob/Write/Edit deny, MCP down, tunnel DOWN, Mac laptop,
-  session slots full, rg flag rejected, active_mount mismatch, or Task prompts
-  for mounts work. Never remove laptop-exec — required for Mac/git/rg/fallback.
+  Hybrid laptop routing (measured 2026-07-26). READ/GREP: mount first (~16-32
+  parallel), then windows-mcp, then laptop-exec. WRITE/EDIT: MCP FileSystem
+  first (~8-10), then mount (~10), then LE. Glob: MCP search/list. git: LE only.
+  Max parallel per path; LE ≤4 (cap 8). Mac/MCP-down/tunnel: mount+LE. Never
+  remove laptop-exec — required for Mac/git/rg-fallback.
 ---
 
-# Laptop Exec (Windows-MCP first; LE fallback)
+# Laptop Exec (hybrid routing)
 
-`~/mounts/` may be stale SSHFS. **Laptop disk is truth** — reach it via
-**windows-mcp first** (when ready), else **`laptop-exec`**.
-**Mac / MCP down → laptop-exec only.** Never uninstall `laptop-exec`.
+`~/mounts/` may be STALE for **git** truth; mount Cursor tools are **ALLOWED**.
+Measured SoT (idle + load + multi-round on Windows hybrid): mount scales best
+for Read/Grep; MCP is fastest for Write and best for Glob/UI; LE is SoT for git
+and slow fallback.
 
-## Priority (read this first)
+**Mac / MCP down → mount for FS + laptop-exec** (git always LE). Never uninstall.
 
-```
-1. Windows + MCP ready  →  windows-mcp for FileSystem / PowerShell / UI
-2. Else                 →  laptop-exec (-p PROJECT every call)
-3. Always               →  laptop-exec for git + content rg (even when MCP ready)
-```
+## Priority by action (source of truth — measured 2026-07-26)
 
-Do **not** open with `laptop-exec read/run/write` when MCP is ready for that step.
+| Action | 1st | 2nd | 3rd | Parallel (same turn) |
+|--------|-----|-----|-----|----------------------|
+| **Read** | Cursor Read on `/mounts/` | windows-mcp `FileSystem` (abs Windows) | `laptop-exec read` | mount **~16–32**; MCP **~8–12**; LE **≤4** |
+| **Grep (content)** | Cursor Grep on `/mounts/` | MCP PowerShell `Select-String` | `laptop-exec rg` | mount **~16–32**; Select-String **~4–8**; LE **≤4** |
+| **Glob / filename** | windows-mcp `FileSystem` search/list | Cursor Glob / mount `ls` | `laptop-exec run` | MCP **~8–12**; mount **~16** |
+| **Write/Edit/StrReplace/Delete** | windows-mcp `FileSystem` write | Cursor Write/Edit on `/mounts/` | `laptop-exec write` | MCP **~8–10**; mount **~10**; LE **≤4** |
+| **git** | `laptop-exec git` only | — | — | LE **≤4** |
+| **Shell build/test** | windows-mcp `PowerShell` | `laptop-exec run` | mount Shell OK | MCP free; LE **≤4** |
+| **UI / Screenshot** | windows-mcp only | — | — | MCP free |
 
-## Parallel MCP (mandatory)
+**Notes:**
+- MCP `FileSystem` search ≠ content Grep. Content via MCP = **Select-String**.
+- MCP relative paths resolve to **Desktop** — always absolute under project root.
+- MCP Read saturates ~27–28 rps under fan-out; more than ~12 parallel mostly adds latency.
+- Mount Read scales past ×64 in benches; prefer **~16–32** independent reads/turn.
+- Evidence (approx): cold Read mount≪MCP≪LE; Write MCP≪mount≪LE; load mount wins Read 20/20 paired.
 
-When MCP is ready and ops are **independent**:
+## Parallel (mandatory — maximize wall-clock)
 
-- Fan out **~8 parallel** `windows-mcp` `FileSystem` / `PowerShell` calls **in the same turn**.
-- **Never** drip independent MCP requests one-by-one across turns.
-- Sequence only when step N needs output from step N-1.
-- MCP has no SSH mux limit; the ≤4 / hard-cap-8 limit applies to **`laptop-exec` only**.
+Independent ops in the **same turn** (never drip one-by-one):
+
+| Path | Target fan-out | Cap / notes |
+|------|----------------|-------------|
+| Mount Read/Grep/Glob | **~16–32** | No mux limit; SSHFS OK under parallel in measured sessions |
+| MCP FileSystem read/search | **~8–12** | Beyond ~12, latency rises (throughput plateaus ~28 rps) |
+| MCP FileSystem write | **~8–10** | Fastest write path when listed |
+| MCP Select-String | **~4–8** | Heavier than FileSystem read |
+| MCP PowerShell build/test | as needed | No mux limit |
+| laptop-exec any | **≤4** prefer | Hard cap **8** mux slots; never storm |
 
 ## HARD STOP
 
-1. Read/Grep/Glob/Write/Edit/StrReplace on `/mounts/` → deny is **expected**.
-2. **Never retry** the denied tool. Run the `NEXT:` command in the same turn.
-3. First allowed I/O for that need:
-   - **Windows + MCP ready:** windows-mcp (`FileSystem` / `PowerShell` / UI)
-   - **Otherwise:** Shell + `laptop-exec` with **`-p PROJECT` every call**
+1. Hooks **ALLOW** Read/Grep/Glob/Write/Edit/StrReplace/Delete/EditNotebook/Shell on `/mounts/`.
+2. If a tool is denied, **never retry** it — run the `NEXT:` hint in the same turn.
+3. Prefer table above when Windows + tools listed; else mount then `laptop-exec -p PROJECT`.
 
-## FAIL-FAST (windows-mcp) — stop the 100-retry loop
+## FAIL-FAST (windows-mcp)
 
-Env file / hybrid hint ≠ tools actually working. Agents burn turns retrying Read or MCP.
+**MCP ready** = tools listed (`windows-mcp` / `user-windows-mcp` with `FileSystem`/`PowerShell`).
 
-**MCP ready only if both are true:**
-
-1. Tool catalog lists `windows-mcp` or `user-windows-mcp` with `FileSystem` / `PowerShell` (not merely `user-filesystem`).
-2. One real call succeeds (or you have not yet tried this session).
-
-**After ONE failure** (`ECONNREFUSED`, fetch failed, not connected, 401 loop, tools missing):
+**After ONE failure** (`ECONNREFUSED`, fetch failed, not connected):
 
 - Mark MCP **down for this session**.
-- Switch to **`laptop-exec` only** for FS/shell (still LE for git/rg).
+- Use **mount + laptop-exec** (git still LE).
 - **Do not** retry the failed MCP call.
-- **Do not** retry Cursor Read/Grep/Write on `/mounts/`.
-- Tell user once: reconnect `connect.bat` / start laptop `windows-mcp` / Reload Window.
+- Tell user once: reconnect / start laptop windows-mcp / Reload Window.
 
-`user-filesystem` is **not** windows-mcp (different allowlist; often useless for project roots).
+`user-filesystem` ≠ windows-mcp. FileSystem args use `mode=` (not `action=`).
 
 ```bash
 laptop-exec status    # must be UP for LE path; else user connect.bat/sh — stop
@@ -72,111 +79,52 @@ laptop-exec git   -p PROJECT -- status
 laptop-exec run   -p PROJECT -- command...
 ```
 
-`PROJECT` = folder under `~/mounts/PROJECT/`. Always `-p` (active_mount often wrong).
+`PROJECT` = folder under `~/mounts/PROJECT/`. Always `-p`.
 
-## Hybrid routing (Windows)
+## Paths
 
-`windows-mcp` / `user-windows-mcp` **ready** = default path for FS/shell/UI.
-`laptop-exec` stays forever for **git**, **content rg**, **Mac**, and **MCP-down fallback**.
-
-### When MCP counts as ready
-
-1. `laptop-exec status` → `tunnel: UP` and `laptop_os: windows` (or Windows paths).
-2. MCP server connected (tools like `FileSystem`, `PowerShell`, `Screenshot` listed).
-3. Prefer MCP process in **interactive session** (SessionId > 0). If Screenshot/UI
-   fails with session/desktop errors → fall back to laptop-exec for non-UI work;
-   tell user to run `windows-mcp install` (or `~\.windows-mcp\start-server.cmd`).
-
-If any check fails → **laptop-exec only**. Never invent raw SSH.
-
-### Routing table
-
-| Need | First choice | Fallback / always |
-|------|--------------|-------------------|
-| File read/write/list/info | **windows-mcp `FileSystem`** | `laptop-exec read/write` |
-| Shell / build / tests | **windows-mcp `PowerShell`** | `laptop-exec run` |
-| Screenshot / Click / Type / Snapshot / UI | **windows-mcp only** | (no LE equivalent) |
-| Clipboard / Process / Notification / Registry | **windows-mcp** | `laptop-exec run` where sensible |
-| `git` | — | **`laptop-exec git` only** |
-| Content search (`rg`) | — | **`laptop-exec rg` only** (MCP search ≠ content grep) |
-| Mac laptop | — | **`laptop-exec` only** |
-| MCP down / auth / forward broken | — | **`laptop-exec` only** |
-
-### Paths
-
-- `laptop-exec`: **repo-relative** + `-p PROJECT` (never `/home/.../mounts/...`).
-- windows-mcp `FileSystem`: **absolute Windows path** under the project root
-  (from connect/`LAPTOP_PATH` + REL, e.g. `D:\Smart\Dakhl\docs\foo.md`).
-  Relative MCP paths resolve from Desktop — avoid for repo work.
-
-### Ops (server ↔ laptop)
-
-- Forward: `windows-mcp-forward` → `http://127.0.0.1:PORT/mcp` (PORT is per-UID,
-  default `28000+(UID-1000)` — see `~/.config/windows-mcp/env`
-  `WINDOWS_MCP_FORWARD_PORT`). Bearer from that env / laptop
-  `~/.windows-mcp/config.toml` auth_key.
-- Cursor: `~/.cursor/mcp.json` entry `windows-mcp`. Reload Window after auth change.
-- Detail: `reference-windows-mcp.md` next to this skill.
+- Mount / Cursor: `/home/$USER/mounts/PROJECT/REL`
+- windows-mcp: **absolute Windows** under project root (`LAPTOP_REMOTE_PATH` / `laptop-exec path -p ID` / mounts.d `rpath|REMOTE_PATH` + REL)
+- laptop-exec: **repo-relative** + `-p PROJECT` (never `/home/.../mounts/...`)
 
 ## rg contract
 
-Not ripgrep. `-i`/`-l`/`-n`/`--glob`/`-g` are **rejected** (old hangs pinned all 8 slots for hours).
+Not ripgrep. `-i`/`-l`/`-n`/`--glob`/`-g` are **rejected**.
 
 ```bash
 # wrong:  laptop-exec rg -p ID -i foo --glob '*.ts'
 # right:  laptop-exec rg -p ID 'foo|Foo' src/
-# right:  laptop-exec rg -p ID 'pattern' '*.ts'
 ```
 
-Exit `1` = no matches. Timeout **90s**. Dash-leading patterns: `rg -- -foo path`. Narrow pathspecs.
-
-Default timeouts (override `LAPTOP_EXEC_*_TIMEOUT=0` to disable): rg 90s, run 600s, git 300s, scp 120s.
-
-`write` = **full file replace** (not patch). Read → edit in `/tmp` → write.
+Exit `1` = no matches. Timeout **90s**. `write` = full file replace.
 
 ## Multi-agent (non-negotiable)
 
-Task spawn is allowed. **Children do not inherit this skill.** If the Task `prompt` omits the block below, the child will Read/Grep mounts, burn denies, and/or pin mux slots.
-
-**Paste verbatim into every Task `prompt` (replace PROJECT):**
+Task spawn is allowed. **Children do not inherit this skill.** Paste into every Task `prompt`:
 
 ```
-Windows-MCP first ONLY if tools listed (windows-mcp/user-windows-mcp FileSystem/PowerShell). Else laptop-exec immediately.
-FAIL-FAST: one MCP connection error (ECONNREFUSED/fetch failed) => MCP down for session; laptop-exec only; never retry same MCP call; never retry Read on /mounts/.
-user-filesystem ≠ windows-mcp.
-ALWAYS laptop-exec for git + content rg; Mac; or when MCP is down.
-laptop-exec status first when using LE. Use -p PROJECT on every laptop-exec call.
-Paths: MCP = absolute Windows under project root; LE = repo-relative (never /home/.../mounts/...).
-Never Read/Grep/Glob/Write/Edit/Shell-heavy on /mounts/.
-Never laptop-exec rg -i/-l/-n/--glob.
-On deny: run NEXT: immediately — do not retry the denied tool.
-MCP: ~8 parallel FileSystem/PowerShell in ONE turn when ready. laptop-exec: prefer ≤4 parallel (hard cap 8 SSH slots).
-Never remove laptop-exec.
+PRIORITY (2026-07-26): READ/GREP=mount first (~16-32 parallel) then MCP (FileSystem / Select-String ~8-12 / ~4-8) then LE ≤4. WRITE/EDIT=MCP FileSystem first (~8-10) then mount (~10) then LE ≤4. Glob=MCP search/list ~8-12 then mount. git=LE only ≤4. UI=MCP only. FAIL-FAST: one MCP error=>MCP down; mount+LE; never retry same MCP call. MCP paths=absolute Windows (not Desktop-relative). LE=-p PROJECT + repo-relative. No rg -i/-l/-n/--glob. user-filesystem≠windows-mcp. FileSystem mode= not action=.
 ```
-
-Prefer ≤4 parallel Tasks that touch the laptop via SSH. One hung `run` blocks everyone. No raw `ssh`/`scp`.
 
 ## Rationalizations (all false)
 
 | Excuse | Reality |
 |--------|---------|
-| "SSH-first means always laptop-exec first" | False — on Windows+MCP, MCP is first for FS/shell/UI |
-| "I'll laptop-exec read even though MCP is ready" | Forbidden for that step; use MCP FileSystem |
-| "One MCP call per turn is safer" | False — independent MCP calls must be parallel in one turn |
-| "Child will see session hooks" | Often weak; paste the block anyway |
-| "Just one quick Read on mounts" | Deny + wasted turn; use MCP or `laptop-exec read` |
-| "rg -i is fine" | Rejected or historically hung for hours |
+| "SSH-first means always laptop-exec first" | False — table above; LE last for FS |
+| "Read must be MCP-first" | False — mount wins Read/Grep under load |
+| "Write must be mount-first" | False — MCP write measured faster |
+| "Grep/Glob are denied on mounts" | False — hooks ALLOW |
+| "MCP FileSystem search = content Grep" | False — Select-String or mount Grep |
+| "One MCP call per turn is safer" | False — fan out to caps above |
+| "Child inherits session hooks" | Often weak; paste the block |
+| "rg -i is fine" | Rejected / historically hung slots |
 | "active_mount is already right" | Often wrong — always `-p` |
-| "8 parallel LE explores are faster" | 8 slots → stall; use MCP parallelism for FS instead |
-| "I'll retry the denied tool" | Forbidden; run `NEXT:` |
-| "windows-mcp replaces laptop-exec" | False — Mac/git/rg need LE |
-| "MCP FileSystem search = rg" | False — use `laptop-exec rg` for content search |
-| "Hybrid env exists so MCP must work" | False — tools must be listed AND one call ok |
-| "Retry windows-mcp until it works" | Forbidden — one fail → LE for session |
-| "user-filesystem is windows-mcp" | False — different server/allowlist |
+| "windows-mcp replaces laptop-exec" | False — Mac/git/LE fallback still needed |
+| "Retry MCP until it works" | Forbidden — one fail → MCP down for session |
+| "user-filesystem is windows-mcp" | False |
 
 ## Red flags → stop
 
-Defaulting to LE while MCP ready · Serializing independent MCP calls · Retry after deny · Retry MCP after ECONNREFUSED · Calling Read on mounts after deny · `rg -i/--glob/-l` · Task without paste block · omit `-p` · `cd mounts && git` · long unbounded `run` · ask for SSHFS/sudo password → `sudo-from-laptop` · delete/disable laptop-exec because MCP exists · Treating user-filesystem as windows-mcp
+Defaulting to LE for ordinary Read/Write · Serial mount/MCP when independent · Retry after deny · Retry MCP after ECONNREFUSED · `rg -i/--glob` · Task without paste block · omit `-p` · Desktop-relative MCP paths · ask for SSHFS/sudo password → `sudo-from-laptop`
 
-Detail: `laptop-exec --help`. Do not paste CLAUDE.md SSH encyclopedia into prompts.
+Detail: `laptop-exec --help`. Do not paste CLAUDE.md encyclopedia into prompts.

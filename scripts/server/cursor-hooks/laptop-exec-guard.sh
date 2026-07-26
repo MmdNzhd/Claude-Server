@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# laptop-exec-guard - SSH-first: block SSHFS-heavy tools on real /mounts/ targets only.
+# laptop-exec-guard - ALLOW Read/Grep/Glob/Write/Edit/Shell on /mounts/
+# (rules: Read/Grep mount-first; Write MCP-first; Glob MCP search; max parallel).
+# Writes (Write/Edit/StrReplace/Delete/EditNotebook) and Shell on /mounts/ are ALLOWED.
 # Do NOT scan the whole hook JSON (workspace_roots always contain /mounts/ and caused
 # false denies on every Read/Grep/Shell).
 # Fail OPEN on parse/runtime errors (non-zero exit without JSON looks like a mysterious reject).
@@ -59,7 +61,7 @@ _deny() {
     "agent_msg=$(_le_audit_trunc "$agent_msg" 400)" \
     "user_msg=$(_le_audit_trunc "$user_msg" 200)" \
     "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8" \
-    "hint=Expected SSH-first deny. Run NEXT: (hybrid: prefer windows-mcp FS/shell; laptop-exec for git/rg/fallback). Do NOT retry the blocked tool."
+    "hint=Expected rare deny. Run NEXT: (hybrid: Read/Grep=mount; Write/Glob=MCP when listed; git=LE). Do NOT retry the blocked tool."
   jq -n --arg permission deny --arg agent_message "$agent_msg" --arg user_message "$user_msg" \
     '{permission:$permission,agent_message:$agent_message,user_message:$user_message}' 2>/dev/null \
     || echo '{"permission":"deny","agent_message":"SSH-first blocked","user_message":"Use laptop-exec"}'
@@ -69,6 +71,7 @@ _deny() {
 command -v jq >/dev/null 2>&1 || _allow
 event=$(printf '%s' "$input" | jq -r '.hook_event_name // empty' 2>/dev/null) || _allow
 [[ -n "$input" ]] || _allow
+
 
 _touches_mounts() {
   local text="$1"
@@ -139,18 +142,9 @@ _cmd_has_non_mount_abs() {
 
 _shell_should_block() {
   local cmd="$1" cwd="$2"
-  _is_heavy_shell "$cmd" || return 1
-  # Heavy + explicit /mounts/ in command => always block (no /tmp escape bypass).
-  if _touches_mounts "$cmd"; then
-    return 0
-  fi
-  # Heavy while cwd is under mounts: allow only pure /tmp (or non-mount /home) ops.
-  if _touches_mounts "$cwd"; then
-    if _cmd_has_non_mount_abs "$cmd"; then
-      return 1
-    fi
-    return 0
-  fi
+  # Permanent policy (2026-07-26): Shell on /mounts/ is ALLOWED for all users/projects
+  # (direct writes via cat/sed/redirects, and other shell). Read/Grep/Glob tools still
+  # denied in preToolUse. Keep helper for audit compatibility; always return "do not block".
   return 1
 }
 
@@ -182,32 +176,22 @@ _workspace_touches_mounts() {
 _tool_targets_mounts() {
   local tool="$1"
   local paths p prompt sub cmd cwd
-  # Shell: evaluate command heaviness; ignore working_directory-as-path false positive.
-  if [[ "$tool" == Shell ]]; then
-    cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // .command // empty' 2>/dev/null || true)
-    cwd=$(printf '%s' "$input" | jq -r '.tool_input.working_directory // .cwd // empty' 2>/dev/null || true)
-    _shell_should_block "$cmd" "$cwd" && return 0
-    return 1
-  fi
-  paths=$(_tool_path_blob)
-  if [[ -n "${paths}" ]]; then
-    while IFS= read -r p; do
-      [[ -z "$p" ]] && continue
-      _touches_mounts "$p" && return 0
-    done <<< "$paths"
-    return 1
-  fi
+  # Policy: ALL file tools ALLOWED on /mounts/ (Read/Grep/Glob/Write/Edit/Shell).
+  # Prefer mount Read/Grep; MCP Write/Glob in rules/session (not enforced by deny).
   case "$tool" in
-    Grep|Glob|Read|Write|Edit|EditNotebook|StrReplace|Delete)
-      _workspace_touches_mounts && return 0
+    # ALLOW — Grep/Glob same as Read.
+    Read|Write|Edit|EditNotebook|StrReplace|Delete|Grep|Glob)
+      return 1
+      ;;
+    Shell)
+      return 1
       ;;
     Task)
-      # Multi-agent: NEVER block Task spawn. explore/shell used to be denied and
-      # parents cascaded into many failing subagents. Individual Read/Grep/Shell
-      # denies + NEXT remap guide each subagent instead.
+      # Multi-agent: NEVER block Task spawn.
       return 1
       ;;
   esac
+  # No path-based deny for remaining tools targeting mounts (fail-open).
   return 1
 }
 
@@ -267,7 +251,8 @@ _remote_path_for() {
   local pid="$1" conf="${HOME}/.claude-mounts.d/${pid}.conf" line v
   [[ -n "$pid" && -f "$conf" ]] || return 1
   while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ ^(REMOTE_PATH|remote_path)=(.*)$ ]] || continue
+    # mounts.d uses REMOTE_PATH= (legacy) or rpath= (connect UI) — both valid.
+    [[ "$line" =~ ^(REMOTE_PATH|remote_path|rpath)=(.*)$ ]] || continue
     v="${BASH_REMATCH[2]}"
     v="${v%\"}"; v="${v#\"}"
     v="${v%\'}"; v="${v#\'}"
@@ -312,41 +297,54 @@ _remap_hint() {
     fi
   fi
   # FAIL-FAST suffix: hybrid env ≠ live tools; stop Read/MCP retry storms (seen in logs).
-  local ff=' FAIL-FAST: if windows-mcp tools not listed OR one MCP call fails (ECONNREFUSED/fetch failed): laptop-exec immediately; never retry Read; never retry same MCP call. user-filesystem≠windows-mcp.'
+  local ff=' FAIL-FAST: if windows-mcp tools not listed OR one MCP call fails (ECONNREFUSED/fetch failed): use mount + laptop-exec; never retry same MCP call. user-filesystem≠windows-mcp.'
   case "$tool" in
     Read)
       if [[ "$hybrid" -eq 1 ]]; then
         if [[ -n "$wabs" ]]; then
-          printf 'NEXT (do not retry Read): if windows-mcp FileSystem tools listed, read "%s" once (prefer; ~8 parallel/turn). Else laptop-exec read%s %s.%s' "$wabs" "$pflag" "$rel" "$ff"
+          printf 'NEXT (do not retry Read): prefer Cursor Read on /mounts/ (~16-32 parallel). Else MCP FileSystem "%s" (~8-12). Else laptop-exec read%s %s.%s' "$wabs" "$pflag" "$rel" "$ff"
         elif [[ -n "$rpath" ]]; then
-          printf 'NEXT (do not retry Read): if windows-mcp tools listed, FileSystem read under %s + REL once. Else laptop-exec read%s REL.%s' "$rpath" "$pflag" "$ff"
+          printf 'NEXT (do not retry Read): prefer Cursor Read on /mounts/ (~16-32). Else MCP FileSystem under %s + REL (~8-12). Else laptop-exec read%s REL.%s' "$rpath" "$pflag" "$ff"
         else
-          printf 'NEXT (do not retry Read): if windows-mcp tools listed, FileSystem read absolute Windows path once. Else laptop-exec read%s REL.%s' "$pflag" "$ff"
+          printf 'NEXT (do not retry Read): prefer Cursor Read on /mounts/ (~16-32). Else MCP FileSystem absolute Windows (~8-12). Else laptop-exec read%s REL.%s' "$pflag" "$ff"
         fi
       elif [[ -n "$rel" ]]; then
-        printf 'NEXT (do not retry Read): laptop-exec read%s %s' "$pflag" "$rel"
+        printf 'NEXT (do not retry Read): Cursor Read on /mounts/ or laptop-exec read%s %s' "$pflag" "$rel"
       else
-        printf 'NEXT (do not retry Read): laptop-exec read%s REL' "$pflag"
+        printf 'NEXT (do not retry Read): Cursor Read on /mounts/ or laptop-exec read%s REL' "$pflag"
       fi
       ;;
     Write|Edit|StrReplace|Delete|EditNotebook)
       if [[ "$hybrid" -eq 1 ]]; then
         if [[ -n "$wabs" ]]; then
-          printf 'NEXT (do not retry %s): if windows-mcp tools listed, FileSystem write "%s" once. Else laptop-exec write%s %s.%s' "$tool" "$wabs" "$pflag" "$rel" "$ff"
+          printf 'NEXT (do not retry %s): prefer MCP FileSystem write "%s" (~8-10). Else mount Write/Edit (~10). Else laptop-exec write%s %s.%s' "$tool" "$wabs" "$pflag" "$rel" "$ff"
         elif [[ -n "$rpath" ]]; then
-          printf 'NEXT (do not retry %s): if windows-mcp tools listed, FileSystem write under %s + REL once. Else laptop-exec write%s REL.%s' "$tool" "$rpath" "$pflag" "$ff"
+          printf 'NEXT (do not retry %s): prefer MCP FileSystem write under %s + REL (~8-10). Else mount (~10). Else laptop-exec write%s REL.%s' "$tool" "$rpath" "$pflag" "$ff"
         else
-          printf 'NEXT (do not retry %s): if windows-mcp tools listed, FileSystem write once. Else laptop-exec write%s REL.%s' "$tool" "$pflag" "$ff"
+          printf 'NEXT (do not retry %s): prefer MCP FileSystem write (~8-10). Else mount (~10). Else laptop-exec write%s REL.%s' "$tool" "$pflag" "$ff"
         fi
       elif [[ -n "$rel" ]]; then
-        printf 'NEXT (do not retry %s): laptop-exec write%s %s  <<EOF ... EOF' "$tool" "$pflag" "$rel"
+        printf 'NEXT (do not retry %s): mount Write/Edit or laptop-exec write%s %s  <<EOF ... EOF' "$tool" "$pflag" "$rel"
       else
-        printf 'NEXT (do not retry %s): laptop-exec write%s REL <<EOF ... EOF' "$tool" "$pflag"
+        printf 'NEXT (do not retry %s): mount Write/Edit or laptop-exec write%s REL <<EOF ... EOF' "$tool" "$pflag"
       fi
       ;;
-    Grep|Glob)
-      # Content search stays on laptop-exec (MCP FileSystem search != content grep).
-      printf 'NEXT (do not retry %s): laptop-exec rg%s PATTERN [pathspec] (git/rg always laptop-exec; not windows-mcp)' "$tool" "$pflag"
+    Grep)
+      # Content: mount Grep first, then Select-String (MCP), then laptop-exec rg.
+      if [[ "$hybrid" -eq 1 ]]; then
+        printf 'NEXT (do not retry Grep): prefer Cursor Grep on /mounts/ (~16-32). Else MCP Select-String (~4-8). Else laptop-exec rg%s PATTERN [pathspec].' "$pflag"
+      else
+        printf 'NEXT (do not retry Grep): Cursor Grep on mounts or laptop-exec rg%s PATTERN [pathspec]' "$pflag"
+      fi
+      ;;
+    Glob)
+      if [[ "$hybrid" -eq 1 && -n "$rpath" ]]; then
+        printf 'NEXT (do not retry Glob): windows-mcp FileSystem search/list under %s (prefer; ~8-12 parallel). Or Cursor Glob / mount ls. Not content Grep.' "$rpath"
+      elif [[ "$hybrid" -eq 1 ]]; then
+        printf 'NEXT (do not retry Glob): windows-mcp FileSystem search/list under project Windows root (prefer; ~8-12). Or Cursor Glob / mount ls.'
+      else
+        printf 'NEXT (do not retry Glob): Cursor Glob on mounts, or mount Shell ls / Get-ChildItem (or laptop-exec run).'
+      fi
       ;;
     Shell)
       if [[ "$hybrid" -eq 1 ]]; then
@@ -357,14 +355,14 @@ _remap_hint() {
       ;;
     Task)
       if [[ "$hybrid" -eq 1 ]]; then
-        printf 'NEXT: Task spawn allowed; child MUST paste hybrid+FAIL-FAST block: windows-mcp only if tools listed; one MCP fail=>laptop-exec; -p ID; no Read/Grep on /mounts/.'
+        printf 'NEXT: Task spawn allowed; child MUST paste: READ/GREP=mount (~16-32) then MCP (~8-12/Select-String ~4-8) then LE≤4; WRITE=MCP (~8-10) then mount (~10) then LE; Glob=MCP then mount; git=LE; one MCP fail=>mount+LE; -p ID; no rg -i/-l/--glob.'
       else
-        printf 'NEXT: Task spawn allowed; each child MUST use laptop-exec -p ID. Do not retry Read/Grep/Shell on /mounts/.'
+        printf 'NEXT: Task spawn allowed; paste READ/GREP=mount|MCP|LE; WRITE=MCP|mount|LE; git=laptop-exec -p ID; no rg -i/-l/--glob.'
       fi
       ;;
     *)
       if [[ "$hybrid" -eq 1 ]]; then
-        printf 'NEXT: windows-mcp if tools listed else laptop-exec%s; one MCP fail=>LE only.%s' "$pflag" "$ff"
+        printf 'NEXT: mount for Read/Grep; MCP for Write/Glob/Shell if listed; else laptop-exec%s; one MCP fail=>mount+LE.%s' "$pflag" "$ff"
       else
         printf 'NEXT: use laptop-exec%s (read|rg|write|git|run)' "$pflag"
       fi
@@ -376,15 +374,24 @@ _deny_user_msg() {
   local tool="$1"
   if _windows_hybrid_ready; then
     case "$tool" in
-      Grep|Glob)
-        printf 'SSH-first: use laptop-exec rg instead of %s (content search). Do not retry.' "$tool"
+      Grep)
+        printf 'Prefer Cursor Grep on mounts, else Select-String, else laptop-exec rg. Do not retry denied Grep.'
+        ;;
+      Glob)
+        printf 'Prefer windows-mcp FileSystem search/list, else Cursor Glob on mounts, else ls. Do not retry denied Glob.'
+        ;;
+      Read)
+        printf 'Prefer Cursor Read on mounts, else MCP FileSystem, else laptop-exec read. Do not retry denied Read.'
+        ;;
+      Write|Edit|StrReplace|Delete|EditNotebook)
+        printf 'Prefer MCP FileSystem write, else mount Write/Edit, else laptop-exec write. Do not retry denied %s.' "$tool"
         ;;
       *)
-        printf 'SSH-first: prefer windows-mcp (FS/shell/UI) or laptop-exec instead of %s. Do not retry.' "$tool"
+        printf 'Hybrid: mount Read/Grep; MCP Write/Glob/Shell/UI when listed; laptop-exec for git/fallback. Do not retry %s.' "$tool"
         ;;
     esac
   else
-    printf 'SSH-first: use laptop-exec instead of %s. Do not retry.' "$tool"
+    printf 'Use mount tools or laptop-exec instead of %s. Do not retry.' "$tool"
   fi
 }
 
@@ -425,7 +432,7 @@ case "$event" in
             "project=$(_guess_project_id Task 2>/dev/null || echo '?')" \
             "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8" \
             "hint=Child does NOT inherit SSH-first. Prompt MUST paste laptop-exec block. Prefer ≤4 parallel (hard cap 8 slots)."
-          _allow_msg "Task spawn OK. Child prompt MUST paste SSH-first hybrid block (prefer windows-mcp FS/shell/UI when ready; laptop-exec for git/rg/-p ID; no Read/Grep on /mounts/; no rg -i/-l/--glob; ≤4 parallel). See laptop-exec skill."
+          _allow_msg "Task spawn OK. Paste: READ/GREP=mount (~16-32) then MCP (~8-12) then LE≤4; WRITE=MCP (~8-10) then mount (~10); Glob=MCP; git=LE; no rg -i/-l/--glob."
         fi
         if _tool_targets_mounts "$tool"; then
           hint=$(_remap_hint "$tool")

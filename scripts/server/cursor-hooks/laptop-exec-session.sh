@@ -37,7 +37,8 @@ _remote_path_for() {
   local pid="$1" conf="${HOME}/.claude-mounts.d/${pid}.conf" line v
   [[ -f "$conf" ]] || return 1
   while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ ^(REMOTE_PATH|remote_path)=(.*)$ ]] || continue
+    # mounts.d uses REMOTE_PATH= (legacy) or rpath= (connect UI) — both valid.
+    [[ "$line" =~ ^(REMOTE_PATH|remote_path|rpath)=(.*)$ ]] || continue
     v="${BASH_REMATCH[2]}"
     v="${v%\"}"; v="${v#\"}"
     v="${v%\'}"; v="${v#\'}"
@@ -61,15 +62,15 @@ cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)
 pid="$(_extract_pid "$roots"$'\n'"$cwd"$'\n'"${PWD:-}" 2>/dev/null || true)"
 user="${USER:-smart}"
 
-base='SSH-FIRST HARD STOP: Never call Cursor Read/Grep/Glob/Write/Edit/StrReplace/Delete on ~/mounts/. Deny expected - do NOT retry; run NEXT:. Never laptop-exec rg -i/-l/-n/--glob. Paths: laptop-exec=repo-relative (-p ID); windows-mcp FileSystem=absolute Windows under project root (not Desktop-relative).'
+base='PRIORITY (2026-07-26): READ/GREP=mount first (~16-32 parallel) then MCP (FileSystem / Select-String ~8-12 / ~4-8) then LE ≤4. WRITE/EDIT=MCP FileSystem first (~8-10) then mount (~10) then LE ≤4. Glob=MCP search/list ~8-12 then mount. git=LE only ≤4. UI=MCP only. Never laptop-exec rg -i/-l/-n/--glob.'
 
 if _windows_hybrid_ready; then
-  hybrid='Windows hybrid CONFIGURED: prefer windows-mcp FileSystem/PowerShell/UI ONLY if those tools are listed in the catalog. SPEED: ~8 parallel FileSystem calls in ONE turn when MCP works. FAIL-FAST: tools missing OR one ECONNREFUSED/fetch failed => MCP down for session; use laptop-exec immediately; never retry denied Read; never retry same MCP call. user-filesystem≠windows-mcp. Keep laptop-exec for git, content rg, and MCP-down.'
+  hybrid='Windows hybrid: READ/GREP=>mount first (~16-32) then windows-mcp if listed (~8-12 / Select-String ~4-8). WRITE/EDIT=>MCP FileSystem first (~8-10) then mount (~10). Glob=>MCP search/list. FAIL-FAST one MCP error=>MCP down; use mount+LE. user-filesystem≠windows-mcp.'
 else
-  hybrid='First I/O = Shell + laptop-exec -p ID (read|rg|write|git|run). On Windows, if windows-mcp tools become listed mid-session, switch FS/shell/UI to MCP; still FAIL-FAST on one connection error.'
+  hybrid='READ/GREP=>mount then MCP if listed then LE. WRITE/EDIT=>MCP if listed then mount then LE. git=>laptop-exec.'
 fi
 
-multi='MULTI-AGENT: Task spawn allowed. EVERY Task prompt MUST paste hybrid+FAIL-FAST: never Read/Grep/Write on /mounts/; never rg -i/-l/-n/--glob; on deny run NEXT:; windows-mcp only if tools listed; one MCP fail=>laptop-exec only. Parallelism: MCP ~8/turn when ready; laptop-exec <=4 (cap 8). Children do not inherit discipline. Tunnel DOWN => stop; user connect.bat/sh.'
+multi='MULTI-AGENT: Task spawn allowed. Paste: READ/GREP=mount (~16-32) then MCP (~8-12) then LE≤4; WRITE=MCP (~8-10) then mount (~10) then LE≤4; Glob=MCP then mount; git=LE only; no rg -i/-l/-n/--glob; one MCP fail=>MCP down. Children do not inherit. Tunnel DOWN => stop; user connect.bat/sh.'
 
 if [[ -z "$pid" ]]; then
   _le_audit_log WARN SESSION_START "project=?" "cwd=$(_le_audit_trunc "${cwd:-${PWD:-}}" 200)" \
@@ -81,8 +82,8 @@ else
   rpath="$(_remote_path_for "$pid" || true)"
   _le_audit_log INFO SESSION_START "project=${pid}" "workspace=/home/${user}/mounts/${pid}" \
     "cwd=$(_le_audit_trunc "${cwd:-}" 200)" "$(_le_audit_session_fields)" \
-    "slots_busy=$(_le_audit_slots_busy)/8" "hint=Hybrid: fan-out ~8 parallel windows-mcp FS; laptop-exec <=4 (cap 8 slots)."
-  examples="Examples: fan-out ~8x windows-mcp FileSystem reads (absolute under project root) in one turn | laptop-exec rg -p ${pid} PATTERN | laptop-exec git -p ${pid} -- status | laptop-exec read -p ${pid} REL as fallback."
+    "slots_busy=$(_le_audit_slots_busy)/8" "hint=Hybrid: mount Read/Grep ~16-32; MCP FS ~8-12 write/read; LE <=4 (cap 8)."
+  examples="Examples: READ/GREP ~16-32x mount under /home/$USER/mounts/${pid}/ then MCP FileSystem/Select-String ~8-12/~4-8 | WRITE/EDIT ~8-10x MCP FileSystem then ~10x mount | Glob ~8-12x MCP search/list | fallback laptop-exec -p ${pid} | git: laptop-exec git -p ${pid} -- status."
   if [[ -n "${rpath:-}" ]]; then
     examples="${examples} Project Windows root: ${rpath}"
   fi

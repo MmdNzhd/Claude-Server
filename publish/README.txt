@@ -3,7 +3,7 @@ Claude Code Server - Client Package (Smart)
 
 Site: Smart
 Server IP (baked into connect scripts): 192.168.210.240
-Current connect scripts: v20260725.41
+Current connect scripts: v20260726.10
 
 WINDOWS
 -------
@@ -38,7 +38,7 @@ Option A (folder / ZIP â€” primary):
    optionally set git mode (g) or IDE (c), Cursor or VS Code opens via Remote SSH.
 
    Header must show:
-     claude-server  |  192.168.210.240  |  v20260725.41
+     claude-server  |  192.168.210.240  |  v20260726.10
 
    Project menu must include:  g git
 
@@ -77,7 +77,7 @@ MAC
 3. Same flow as Windows (project table, git banner, session keys).
 
    Header must show:
-     claude-server  |  192.168.210.240  |  v20260725.41
+     claude-server  |  192.168.210.240  |  v20260726.10
 
    After disconnect: 10s countdown, default M = project menu.
 
@@ -109,7 +109,7 @@ ONE CONNECT PER PC (important)
 
 SINGLE PROJECT (important)
 --------------------------
-  Only ONE project is mounted per session. Requires connect scripts v20260725.41+
+  Only ONE project is mounted per session. Requires connect scripts v20260726.10+
   and server-side mount fix (admin deploys from repo - not included in this ZIP).
 
 SESSION KEYS
@@ -131,7 +131,7 @@ If selecting a project shows "Join-Path ChildPath" prompt:
   - connect.bat blocks outdated folders automatically
 
 If connect.bat says OUTDATED:
-  - Missing connect-ui.ps1 or version is not v20260725.41
+  - Missing connect-ui.ps1 or version is not v20260726.10
 
 Do NOT use old folders from previous ZIP dates or stale Desktop copies.
 Do NOT mix this Smart package with a Sepidz ZIP (different server IP).
@@ -160,7 +160,7 @@ TWO CURSOR PROFILES (no conflict)
 
 CURSOR AUTH: server golden tokens + profile machineid; use [Claude Server] window only.
 
-LOGS (durable on laptop + synced to server, v20260725.41+)
+LOGS (durable on laptop + synced to server, v20260726.10+)
 ------------------------------------------------------------
   Connect keeps a durable local day log on your laptop AND syncs it to the
   server account:

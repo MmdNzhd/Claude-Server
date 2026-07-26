@@ -33,9 +33,14 @@ $syncIdx = $s.IndexOf('function Sync-ConnectExeBesideClient')
 if ($syncIdx -ge 0) {
     $nextFn2 = $s.IndexOf("`nfunction ", $syncIdx + 40)
     $syncBody = if ($nextFn2 -gt $syncIdx) { $s.Substring($syncIdx, $nextFn2 - $syncIdx) } else { $s.Substring($syncIdx) }
-    Assert ($syncBody -match 'Copy-ExeAtomicSwap -Source \$exe -Destination \$desk') 'Desktop mirror now goes through the atomic-swap helper'
-    Assert ($syncBody -match 'Copy-ExeAtomicSwap -Source \$exe -Destination \$setup') 'Setup mirror now goes through the atomic-swap helper'
-    Assert ($syncBody -match 'Resolve-Path .*\$exe.*Resolve-Path .*\$desk' -or $syncBody -match '\(Resolve-Path -LiteralPath \$exe') 'guards against copying the exe onto itself (self-referential running-from-Desktop case)'
+    Assert ($syncBody -match 'Copy-ExeAtomicSwap -Source \$exe -Destination \$dstExe') 'promote dirs refresh Claude-Connect.exe via atomic-swap'
+    Assert ($syncBody -match 'Copy-ExeAtomicSwap -Source \$exe -Destination \$verExe') 'versioned Claude-Connect-{ver}.exe via atomic-swap'
+    Assert ($syncBody -match "Claude-Connect-Setup\.exe") 'legacy Desktop Setup name still promoted'
+    Assert ($syncBody -match 'Copy-ExeAtomicSwap -Source \$exe -Destination \(Join-Path \$desk') 'Setup mirror goes through atomic-swap helper'
+    Assert (
+        ($syncBody -match 'GetFullPath\(\$dstExe\)') -and
+        ($syncBody -match 'GetFullPath\(\$exe\)')
+    ) 'guards against copying the exe onto itself (GetFullPath compare)'
     Assert ($syncBody -notmatch 'Copy-Item -LiteralPath \$exe -Destination \$desk -Force -ErrorAction SilentlyContinue') 'old unconditional Copy-Item (no lock fallback) removed from the Desktop mirror path'
 }
 

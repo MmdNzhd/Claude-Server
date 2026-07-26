@@ -72,12 +72,20 @@ function Invoke-PreflightScript {
     return 1
 }
 
+# Prefer RUN_ID from parent connect.bat (unique per UI). Only mint if missing.
 if ($env:CLAUDE_CONNECT_RUN_ID -notmatch '^[0-9a-fA-F]{12}$') {
     $env:CLAUDE_CONNECT_RUN_ID = [guid]::NewGuid().ToString('N').Substring(0, 12)
 }
 try {
-    Set-Content -LiteralPath (Join-Path $env:TEMP 'claude-connect-run-id.txt') `
-        -Value $env:CLAUDE_CONNECT_RUN_ID -Encoding ASCII
+    # Per-PID handoff avoids multi-UI races on a single shared TEMP file.
+    $pidHandoff = Join-Path $env:TEMP ("claude-connect-run-id.{0}.txt" -f $PID)
+    Set-Content -LiteralPath $pidHandoff -Value $env:CLAUDE_CONNECT_RUN_ID -Encoding ASCII
+    # Legacy shared path: write only when file absent so a concurrent UI cannot
+    # overwrite another bat's already-minted id mid-handoff.
+    $sharedHandoff = Join-Path $env:TEMP 'claude-connect-run-id.txt'
+    if (-not (Test-Path -LiteralPath $sharedHandoff)) {
+        Set-Content -LiteralPath $sharedHandoff -Value $env:CLAUDE_CONNECT_RUN_ID -Encoding ASCII
+    }
 } catch {}
 
 try {

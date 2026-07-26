@@ -123,6 +123,45 @@ for _plan_skill in heavy-task-plan evidence-gated-stages parallel-phased-executi
     fi
 done
 unset _plan_skill _psrc
+# Figma write-to-canvas skills (official + Smart router)
+_REPO_SKILLS="$(cd "$(dirname "$0")/.." && pwd)/skills"
+for _figma_skill in figma-use figma-generate-design figma-create-new-file figma-designer; do
+    _fsrc="/usr/local/lib/claude-server/skills/$_figma_skill"
+    if [ ! -f "$_fsrc/SKILL.md" ] && [ -f "$_REPO_SKILLS/$_figma_skill/SKILL.md" ]; then
+        _fsrc="$_REPO_SKILLS/$_figma_skill"
+    fi
+    if [ -d "$_fsrc" ] && [ -f "$_fsrc/SKILL.md" ]; then
+        mkdir -p "/home/$USERNAME/.cursor/skills"
+        rm -rf "/home/$USERNAME/.cursor/skills/$_figma_skill"
+        cp -a "$_fsrc" "/home/$USERNAME/.cursor/skills/$_figma_skill"
+        chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor/skills/$_figma_skill"
+        ok "~/.cursor/skills/$_figma_skill installed"
+    fi
+done
+unset _figma_skill _fsrc _REPO_SKILLS
+# Figma + MCP cursor rules (parity with install.sh user loop)
+for _rule in figma-design backend-agent; do
+    _rsrc="/usr/local/lib/claude-server/cursor-rules/${_rule}.mdc"
+    if [ ! -f "$_rsrc" ]; then
+        _rsrc="$(cd "$(dirname "$0")/.." && pwd)/cursor-rules/${_rule}.mdc"
+    fi
+    if [ -f "$_rsrc" ]; then
+        mkdir -p "/home/$USERNAME/.cursor/rules"
+        install -m 644 "$_rsrc" "/home/$USERNAME/.cursor/rules/${_rule}.mdc"
+        chown "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor/rules/${_rule}.mdc"
+        ok "~/.cursor/rules/${_rule}.mdc installed"
+    fi
+done
+unset _rule _rsrc
+if [ -f "/usr/local/lib/claude-server/skills/context7/SKILL.md" ] || [ -f "$(cd "$(dirname "$0")/.." && pwd)/skills/context7/SKILL.md" ]; then
+    _c7="/usr/local/lib/claude-server/skills/context7/SKILL.md"
+    [ -f "$_c7" ] || _c7="$(cd "$(dirname "$0")/.." && pwd)/skills/context7/SKILL.md"
+    mkdir -p "/home/$USERNAME/.cursor/skills/context7"
+    install -m 644 "$_c7" "/home/$USERNAME/.cursor/skills/context7/SKILL.md"
+    chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.cursor/skills/context7"
+    ok "~/.cursor/skills/context7 installed"
+    unset _c7
+fi
 RULE_SRC="/usr/local/lib/claude-server/cursor-rules/laptop-exec.mdc"
 if [ ! -f "$RULE_SRC" ]; then
     REPO_RULE="$(cd "$(dirname "$0")/.." && pwd)/cursor-rules/laptop-exec.mdc"

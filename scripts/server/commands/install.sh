@@ -373,7 +373,24 @@ for _plan_skill in heavy-task-plan evidence-gated-stages parallel-phased-executi
     fi
 done
 unset _plan_skill
-if [ -f "$SERVER_DIR/skills/context7/SKILL.md" ] || [ -f "$SERVER_DIR/cursor-rules/figma-design.mdc" ] || [ -f "$SERVER_DIR/cursor-rules/backend-agent.mdc" ] || [ -f "$SERVER_DIR/skills/heavy-task-plan/SKILL.md" ]; then
+# Figma write-to-canvas skills (official + Smart router)
+for _figma_skill in figma-use figma-generate-design figma-create-new-file figma-designer; do
+    if [ -f "$SERVER_DIR/skills/$_figma_skill/SKILL.md" ]; then
+        mkdir -p "/usr/local/lib/claude-server/skills/$_figma_skill"
+        rm -rf "/usr/local/lib/claude-server/skills/$_figma_skill"
+        cp -a "$SERVER_DIR/skills/$_figma_skill" "/usr/local/lib/claude-server/skills/$_figma_skill"
+        find "/usr/local/lib/claude-server/skills/$_figma_skill" -type f -exec chmod 644 {} +
+        find "/usr/local/lib/claude-server/skills/$_figma_skill" -type d -exec chmod 755 {} +
+        ok "$_figma_skill skill -> /usr/local/lib/claude-server/skills/"
+    fi
+done
+unset _figma_skill
+if [ -f "$SERVER_DIR/skills/FIGMA-SKILLS-VENDOR.md" ]; then
+    install -m 644 "$SERVER_DIR/skills/FIGMA-SKILLS-VENDOR.md" \
+        /usr/local/lib/claude-server/skills/FIGMA-SKILLS-VENDOR.md
+    ok "FIGMA-SKILLS-VENDOR.md -> /usr/local/lib/claude-server/skills/"
+fi
+if [ -f "$SERVER_DIR/skills/context7/SKILL.md" ] || [ -f "$SERVER_DIR/cursor-rules/figma-design.mdc" ] || [ -f "$SERVER_DIR/cursor-rules/backend-agent.mdc" ] || [ -f "$SERVER_DIR/skills/heavy-task-plan/SKILL.md" ] || [ -f "$SERVER_DIR/skills/figma-use/SKILL.md" ]; then
     for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
         [ -d "/home/$u" ] || continue
         [ "$u" = "designer" ] && continue
@@ -400,8 +417,17 @@ if [ -f "$SERVER_DIR/skills/context7/SKILL.md" ] || [ -f "$SERVER_DIR/cursor-rul
             fi
         done
         unset _plan_skill
+        for _figma_skill in figma-use figma-generate-design figma-create-new-file figma-designer; do
+            if [ -f "$SERVER_DIR/skills/$_figma_skill/SKILL.md" ]; then
+                mkdir -p "/home/$u/.cursor/skills"
+                rm -rf "/home/$u/.cursor/skills/$_figma_skill"
+                cp -a "$SERVER_DIR/skills/$_figma_skill" "/home/$u/.cursor/skills/$_figma_skill"
+                chown -R "$u:$u" "/home/$u/.cursor/skills/$_figma_skill"
+            fi
+        done
+        unset _figma_skill
     done
-    ok "context7 + plan skills + MCP cursor rules -> all users ~/.cursor/"
+    ok "context7 + plan skills + figma skills + MCP cursor rules -> all users ~/.cursor/"
 fi
 if [ -f "$SERVER_DIR/cursor-auth-refresh.sh" ]; then
     install -m 755 "$SERVER_DIR/cursor-auth-refresh.sh" /usr/local/bin/cursor-auth-refresh
@@ -418,29 +444,56 @@ if [ -f "$SERVER_DIR/audit-cursor-golden-deep.py" ]; then
 fi
 
 # Connect client logs on server only (1-day retention)
-install -m 755 "$SERVER_DIR/claude-connect-logs-cleanup.sh" /usr/local/bin/claude-connect-logs-cleanup
-cat > /etc/cron.d/claude-connect-logs <<'CRON'
+if [ -f "$SERVER_DIR/claude-connect-logs-cleanup.sh" ]; then
+    install -m 755 "$SERVER_DIR/claude-connect-logs-cleanup.sh" /usr/local/bin/claude-connect-logs-cleanup
+    cat > /etc/cron.d/claude-connect-logs <<'CRON'
 # Clean per-user ~/.claude/logs older than 1 day (hourly)
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 0 * * * * root /usr/local/bin/claude-connect-logs-cleanup >/dev/null 2>&1
 CRON
-chmod 644 /etc/cron.d/claude-connect-logs
+    chmod 644 /etc/cron.d/claude-connect-logs
+    ok "claude-connect-logs-cleanup + cron"
+else
+    warn "claude-connect-logs-cleanup.sh missing in repo (skip cron; sync server checkout)"
+fi
 
 # Stuck sshfs/sftp mount-helper reaper (every 10 min) - see script header for why
 # these can survive for days without this: `timeout 30` on the foreground sshfs
 # call does not bound the persistent `-o reconnect` background daemon it forks.
-install -m 755 "$SERVER_DIR/claude-mount-reaper.sh" /usr/local/bin/claude-mount-reaper
-touch /var/log/claude-mount-reaper.log
-chmod 600 /var/log/claude-mount-reaper.log
-cat > /etc/cron.d/claude-mount-reaper <<'CRON'
+if [ -f "$SERVER_DIR/claude-mount-reaper.sh" ]; then
+    install -m 755 "$SERVER_DIR/claude-mount-reaper.sh" /usr/local/bin/claude-mount-reaper
+    touch /var/log/claude-mount-reaper.log
+    chmod 600 /var/log/claude-mount-reaper.log
+    cat > /etc/cron.d/claude-mount-reaper <<'CRON'
 # Kill sshfs/sftp mount helpers stuck for 10+ minutes (every 10 min)
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 */10 * * * * root /usr/local/bin/claude-mount-reaper >/dev/null 2>&1
 CRON
-chmod 644 /etc/cron.d/claude-mount-reaper
-ok "claude-mount-reaper cron -> /etc/cron.d/claude-mount-reaper (every 10 min, log: /var/log/claude-mount-reaper.log)"
+    chmod 644 /etc/cron.d/claude-mount-reaper
+    ok "claude-mount-reaper cron -> /etc/cron.d/claude-mount-reaper (every 10 min, log: /var/log/claude-mount-reaper.log)"
+else
+    warn "claude-mount-reaper.sh missing in repo (skip cron; sync server checkout)"
+fi
+
+# Idle old Cursor Remote server-main reaper (hourly). Default cron uses --apply.
+# Protects builds with live TCP clients; skips trees younger than 1h. See script header.
+if [ -f "$SERVER_DIR/cursor-server-reaper.sh" ]; then
+    install -m 755 "$SERVER_DIR/cursor-server-reaper.sh" /usr/local/bin/cursor-server-reaper
+    touch /var/log/cursor-server-reaper.log
+    chmod 600 /var/log/cursor-server-reaper.log
+    cat > /etc/cron.d/cursor-server-reaper <<'CRON'
+# Reap idle old cursor-server server-main trees (estab=0, age>=1h)
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+15 * * * * root /usr/local/bin/cursor-server-reaper --apply >/dev/null 2>&1
+CRON
+    chmod 644 /etc/cron.d/cursor-server-reaper
+    ok "cursor-server-reaper cron -> /etc/cron.d/cursor-server-reaper (hourly :15, log: /var/log/cursor-server-reaper.log)"
+else
+    warn "cursor-server-reaper.sh missing in repo (skip cron; sync server checkout)"
+fi
 
 
 mkdir -p /etc/cursor-auth/golden

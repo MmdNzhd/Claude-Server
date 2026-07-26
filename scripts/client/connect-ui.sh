@@ -111,6 +111,7 @@ ui_project_table() {
     printf '    \033[1;37mProjects\033[0m\n\n'
     if [ -z "$raw" ]; then
         printf '    \033[0;90m(no projects configured)\033[0m\n\n'
+        printf '    \033[0;90ma add   u update   q quit\033[0m\n\n'
         return
     fi
     local mid mlabel mrpath mlpath active_tag os_tag path_show
@@ -144,7 +145,7 @@ ui_project_table() {
         i=$(( i + 1 ))
     done <<< "$raw"
     echo ""
-    printf '    \033[0;90ma add   e edit   d delete   c config   g git   q quit\033[0m\n\n'
+    printf '    \033[0;90ma add   e edit   d delete   c config   g git   u update   q quit\033[0m\n\n'
 }
 
 ui_session_box() {
@@ -315,7 +316,19 @@ write_connect_scorecard() {
     [ "${_editor_opened:-0}" = "1" ] && ed='open'
     local banner='n/a'
     [ "${TUNNEL_BANNER_CACHE_UP:-0}" = "1" ] && banner='ok'
-    local line="SCORECARD ${phase} auth_ms=n/a banner=${banner} mount_ms=n/a am=${am} editor=${ed} slot=0 ver=${ver}"
+    local port_sc=0
+    if [ -n "${PORT:-}" ]; then
+        port_sc="$(printf '%s' "$PORT" | tr -dc '0-9')"
+    elif [ -n "${TUNNEL_PORT:-}" ]; then
+        port_sc="$(printf '%s' "$TUNNEL_PORT" | tr -dc '0-9')"
+    fi
+    [ -n "$port_sc" ] || port_sc=0
+    local line="SCORECARD ${phase} auth_ms=n/a banner=${banner} mount_ms=n/a am=${am} editor=${ed} slot=0 ver=${ver} port=${port_sc}"
+    if [ -n "${_LAST_AGENT_PATH_OK:-}" ]; then
+        local ap_state='bad' ap_conf="${_LAST_AGENT_PATH_CONF:-}"
+        [ "${_LAST_AGENT_PATH_OK}" = "1" ] && ap_state='ok'
+        line="${line} conf_port=${ap_conf} agent_path=${ap_state}"
+    fi
     if declare -F connect_log >/dev/null 2>&1; then
         connect_log "$line" 'INFO'
     fi
@@ -465,6 +478,54 @@ invoke_connect_silent_update_check() {
             connect_log "UPDATE_SILENT stamp_fail" 'ERROR'
         fi
     fi
+}
+
+# User-triggered update from project menu (u). Visible check; clears throttle/defer.
+invoke_connect_manual_update() {
+    local cfg_dir="$HOME/.config/claude-connect"
+    local script_dir update_sh exit_code
+    mkdir -p "$cfg_dir" 2>/dev/null || true
+    rm -f "$cfg_dir/update-check-miss.txt" "$cfg_dir/update-defer.txt" "$cfg_dir/.last-update-check" 2>/dev/null || true
+
+    script_dir="${CONNECT_SCRIPT_DIR:-${SCRIPT_DIR:-}}"
+    if [ -z "$script_dir" ]; then
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    fi
+    update_sh="$script_dir/connect-update.sh"
+    if [ ! -f "$update_sh" ] && [ -f "$script_dir/mac/connect-update.sh" ]; then
+        update_sh="$script_dir/mac/connect-update.sh"
+    fi
+    if [ ! -f "$update_sh" ] && [ -f "$(dirname "$script_dir")/mac/connect-update.sh" ]; then
+        update_sh="$(dirname "$script_dir")/mac/connect-update.sh"
+    fi
+    if [ ! -f "$update_sh" ]; then
+        warn "Update script missing: $update_sh"
+        declare -F connect_log >/dev/null 2>&1 && connect_log "UPDATE_MANUAL result=fail reason=no_script path=$update_sh" 'ERROR'
+        return 1
+    fi
+
+    echo ""
+    printf '    \033[0;36mChecking for client update...\033[0m\n\n'
+    declare -F connect_decision >/dev/null 2>&1 && connect_decision project_menu update_manual
+    declare -F connect_log >/dev/null 2>&1 && connect_log 'UPDATE_MANUAL begin' 'INFO'
+
+    set +e
+    unset CLAUDE_CONNECT_UPDATE_QUIET
+    bash "$update_sh"
+    exit_code=$?
+    set -e
+
+    declare -F connect_log >/dev/null 2>&1 && connect_log "UPDATE_MANUAL result=exit exit=$exit_code" 'INFO'
+    if [ "$exit_code" -eq 2 ]; then
+        printf '    \033[0;32mUpdate applied - relaunch connect.sh.\033[0m\n'
+        exit 0
+    elif [ "$exit_code" -eq 0 ]; then
+        printf '    \033[0;90mUpdate check finished.\033[0m\n\n'
+        return 0
+    fi
+    warn 'Update check failed (see day log).'
+    echo ""
+    return 1
 }
 
 

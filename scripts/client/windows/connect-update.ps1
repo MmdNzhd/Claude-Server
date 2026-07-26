@@ -31,6 +31,43 @@ if (-not $ScriptDir) {
 $ScriptDir = $ScriptDir.TrimEnd('\', '/')
 try { $ScriptDir = [IO.Path]::GetFullPath($ScriptDir) } catch {}
 
+function Save-ConnectLaunchDirStamp {
+    # Persist where the user launched Claude-Connect*.exe so post-update can drop
+    # Claude-Connect-{ver}.exe beside that folder (e.g. Desktop\claude-publish).
+    param([string]$Dir = '')
+    try {
+        $d = ($Dir + '').Trim()
+        if (-not $d -and $env:CLAUDE_CONNECT_LAUNCH_DIR) { $d = $env:CLAUDE_CONNECT_LAUNCH_DIR.Trim() }
+        if (-not $d) {
+            try {
+                Get-CimInstance Win32_Process -Filter "Name LIKE 'Claude-Connect%'" -ErrorAction SilentlyContinue | ForEach-Object {
+                    $p = [string]$_.ExecutablePath
+                    if (-not $p) { return }
+                    $leaf = Split-Path -Leaf $p
+                    # Prefer versioned / Setup names over the install-folder Claude-Connect.exe
+                    if ($leaf -match '^Claude-Connect-\d{8}\.\d+\.exe$' -or $leaf -eq 'Claude-Connect-Setup.exe') {
+                        $d = Split-Path -Parent $p
+                    } elseif (-not $d -and $leaf -eq 'Claude-Connect.exe') {
+                        $parent = Split-Path -Parent $p
+                        $canon = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
+                        try {
+                            if ([IO.Path]::GetFullPath($parent) -ne [IO.Path]::GetFullPath($canon)) { $d = $parent }
+                        } catch {}
+                    }
+                }
+            } catch {}
+        }
+        if (-not $d) { return }
+        try { $d = [IO.Path]::GetFullPath($d) } catch { return }
+        if (-not (Test-Path -LiteralPath $d)) { return }
+        $env:CLAUDE_CONNECT_LAUNCH_DIR = $d
+        $stampDir = Join-Path $env:USERPROFILE '.config\claude-connect'
+        New-Item -ItemType Directory -Force -Path $stampDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $stampDir 'last-launch-dir.txt') -Value $d -Encoding ASCII -NoNewline
+    } catch {}
+}
+Save-ConnectLaunchDirStamp
+
 $null = Ensure-ConnectRunId
 
 $RemoteBundle = if ($env:CLAUDE_CLIENT_BUNDLE) { $env:CLAUDE_CLIENT_BUNDLE.TrimEnd('/') } else { '/usr/local/share/claude-client' }
@@ -76,7 +113,7 @@ function Assert-SmartNotSepidzContaminated {
         Write-UpdateMsg $msg 'Red'
         exit 1
     }
-    # Sepidz IP only valid under a Sepidz tree — never on Smart Desktop\Claude-Connect.
+    # Sepidz IP only valid under a Sepidz tree â€” never on Smart Desktop\Claude-Connect.
     if ($ServerIp -eq '192.168.250.70' -and (-not $sepidzPath -or $smartCanon)) {
         $msg = 'REFUSE Smart/Sepidz contamination: ServerIP 192.168.250.70 outside Sepidz tree (or Smart Claude-Connect path)'
         Write-UpdateFileLog ("FAIL $msg path=$LaunchPath ip=$ServerIp smart_canon=$smartCanon sepidz_path=$sepidzPath") 'ERROR'
@@ -238,9 +275,41 @@ function Copy-ExeAtomicSwap {
     }
 }
 
+function Get-ConnectExePromoteDirs {
+    # Dirs where the new Claude-Connect-{ver}.exe should appear: install/script dir +
+    # wherever the user actually launched the EXE (claude-publish, Desktop, …).
+    # Never deletes older versioned EXEs.
+    param([string]$WinDir)
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $dirs = New-Object 'System.Collections.Generic.List[string]'
+    $addDir = {
+        param($d, $seenSet, $list)
+        if (-not $d) { return }
+        try { $d = [IO.Path]::GetFullPath($d) } catch { return }
+        if (-not (Test-Path -LiteralPath $d)) { return }
+        if ($seenSet.Add($d)) { [void]$list.Add($d) }
+    }
+    & $addDir $WinDir $seen $dirs
+    if ($ScriptDir) { & $addDir $ScriptDir $seen $dirs }
+    if ($env:CLAUDE_CONNECT_LAUNCH_DIR) { & $addDir $env:CLAUDE_CONNECT_LAUNCH_DIR $seen $dirs }
+    $stamp = Join-Path $env:USERPROFILE '.config\claude-connect\last-launch-dir.txt'
+    if (Test-Path -LiteralPath $stamp) {
+        try { & $addDir ((Get-Content -LiteralPath $stamp -Raw -ErrorAction Stop).Trim()) $seen $dirs } catch {}
+    }
+    try {
+        Get-CimInstance Win32_Process -Filter "Name LIKE 'Claude-Connect%'" -ErrorAction SilentlyContinue | ForEach-Object {
+            $p = [string]$_.ExecutablePath
+            if ($p -and (Test-Path -LiteralPath $p)) { & $addDir (Split-Path -Parent $p) $seen $dirs }
+        }
+    } catch {}
+    return $dirs
+}
+
 function Sync-ConnectExeBesideClient {
-    # Existing bat users: after auto-update, Claude-Connect.exe sits next to connect.bat.
-    # Also mirror to Desktop so they can see/share the single-file installer.
+    # After update: refresh Claude-Connect.exe beside the install folder, and place
+    # Claude-Connect-{ver}.exe next to every launch/install dir we know (ScriptDir,
+    # CLAUDE_CONNECT_LAUNCH_DIR, last-launch-dir, running EXE folders). Never delete olds.
+    param([string]$VersionLabel = '')
     try {
         $winDir = $ScriptDir
         $leaf = Split-Path -Leaf $ScriptDir
@@ -252,15 +321,39 @@ function Sync-ConnectExeBesideClient {
         }
         $exe = Join-Path $winDir 'Claude-Connect.exe'
         if (-not (Test-Path -LiteralPath $exe)) { return }
-        $desk = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect.exe'
-        $setup = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect-Setup.exe'
-        $okDesk = $true
-        $okSetup = $true
-        if ((Resolve-Path -LiteralPath $exe -ErrorAction SilentlyContinue).Path -ne (Resolve-Path -LiteralPath $desk -ErrorAction SilentlyContinue).Path) {
-            $okDesk = Copy-ExeAtomicSwap -Source $exe -Destination $desk
+
+        $verLabel = ($VersionLabel + '').Trim()
+        if (-not $verLabel) {
+            try { $verLabel = (Get-LocalVersion + '').Trim() } catch { $verLabel = '' }
         }
-        $okSetup = Copy-ExeAtomicSwap -Source $exe -Destination $setup
-        Write-UpdateFileLog ("exe_promoted path=$exe desk=$okDesk setup=$okSetup")
+
+        $promoteDirs = @(Get-ConnectExePromoteDirs -WinDir $winDir)
+        $written = New-Object System.Collections.Generic.List[string]
+        foreach ($dir in $promoteDirs) {
+            $dstExe = Join-Path $dir 'Claude-Connect.exe'
+            try {
+                if (([IO.Path]::GetFullPath($dstExe)) -ne ([IO.Path]::GetFullPath($exe))) {
+                    [void](Copy-ExeAtomicSwap -Source $exe -Destination $dstExe)
+                }
+            } catch {}
+            if ($verLabel -match '^\d{8}\.\d+$') {
+                $verExe = Join-Path $dir ("Claude-Connect-{0}.exe" -f $verLabel)
+                $okVer = Copy-ExeAtomicSwap -Source $exe -Destination $verExe
+                Write-UpdateFileLog ("exe_versioned_promoted ver={0} ok={1} path={2}" -f $verLabel, [int]$okVer, $verExe)
+                if ($okVer) { $written.Add($verExe) | Out-Null }
+            }
+        }
+        # Legacy Desktop Setup name (additive; never removes other versioned EXEs).
+        $desk = Join-Path $env:USERPROFILE 'Desktop'
+        try {
+            [void](Copy-ExeAtomicSwap -Source $exe -Destination (Join-Path $desk 'Claude-Connect-Setup.exe'))
+        } catch {}
+        if ($written.Count -gt 0) {
+            $script:LastExeVersionedPaths = @($written)
+            Write-UpdateFileLog ("exe_promoted dirs={0} versioned={1}" -f $promoteDirs.Count, $written.Count)
+        } else {
+            Write-UpdateFileLog ("exe_promoted dirs={0} versioned=0" -f $promoteDirs.Count)
+        }
     } catch {
         Write-UpdateFileLog ("exe_promote_fail $($_.Exception.Message)") 'WARN'
     }
@@ -382,44 +475,7 @@ function Get-ClientUpdatePolicy {
         force_min_version = $null
         message_optional = 'A newer Claude Connect is available. Update now?'
         message_force = 'A required Claude Connect update will be applied now.'
-        defer_hours = 48
     }
-}
-
-function Get-UpdateDeferPath { return (Join-Path (Join-Path $env:USERPROFILE '.config\claude-connect') 'update-defer.txt') }
-
-function Test-UpdateDeferActive {
-    param([string]$RemoteVer)
-    $path = Get-UpdateDeferPath
-    if (-not (Test-Path -LiteralPath $path)) { return $false }
-    try {
-        $raw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
-        $ver = $null; $until = $null
-        foreach ($line in ($raw -split "`n")) {
-            if ($line -match '^version=(.+)$') { $ver = $Matches[1].Trim() }
-            if ($line -match '^until=(.+)$') { $until = $Matches[1].Trim() }
-        }
-        if ($ver -and $RemoteVer -and $ver -ne $RemoteVer) { return $false }
-        if (-not $until) { return $false }
-        $dt = [datetime]::Parse($until, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
-        if ($dt -gt (Get-Date).ToUniversalTime()) {
-            Write-UpdateFileLog "UPDATE_DEFER active until=$until ver=$ver"
-            return $true
-        }
-    } catch {}
-    return $false
-}
-
-function Save-UpdateDefer {
-    param([string]$RemoteVer, [int]$Hours = 48)
-    $dir = Join-Path $env:USERPROFILE '.config\claude-connect'
-    try { New-Item -ItemType Directory -Force -Path $dir | Out-Null } catch {}
-    $until = (Get-Date).ToUniversalTime().AddHours($Hours).ToString('o')
-    @"
-version=$RemoteVer
-until=$until
-"@ | Set-Content -LiteralPath (Get-UpdateDeferPath) -Encoding UTF8
-    Write-UpdateFileLog "UPDATE_DEFER saved until=$until ver=$RemoteVer"
 }
 
 # #P1: connect-version.txt can be intentionally/persistently absent on the server
@@ -915,9 +971,9 @@ function Invoke-ExeOnlyClientUpdate {
     $deskSetup = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect-Setup.exe'
     $canonExe = Join-Path $canon 'Claude-Connect.exe'
     foreach ($pair in @(
-        @{ Dst = $deskSetup; Req = 'desk_setup' },
-        @{ Dst = $canonExe; Req = 'canon_exe' },
-        @{ Dst = $deskExe; Req = 'desk_exe' }
+        @{ Dst = $deskSetup; Tag = 'desk_setup' },
+        @{ Dst = $canonExe; Tag = 'canon_exe' },
+        @{ Dst = $deskExe; Tag = 'desk_exe' }
     )) {
         if ($pair.Tag -eq 'desk_exe' -and $env:CLAUDE_CONNECT_FROM_EXE -eq '1') {
             Write-UpdateFileLog 'exe_copy_skip desk_exe reason=from_exe_locked'
@@ -1110,30 +1166,28 @@ if (-not $forceApply) {
         Complete-UpdateCheckHandoff
         exit 0
     }
-    if (Test-UpdateDeferActive -RemoteVer $remoteVer) {
-        Write-UpdateMsg 'Optional update deferred - continuing with current client' 'DarkYellow'
-        Write-UpdateFileLog "UPDATE_OPTIONAL_SKIP reason=defer local=$localVer remote=$remoteVer"
-        Complete-UpdateCheckHandoff
-        exit 0
-    }
+    # Defer option removed — drop any leftover stamp from older clients.
+    try {
+        $deferPath = Join-Path (Join-Path $env:USERPROFILE '.config\claude-connect') 'update-defer.txt'
+        if (Test-Path -LiteralPath $deferPath) { Remove-Item -LiteralPath $deferPath -Force -ErrorAction SilentlyContinue }
+    } catch {}
     $msg = 'A newer Claude Connect is available. Update now?'
     try { if ($policy.message_optional) { $msg = [string]$policy.message_optional } } catch {}
     Write-UpdateMsg ("{0} (v{1} -> v{2})" -f $msg, $localVer, $remoteVer) 'Cyan'
     $answer = 'N'
-    try {
-        Write-Host -NoNewline '  Update now? [Y]es / [N]ot now / [D]efer 48h: '
-        $answer = [Console]::ReadLine()
-    } catch { $answer = 'N' }
+    # Automation / hard tests: avoid [Console]::ReadLine when stdin is a pipe that SSH
+    # or redirected hosts may already have consumed. Interactive UI unchanged.
+    if ($env:CLAUDE_CONNECT_UPDATE_YES -eq '1') {
+        $answer = 'Y'
+        Write-UpdateFileLog 'UPDATE_OPTIONAL_ANSWER source=CLAUDE_CONNECT_UPDATE_YES'
+    } else {
+        try {
+            Write-Host -NoNewline '  Update now? [Y]es / [N]ot now: '
+            $answer = [Console]::ReadLine()
+        } catch { $answer = 'N' }
+    }
     if (-not $answer) { $answer = 'N' }
     $a = $answer.Trim().ToUpperInvariant()
-    if ($a -eq 'D' -or $a -eq 'DEFER') {
-        $hours = 48
-        try { if ($policy.defer_hours) { $hours = [int]$policy.defer_hours } } catch {}
-        Save-UpdateDefer -RemoteVer $remoteVer -Hours $hours
-        Write-UpdateMsg 'Update deferred for 48 hours' 'DarkYellow'
-        Complete-UpdateCheckHandoff
-        exit 0
-    }
     if ($a -eq 'N' -or $a -eq 'NO') {
         Write-UpdateFileLog "UPDATE_OPTIONAL_SKIP reason=user_no local=$localVer remote=$remoteVer"
         Complete-UpdateCheckHandoff
@@ -1147,106 +1201,13 @@ if (-not $forceApply) {
 }
 
 
-# --- EXE-only primary update (bat or EXE launch) ---
+# --- Bundle primary (scripts are source of truth) ---
+# Do NOT use Claude-Connect.exe SFX extract as the primary updater: scripts-only
+# server deploys keep the previous EXE binary, so extracting it would reinstall
+# stale scripts and never land the new connect-version / sidecar fixes.
 Show-UpdateProgressUi -Status 'Preparing update...'
 Set-UpdateProgressUi -Status ('Updating to v{0}...' -f $remoteVer) -Percent 5
-Write-UpdateFileLog 'exe_only_primary try=1'
-if (Invoke-ExeOnlyClientUpdate -Target $ep.Target -RemoteVer $remoteVer) {
-    Write-UpdateMsg "Updated to v$remoteVer" 'Green'
-    Write-UpdateFileLog 'applied_ok via=exe_only continue_no_relaunch exit=0'
-    try {
-        $dayLog = Get-UpdateLogPath
-        $cfg = Join-Path $env:USERPROFILE '.config\claude-connect\connect.conf'
-        $ru=''; $sip=''
-        if (Test-Path $cfg) {
-            Get-Content $cfg | ForEach-Object {
-                if ($_ -match '^REMOTE_USER=(.+)$') { $ru=$Matches[1].Trim() }
-            }
-        }
-        if (Get-Command Get-LocalServerIp -ErrorAction SilentlyContinue) { $sip = Get-LocalServerIp }
-        if ($ru -and $sip -and (Test-Path $dayLog)) {
-            $t = "{0}@{1}" -f $ru,$sip
-            $wmPath = $dayLog + '.sync-offset'
-            $off = 0
-            if (Test-Path -LiteralPath $wmPath) {
-                $raw = ((Get-Content -LiteralPath $wmPath -Raw -ErrorAction SilentlyContinue) + '').Trim()
-                [void][int]::TryParse($raw, [ref]$off)
-                if ($off -lt 0) { $off = 0 }
-            }
-            $fileLen = [int64]0
-            $take = 0
-            $chunk = $null
-            $fsRead = $null
-            try {
-                $fsRead = [System.IO.File]::Open(
-                    $dayLog,
-                    [System.IO.FileMode]::Open,
-                    [System.IO.FileAccess]::Read,
-                    [System.IO.FileShare]::ReadWrite)
-                $fileLen = [int64]$fsRead.Length
-                if ($off -gt $fileLen) { $off = 0 }
-                if ($off -lt $fileLen) {
-                    $take = [int][Math]::Min(512KB, $fileLen - $off)
-                    $null = $fsRead.Seek([int64]$off, [System.IO.SeekOrigin]::Begin)
-                    $chunk = New-Object byte[] $take
-                    $got = $fsRead.Read($chunk, 0, $take)
-                    if ($got -lt $take) {
-                        $take = $got
-                        $trimmed = New-Object byte[] $take
-                        [Array]::Copy($chunk, 0, $trimmed, 0, $take)
-                        $chunk = $trimmed
-                    }
-                }
-            } finally {
-                if ($fsRead) { try { $fsRead.Dispose() } catch { } }
-            }
-            if ($take -gt 0 -and $null -ne $chunk) {
-                $tmpLocal = Join-Path $env:TEMP ("claude-upd-chunk-{0}.log" -f $PID)
-                [System.IO.File]::WriteAllBytes($tmpLocal, $chunk)
-                $day = Get-Date -Format 'yyyyMMdd'
-                $remoteTmp = ".claude/logs/.connect-upd-$PID.tmp"
-                $remoteDay = ".claude/logs/connect-$day.log"
-                $mk = 'mkdir -p "$HOME/.claude/logs" && chmod 700 "$HOME/.claude" "$HOME/.claude/logs" 2>/dev/null; true'
-                $sshOpts = $script:SshCommonOpts + @($t, $mk)
-                $rMk = Invoke-SshTimed -ArgumentList $sshOpts -TimeoutMs 12000
-                if ($rMk.Ok) {
-                    $scpArgs = @('-o','BatchMode=yes','-o','ConnectTimeout=12','-o','ControlMaster=no','-o','IdentitiesOnly=yes','-o','IdentityAgent=none','-q', $tmpLocal, "${t}:$remoteTmp")
-                    $rScp = Invoke-SshTimed -Exe 'scp' -ArgumentList $scpArgs -TimeoutMs 20000
-                    if ($rScp.Ok) {
-                        $cat = 'cat "$HOME/' + $remoteTmp + '" >> "$HOME/' + $remoteDay + '"; ec=$?; rm -f "$HOME/' + $remoteTmp + '"; chmod 600 "$HOME/' + $remoteDay + '" 2>/dev/null; exit $ec'
-                        $rCat = Invoke-SshTimed -ArgumentList ($script:SshCommonOpts + @($t, $cat)) -TimeoutMs 12000
-                        if ($rCat.Ok) {
-                            $newOff = $off + $take
-                            Set-Content -LiteralPath $wmPath -Value "$newOff" -Encoding ASCII -NoNewline -ErrorAction SilentlyContinue
-                            Write-UpdateFileLog ("shipped_day_log_to_server target=$t bytes=$take offset=$newOff")
-                        } else {
-                            Write-UpdateFileLog 'SHIP_FAIL cat' 'WARN'
-                        }
-                    } else {
-                        Write-UpdateFileLog 'SHIP_FAIL scp' 'WARN'
-                    }
-                } else {
-                    Write-UpdateFileLog 'SHIP_FAIL mkdir' 'WARN'
-                }
-                Remove-Item -LiteralPath $tmpLocal -Force -ErrorAction SilentlyContinue
-            } else {
-                Write-UpdateFileLog 'ship_skip already_synced'
-            }
-        } else {
-            Write-UpdateFileLog 'ship_skip no_conf_or_log'
-        }
-    } catch {
-        Write-UpdateFileLog ("SHIP_FAIL ex=" + $_.Exception.Message) 'WARN'
-    }
-    Sync-ConnectExeBesideClient
-    Set-UpdateProgressUi -Status 'Update complete...' -Percent 100
-    Close-UpdateProgressUi
-    exit 0
-}
-
-Write-UpdateFileLog 'exe_only_fallback_to_bundle' 'WARN'
-Set-UpdateProgressUi -Status 'Falling back to full bundle download...' -Percent 30
-Write-UpdateMsg '  EXE update unavailable - falling back to full bundle...' 'DarkYellow'
+Write-UpdateFileLog 'bundle_primary try=1 reason=scripts_source_of_truth'
 
 $manifestRaw = Invoke-SshCat -Target $ep.Target -RemotePath "$RemoteBundle/manifest.txt"
 if (-not $manifestRaw) { Write-UpdateFileLog 'manifest_empty_or_unreachable' 'ERROR'; Close-UpdateProgressUi; exit 1 }
@@ -1290,7 +1251,7 @@ if ($leaf -eq 'windows') {
 $macDir = Join-Path $packageRoot 'mac'
 
 # Flat Desktop layout (sync-desktop): windowsDir == packageRoot.
-# Never put .client-update-bak under Live — Move-Item fails with "subdirectory of the source".
+# Never put .client-update-bak under Live â€” Move-Item fails with "subdirectory of the source".
 $NewRoot = Join-Path $packageRoot '.client-update-new'
 $BakRoot = Join-Path $packageRoot '.client-update-bak'
 if ($windowsDir -eq $packageRoot) {
@@ -1477,6 +1438,17 @@ if ($swapOk) {
 }
 
 Write-UpdateMsg "Updated to v$remoteVer" 'Green'
+try { Sync-ConnectExeBesideClient -VersionLabel $remoteVer } catch {}
+$paths = @()
+try { if ($script:LastExeVersionedPaths) { $paths = @($script:LastExeVersionedPaths) } } catch { $paths = @() }
+if ($paths.Count -gt 0) {
+    foreach ($p in $paths) {
+        Write-UpdateMsg ("  EXE ready: {0}" -f $p) 'DarkGray'
+    }
+    Write-UpdateMsg '  (older Claude-Connect-*.exe files kept)' 'DarkGray'
+} else {
+    Write-UpdateMsg ("  Claude-Connect-{0}.exe: not written beside launch folders (see day log)" -f $remoteVer) 'DarkYellow'
+}
 $depth = 0
 try { if ($env:CLAUDE_CONNECT_UPDATE_DEPTH) { $depth = [int]$env:CLAUDE_CONNECT_UPDATE_DEPTH } } catch { $depth = 0 }
 $fromExe = if ($env:CLAUDE_CONNECT_FROM_EXE -eq '1') { '1' } else { '0' }
@@ -1579,6 +1551,74 @@ Write-UpdateFileLog ("bat_relaunch_attempt via=caller depth=$depth dir=$ScriptDi
     } catch {
         Write-UpdateFileLog ("bat_relaunch_handoff fail err=$($_.Exception.Message -replace '[\r\n]',' ') pid=$PID") 'ERROR'
     }
+
+    # Same-process caller (menu `u`): connect-update was `&`'d inside connect-boot/connect.ps1.
+    # `exit 2` returns to the CALLER's in-memory Invoke-ConnectManualUpdate / Wait-ConnectExit,
+    # which may still be the PRE-update script and will show "Press Enter to close".
+    # Detect live UI (command line / env / Wait-ConnectExit), spawn relaunch, then force-kill this PID.
+    $calledFromLiveUi = $false
+    try {
+        if ($env:CLAUDE_CONNECT_MANUAL_UPDATE -eq '1') { $calledFromLiveUi = $true }
+        if (-not $calledFromLiveUi -and (Get-Command Wait-ConnectExit -ErrorAction SilentlyContinue)) { $calledFromLiveUi = $true }
+        if (-not $calledFromLiveUi) {
+            $cl = [string](Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue).CommandLine
+            if ($cl -match '(?i)connect-boot\.ps1|(?i)[\\/]connect\.ps1(\s|$|")') { $calledFromLiveUi = $true }
+        }
+    } catch {}
+    if ($calledFromLiveUi) {
+        try {
+            $bat = Join-Path $ScriptDir 'connect.bat'
+            if (Test-Path -LiteralPath $bat) {
+                $relaunchDepth = $depth + 1
+                $relaunchRunId = [guid]::NewGuid().ToString('N').Substring(0, 12)
+                $prevDepth = $env:CLAUDE_CONNECT_UPDATE_DEPTH
+                $prevRun = $env:CLAUDE_CONNECT_RUN_ID
+                $prevRelaunch = $env:CLAUDE_CONNECT_IS_RELAUNCH
+                try {
+                    $env:CLAUDE_CONNECT_UPDATE_DEPTH = [string]$relaunchDepth
+                    $env:CLAUDE_CONNECT_RUN_ID = $relaunchRunId
+                    $env:CLAUDE_CONNECT_IS_RELAUNCH = '1'
+                    Start-Process -FilePath $bat -WorkingDirectory $ScriptDir | Out-Null
+                    Write-UpdateFileLog ("bat_relaunch_from_update_self depth={0} run_id={1}" -f $relaunchDepth, $relaunchRunId)
+                } finally {
+                    if ($null -eq $prevDepth) { Remove-Item Env:CLAUDE_CONNECT_UPDATE_DEPTH -ErrorAction SilentlyContinue }
+                    else { $env:CLAUDE_CONNECT_UPDATE_DEPTH = $prevDepth }
+                    if ($null -eq $prevRun) { Remove-Item Env:CLAUDE_CONNECT_RUN_ID -ErrorAction SilentlyContinue }
+                    else { $env:CLAUDE_CONNECT_RUN_ID = $prevRun }
+                    if ($null -eq $prevRelaunch) { Remove-Item Env:CLAUDE_CONNECT_IS_RELAUNCH -ErrorAction SilentlyContinue }
+                    else { $env:CLAUDE_CONNECT_IS_RELAUNCH = $prevRelaunch }
+                }
+            }
+        } catch {
+            Write-UpdateFileLog ("bat_relaunch_from_update_self_fail err=$($_.Exception.Message)") 'WARN'
+        }
+        Write-UpdateFileLog ("UPDATE_EXIT exiting=2 kill_self skip_stale_press_enter pid=$PID")
+        try {
+            $km = Join-Path $env:TEMP 'claude-connect-kill-self.marker'
+            Set-Content -LiteralPath $km -Value ("pid={0} t={1}" -f $PID, (Get-Date -Format 'o')) -Encoding ASCII -NoNewline
+        } catch {}
+        try {
+            $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            # Kill this UI process (and parent connect.bat /K if any) after a brief delay so Start-Process above lands.
+            $killCmd = @"
+Start-Sleep -Milliseconds 400
+try {
+  `$self = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction SilentlyContinue
+  if (`$self -and `$self.ParentProcessId) {
+    `$par = Get-CimInstance Win32_Process -Filter "ProcessId=`$(`$self.ParentProcessId)" -ErrorAction SilentlyContinue
+    if (`$par -and `$par.Name -eq 'cmd.exe' -and (`$par.CommandLine -match '(?i)connect\.bat')) {
+      Stop-Process -Id `$par.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+  }
+} catch {}
+Stop-Process -Id $PID -Force -ErrorAction SilentlyContinue
+"@
+            Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $killCmd) | Out-Null
+        } catch {}
+        # Hard exit — do not return to stale Wait-ConnectExit.
+        try { [Environment]::Exit(2) } catch { exit 2 }
+    }
+
     # Final breadcrumb after ship so day log always records handoff intent before process dies.
     Write-UpdateFileLog ("UPDATE_EXIT exiting=2 handoff_to_bat_or_exe_setup pid=$PID")
     exit 2

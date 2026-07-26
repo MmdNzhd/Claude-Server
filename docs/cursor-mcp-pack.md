@@ -37,15 +37,50 @@ Claude Code (terminal) keeps codegraph/headroom/sqlserver from add-user; `cursor
 
 ## Figma
 
-1. In Cursor chat, run **`/add-plugin figma`** to add Figma skills/workflows (recommended for design-to-code tasks).
-2. **Server golden OAuth (preferred for this fleet)** — `cursor-mcp-sync` injects a shared OAuth access token (`figu_…`, not PAT `figd_…`) from root-only `/etc/claude-code/figma-mcp.env` into each user's Cursor `~/.cursor/mcp.json` and Claude `~/.claude/settings.json` as `Authorization: Bearer …`. Re-sync: `sudo claude-server sync-cursor-mcp` (or `cursor-mcp-sync --all`). After sync: **Reload Window**.
-3. **Optional per-user override** — `~/.config/cursor-mcp/figma-mcp.env` with `FIGMA_MCP_ACCESS_TOKEN=…` (mode `0600`).
-4. **Manual OAuth Connect** still works in Cursor MCP settings if you prefer a personal login (on Remote SSH, `cursor://` callbacks must hit the Connect profile — see connect notes).
-5. **Seat requirement** — the Figma account behind the token needs **Full** or **Dev** seat for MCP/API access (View-only may fail). Shared golden login has the same ToS/concurrency caveats as Cursor golden auth.
-6. **Blast radius** — the same OAuth access token is copied into every user's `~/.cursor/mcp.json` and `~/.claude/settings.json` (mode `0600`). Compromise of any home directory can expose the golden bearer; revoke/rotate by replacing `/etc/claude-code/figma-mcp.env` and re-running `sync-cursor-mcp --all`. Refresh token stays root-only in the golden env.
-7. Token lifetime is finite (`expires_in` ~90 days); renew by re-exporting OAuth tokens into `/etc/claude-code/figma-mcp.env` and re-syncing.
+1. **Fleet Cursor skills (preferred)** — `claude-server install` / `add-user` deploy official write-to-canvas skills plus a Smart router into each user's `~/.cursor/skills/`:
+   - `figma-use` (mandatory before every `use_figma`)
+   - `figma-generate-design` (multi-section screens from the design system)
+   - `figma-create-new-file`
+   - `figma-designer` (Smart router + prompt templates)
+   Vendor pin: [`scripts/server/skills/FIGMA-SKILLS-VENDOR.md`](../scripts/server/skills/FIGMA-SKILLS-VENDOR.md). After install: **Reload Window**.
+2. **Optional:** In Cursor chat, `/add-plugin figma` can add extra plugin skills; not required when the fleet trees above are present.
+3. **Server golden OAuth (preferred for this fleet)** — `cursor-mcp-sync` injects a shared OAuth access token (`figu_…`, not PAT `figd_…`) from root-only `/etc/claude-code/figma-mcp.env` into each user's Cursor `~/.cursor/mcp.json` and Claude `~/.claude/settings.json` as `Authorization: Bearer …`. Re-sync: `sudo claude-server sync-cursor-mcp` (or `cursor-mcp-sync --all`). After sync: **Reload Window**.
+4. **Optional per-user override** — `~/.config/cursor-mcp/figma-mcp.env` with `FIGMA_MCP_ACCESS_TOKEN=…` (mode `0600`).
+5. **Manual OAuth Connect** still works in Cursor MCP settings if you prefer a personal login (on Remote SSH, `cursor://` callbacks must hit the Connect profile — see connect notes).
+6. **Seat requirement** — the Figma account behind the token needs **Full** or **Dev** seat for MCP/API access (View-only may fail). **Write to canvas needs Full seat + edit permission** on the file. Shared golden login has the same ToS/concurrency caveats as Cursor golden auth.
+7. **Blast radius** — the same OAuth access token is copied into every user's `~/.cursor/mcp.json` and `~/.claude/settings.json` (mode `0600`). Compromise of any home directory can expose the golden bearer; revoke/rotate by replacing `/etc/claude-code/figma-mcp.env` and re-running `sync-cursor-mcp --all`. Refresh token stays root-only in the golden env.
+8. Token lifetime is finite (`expires_in` ~90 days); renew by re-exporting OAuth tokens into `/etc/claude-code/figma-mcp.env` and re-syncing.
 
-Agent rule: [`scripts/server/cursor-rules/figma-design.mdc`](../scripts/server/cursor-rules/figma-design.mdc)
+Agent rule: [`scripts/server/cursor-rules/figma-design.mdc`](../scripts/server/cursor-rules/figma-design.mdc)  
+Smart skill: [`scripts/server/skills/figma-designer/SKILL.md`](../scripts/server/skills/figma-designer/SKILL.md)
+
+### Designer quick prompts (Club: also load `figma-designer/references/club-design-kit.md`)
+
+Paste a Figma file or selection link, then ask in plain language. Examples:
+
+**Build a page from requirements**
+
+```
+Using this Figma file: <PASTE_FILE_URL>
+Build a new settings screen with auto layout using our existing components.
+Requirements:
+- …
+```
+
+**Edit a selection**
+
+```
+Using this selection: <PASTE_NODE_URL>
+Change the primary button label to "Save" and keep existing components/variables.
+```
+
+**New file then design**
+
+```
+Create a new Figma Design file named "Onboarding draft", then using that file build an empty-state screen from our design system.
+```
+
+Agent should load `figma-designer` → `figma-use` / `figma-generate-design` as appropriate. Large screens work best section-by-section.
 
 ---
 

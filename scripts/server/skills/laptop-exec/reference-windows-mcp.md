@@ -1,9 +1,10 @@
 # Windows-MCP + laptop-exec (ops)
 
-Companion to `SKILL.md`. Keep `laptop-exec` forever (Mac + git + content `rg`).
+Companion to `SKILL.md`. Keep `laptop-exec` forever (Mac + git + content `rg` fallback).
 
-**Priority:** on Windows when MCP is ready, use windows-mcp for FS/shell/UI
-**first**; `laptop-exec` is fallback (and always for Mac + git + content `rg`).
+**Priority (measured 2026-07-26):** Read/Grep → **mount first**; Write → **windows-mcp
+FileSystem first**; Glob/UI/Shell → windows-mcp when listed; git → laptop-exec only.
+See skill priority table + parallel caps.
 
 ## Official product model
 
@@ -38,12 +39,15 @@ or user-started `start-server.cmd` on the desktop.
 Cursor can call tools.
 
 1. If `windows-mcp` / `user-windows-mcp` tools are **not listed** → treat as down;
-   use `laptop-exec` immediately (do not poll / rediscover in a loop).
+   use **mount** for FS, **laptop-exec** for git/rg/fallback (do not poll in a loop).
 2. If **one** call fails with `ECONNREFUSED`, fetch failed, or not connected →
-   mark down for the session; switch to `laptop-exec`; **never** retry that MCP
-   call; **never** retry Cursor Read on `/mounts/`.
+   mark down for the session; use **mount + laptop-exec**; **never** retry that
+   same MCP call. Mount Read/Write remain allowed.
 3. `user-filesystem` is a different MCP (narrow allowlist) — not a substitute.
-4. Tell the user once: `connect.bat`, laptop `~\.windows-mcp\start-server.cmd`,
+4. FileSystem tool requires `mode=` (`read`/`write`/`list`/`search`/…). Do not pass `action=`.
+5. Relative FileSystem paths resolve to the user **Desktop** — always use absolute
+   Windows paths under the project root.
+6. Tell the user once: `connect.bat`, laptop `~\.windows-mcp\start-server.cmd`,
    Reload Window.
 
 ## Server helpers
@@ -60,8 +64,9 @@ maintain re-syncs every ~3 minutes.
 
 ## Skill vs MCP vs CLI (why hybrid)
 
-- **Skill** = routing SOP (this file + SKILL.md).
-- **MCP** = windows-mcp tools (FS/UI/shell with schema).
-- **CLI** = `laptop-exec` (mux-safe SSH to laptop disk; required on Mac).
+- **Skill** = routing SOP (this file + SKILL.md) including parallel caps.
+- **MCP** = windows-mcp tools (FS/UI/shell with schema) — best Write/Glob/UI.
+- **Mount** = fastest Read/Grep under load when ALLOW.
+- **CLI** = `laptop-exec` (mux-safe SSH; required for git/Mac/fallback).
 
-Do not collapse to MCP-only.
+Do not collapse to MCP-only or LE-only.

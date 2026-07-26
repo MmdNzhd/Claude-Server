@@ -18,6 +18,8 @@ grep -q 'meaning=timeout' "$LE" && ok 'CMD_END branch for exit 124 (timeout)' ||
 grep -q 'exit=124' "$LE" && ok 'CMD_END logs exit=124' || bad 'CMD_END logs exit=124'
 grep -q 'CMD_TIMEOUT' "$LE" && ok 'still logs CMD_TIMEOUT on 124 in _laptop_ssh' || bad 'still logs CMD_TIMEOUT'
 if grep -q 'LAPTOP_EXEC_RUN_TIMEOUT:-600' "$LE"; then bad 'old RUN default 600 removed'; else ok 'old RUN default 600 removed'; fi
+grep -q 'meaning=aborted' "$LE" && ok 'abort path logs meaning=aborted' || bad 'abort path logs meaning=aborted'
+grep -q "trap '_le_on_signal' TERM INT HUP" "$LE" && ok 'abort traps TERM INT HUP' || bad 'abort traps TERM INT HUP'
 
 echo ""
 if [ "$FAIL" -eq 0 ]; then

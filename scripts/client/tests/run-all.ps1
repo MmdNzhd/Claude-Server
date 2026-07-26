@@ -13,6 +13,8 @@ $suites = @(
     @{ Name = 'connect-preflight-skip-update'; Script = 'test-connect-preflight-skip-update.ps1' }
     @{ Name = 'connect-task7-prefetch-foreign-cache'; Script = 'test-connect-task7-prefetch-foreign-cache.ps1' }
     @{ Name = 'connect-task8-deferred-setup'; Script = 'test-connect-task8-deferred-setup.ps1' }
+    @{ Name = 'empty-menu-manual-update'; Script = 'test-empty-menu-manual-update.ps1' }
+    @{ Name = 'run-id-multi-ui'; Script = 'test-run-id-multi-ui.ps1' }
     @{ Name = 'connect-update-script-only-drift'; Script = 'test-connect-update-script-only-drift.ps1' }
     @{ Name = 'baseline-connect-working-invariants'; Script = 'test-baseline-connect-working-invariants.ps1' }
     @{ Name = 'ssh-user-fix-retry';  Script = 'test-ssh-user-fix-retry.ps1' }
@@ -72,6 +74,7 @@ $suites = @(
     @{ Name = 'p0-connect-fixes'; Script = 'test-p0-connect-fixes.ps1' }
     @{ Name = 'windows-mcp-no-orphan-cmd'; Script = 'test-windows-mcp-no-orphan-cmd.ps1' }
     @{ Name = 'windows-mcp-ports'; Script = 'test-windows-mcp-ports.ps1' }
+    @{ Name = 'figma-skills-pack'; Script = 'test-figma-skills-pack.ps1' }
     @{ Name = 'connect-bat-max-ps-starts'; Script = 'test-connect-bat-max-ps-starts.ps1' }
     @{ Name = 'client-update-policy-optional'; Script = 'test-client-update-policy-optional.ps1' }
     @{ Name = 'smartscreen-docs-contract'; Script = 'test-smartscreen-docs-contract.ps1' }
@@ -81,11 +84,14 @@ $suites = @(
     @{ Name = 'banner-probe-interval'; Script = 'test-banner-probe-interval.ps1' }
     @{ Name = 'sidecar-watchdog-lease'; Script = 'test-sidecar-watchdog-lease.ps1' }
     @{ Name = 'pushconf-am-only'; Script = 'test-pushconf-am-only.ps1' }
+    @{ Name = 'agent-path-diag-logs'; Script = 'test-agent-path-diag-logs.ps1' }
     @{ Name = 'connect-scorecard'; Script = 'test-connect-scorecard.ps1' }
     @{ Name = 'editor-opened-script-scope'; Script = 'test-editor-opened-script-scope.ps1' }
     @{ Name = 'launch-trust-path-no-double-relaunch'; Script = 'test-launch-trust-path-no-double-relaunch.ps1' }
     @{ Name = 'opening-fail-clears-editor-seen'; Script = 'test-opening-fail-clears-editor-seen.ps1' }
     @{ Name = 'sidecar-job-object'; Script = 'test-sidecar-job-object.ps1' }
+    @{ Name = 'sidecar-front-flap'; Script = 'test-sidecar-front-flap.ps1' }
+    @{ Name = 'connect-update-bundle-primary'; Script = 'test-connect-update-bundle-primary.ps1' }
     @{ Name = 'windows-shadow-canon'; Script = 'test-windows-shadow-canon.ps1' }
     @{ Name = 'skip-12-fingerprint-hold'; Script = 'test-skip-12-fingerprint-hold.ps1' }
     @{ Name = 'step-console-quiet'; Script = 'test-step-console-quiet.ps1' }
@@ -100,6 +106,11 @@ $suites = @(
     @{ Name = 'logsync-fast-timeout-live'; Script = 'test-logsync-fast-timeout-live.ps1' }
     @{ Name = 'exe-atomic-swap'; Script = 'test-exe-atomic-swap.ps1' }
     @{ Name = 'exe-atomic-swap-live'; Script = 'test-exe-atomic-swap-live.ps1' }
+    @{ Name = 'exe-promote-launch-dir-hard'; Script = 'test-exe-promote-launch-dir-hard.ps1' }
+    @{ Name = 'exe-promote-dirs-contract'; Script = 'test-exe-promote-dirs-contract.ps1' }
+    @{ Name = 'update-no-defer-prompt'; Script = 'test-update-no-defer-prompt.ps1' }
+    @{ Name = 'update-kill-self-contract'; Script = 'test-update-kill-self-contract.ps1' }
+    @{ Name = 'update-relaunch-no-press-enter-live'; Script = 'test-update-relaunch-no-press-enter-live.ps1' }
     @{ Name = 'local-port-free-bind-live'; Script = 'test-local-port-free-bind-live.ps1' }
     @{ Name = 'orphan-tunnel-kill-vs-sibling-live'; Script = 'test-orphan-tunnel-kill-vs-sibling-live.ps1' }
     @{ Name = 'auth-stamp-current-live'; Script = 'test-auth-stamp-current-live.ps1' }
@@ -107,6 +118,7 @@ $suites = @(
     @{ Name = 'sidecar-listening-live'; Script = 'test-sidecar-listening-live.ps1' }
     @{ Name = 'tcp-port-relay-live'; Script = 'test-tcp-port-relay-live.ps1' }
     @{ Name = 'sidecar-boot-reap-live'; Script = 'test-sidecar-boot-reap-live.ps1' }
+    @{ Name = 'sidecar-boot-reap-preserve-fronts-live'; Script = 'test-sidecar-boot-reap-preserve-fronts-live.ps1' }
     @{ Name = 'remote-editor-detect-live'; Script = 'test-remote-editor-detect-live.ps1' }
     @{ Name = 'connect-single-instance-live'; Script = 'test-connect-single-instance-live.ps1' }
     @{ Name = 'mount-port-fallback-live'; Script = 'test-mount-port-fallback-live.ps1' }
@@ -125,6 +137,7 @@ $suites = @(
     @{ Name = 'mount-backgrounded-live'; Script = 'test-mount-backgrounded-live.ps1' }
     @{ Name = 'mount-bg-daylog-mutex-contention-live'; Script = 'test-mount-bg-daylog-mutex-contention-live.ps1' }
     @{ Name = 'tunnel-sync-down-debounce-returns-true'; Script = 'test-tunnel-sync-down-debounce-returns-true.ps1' }
+    @{ Name = 'tunnel-no-proc-keepalive'; Script = 'test-tunnel-no-proc-keepalive.ps1' }
 )
 
 $fail = 0

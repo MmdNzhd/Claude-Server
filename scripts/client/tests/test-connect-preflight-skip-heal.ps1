@@ -114,11 +114,17 @@ $batPath = Get-ClientFile 'windows\connect.bat'
 Assert (Test-Path -LiteralPath $batPath) 'connect.bat exists'
 $bat = Get-Content -LiteralPath $batPath -Raw
 
+# Multi-UI: RUN_ID must be minted BEFORE preflight so concurrent bats do not share
+# the last writer of %TEMP%\claude-connect-run-id.txt.
+$runIdMint = $bat.IndexOf('Multi-UI: mint a unique RUN_ID')
 $preflightStart = $bat.IndexOf('if exist "%HERE%connect-preflight.ps1"')
 Assert ($preflightStart -ge 0) 'connect.bat has preflight block'
+Assert ($runIdMint -ge 0 -and $runIdMint -lt $preflightStart) 'connect.bat mints RUN_ID before preflight'
+Assert ($bat.Substring($runIdMint, $preflightStart - $runIdMint) -match 'CLAUDE_CONNECT_RUN_ID') 'pre-preflight block sets RUN_ID'
+Assert ($bat -match 'if not defined CLAUDE_CONNECT_RUN_ID if exist "%TEMP%\\claude-connect-run-id\.txt"') 'bat adopts shared RUN_ID handoff only when unset'
 
-$preflightEnd = $bat.IndexOf('REM Stable run id:', $preflightStart)
-if ($preflightEnd -lt 0) { $preflightEnd = $bat.IndexOf('if not defined CLAUDE_CONNECT_RUN_ID', $preflightStart) }
+$preflightEnd = $bat.IndexOf('REM Stable run id fallback', $preflightStart)
+if ($preflightEnd -lt 0) { $preflightEnd = $bat.IndexOf(':AFTER_CLIENT_UPDATE', $preflightStart) }
 Assert ($preflightEnd -gt $preflightStart) 'connect.bat preflight block bounded'
 
 $preflightBlock = $bat.Substring($preflightStart, $preflightEnd - $preflightStart)

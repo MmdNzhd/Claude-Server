@@ -17,6 +17,8 @@ $script:ConnectLogAsyncStallSince = $null
 # long-lived StreamWriter's own internal buffer - see Write-ConnectLogSynced for why the
 # actual physical write no longer goes through that stream's cached position.
 $script:ConnectLogPendingBuffer = [System.Text.StringBuilder]::new()
+$script:LastAgentPathUnix = 0
+$script:LastAgentPathResult = $null  # hashtable for SCORECARD reuse
 
 function Get-ConnectLogDir {
     $dir = Join-Path $env:USERPROFILE '.config\claude-connect\logs'
@@ -1234,6 +1236,28 @@ function Write-ConnectUserFacingError {
 }
 
 
+function Close-ConnectRelaunchHostConsole {
+    # After update relaunch, kill a leftover parent cmd.exe that was started with /K
+    # (or otherwise outlives powershell). Never touch unrelated parents.
+    try {
+        $self = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop
+        $parentId = [int]$self.ParentProcessId
+        if ($parentId -le 4) { return }
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$parentId" -ErrorAction SilentlyContinue
+        if (-not $parent) { return }
+        $cmdLine = [string]$parent.CommandLine
+        $isConnectCmd = ($parent.Name -eq 'cmd.exe') -and ($cmdLine -match '(?i)connect\.bat')
+        if (-not $isConnectCmd) { return }
+        # Detached killer so our exit is not blocked if Stop-Process races us.
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        Start-Process -FilePath $ps -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+            ("Start-Sleep -Milliseconds 500; Stop-Process -Id {0} -Force -ErrorAction SilentlyContinue" -f $parentId)
+        ) | Out-Null
+        Write-ConnectLog ("EXIT_RELAUNCH_HOST_CMD scheduled parent_cmd_pid={0}" -f $parentId) 'INFO'
+    } catch { }
+}
+
 function Wait-ConnectExit {
     param(
         [string]$Reason = 'user_close',
@@ -1245,6 +1269,32 @@ function Wait-ConnectExit {
     if ($Code -ne 0) {
         Write-ConnectLog ("FAIL EXIT reason={0} code={1}" -f $Reason, $Code) 'ERROR'
     }
+
+    # Successful update relaunch already spawned a new Connect window. Must exit FAST:
+    # Force log-sync over SSH can hang for tens of seconds and leaves the old UI stuck on
+    # "Update applied - relaunching...". Skip blocking drain/Close-ConnectLog here.
+    $skipEnter = ($Code -eq 0) -and (
+        $Reason -eq 'update_manual_relaunch' -or
+        $Reason -eq 'update_relaunch'
+    )
+    if ($skipEnter) {
+        try {
+            if ($script:ConnectLogWriter) {
+                try { Write-ConnectLog '======== session end (update_relaunch) ========' } catch { }
+                try { $script:ConnectLogWriter.Flush() } catch { }
+                try { $script:ConnectLogWriter.Dispose() } catch { }
+                $script:ConnectLogWriter = $null
+            }
+        } catch { }
+        try {
+            if (Get-Command Exit-ConnectSingleInstance -ErrorAction SilentlyContinue) {
+                Exit-ConnectSingleInstance
+            }
+        } catch { }
+        try { Close-ConnectRelaunchHostConsole } catch { }
+        exit 0
+    }
+
     if (Get-Command Complete-ConnectLogAsyncDrain -ErrorAction SilentlyContinue) {
         Complete-ConnectLogAsyncDrain -Force
     } elseif (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue) {
@@ -1438,6 +1488,182 @@ function Invoke-ConnectSilentUpdateCheck {
     }
 }
 
+function Invoke-ConnectManualUpdate {
+    <#
+    .SYNOPSIS
+      User-triggered client update from the project menu (u).
+      Always runs a visible check (not Quiet) and clears throttle/defer so Download works on demand.
+    #>
+    $scriptDir = $null
+    if ($script:ConnectScriptDir) { $scriptDir = $script:ConnectScriptDir }
+    elseif ($PSScriptRoot) { $scriptDir = $PSScriptRoot }
+    if (-not $scriptDir) { $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
+
+    $cfgDir = Join-Path $env:USERPROFILE '.config\claude-connect'
+    foreach ($name in @('update-check-miss.txt', 'update-defer.txt', '.last-update-check')) {
+        $p = Join-Path $cfgDir $name
+        try { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } } catch { }
+    }
+
+    $updateScript = Join-Path $scriptDir 'connect-update.ps1'
+    if (-not (Test-Path -LiteralPath $updateScript)) {
+        Warn "Update script missing: $updateScript"
+        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+            Write-ConnectLog "UPDATE_MANUAL result=fail reason=no_script path=$updateScript" 'ERROR'
+        }
+        return
+    }
+
+    Write-Host ''
+    Write-Host '    Checking for client update...' -ForegroundColor Cyan
+    Write-Host ''
+    if (Get-Command Write-ConnectDecision -ErrorAction SilentlyContinue) {
+        Write-ConnectDecision 'project_menu' 'update_manual'
+    } elseif (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog 'DECISION: project_menu=update_manual' 'INFO'
+    }
+
+    $exitCode = 1
+    try {
+        # Not -Quiet: optional updates prompt Y/N; force policy still auto-applies.
+        # Flag so connect-update can kill_self after apply (avoids stale Press Enter from old in-memory UI).
+        $env:CLAUDE_CONNECT_MANUAL_UPDATE = '1'
+        & $updateScript -ScriptDir $scriptDir
+        if ($null -ne $LASTEXITCODE) { $exitCode = [int]$LASTEXITCODE } else { $exitCode = 0 }
+    } catch {
+        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+            Write-ConnectLog ("UPDATE_MANUAL result=fail error={0}" -f $_.Exception.Message) 'ERROR'
+        }
+        Warn ("Update failed: {0}" -f $_.Exception.Message)
+        return
+    } finally {
+        Remove-Item Env:CLAUDE_CONNECT_MANUAL_UPDATE -ErrorAction SilentlyContinue
+    }
+
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog ("UPDATE_MANUAL result=exit exit={0}" -f $exitCode) 'INFO'
+    }
+
+    if ($exitCode -eq 2) {
+        Write-Host '    Update applied - relaunching...' -ForegroundColor Green
+        try { [Console]::Out.Flush() } catch { }
+        # connect-update (same process) already spawned bat + scheduled kill_self when it
+        # detected Wait-ConnectExit. If we still reach here (older updater / race), relaunch
+        # and hard-exit without "Press Enter to close".
+        if (Get-Command Exit-ConnectSingleInstance -ErrorAction SilentlyContinue) {
+            Exit-ConnectSingleInstance
+        }
+        $null = Invoke-ConnectBatRelaunch -ScriptDir $scriptDir
+        try { Close-ConnectRelaunchHostConsole } catch { }
+        try { [Environment]::Exit(0) } catch { Wait-ConnectExit -Reason 'update_manual_relaunch' -Code 0 }
+    } elseif ($exitCode -eq 0) {
+        Write-Host '    Update check finished.' -ForegroundColor DarkGray
+        Write-Host ''
+    } else {
+        Warn 'Update check failed (see day log).'
+        Write-Host ''
+    }
+}
+
+
+function Invoke-AgentPathProbe {
+    # Fail-open: probe server conf TUNNEL_PORT vs this UI session port (rate-limited 60s).
+    # Dual-UI: session!=conf with listen_conf=1 is ok (primary_match=0). Bad only when
+    # conf empty, conf port closed, or parse/ssh fail.
+    try {
+        $sessionPortRaw = $null
+        if ($null -ne $script:Port -and ("$($script:Port)").Trim().Length -gt 0) {
+            $sessionPortRaw = "$($script:Port)"
+        } elseif ($Port -and ("$Port").Trim().Length -gt 0) {
+            $sessionPortRaw = "$Port"
+        } elseif ($null -ne $script:TunnelPort -and ("$($script:TunnelPort)").Trim().Length -gt 0) {
+            $sessionPortRaw = "$($script:TunnelPort)"
+        } elseif ($env:TunnelPort -and ("$($env:TunnelPort)").Trim().Length -gt 0) {
+            $sessionPortRaw = "$($env:TunnelPort)"
+        }
+        $sessionPort = if ($null -ne $sessionPortRaw) { ($sessionPortRaw -replace '\D', '') } else { '' }
+        if (-not $sessionPort) {
+            Write-ConnectTrace 'AGENT_PATH skip reason=no_session_port'
+            return
+        }
+
+        $nowUnix = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        if (($nowUnix - [int]$script:LastAgentPathUnix) -lt 60) { return }
+        # Stamp immediately so a fail does not retry-storm within the window.
+        $script:LastAgentPathUnix = $nowUnix
+
+        if (-not (Get-Command SshX -ErrorAction SilentlyContinue)) {
+            Write-ConnectTrace 'AGENT_PATH skip reason=no_sshx'
+            return
+        }
+
+        # Literal remote one-liner; only PORTPLACEHOLDER is substituted (digits-only session port).
+        $remoteCmd = @'
+timeout 3 bash -c 'C="$HOME/.claude-connect.conf"; cp=$(grep -E "^TUNNEL_PORT=" "$C" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\r"); am=$(grep -E "^ACTIVE_MOUNT=" "$C" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\r"); sp=PORTPLACEHOLDER; lc=0; ls=0; if [ -n "$cp" ]; then timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/$cp" 2>/dev/null && lc=1 || true; fi; if [ -n "$sp" ]; then timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/$sp" 2>/dev/null && ls=1 || true; fi; echo "AGENT_PATH_PROBE conf_port=${cp:-} conf_am=${am:-} listen_conf=$lc listen_session=$ls session_port=$sp"'
+'@
+        $remoteCmd = $remoteCmd.Replace('PORTPLACEHOLDER', $sessionPort)
+
+        $outLines = @()
+        try {
+            $outLines = @(SshX $remoteCmd)
+        } catch {
+            $script:LastAgentPathResult = @{ Ok = $false; ConfPort = ''; Reason = 'probe_fail' }
+            Write-ConnectLog ("AGENT_PATH bad reason=probe_fail session_port={0} conf_port= conf_am= listen_conf= listen_session= primary_match=0" -f $sessionPort) 'WARN'
+            return
+        }
+
+        $joined = ($outLines | ForEach-Object { "$_" }) -join "`n"
+        $probeLine = $null
+        foreach ($ln in $outLines) {
+            $s = ("$ln").Trim()
+            if ($s -match 'AGENT_PATH_PROBE\b') { $probeLine = $s; break }
+        }
+        if (-not $probeLine -and $joined -match '(?m)(AGENT_PATH_PROBE\b[^\r\n]*)') {
+            $probeLine = $Matches[1].Trim()
+        }
+        if (-not $probeLine) {
+            $script:LastAgentPathResult = @{ Ok = $false; ConfPort = ''; Reason = 'probe_fail' }
+            Write-ConnectLog ("AGENT_PATH bad reason=probe_fail session_port={0} conf_port= conf_am= listen_conf= listen_session= primary_match=0" -f $sessionPort) 'WARN'
+            return
+        }
+
+        $confPort = ''
+        $confAm = ''
+        $listenConf = ''
+        $listenSession = ''
+        if ($probeLine -match 'conf_port=([^\s]*)') { $confPort = $Matches[1] }
+        if ($probeLine -match 'conf_am=([^\s]*)') { $confAm = $Matches[1] }
+        if ($probeLine -match 'listen_conf=([^\s]*)') { $listenConf = $Matches[1] }
+        if ($probeLine -match 'listen_session=([^\s]*)') { $listenSession = $Matches[1] }
+
+        $primaryMatch = if ($confPort -and $confPort -eq $sessionPort) { 1 } else { 0 }
+        $reason = ''
+        $ok = $true
+        if (-not $confPort) {
+            $ok = $false
+            $reason = 'conf_empty'
+        } elseif ("$listenConf" -eq '0') {
+            $ok = $false
+            $reason = 'conf_port_closed'
+        }
+
+        $script:LastAgentPathResult = @{
+            Ok       = $ok
+            ConfPort = $confPort
+            Reason   = $reason
+        }
+
+        if ($ok) {
+            Write-ConnectLog ("AGENT_PATH ok session_port={0} conf_port={1} conf_am={2} listen_conf={3} listen_session={4} primary_match={5}" -f `
+                $sessionPort, $confPort, $confAm, $listenConf, $listenSession, $primaryMatch) 'INFO'
+        } else {
+            Write-ConnectLog ("AGENT_PATH bad reason={0} session_port={1} conf_port={2} conf_am={3} listen_conf={4} listen_session={5} primary_match={6}" -f `
+                $reason, $sessionPort, $confPort, $confAm, $listenConf, $listenSession, $primaryMatch) 'WARN'
+        }
+    } catch {
+        # Fail-open: never break the status-line loop.
+    }
+}
 
 function Write-ConnectScorecard {
     param(
@@ -1474,6 +1700,19 @@ function Write-ConnectScorecard {
     if (-not $slot) { $slot = '0' }
     $line = ("SCORECARD {0} auth_ms={1} banner={2} mount_ms={3} am={4} editor={5} slot={6} ver={7}" -f `
         $Phase, $auth, $banner, $mount, $am, $ed, $slot, $ver)
+    $sessionPortSc = ''
+    if ($null -ne $script:Port -and ("$($script:Port)").Trim().Length -gt 0) {
+        $sessionPortSc = ("$($script:Port)" -replace '\D', '')
+    } elseif ($Port -and ("$Port").Trim().Length -gt 0) {
+        $sessionPortSc = ("$Port" -replace '\D', '')
+    }
+    if ($sessionPortSc) { $line = "$line port=$sessionPortSc" }
+    if ($null -ne $script:LastAgentPathResult) {
+        $apConf = ''
+        try { $apConf = [string]$script:LastAgentPathResult.ConfPort } catch { $apConf = '' }
+        $apState = if ($script:LastAgentPathResult.Ok) { 'ok' } else { 'bad' }
+        $line = "$line conf_port=$apConf agent_path=$apState"
+    }
     Write-ConnectLog $line 'INFO'
     if ($env:CLAUDE_CONNECT_SCORECARD_UI -eq '1') {
         Write-Host ("  {0}" -f $line) -ForegroundColor DarkGray
@@ -1723,6 +1962,8 @@ function Write-ProjectTable {
     if ($Mounts.Count -eq 0) {
         Write-Host '    (no projects configured)' -ForegroundColor DarkGray
         Write-Host ''
+        Write-Host '    a add   u update   q quit' -ForegroundColor DarkGray
+        Write-Host ''
         return
     }
     $pathMax = if ($tier -eq 'wide') { 50 } elseif ($tier -eq 'normal') { 36 } elseif ($tier -eq 'narrow') { 24 } else { 0 }
@@ -1758,7 +1999,7 @@ function Write-ProjectTable {
         $i++
     }
     Write-Host ''
-    Write-Host '    a add   e edit   d delete   c config   g git   q quit' -ForegroundColor DarkGray
+    Write-Host '    a add   e edit   d delete   c config   g git   u update   q quit' -ForegroundColor DarkGray
     Write-Host ''
 }
 
@@ -2037,6 +2278,9 @@ function Update-SessionStatusLine {
         $script:LastSessionStatusKey = $statusKey
         Write-Host $line -ForegroundColor DarkCyan
         Write-ConnectLog "STATUS: [$ProjectLabel | git:$GitLabel | tunnel:$tunnel | $ed]"
+    }
+    if ($TunnelOk) {
+        try { Invoke-AgentPathProbe } catch { }
     }
     if ($EditorCmd -and $Alias -and $RemotePath) {
         if (-not $EditorOpen) {

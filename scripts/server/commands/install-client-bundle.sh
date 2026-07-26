@@ -150,8 +150,12 @@ chmod 755 "$BUNDLE_ROOT/server/laptop-exec.sh" \
 if [ ! -f "$BUNDLE_ROOT/manifest.txt" ]; then
     {
         find "$BUNDLE_ROOT" -maxdepth 1 -type f ! -name 'manifest.txt' -printf '%f\n' | sort
-        find "$BUNDLE_ROOT/mac" -type f 2>/dev/null | sed "s|^$BUNDLE_ROOT/||" | sort
-        find "$BUNDLE_ROOT/server" -type f 2>/dev/null | sed "s|^$BUNDLE_ROOT/||" | sort
+        if [ -d "$BUNDLE_ROOT/mac" ]; then
+            find "$BUNDLE_ROOT/mac" -type f | sed "s|^$BUNDLE_ROOT/||" | sort
+        fi
+        if [ -d "$BUNDLE_ROOT/server" ]; then
+            find "$BUNDLE_ROOT/server" -type f | sed "s|^$BUNDLE_ROOT/||" | sort
+        fi
     } > "$BUNDLE_ROOT/manifest.txt"
     chmod 644 "$BUNDLE_ROOT/manifest.txt"
 fi

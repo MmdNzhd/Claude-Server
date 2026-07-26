@@ -43,6 +43,84 @@ _die() {
     exit 1
 }
 
+# Abort tracking: Cursor/tool cancel often SIGTERM this bash while timeout/ssh keep running
+# (proven 2026-07-26: TERM LE → children ALIVE, Windows work continued). Trap kills the tree.
+_LE_CMD_CHILD=0
+_LE_CMD_ENDED=0
+_LE_ACTIVE_CMD=""
+_LE_ABORT_SLOT_FD=""
+_LE_WIN_JOB_ID=""
+
+_le_kill_tree() {
+    local root="$1" c
+    [ -n "${root:-}" ] || return 0
+    case "$root" in *[!0-9]*) return 0 ;; esac
+    [ "$root" -gt 1 ] 2>/dev/null || return 0
+    while read -r c; do
+        c=$(echo "$c" | tr -d ' ')
+        [ -n "$c" ] || continue
+        _le_kill_tree "$c"
+    done < <(ps -o pid= --ppid "$root" 2>/dev/null || true)
+    kill -TERM "$root" 2>/dev/null || true
+}
+
+_le_remote_kill_win_job() {
+    # Best-effort: after local ssh dies, Windows powershell can outlive the channel.
+    # Job id is visible on the outer powershell -Command line (not only inside EncodedCommand).
+    local jid="${_LE_WIN_JOB_ID:-}" opts
+    [ -n "$jid" ] || return 0
+    [ "${LAPTOP_OS:-}" = "windows" ] || return 0
+    [ -n "${TUNNEL_PORT:-}" ] && [ -n "${LAPTOP_USER:-}" ] || return 0
+    [ -f "$KEY" ] || return 0
+    mapfile -t opts < <(_ssh_common_opts)
+    # taskkill /T kills the whole Windows process tree (outer LE_JOB_ID wrapper + EncodedCommand + -File).
+    local remote_ps
+    remote_ps="Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -and \$_.CommandLine -like '*${jid}*' } | ForEach-Object { Start-Process -FilePath taskkill.exe -ArgumentList @('/F','/T','/PID',\"\$(\$_.ProcessId)\") -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue }"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout -k 2 --foreground 10 ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" \
+            "${LAPTOP_USER}@127.0.0.1" \
+            "powershell -NoProfile -Command \"${remote_ps}\"" \
+            >/dev/null 2>&1 || true
+    else
+        ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" \
+            "${LAPTOP_USER}@127.0.0.1" \
+            "powershell -NoProfile -Command \"${remote_ps}\"" \
+            >/dev/null 2>&1 || true
+    fi
+    _LE_WIN_JOB_ID=""
+}
+
+_le_abort_cleanup() {
+    local reason="${1:-aborted}" exit_code="${2:-143}"
+    if [ "${_LE_CMD_CHILD:-0}" -gt 0 ]; then
+        _le_kill_tree "$_LE_CMD_CHILD"
+        sleep 0.2
+        _le_kill_tree "$_LE_CMD_CHILD"
+        kill -KILL "$_LE_CMD_CHILD" 2>/dev/null || true
+        _LE_CMD_CHILD=0
+    fi
+    if [ -n "${_LE_ABORT_SLOT_FD:-}" ]; then
+        eval "exec ${_LE_ABORT_SLOT_FD}>&-" 2>/dev/null || true
+        _LE_ABORT_SLOT_FD=""
+    fi
+    _le_remote_kill_win_job
+    if [ "${_LE_CMD_ENDED:-0}" -eq 0 ] && [ -n "${_LE_ACTIVE_CMD:-}" ]; then
+        _LE_CMD_ENDED=1
+        # Literal meaning=aborted (contract/tests grep this exact token).
+        _le_audit_log WARN CMD_END "cmd=${_LE_ACTIVE_CMD}" "exit=${exit_code}" \
+            "meaning=aborted" "abort_reason=${reason}" \
+            "project=${PROJECT_ID:-${ACTIVE_MOUNT:-?}}" \
+            "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8" \
+            "hint=Parent aborted; killed timeout/ssh tree (slot released)."
+    fi
+}
+
+_le_on_signal() {
+    _le_abort_cleanup aborted 143
+    trap - TERM INT HUP
+    exit 143
+}
+
 _expand_home() {
     local p="$1"
     case "$p" in
@@ -61,14 +139,33 @@ _load_global() {
             v="${v#\"}"; v="${v%\"}"
             case "$k" in
                 LAPTOP_USER) LAPTOP_USER="$v" ;;
-                TUNNEL_PORT) TUNNEL_PORT="$v" ;;
+                TUNNEL_PORT|PORT) [ -n "$TUNNEL_PORT" ] || TUNNEL_PORT="$v" ;;
                 GIT_MODE|git_mode) GIT_MODE="$v" ;;
                 LAPTOP_OS|laptop_os) LAPTOP_OS="$v" ;;
                 ACTIVE_MOUNT|active_mount) ACTIVE_MOUNT="$v" ;;
             esac
         done < "$CONNECT_CONF"
     fi
-    [ -n "$TUNNEL_PORT" ] || TUNNEL_PORT=$((20000 + $(id -u)))
+    # Match connect client: non-overlapping 10-port block per UID
+    # (20000 + (UID-1000)*10 + slot). Slot 0 is the laptop-exec default when
+    # conf omitted TUNNEL_PORT. NEVER use legacy 20000+UID (Smart -> 21002).
+    if [ -z "$TUNNEL_PORT" ]; then
+        _uid=$(id -u)
+        _deprecated=$((20000 + _uid))
+        if [ "$_uid" -ge 1000 ] 2>/dev/null; then
+            _fallback=$((20000 + (_uid - 1000) * 10))
+        else
+            _fallback=20020
+        fi
+        echo "warn: TUNNEL_PORT_MISSING fallback=${_fallback} deprecated_would_be=${_deprecated} (reconnect connect.bat/sh)" >&2
+        if declare -F _le_audit_log >/dev/null 2>&1; then
+            _le_audit_log WARN TUNNEL_PORT_MISSING \
+                "fallback=${_fallback}" "deprecated_would_be=${_deprecated}" \
+                "hint=reconnect connect.bat/sh"
+        fi
+        TUNNEL_PORT=$_fallback
+        unset _uid _deprecated _fallback
+    fi
     case "${GIT_MODE,,}" in
         server|on|yes|1|slow) GIT_MODE="server" ;;
         hide|fast) GIT_MODE="hide" ;;
@@ -208,6 +305,7 @@ _laptop_ssh() {
         echo "laptop-exec: session slots full (max 8 concurrent SSH channels). Wait; do NOT open new TCP/mux." >&2
         return 255
     fi
+    _LE_ABORT_SLOT_FD="$_slot_fd"
     if [ "${_round:-1}" -gt 5 ]; then
         _le_audit_log WARN SLOT_WAIT "rounds=${_round}" "waited_ms=$((_round * 200))"             "slots_busy=$(_le_audit_slots_busy)/8" "project=${PROJECT_ID:-?}"             "$(_le_audit_session_fields)" "caller=_laptop_ssh"
     fi
@@ -247,22 +345,30 @@ _laptop_ssh() {
         ) 9>"$_lock"
 
         set +e
+        # Background + wait so TERM/INT trap can kill timeout/ssh (foreground wait alone orphans them).
         if [ -n "${LAPTOP_EXEC_CMD_TIMEOUT:-}" ] && command -v timeout >/dev/null 2>&1; then
             # Bound long searches so hung Select-String cannot pin mux slots for hours.
             timeout -k 5 --foreground "$LAPTOP_EXEC_CMD_TIMEOUT" \
-                ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" "$@"
+                ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" "$@" &
+            _LE_CMD_CHILD=$!
+            wait "$_LE_CMD_CHILD"
             _rc=$?
+            _LE_CMD_CHILD=0
             if [ "$_rc" -eq 124 ]; then
                 _le_audit_log ERROR CMD_TIMEOUT "timeout_s=${LAPTOP_EXEC_CMD_TIMEOUT}"                     "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)"                     "slots_busy=$(_le_audit_slots_busy)/8" "attempt=${_attempt}"                     "hint=Hung remote cmd pinned a mux slot; reduce parallel agents or narrow pathspecs."
                 echo "laptop-exec: command timed out after ${LAPTOP_EXEC_CMD_TIMEOUT}s" >&2
             fi
         else
-            ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" "$@"
+            ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" "${LAPTOP_USER}@127.0.0.1" "$@" &
+            _LE_CMD_CHILD=$!
+            wait "$_LE_CMD_CHILD"
             _rc=$?
+            _LE_CMD_CHILD=0
         fi
         set -e
         if [ "$_rc" -ne 255 ]; then
             eval "exec ${_slot_fd}>&-"
+            _LE_ABORT_SLOT_FD=""
             return "$_rc"
         fi
         # Master dead? recreate. If master alive, do NOT ssh -O exit (that cascades).
@@ -283,6 +389,7 @@ _laptop_ssh() {
         _attempt=$((_attempt + 1))
     done
     eval "exec ${_slot_fd}>&-" 2>/dev/null || true
+    _LE_ABORT_SLOT_FD=""
     return "$_rc"
 }
 
@@ -406,7 +513,9 @@ _run_in_project() {
     fi
     # Windows: avoid cmd /c nested-quote breakage for | & <> () and paths.
     # Encode a PowerShell Set-Location + argv splat as -EncodedCommand.
+    # Outer -Command embeds LE_JOB_ID in the visible command line so abort can taskkill orphans.
     local enc
+    _LE_WIN_JOB_ID="lejob_${$}_$(date +%s)_${RANDOM}"
     enc="$(python3 - "$rpath" "$@" <<'PY'
 import base64, sys
 
@@ -427,7 +536,9 @@ ps = "; ".join(parts)
 sys.stdout.write(base64.b64encode(ps.encode("utf-16-le")).decode("ascii"))
 PY
 )"
-    _laptop_ssh "powershell -NoProfile -EncodedCommand ${enc}"
+    # \$env so bash does not expand; LE_JOB_ID stays visible on Windows command line for abort kill.
+    _laptop_ssh "powershell -NoProfile -Command \"\$env:LE_JOB_ID='${_LE_WIN_JOB_ID}'; powershell -NoProfile -EncodedCommand ${enc}\""
+    _LE_WIN_JOB_ID=""
 }
 
 
@@ -508,7 +619,7 @@ _cmd_status() {
     else
         echo "sshfs:        n/a (no active_mount)"
     fi
-    echo "prefer:       laptop-exec (SSH-first; mount optional)"
+    echo "prefer:       READ/GREP=mount|MCP|LE; WRITE=MCP|mount|LE; Glob=MCP|mount; git=LE"
 }
 
 _cmd_health() {
@@ -569,8 +680,8 @@ _cmd_mount_status() {
     echo "sshfs:        $state"
     if _tunnel_up; then echo "tunnel:       UP"; else echo "tunnel:       DOWN"; fi
     case "$state" in
-        MOUNTED) echo "recommend:    laptop-exec for agent work; SSHFS for manual IDE edits" ;;
-        *) echo "recommend:    laptop-exec ONLY (read/write/git/rg/run)" ;;
+        MOUNTED) echo "recommend:    mount Read/Grep; MCP Write/Glob when listed; LE for git + fallback" ;;
+        *) echo "recommend:    MCP when listed else laptop-exec (git always LE)" ;;
     esac
 }
 
@@ -850,6 +961,9 @@ main() {
     case " $* " in
         *" -p "*|*" --project "*) ;;
     esac
+    _LE_ACTIVE_CMD="$cmd"
+    _LE_CMD_ENDED=0
+    trap '_le_on_signal' TERM INT HUP
     _le_audit_log INFO CMD_BEGIN "cmd=${cmd}" "argv=${_argv}"         "project=${PROJECT_ID:-${ACTIVE_MOUNT:-?}}" "$(_le_audit_session_fields)"         "slots_busy=$(_le_audit_slots_busy)/8" "parent_cmd=$(_le_audit_trunc "${SSH_ORIGINAL_COMMAND:-${CURSOR_TRACE_ID:-n/a}}" 80)"
     set +e
     case "$cmd" in
@@ -873,18 +987,22 @@ main() {
     _rc=$?
     set -e
     _ms=$(( $(date +%s%3N 2>/dev/null || date +%s) - _t0 ))
-    if [ "$_rc" -eq 0 ]; then
-        _le_audit_log INFO CMD_END "cmd=${cmd}" "exit=0" "ms=${_ms}"             "project=${PROJECT_ID:-${ACTIVE_MOUNT:-?}}" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8"
-    elif [ "$_rc" -eq 1 ] && [ "$cmd" = "rg" ]; then
-        _le_audit_log INFO CMD_END "cmd=rg" "exit=1" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "meaning=no_matches" "$(_le_audit_session_fields)"
-    elif [ "$_rc" -eq 124 ]; then
-        # Guarantee CMD_END on timeout (124) even when CMD_TIMEOUT already logged in _laptop_ssh.
-        _le_audit_log WARN CMD_END "cmd=${cmd}" "exit=124" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "meaning=timeout" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8"
-    elif [ "$_rc" -eq 255 ]; then
-        _le_audit_log ERROR CMD_END "cmd=${cmd}" "exit=255" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8" "hint=SSH/mux failure or SLOT_FULL — check prior SLOT_*/MUX_* lines."
-    else
-        _le_audit_log WARN CMD_END "cmd=${cmd}" "exit=${_rc}" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8"
+    if [ "${_LE_CMD_ENDED:-0}" -eq 0 ]; then
+        _LE_CMD_ENDED=1
+        if [ "$_rc" -eq 0 ]; then
+            _le_audit_log INFO CMD_END "cmd=${cmd}" "exit=0" "ms=${_ms}"             "project=${PROJECT_ID:-${ACTIVE_MOUNT:-?}}" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8"
+        elif [ "$_rc" -eq 1 ] && [ "$cmd" = "rg" ]; then
+            _le_audit_log INFO CMD_END "cmd=rg" "exit=1" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "meaning=no_matches" "$(_le_audit_session_fields)"
+        elif [ "$_rc" -eq 124 ]; then
+            # Guarantee CMD_END on timeout (124) even when CMD_TIMEOUT already logged in _laptop_ssh.
+            _le_audit_log WARN CMD_END "cmd=${cmd}" "exit=124" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "meaning=timeout" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8"
+        elif [ "$_rc" -eq 255 ]; then
+            _le_audit_log ERROR CMD_END "cmd=${cmd}" "exit=255" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8" "hint=SSH/mux failure or SLOT_FULL — check prior SLOT_*/MUX_* lines."
+        else
+            _le_audit_log WARN CMD_END "cmd=${cmd}" "exit=${_rc}" "ms=${_ms}"             "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)"             "slots_busy=$(_le_audit_slots_busy)/8"
+        fi
     fi
+    trap - TERM INT HUP
     return "$_rc"
 }
 main "$@"

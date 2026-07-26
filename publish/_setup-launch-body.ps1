@@ -113,6 +113,26 @@ try {
     # UI only if a download is needed) and starts the connect UI. The Global\ClaudeConnectExeLaunch
     # double-launch gate lives in the worker now (see _setup-worker-body.ps1).
     $env:CLAUDE_CONNECT_FROM_EXE = '1'
+    # Remember where the user double-clicked the SFX so updates can drop Claude-Connect-VER.exe
+    # next to that folder (e.g. Desktop\claude-publish), not only Desktop\Claude-Connect.
+    try {
+        $launchExe = $null
+        try { $launchExe = (Get-Process -Id $PID -ErrorAction Stop).Path } catch {}
+        if (-not $launchExe) {
+            try { $launchExe = [Environment]::GetCommandLineArgs()[0] } catch {}
+        }
+        if ($launchExe -and (Test-Path -LiteralPath $launchExe)) {
+            $launchDir = Split-Path -Parent $launchExe
+            $env:CLAUDE_CONNECT_LAUNCH_EXE = $launchExe
+            $env:CLAUDE_CONNECT_LAUNCH_DIR = $launchDir
+            $stampDir = Join-Path $env:USERPROFILE '.config\claude-connect'
+            New-Item -ItemType Directory -Force -Path $stampDir | Out-Null
+            Set-Content -LiteralPath (Join-Path $stampDir 'last-launch-dir.txt') -Value $launchDir -Encoding ASCII -NoNewline
+            Log ("launch_dir={0}" -f $launchDir)
+        }
+    } catch {
+        Log ("launch_dir_warn $($_.Exception.Message)")
+    }
     Start-Process -FilePath 'powershell.exe' -WorkingDirectory $Dest -ArgumentList @(
         '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $workerDest
     ) -WindowStyle Hidden | Out-Null

@@ -29,6 +29,7 @@ if ($leaseExistedBefore) {
 
 $decoyAPid = $null
 $decoyBPid = $null
+$decoyCPid = $null
 
 try {
     # --- Safety #2: define OUR OWN stub for Stop-CursorProxySidecarWatchdog BEFORE loading
@@ -102,8 +103,32 @@ try {
     Assert ($resultB -eq $true) 'case B: dead lease pid -> Invoke-CursorProxySidecarBootReap DOES report/act on the orphan condition'
     Assert ($script:StopWatchdogCallCount -eq 1) 'case B: stub Stop-CursorProxySidecarWatchdog was called exactly once (real watchdog kill/mutex/TEMP logic never ran)'
     $decoyBPid = $null
+
+    # === Case C: dead lease BUT sticky fronts up -> must NOT kill watchdog (multi-Connect adopt) ===
+    $script:StopWatchdogCallCount = 0
+    $script:FrontListenStub = $true
+    function Test-CursorProxySidecarListening {
+        param([int]$Port)
+        return [bool]$script:FrontListenStub
+    }
+    $procC = Start-Process powershell -ArgumentList '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 60' -WindowStyle Hidden -PassThru
+    $decoyCPid = $procC.Id
+    Start-Sleep -Milliseconds 300
+    Stop-Process -Id $decoyCPid -Force -ErrorAction SilentlyContinue
+    $deadlineC = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $deadlineC) {
+        if (-not (Get-Process -Id $decoyCPid -ErrorAction SilentlyContinue)) { break }
+        Start-Sleep -Milliseconds 150
+    }
+    ("{0}|{1}" -f $decoyCPid, (Get-Date -Format o)) | Set-Content -LiteralPath $leasePath -Encoding ASCII
+    $resultC = Invoke-CursorProxySidecarBootReap
+    Assert (-not $resultC) 'case C: dead lease + fronts_up -> BootReap skips kill (returns false)'
+    Assert ($script:StopWatchdogCallCount -eq 0) 'case C: Stop-CursorProxySidecarWatchdog NOT called when fronts still up'
+    Assert (-not (Test-Path -LiteralPath $leasePath)) 'case C: stale lease file removed even when skip-preserving fronts'
+    $decoyCPid = $null
+    Remove-Item Function:Test-CursorProxySidecarListening -ErrorAction SilentlyContinue
 } finally {
-    foreach ($p in @($decoyAPid, $decoyBPid)) {
+    foreach ($p in @($decoyAPid, $decoyBPid, $decoyCPid)) {
         if ($p) { try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } catch {} }
     }
     # Restore the real lease file (or its absence) exactly as found - even if an assertion threw.

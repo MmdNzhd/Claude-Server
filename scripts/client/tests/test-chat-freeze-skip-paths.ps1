@@ -20,9 +20,12 @@ $conn = Get-Content (Join-Path $RepoRoot 'scripts\client\windows\connect.ps1') -
 Assert ($el -match 'CURSOR_PROXY_CLEAR_SKIP') 'editor-launch has CURSOR_PROXY_CLEAR_SKIP'
 Assert ($el -match 'Test-MayClearCursorProxySettings') 'editor-launch has Test-MayClearCursorProxySettings'
 Assert ($el -match 'action=repair_sidecar_only') 'editor-launch prefers repair when windows open'
-Assert ($side -match 'CURSOR_PROXY_CLEAR_SKIP: reason=windows_open') 'sidecar Clear skips when windows open'
+Assert ($side -match 'CURSOR_PROXY_CLEAR_SKIP: reason=windows_open') 'sidecar Clear skips when windows open AND front up'
+Assert ($side -match 'CURSOR_PROXY_CLEAR force reason=18998_down_windows_open') 'sidecar force-clears sticky when windows open AND 18998 down'
 Assert ($side -match 'Repair-CursorProxySettingsToSidecar') 'sidecar repair helper exists'
 Assert ($side -match 'action=repair_sidecar_only') 'sidecar clear logs repair_sidecar_only'
+Assert ($side -match 'SIDECAR_BOOT_REAP skip reason=') 'boot reap preserves live fronts / open windows'
+Assert ($side -match 'Detach-CursorProxySidecarJobProcess -Process \$pWd') 'watchdog gets job-handle detach so Connect exit keeps fronts' # regex \$ = literal $
 
 Assert ($auth -match 'AUTH_SYNC_SKIP') 'auth has AUTH_SYNC_SKIP'
 Assert ($auth -match 'db_too_large') 'auth skips reason=db_too_large'

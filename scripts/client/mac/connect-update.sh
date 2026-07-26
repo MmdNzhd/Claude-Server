@@ -381,21 +381,9 @@ main() {
             _update_file_log "UPDATE_OPTIONAL_SKIP reason=silent local=$local_ver remote=$remote_ver"
             exit 0
         fi
-        defer_file="${HOME}/.config/claude-connect/update-defer.txt"
-        if [ -f "$defer_file" ]; then
-            dver="$(grep '^version=' "$defer_file" | cut -d= -f2-)"
-            duntil="$(grep '^until=' "$defer_file" | cut -d= -f2-)"
-            if [ "$dver" = "$remote_ver" ] && [ -n "$duntil" ]; then
-                # crude: if until still in future (string compare on ISO often works for same format)
-                now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-                if [[ "$duntil" > "$now" ]]; then
-                    _update_msg '  Optional update deferred - continuing\n'
-                    _update_file_log "UPDATE_OPTIONAL_SKIP reason=defer local=$local_ver remote=$remote_ver"
-                    exit 0
-                fi
-            fi
-        fi
-        _update_msg '  Optional update available (v%s -> v%s). Update now? [y/N/D]:\n' "$local_ver" "$remote_ver"
+        # Defer option removed — drop any leftover stamp.
+        rm -f "${HOME}/.config/claude-connect/update-defer.txt" 2>/dev/null || true
+        _update_msg '  Optional update available (v%s -> v%s). Update now? [y/N]:\n' "$local_ver" "$remote_ver"
         ans=N
         if [ -t 0 ]; then read -r ans || ans=N; fi
         ans="$(printf '%s' "$ans" | tr '[:lower:]' '[:upper:]')"
@@ -403,13 +391,6 @@ main() {
         case "$ans" in
             N|NO)
                 _update_file_log "UPDATE_OPTIONAL_SKIP reason=user_no local=$local_ver remote=$remote_ver"
-                exit 0
-                ;;
-            D|DEFER)
-                mkdir -p "${HOME}/.config/claude-connect"
-                until="$(date -u -v+48H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+48 hours' +%Y-%m-%dT%H:%M:%SZ)"
-                printf 'version=%s\nuntil=%s\n' "$remote_ver" "$until" > "$defer_file"
-                _update_file_log "UPDATE_DEFER saved until=$until ver=$remote_ver"
                 exit 0
                 ;;
         esac

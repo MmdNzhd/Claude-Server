@@ -102,6 +102,20 @@ _sync_golden_file "skills/laptop-exec/SKILL.md" 644 \
     "$REPO_ROOT/scripts/server/skills/laptop-exec/SKILL.md" \
     "/home/$STAGE_USER/.cursor/skills/laptop-exec/SKILL.md" \
     "$SERVER_DIR/skills/laptop-exec/SKILL.md"
+_sync_golden_file "skills/laptop-exec/reference-windows-mcp.md" 644 \
+    "$CLIENT_BUNDLE/server/skills/laptop-exec/reference-windows-mcp.md" \
+    "$REPO_ROOT/scripts/server/skills/laptop-exec/reference-windows-mcp.md" \
+    "/home/$STAGE_USER/.cursor/skills/laptop-exec/reference-windows-mcp.md" \
+    "$SERVER_DIR/skills/laptop-exec/reference-windows-mcp.md"
+for _hf in laptop-exec-audit-log.sh laptop-exec-guard.sh laptop-exec-guard-wrap.sh laptop-exec-shell-scan.py laptop-exec-session.sh; do
+  _mode=755
+  [[ "$_hf" == *.py ]] && _mode=644
+  _sync_golden_file "cursor-hooks/$_hf" "$_mode" \
+      "$CLIENT_BUNDLE/server/cursor-hooks/$_hf" \
+      "$REPO_ROOT/scripts/server/cursor-hooks/$_hf" \
+      "/home/$STAGE_USER/.cursor/hooks/$_hf" \
+      "$SERVER_DIR/cursor-hooks/$_hf"
+done
 
 if ! grep -q 'GIT_MODE="off"' "$SERVER_DIR/laptop-exec.sh" 2>/dev/null; then
     _sync_from_laptop "laptop-exec.sh" 755 || true
@@ -169,6 +183,9 @@ getent passwd | awk -F: '$3 >= 1000 && $1 != "nobody" && $1 != "nfsnobody" { pri
   [ -f "$SERVER_DIR/claude-git-setup.sh" ] && atomic_install 755 "$SERVER_DIR/claude-git-setup.sh" "$h/.local/bin/claude-git-setup" "$u" "$u"
   install -m 644 -o "$u" -g "$u" "$SERVER_DIR/cursor-rules/laptop-exec.mdc" "$h/.cursor/rules/laptop-exec.mdc"
   install -m 644 -o "$u" -g "$u" "$SERVER_DIR/skills/laptop-exec/SKILL.md" "$h/.cursor/skills/laptop-exec/SKILL.md"
+  [ -f "$SERVER_DIR/skills/laptop-exec/reference-windows-mcp.md" ] && \
+    install -m 644 -o "$u" -g "$u" "$SERVER_DIR/skills/laptop-exec/reference-windows-mcp.md" \
+      "$h/.cursor/skills/laptop-exec/reference-windows-mcp.md"
   for _hf in laptop-exec-audit-log.sh laptop-exec-guard.sh laptop-exec-guard-wrap.sh laptop-exec-shell-scan.py laptop-exec-session.sh; do
     [ -f "$SERVER_DIR/cursor-hooks/$_hf" ] || continue
     install -m 755 -o "$u" -g "$u" "$SERVER_DIR/cursor-hooks/$_hf" "$h/.cursor/hooks/$_hf"

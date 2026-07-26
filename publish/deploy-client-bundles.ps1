@@ -47,35 +47,15 @@ if ($DeploySepidz -and -not $SepidClientRoot) { throw 'SepidClientRoot is requir
 $RemoteDeployDir = 'claude-client-bundle-deploy'
 $InstallScriptRel = 'scripts\server\commands\install-client-bundle.sh'
 
-$WinBundleFiles = @(
-    'connect.bat',
-    'connect-boot.ps1',
-    'connect-heal.ps1',
-    'connect-bootstrap.ps1',
-    'connect-version.txt',
-    'connect.ps1',
-    'connect-rider.bat',
-    'connect-update.ps1',
-    'cursor-proxy-sidecar.ps1',
-    'connect-ui.ps1',
-    'connect-diagnostic.ps1',
-    'editor-launch.ps1',
-    'git-mode.ps1',
-    'cursor-auth-laptop.ps1',
-    'windows-mcp-laptop.ps1',
-    'Claude-Connect.exe'
-)
-
-$MacBundleFiles = @(
-    'connect.sh',
-    'connect-update.sh',
-    'connect-version.txt',
-    'cursor-proxy-sidecar.sh',
-    'git-mode.sh',
-    'connect-ui.sh',
-    'editor-launch.sh',
-    'claude-mount.sh'
-)
+# ONE source of truth: publish/client-bundle-manifest.tsv (do not hardcode lists here).
+. (Join-Path $PSScriptRoot 'ClientBundleManifest.ps1')
+if (-not $ProjectRoot) { throw 'ProjectRoot is required' }
+$_manifestEntries = Get-ClientBundleManifestEntries -ProjectRoot $ProjectRoot
+$WinBundleFiles = @(@($_manifestEntries) | Where-Object { $_.Kind -eq 'win' } | ForEach-Object { $_.Name })
+$MacBundleFiles = @(@($_manifestEntries) | Where-Object { $_.Kind -eq 'mac' } | ForEach-Object { $_.Name })
+if ($WinBundleFiles.Count -lt 10 -or $MacBundleFiles.Count -lt 5) {
+    throw "client-bundle-manifest.tsv produced too few files (win=$($WinBundleFiles.Count) mac=$($MacBundleFiles.Count))"
+}
 
 $ServerBundleFiles = @(
     'laptop-exec.sh',

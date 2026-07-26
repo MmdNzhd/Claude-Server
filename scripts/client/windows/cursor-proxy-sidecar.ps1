@@ -369,15 +369,21 @@ function Repair-CursorProxySettingsToSidecar {
 function Clear-CursorProxySettingsSidecar {
     # Remove sticky 18998 proxy when sidecar/backend is down so Cursor can talk direct
     # instead of hard-failing every agent turn on a dead loopback proxy.
-    # NEVER clear settings while server-profile Cursor windows are open - repair sidecar only
-    # (CLEAR_SKIP). Clearing under an open window freezes chat/proxy mid-session.
+    # When server-profile Cursor windows are open AND 18998 is listening: CLEAR_SKIP +
+    # repair only (clearing a live sticky mid-session freezes chat).
+    # When windows are open AND 18998 is NOT listening: FORCE clear — leaving settings
+    # pointed at a dead front yields MCP ECONNREFUSED 127.0.0.1:18998 (worse than clear).
     $nOpen = 0
     try {
         if (Get-Command Get-CursorProfileProcesses -ErrorAction SilentlyContinue) {
             $nOpen = @(Get-CursorProfileProcesses -ForceRefresh).Count
         }
     } catch { $nOpen = 0 }
-    if ($nOpen -gt 0) {
+    $frontListening = $false
+    if (Get-Command Test-CursorProxySidecarListening -ErrorAction SilentlyContinue) {
+        try { $frontListening = [bool](Test-CursorProxySidecarListening -Port 18998) } catch { $frontListening = $false }
+    }
+    if ($nOpen -gt 0 -and $frontListening) {
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
             Write-GitModeLog ("CURSOR_PROXY_CLEAR_SKIP: reason=windows_open action=repair_sidecar_only profile_count={0}" -f $nOpen) 'WARN'
         }
@@ -385,6 +391,11 @@ function Clear-CursorProxySettingsSidecar {
             try { [void](Repair-CursorProxySettingsToSidecar) } catch {}
         }
         return $false
+    }
+    if ($nOpen -gt 0 -and -not $frontListening) {
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("CURSOR_PROXY_CLEAR force reason=18998_down_windows_open profile_count={0}" -f $nOpen) 'WARN'
+        }
     }
     $settingsPath = Get-CursorProxySettingsPath
     if (-not (Test-Path -LiteralPath $settingsPath)) { return $false }
@@ -598,6 +609,13 @@ while ($true) {
         if ($pWd -and (Get-Command Add-CursorProxySidecarJobProcess -ErrorAction SilentlyContinue)) {
             Add-CursorProxySidecarJobProcess -Process $pWd
         }
+        # Plant a second KILL_ON_JOB_CLOSE handle inside the watchdog so Connect exit
+        # (or owner adopt by another Connect) does not tear down 18998/18999 relays while
+        # the watchdog still lives. keepTunnelForEditor also detaches into the tunnel;
+        # watchdog detach covers the common case where Connect dies without that path.
+        if ($pWd -and (Get-Command Detach-CursorProxySidecarJobProcess -ErrorAction SilentlyContinue)) {
+            try { [void](Detach-CursorProxySidecarJobProcess -Process $pWd) } catch {}
+        }
         $script:CursorProxyWatchdogStarted = $true
         try {
             $lease = Join-Path $env:TEMP 'claude-connect-sidecar-watchdog.lease'
@@ -699,11 +717,11 @@ function Stop-CursorProxySidecarRelays {
 }
 
 function Invoke-CursorProxySidecarBootReap {
-    # Optional nice-to-have: if a previous Connect process crashed/was killed without
-    # reaching the clean-disconnect Stop-CursorProxySidecarWatchdog call, its lease file
-    # points at a Connect host PID that's no longer running. Reap just that orphaned
-    # watchdog (mutex release + cmdline-scoped process kill + TEMP cleanup) once at boot,
-    # before Ensure-CursorProxySidecar, so this Connect doesn't inherit a stale watchdog.
+    # If a previous Connect crashed without clean Stop-CursorProxySidecarWatchdog, its
+    # lease points at a dead PID. Only reap (kill watchdog + close job + TEMP cleanup)
+    # when sticky fronts are already down AND no server-profile Cursor windows are open.
+    # Otherwise drop the stale lease only — killing a live 18998/18999 tree on multi-Connect
+    # "adopt stale" blackholes open Cursor MCP (ECONNREFUSED) until fronts rebound.
     # Never touches Mac; never kills anything not matched by the watchdog TEMP script path.
     $lease = Join-Path $env:TEMP 'claude-connect-sidecar-watchdog.lease'
     if (-not (Test-Path -LiteralPath $lease)) { return $false }
@@ -717,6 +735,29 @@ function Invoke-CursorProxySidecarBootReap {
     $stillRunning = $false
     try { $stillRunning = [bool](Get-Process -Id $leasePid -ErrorAction SilentlyContinue) } catch { $stillRunning = $false }
     if ($stillRunning) { return $false }
+
+    $frontUp = $false
+    if (Get-Command Test-CursorProxySidecarListening -ErrorAction SilentlyContinue) {
+        try {
+            $frontUp = (Test-CursorProxySidecarListening -Port 18998) -and (Test-CursorProxySidecarListening -Port 18999)
+        } catch { $frontUp = $false }
+    }
+    $nOpen = 0
+    try {
+        if (Get-Command Get-CursorProfileProcesses -ErrorAction SilentlyContinue) {
+            $nOpen = @(Get-CursorProfileProcesses -ForceRefresh).Count
+        }
+    } catch { $nOpen = 0 }
+
+    if ($frontUp -or $nOpen -gt 0) {
+        $reason = if ($frontUp) { 'fronts_up' } else { 'windows_open' }
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("SIDECAR_BOOT_REAP skip reason={0} orphan_lease_pid={1} front_up={2} profile_count={3}" -f $reason, $leasePid, [int]$frontUp, $nOpen) 'WARN'
+        }
+        try { Remove-Item -LiteralPath $lease -Force -ErrorAction SilentlyContinue } catch {}
+        return $false
+    }
+
     if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
         Write-GitModeLog ("SIDECAR_BOOT_REAP orphan_lease_pid={0}" -f $leasePid) 'WARN'
     }

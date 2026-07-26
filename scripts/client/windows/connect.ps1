@@ -1,4 +1,4 @@
-﻿# connect.ps1 - Claude Code launcher for Windows.
+# connect.ps1 - Claude Code launcher for Windows.
 # connect.bat invariant: g git (menu footer lives in connect-ui.ps1)
 # Usage:  double-click connect.bat
 #         connect.bat -Setup   (reconfigure username)
@@ -122,10 +122,13 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260726.05'
+$script:ConnectVersion = '20260726.25'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = '21059021-b14e-4c6c-87a9-87815dbcbece'
+$script:ConnectBuildId = '81895cfc-1940-453e-8af6-cd3a34da3d67'
+$script:SshMsSamples = [System.Collections.Generic.List[int]]::new()
+$script:SshMsSampleStartUnix = 0
+$script:LastSshRollupUnix = 0
 $CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
@@ -1118,6 +1121,42 @@ function Add-SshRecentLog([string]$Line) {
     while ($script:SshRecentLog.Count -gt 24) { $script:SshRecentLog.RemoveAt(0) }
 }
 
+function Add-SshMsSample([int]$Ms) {
+    try {
+        if ($null -eq $script:SshMsSamples) { $script:SshMsSamples = [System.Collections.Generic.List[int]]::new() }
+        if ($script:SshMsSampleStartUnix -le 0) { $script:SshMsSampleStartUnix = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
+        $script:SshMsSamples.Add([int]$Ms)
+        while ($script:SshMsSamples.Count -gt 60) { $script:SshMsSamples.RemoveAt(0) }
+        Write-SshLatencyRollupIfDue
+    } catch { }
+}
+
+function Write-SshLatencyRollupIfDue {
+    try {
+        if (-not (Get-Command Write-ConnectLog -EA SilentlyContinue)) { return }
+        if ($null -eq $script:SshMsSamples -or $script:SshMsSamples.Count -lt 1) { return }
+        $now = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        # At most once per 60s since last rollup.
+        if (($now - [int]$script:LastSshRollupUnix) -lt 60) { return }
+        $elapsed = $now - [int]$script:SshMsSampleStartUnix
+        $n = $script:SshMsSamples.Count
+        # Emit when count>=30, or count>=1 with window>=60s since sample start.
+        if (-not ($n -ge 30 -or $elapsed -ge 60)) { return }
+        $script:LastSshRollupUnix = $now
+        $arr = @($script:SshMsSamples | Sort-Object)
+        $n = $arr.Count
+        $min = $arr[0]; $max = $arr[$n - 1]
+        $p50 = $arr[[int]([math]::Floor(($n - 1) * 0.5))]
+        $p90 = $arr[[int]([math]::Floor(($n - 1) * 0.9))]
+        $over2 = @($arr | Where-Object { $_ -ge 2000 }).Count
+        $over5 = @($arr | Where-Object { $_ -ge 5000 }).Count
+        $win = [math]::Max(1, $elapsed)
+        Write-ConnectLog ("SSH_ROLLUP window_s={0} count={1} min={2} p50={3} p90={4} max={5} over_2s={6} over_5s={7}" -f $win, $n, $min, $p50, $p90, $max, $over2, $over5) 'INFO'
+        $script:SshMsSamples.Clear()
+        $script:SshMsSampleStartUnix = $now
+    } catch { }
+}
+
 function Invoke-SshXCore {
     param(
         [Parameter(Mandatory)][string]$RemoteCmd,
@@ -1232,6 +1271,7 @@ function SshX([string]$Cmd, [switch]$NoRetryOnTimeout) {
         $script:ConnectPerf.SshMsTotal += $result.Ms
         $script:ConnectPerf.SshCount++
     }
+    Add-SshMsSample ([int]$result.Ms)
     Add-SshRecentLog "exit=$($result.Exit) ms=$($result.Ms) cmd=$truncCmd"
     if ($result.Exit -ne 0 -and $result.Exit -ne 124) {
         $script:LastSshExit = $result.Exit
@@ -1420,8 +1460,10 @@ function Write-SessionDiagnosticReport {
     # process-scan probes - they were adding avoidable work right after the window already opened.
     # AuthOk=$false is the NORMAL steady state (auth-sync skipped when stamp current), so gate on
     # "auth not genuinely failed" - otherwise the light path never fires on a happy reconnect.
-    $authFine = ($AuthOk -ne $false) -or ($AuthDetail -match 'skip')
-    $lightOpen = ($Phase -eq 'SESSION_OPEN' -and $OnFolder -and $MountOk -and $authFine)
+            $authFine = ($AuthOk -ne $false) -or ($AuthDetail -match 'skip')
+    $mountPendingLight = ($MountOut -match 'started_in_background') -and $OnFolder
+    $lightOpen = ($Phase -eq 'SESSION_OPEN' -and $OnFolder -and ($MountOk -or $mountPendingLight) -and $authFine)
+    if ($mountPendingLight) { $MountOk = $true }
     if ($EditorCmd -eq 'cursor' -and -not $lightOpen) {
         if (Get-Command Test-RemoteEditorInAgentHome -ErrorAction SilentlyContinue) {
             $agentHome = Test-RemoteEditorInAgentHome
@@ -1598,16 +1640,60 @@ function Choose-Project {
 
     $mounts = @(Get-MountsForLaptop -Os 'windows' -Mounts $Mounts)
     $hiddenCount = Get-SkippedMountCountForLaptop -Os 'windows' -Mounts $Mounts
+    $emptyLaptopSshPrepared = $false
     while ($true) {
         if ($mounts.Count -eq 0) {
+            # Empty list: stay on a real menu (do not auto-jump into Add).
+            # First Add needs laptop SSH/admin - prepare that before the folder picker.
+            Write-GitModeBanner -GitMode (Get-GitMode)
             if ($hiddenCount -gt 0) {
                 Write-Host "    No PC projects ($hiddenCount Mac-only on server)." -ForegroundColor DarkGray
                 Write-Host ''
             }
-            Ensure-ServerSessionReady
-            $null = ($added = Add-Project)
-            if (-not $added) { return $null }
-            return ,$added
+            Write-ProjectTable -Mounts @()
+            Write-Host '    First project needs laptop SSH (may ask for administrator once).' -ForegroundColor DarkGray
+            Write-Host ''
+            $c = (Read-ConnectPrompt '    >' -Tag 'MENU_PROJECT_EMPTY').Trim().ToLower()
+            Write-Host ''
+            if (-not $c) { Write-ConnectDecision 'project_menu' 'empty_retry'; continue }
+            switch ($c) {
+                'a' {
+                    Write-ConnectDecision 'project_menu' 'add_empty'
+                    if (-not $emptyLaptopSshPrepared) {
+                        Write-Host '    Preparing laptop SSH (admin prompt if needed)...' -ForegroundColor Cyan
+                        Write-Host ''
+                        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                            Write-ConnectLog 'EMPTY_MENU: ensure_laptop_ssh_before_add' 'INFO'
+                        }
+                        Ensure-ServerSessionReady
+                        $emptyLaptopSshPrepared = $true
+                    } else {
+                        Ensure-ServerSessionReady
+                    }
+                    $null = ($added = Add-Project)
+                    if ($added) { return ,$added }
+                    $null = ($allMounts = @(Get-Mounts))
+                    $null = ($mounts = @(Get-MountsForLaptop -Os 'windows' -Mounts $allMounts))
+                    $hiddenCount = Get-SkippedMountCountForLaptop -Os 'windows' -Mounts $allMounts
+                }
+                'u' {
+                    if (Get-Command Invoke-ConnectManualUpdate -ErrorAction SilentlyContinue) {
+                        Invoke-ConnectManualUpdate
+                    } else {
+                        Warn 'Manual update is not available in this client build.'
+                    }
+                }
+                'q' {
+                    Write-ConnectDecision 'project_menu' 'quit'
+                    if (Get-Command Close-ConnectLog -ErrorAction SilentlyContinue) { Close-ConnectLog }
+                    Write-Host ''
+                    exit 0
+                }
+                default {
+                    Warn 'Enter a, u (update), or q.'
+                }
+            }
+            continue
         }
 
         Write-GitModeBanner -GitMode (Get-GitMode)
@@ -1633,6 +1719,13 @@ function Choose-Project {
                 $null = ($allMounts = @(Get-Mounts))
                 $null = ($mounts = @(Get-MountsForLaptop -Os 'windows' -Mounts $allMounts))
                 $hiddenCount = Get-SkippedMountCountForLaptop -Os 'windows' -Mounts $allMounts
+            }
+            'u' {
+                if (Get-Command Invoke-ConnectManualUpdate -ErrorAction SilentlyContinue) {
+                    Invoke-ConnectManualUpdate
+                } else {
+                    Warn 'Manual update is not available in this client build.'
+                }
             }
             'e' {
                 Write-ConnectDecision 'project_menu' 'edit'
@@ -1708,7 +1801,7 @@ function Choose-Project {
                 $raw = [string]$_
                 $isAscii = $raw.Length -ge 1 -and ($raw.ToCharArray() | Where-Object { [int]$_ -gt 127 } | Measure-Object).Count -eq 0
                 if ($isAscii) {
-                    Warn "Enter a number or a/e/d/c/g/q."
+                    Warn "Enter a number or a/e/d/c/g/u/q."
                 } elseif (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
                     Write-ConnectLog ("PROJECT_MENU ignore non_command choice={0}" -f $raw) 'INFO'
                 }
@@ -2497,11 +2590,6 @@ $script:WindowsMcpEnsured = $false
                 # via Write-ConnectLog below, just no longer echoed to the console.
                 Write-ConnectLog "MOUNT: $cleanOut"
             }
-            if ($script:PostTunnelRecovery) {
-                Warn 'Recovery complete - press O if Cursor is not on the project folder'
-                Write-ConnectLog 'RECOVERY: user_warn press_o_if_cursor_not_on_folder'
-            }
-
             $script:ActiveProjectId = $go.Id
 
             $script:CursorAuthNeedsBootstrap = $false
@@ -2519,6 +2607,13 @@ $script:WindowsMcpEnsured = $false
                     $cursorRunning = Test-RemoteEditorWindowOpenWhenOnFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
                 }
                 $folderSw.Stop()
+                # Only nag after recovery when Cursor is NOT already on the project folder.
+                if ($script:PostTunnelRecovery -and -not $onCorrectFolder) {
+                    Warn 'Recovery complete - press O if Cursor is not on the project folder'
+                    Write-ConnectLog 'RECOVERY: user_warn press_o_if_cursor_not_on_folder'
+                } elseif ($script:PostTunnelRecovery) {
+                    Write-ConnectLog 'RECOVERY: skip_press_o_warn reason=already_on_folder' 'DEBUG'
+                }
                 if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
                     Write-ConnectPerfLog -Mark 'auth_folder_check' -Ms $folderSw.ElapsedMilliseconds `
                         -Extra "on_folder=$onCorrectFolder window=$cursorRunning agent_home=$agentHome"
@@ -3131,8 +3226,9 @@ $script:WindowsMcpEnsured = $false
                     $skipRecoveryClear = $true
                 }
                 Begin-ConnectRecovery -Trigger 'auto' -ProjectId $go.Id -EditorWasOpen $skipRecoveryClear
-                Write-Host '    Connection dropped - recovering...' -ForegroundColor Yellow
                 if ($skipRecoveryClear) {
+                    # Editor still open: quiet refresh (no "Connection dropped" yell).
+                    Write-ConnectLog 'RECOVERY: quiet_tunnel_refresh reason=editor_open' 'INFO'
                     # Keep EditorSeenOpen if already set by on-folder/window checks; never force editorOpened from sticky alone.
                     if ($editorOpened) { $script:EditorSeenOpen = $true }
                     try {
@@ -3145,6 +3241,7 @@ $script:WindowsMcpEnsured = $false
                     Write-ConnectLog 'TUNNEL: recovering session (preserve mount, re-ensure tunnel)' 'WARN'
                     $alreadyDown = $false
                 } else {
+                    Write-Host '    Connection dropped - recovering...' -ForegroundColor Yellow
                     $editorOpened = $false
                     $script:EditorOpened = $editorOpened
                     Write-ConnectLog 'TUNNEL: recovering session (down mount, restart tunnel)' 'WARN'

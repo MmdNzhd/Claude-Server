@@ -14,13 +14,21 @@ echo.%HERE%| find /I "claude-code-sepidz" >nul && set "HERE_IS_SEPIDZ=1"
 echo.%HERE%| find /I "Claude-Connect-Sepidz" >nul && set "HERE_IS_SEPIDZ=1"
 title Claude Connect
 
+REM Multi-UI: mint a unique RUN_ID in THIS bat process BEFORE preflight.
+REM A shared %TEMP%\claude-connect-run-id.txt is racy when two connect.bat start together
+REM (both UIs would inherit the last writer and merge day-log session lines).
+if not defined CLAUDE_CONNECT_RUN_ID (
+    for /f %%I in ('powershell -NoProfile -WindowStyle Hidden -Command "[guid]::NewGuid().ToString('N').Substring(0,12)"') do set "CLAUDE_CONNECT_RUN_ID=%%I"
+)
+
 REM Stage 6: when connect-preflight.ps1 exists, happy path uses one PS preflight then connect-boot
 REM (skips scattered bootstrap/heal/update PS starts). Sepidz / OUTDATED / error paths unchanged.
 if exist "%HERE%connect-preflight.ps1" (
     if not defined CLAUDE_CONNECT_UPDATE_DEPTH set "CLAUDE_CONNECT_UPDATE_DEPTH=0"
     powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%HERE%connect-preflight.ps1" -Here "%HERE_NOTRAIL%"
     set "PRE_EC=!errorlevel!"
-    if exist "%TEMP%\claude-connect-run-id.txt" (
+    REM Only adopt preflight handoff file when bat still has no RUN_ID (should not happen).
+    if not defined CLAUDE_CONNECT_RUN_ID if exist "%TEMP%\claude-connect-run-id.txt" (
         for /f "usebackq delims=" %%I in ("%TEMP%\claude-connect-run-id.txt") do set "CLAUDE_CONNECT_RUN_ID=%%I"
     )
     if exist "%TEMP%\claude-connect-preflight.ok" (
@@ -58,13 +66,10 @@ if exist "%HERE%connect-preflight.ps1" (
     goto AFTER_CLIENT_UPDATE
 )
 
-REM Stable run id: correlates BOOTSTRAP / UPDATE / session start in the day log
+REM Stable run id fallback when preflight.ps1 is absent (minted earlier when present).
 REM setlocal env vars inherit to child powershell -File (connect-update.ps1, connect.ps1).
-
 if not defined CLAUDE_CONNECT_RUN_ID (
-
   for /f %%I in ('powershell -NoProfile -WindowStyle Hidden -Command "[guid]::NewGuid().ToString('N').Substring(0,12)"') do set "CLAUDE_CONNECT_RUN_ID=%%I"
-
 )
 
 REM Log double-click immediately (before update) - durable local day log (BOM-less)

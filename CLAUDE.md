@@ -9,7 +9,7 @@
 SSH reverse tunnel: client laptop Ã¢â€ â€™ server, port = `20000 + (server_UID - 1000) * 10 + slot` (10-port non-overlapping block per user, slot 0-9; see `Get-TunnelPortUserBase` / `tunnel_port_user_base`).
 **Source of truth = laptop disk.** Optional SSHFS under `~/mounts/<ID>/` is for Cursor UI only and may be STALE or NOT_MOUNTED.
 
-**Agents must use SSH-first `laptop-exec`** (not Cursor Read/Grep/Write on `/mounts/`). Connect UI `sshx()` / `SshX()` open one-shot SSH (no mux). `laptop-exec` uses a shared SSH ControlMaster through the same reverse tunnel.
+**Agents:** Read/Grep mount-first (~16–32 parallel) then windows-mcp then LE; Write MCP FileSystem-first (~8–10) then mount (~10) then LE; Glob MCP search/list; `laptop-exec` for git + fallback. Connect UI `sshx()` / `SshX()` open one-shot SSH (no mux). `laptop-exec` uses a shared SSH ControlMaster through the same reverse tunnel.
 
 ```
 Laptop Ã¢â€â‚¬Ã¢â€â‚¬SSHÃ¢â€â‚¬Ã¢â€â‚¬Ã¢â€“Â¶ Server (port 22) + reverse tunnel (20000+UID)
@@ -202,22 +202,22 @@ Verified against live `laptop-exec` / hooks. Numbers below are exact.
 
 ```
 [Cursor agent on Linux]
-  Read/Grep/Write on /mounts/ Ã¢â€ â€™ hook DENY (+ NEXT:)
-  Shell heavy on mounts Ã¢â€ â€™ DENY
-  Task spawn Ã¢â€ â€™ ALLOW (child must still use laptop-exec)
-       Ã¢â€ â€œ
-[laptop-exec] ControlMaster Ã¢â€ â€™ 127.0.0.1:$TUNNEL_PORT Ã¢â€ â€™ laptop disk
-Optional SSHFS ~/mounts/<ID>/ = UI only (may be STALE)
+  Read/Grep: mount first (~16-32) then windows-mcp then laptop-exec
+  WRITE/EDIT: MCP FileSystem first (~8-10) then mount (~10) then LE
+  Glob: MCP search/list then mount; git: laptop-exec only | Task paste PRIORITY
+       |
+[mount / windows-mcp / laptop-exec] → laptop disk
+Optional SSHFS ~/mounts/<ID>/ = UI + allowed FS (may be STALE for git)
 ```
 
 Session: `~/.claude-connect.conf`. Cache: `~/.cache/laptop-exec/` (8 `slot-*.lock`, `cm-%C`).
 
 ### Hard rules (summary)
 
-1. Denied on mounts: Grep, Glob, Read, Write, Edit, EditNotebook, StrReplace, Delete Ã¢â‚¬â€ run `NEXT:`; never retry.
-2. First I/O = Shell + `laptop-exec -p ID` (repo-relative paths only) Ã¢â‚¬â€ **except** on Windows when Cursor MCP `windows-mcp` is ready: prefer `windows-mcp` FileSystem/PowerShell/UI for that step; `git` and content `rg` always stay on `laptop-exec` (full routing table in the skill).
+1. Hooks **ALLOW** Read/Grep/Glob/Write/Edit/EditNotebook/StrReplace/Delete/Shell on `/mounts/`. Read/Grep prefer mount (~16–32 parallel) then MCP; WRITE/EDIT prefer MCP FileSystem (~8–10) then mount (~10); Glob prefer MCP search/list (~8–12).
+2. First I/O: table in skill + rule `laptop-exec` (measured 2026-07-26). **git** always `laptop-exec git`. Content Grep via MCP is Select-String (FileSystem search ≠ content).
 3. `rg` is **not** ripgrep: `-i`/`-l`/`-n`/`--glob` rejected (old hangs pinned mux slots for hours).
-4. Mux: **8** slots; prefer Ã¢â€°Â¤4 parallel; `session slots full` Ã¢â€ â€™ wait; no raw SSH storms.
+4. Mux: **8** slots; prefer ≤4 LE parallel; mount/MCP fan-out to caps above; `session slots full` → wait; no raw SSH storms.
 5. Tunnel DOWN Ã¢â€ â€™ user `connect.bat`/`connect.sh`. STALE mount + UP tunnel Ã¢â€ â€™ still laptop-exec.
 6. Sudo: `sudo-from-laptop --smart|--sepidz` Ã¢â‚¬â€ never ask for a password.
 7. Every Task prompt must paste the SSH-first block from the `laptop-exec` skill.
@@ -278,7 +278,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | Both EXIT and SIGTERM traps | mac:444-445 | `kill <pid>` won't trigger EXIT alone |
 | `[Console]::Key` + `KeyChar` checks | win:610,728,784 | Physical key check so R/Q/C/X work under Persian/Arabic keyboard layouts |
 | `[Uri]::EscapeDataString` for Gateway URL | win:695 | PS5.1+PS7 safe; avoids `System.Web` dependency |
-| `$script:ConnectVersion = '20260725.41'` | win connect.ps1 | Must match connect.bat guard |
+| `$script:ConnectVersion = '20260726.10'` | win connect.ps1 | Must match connect.bat guard |
 | `@(Choose-Project -Mounts $mounts)[-1]` | win connect.ps1 | Prevents pipeline leak Ã¢â€ â€™ Join-Path ChildPath prompt |
 | `@(Resolve-EditorChoice -CfgDir $CfgDir)[-1]` | win connect.ps1 | Same pipeline-safe capture |
 | `return ,($obj)` in Choose-Project | win connect.ps1 | Unary comma suppresses pipeline output |
@@ -286,7 +286,7 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | connect.bat guards | windows/connect.bat | Requires git-mode.ps1, Path.Combine, @(Choose-Project, version |
 | Dot-source git-mode.ps1 / git-mode.sh | all Windows/Mac launchers | GIT_MODE must not be duplicated in forks |
 | Push GIT_MODE to ~/.claude-connect.conf | connect.ps1/sh | Server claude-mount reads hide vs server |
-| `CONNECT_VERSION='20260725.41'` | mac connect.sh | Must match published client version |
+| `CONNECT_VERSION='20260726.10'` | mac connect.sh | Must match published client version |
 | Dot-source `connect-ui.ps1` / source `connect-ui.sh` | all launchers | UI tables, header, session box |
 | Elevate only when sshd/firewall/authorized_keys repair needs admin | win | Main UI stays unelevated; `-AdminFix` / `Invoke-LaptopAdminOps` elevates on demand; `Ensure-LaptopSshReady` still used mid-session |
 | Publish client package **12 files** | publish.ps1 | +connect-ui, editor-launch.sh (mac) |

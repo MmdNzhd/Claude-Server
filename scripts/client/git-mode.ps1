@@ -2127,15 +2127,16 @@ function Sync-SessionTunnelProcess {
             Write-GitModeLog ("TUNNEL_SYNC soft_fail count=$script:TunnelSoftFailCount/$script:TunnelSoftFailBudget port=$Port reason=no_proc_tcp_open$(Get-TunnelSessionDiagSuffix)") 'WARN'
             $null = Try-ReattachSessionTunnelProcess -BgTunnel $BgTunnel
             if ($script:TunnelSoftFailCount -ge $script:TunnelSoftFailBudget) {
+                # TCP still open => reverse forward is alive; Process handle was lost
+                # (common with dual UI / re-parent). Do NOT Release-StaleTunnelPort or
+                # force session recovery ("Connection dropped") - keep soft-health.
                 $dropPid = 0
                 if ($BgTunnel.Value) { $dropPid = $BgTunnel.Value.Id }
                 elseif ($script:LastTunnelExitLoggedPid) { $dropPid = $script:LastTunnelExitLoggedPid }
-                Write-TunnelDropLog -Reason 'no_proc_tcp_open_budget' -TunnelPid $dropPid -TcpOpen $true `
-                    -Banner $script:TunnelBannerCacheBanner
-                Release-StaleTunnelPort
+                Write-GitModeLog ("TUNNEL_SYNC soft_fail_exhausted_keep_alive port=$Port reason=no_proc_tcp_open pid=$dropPid$(Get-TunnelSessionDiagSuffix)") 'WARN'
                 $script:TunnelSoftFailCount = 0
                 $script:TunnelSyncFailCount = 0
-                return $false
+                return $true
             }
             $script:TunnelSyncFailCount = 0
             if (-not $BgTunnel.Value -or $BgTunnel.Value.HasExited) {
@@ -3127,6 +3128,16 @@ else
   SLOT_OUT=`$SLOT
   PUBLISH_PORT=`$PORT
 fi
+# Never wipe TUNNEL_PORT (empty PORT_OUT -> laptop-exec fell back to legacy 20000+UID=21002).
+if [ -z "`$PORT_OUT" ] && [ -n "`$CUR_PORT" ]; then
+  PORT_OUT=`$CUR_PORT
+  SLOT_OUT=`$CUR_SLOT
+  printf 'PUSH_CONF port_empty_recovered server=%s\n' "`$CUR_PORT"
+fi
+if [ -z "`$PORT_OUT" ]; then
+  printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s am_only=%s publish_port=ABORT_EMPTY\n' "`$CLEAR" "`$PREFER" "`$AM" "`$AM_ONLY"
+  exit 0
+fi
 mkdir -p "`$HOME/.local/bin"
 printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nPORT=%s\nTUNNEL_SLOT=%s\nGIT_MODE=%s\nLAPTOP_OS=windows\nACTIVE_MOUNT=%s\nLAPTOP_HOSTKEY_FP=%s\n' "`$LU" "`$PORT_OUT" "`$PORT_OUT" "`$SLOT_OUT" "`$MODE" "`$AM" "`$HK" > "`$HOME/.claude-connect.conf"
 chmod 600 "`$HOME/.claude-connect.conf" 2>/dev/null || true
@@ -3142,10 +3153,16 @@ printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s am_only=%s publish_port=%s
     $pushLine = if ($null -eq $pushRaw -or "$pushRaw" -eq '') { '(no result line)' } else { ([string]$pushRaw -replace '\s+', ' ').Trim() }
     if (-not $pushLine) { $pushLine = '(no result line)' }
     $hasResult = [bool]($pushLine -match 'PUSH_CONF_RESULT')
+    $pushScan = ((@($pushOut) | ForEach-Object { "$_" }) -join ' ') + ' ' + "$pushRaw" + ' ' + "$pushLine"
     # Exit 0 without PUSH_CONF_RESULT must NOT dedupe as success (silent false-ok).
     if ($pushExit -ne 0 -or -not $hasResult) {
         # Do not record dedupe on failure - allow immediate retry of the same prefer/clear key.
         Write-GitModeLog "PUSH_CONF fail exit=$pushExit out=$pushLine" 'ERROR'
+        foreach ($sig in @('ABORT_EMPTY', 'port_empty_recovered', 'port_mismatch_keep')) {
+            if ($pushScan -match [regex]::Escape($sig)) {
+                Write-GitModeLog "PUSH_CONF signal=$sig out=$pushLine" 'WARN'
+            }
+        }
     } else {
         $script:LastPushConfKey = $dedupeKey
         $script:LastPushConfAt = Get-Date
@@ -3153,6 +3170,11 @@ printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s am_only=%s publish_port=%s
             $script:LastPushConfActive = $Matches[1]
         }
         Write-GitModeLog "PUSH_CONF ok exit=$pushExit $pushLine" 'INFO'
+        foreach ($sig in @('ABORT_EMPTY', 'port_empty_recovered', 'port_mismatch_keep')) {
+            if ($pushScan -match [regex]::Escape($sig)) {
+                Write-GitModeLog "PUSH_CONF signal=$sig out=$pushLine" 'WARN'
+            }
+        }
     }
 }
 

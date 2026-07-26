@@ -245,6 +245,21 @@ PY
     $has_le && ok "laptop-exec CLI" || warn "laptop-exec missing (~/.local/bin)"
     $has_le_rule && ok "laptop-exec rule" || warn "laptop-exec.mdc missing"
     $has_le_hook && ok "laptop-exec hook" || warn "laptop-exec-guard.sh missing"
+    if _user_readable "$h/.cursor/skills/figma-use/SKILL.md"; then
+        ok "figma-use skill (~/.cursor/skills/figma-use/SKILL.md)"
+    else
+        warn "figma-use skill missing (~/.cursor/skills/figma-use/SKILL.md; run: sudo claude-server install)"
+    fi
+    if _user_readable "$h/.cursor/skills/figma-designer/SKILL.md"; then
+        ok "figma-designer skill"
+    else
+        warn "figma-designer skill missing"
+    fi
+    if _user_readable "$h/.cursor/skills/figma-designer/references/club-design-kit.md"; then
+        ok "figma-designer Club kit (club-design-kit.md)"
+    else
+        warn "figma-designer Club kit missing (references/club-design-kit.md)"
+    fi
     if _user_readable "$h/.cursor/mcp.json"; then
         for _mcp_key in figma context7 playwright sequential-thinking memory sqlserver; do
             _user_grep "$h/.cursor/mcp.json" "\"$_mcp_key\"" && ok "Cursor MCP: $_mcp_key" || warn "Cursor MCP: $_mcp_key missing in ~/.cursor/mcp.json"

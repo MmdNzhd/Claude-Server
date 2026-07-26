@@ -21,7 +21,7 @@ $minRaw = $null
 try { $minRaw = $policy.force_min_version } catch { $minRaw = $null }
 $minStr = if ($null -eq $minRaw) { '' } else { [string]$minRaw }
 Assert ([string]::IsNullOrWhiteSpace($minStr) -or $minStr -eq 'null') 'policy force_min_version is null/empty'
-Assert ($null -ne $policy.defer_hours) 'policy keeps defer_hours'
+Assert (-not ($policy.PSObject.Properties.Name -contains 'defer_hours')) 'policy JSON has no defer_hours'
 Assert (-not [string]::IsNullOrWhiteSpace([string]$policy.message_optional)) 'policy keeps message_optional'
 
 $upd = Get-Content (Join-Path $RepoRoot 'scripts\client\windows\connect-update.ps1') -Raw
@@ -32,6 +32,10 @@ $pub = Get-Content (Join-Path $RepoRoot 'publish\publish.ps1') -Raw
 Assert ($upd.Contains('} catch { $answer = ''N'' }')) 'connect-update prompt catch defaults to N'
 Assert ($upd.Contains('if (-not $answer) { $answer = ''N'' }')) 'connect-update empty answer defaults to N'
 Assert (-not $upd.Contains('} catch { $answer = ''Y'' }')) 'connect-update catch no longer defaults to Y'
+Assert ($upd -match 'Update now\? \[Y\]es / \[N\]ot now:') 'Win prompt is Yes / Not now only'
+Assert ($upd -notmatch '\[D\]efer') 'Win prompt has no [D]efer'
+Assert ($upd -notmatch 'function Save-UpdateDefer') 'Save-UpdateDefer removed'
+Assert ($upd -notmatch 'function Test-UpdateDeferActive') 'Test-UpdateDeferActive removed'
 
 # Quiet + optional never UPDATE_FORCE / applied_ok unless force mode AND force_min
 Assert ($upd.Contains('Test-UpdateForceRequired')) 'connect-update still uses Test-UpdateForceRequired'
@@ -55,12 +59,14 @@ Assert ($pub.Contains('CLAUDE_PUBLISH_STRIP_WINDOWS_EXE_ONLY')) 'Smart publish g
 Assert ($pub.Contains('keeps full script tree')) 'Smart publish documents full script tree retention'
 Assert (Test-Path (Join-Path $RepoRoot 'publish\SEPIDZ_PUBLISH_FROZEN')) 'SEPIDZ_PUBLISH_FROZEN marker still present'
 
-# Mac optional prompt parity (Stage 6b)
+# Mac optional prompt parity — Defer removed (Y/N only)
 $macUpd = Get-Content (Join-Path $RepoRoot 'scripts\client\mac\connect-update.sh') -Raw
-Assert ($macUpd -match '\[y/N/D\]') 'Mac optional prompt shows [y/N/D]'
+Assert ($macUpd -match '\[y/N\]') 'Mac optional prompt shows [y/N]'
+Assert ($macUpd -notmatch '\[y/N/D\]') 'Mac optional prompt no longer shows [y/N/D]'
+Assert ($macUpd -notmatch 'D\|DEFER') 'Mac has no Defer answer branch'
 Assert ($macUpd -match '(?m)^\s*ans=N\s*$') 'Mac optional ans defaults to N'
 Assert ($macUpd -match '\[ -z "\$ans" \] && ans=N') 'Mac empty Enter keeps N'
-Assert (([regex]::Matches($macUpd, 'Optional update available[\s\S]{0,200}\[y/N/D\]')).Count -ge 1) 'Mac optional block uses [y/N/D]'
+Assert (([regex]::Matches($macUpd, 'Optional update available[\s\S]{0,200}\[y/N\]')).Count -ge 1) 'Mac optional block uses [y/N]'
 
 Write-Host ""
 if ($Fail -eq 0) {

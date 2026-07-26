@@ -61,7 +61,12 @@ Assert ($win -match 'Invoke-LaptopAdminOps' -and $win -match 'Start-Process powe
 
 Assert (Test-Path (Join-Path $Client 'windows\connect-boot.ps1')) 'connect-boot.ps1 exists'
 Assert ((Get-Content (Join-Path $Client 'windows\connect-boot.ps1') -Raw) -match 'ClaudeConnect#') 'connect-boot acquires ClaudeConnect# slot pool'
-Assert ((Get-Content (Join-Path $Client '..\..\publish\deploy-client-bundles.ps1') -Raw) -match "connect-boot\.ps1") 'deploy-client-bundles includes connect-boot.ps1 in WinBundleFiles'
+$manifestTsv = Join-Path $Client '..\..\publish\client-bundle-manifest.tsv'
+$deployBundles = Get-Content (Join-Path $Client '..\..\publish\deploy-client-bundles.ps1') -Raw
+Assert (
+    ((Test-Path $manifestTsv) -and ((Get-Content $manifestTsv -Raw) -match '(?m)^win\tconnect-boot\.ps1\t')) -or
+    ($deployBundles -match 'connect-boot\.ps1')
+) 'client-bundle-manifest (or deploy-client-bundles) ships connect-boot.ps1'
 Assert (
     ($uiSh -match 'connect\.lock') -or
     ($uiSh -match 'Another Claude Connect is already running') -or
@@ -78,6 +83,18 @@ Assert ($gm -match 'skip_sibling') 'git-mode ORPHAN_TUNNEL skip_sibling present'
 Assert ($gm -match 'Get-SiblingConnectTunnelPids') 'git-mode Get-SiblingConnectTunnelPids present'
 Assert ($gm -match 'sticky_shared|sibling_live') 'git-mode Acquire sticky_shared / sibling_live'
 Assert ($gm -match 'am_only|Test-IsPrimaryTunnelPublisher') 'git-mode am_only PushConf keeps primary TUNNEL_PORT'
+Assert ($gm -match 'PUSH_CONF signal=') 'git-mode warns PUSH_CONF signal= for ABORT_EMPTY/port_empty/mismatch'
+$uiPs = Get-Content (Join-Path $Client 'connect-ui.ps1') -Raw
+Assert ($uiPs -match 'function Invoke-AgentPathProbe') 'connect-ui AGENT_PATH probe (Connect green vs agent dead)'
+Assert ($uiPs -match 'AGENT_PATH ok') 'AGENT_PATH ok log present'
+Assert ($uiPs -match 'conf_empty|conf_port_closed|probe_fail') 'AGENT_PATH bad reasons are explicit'
+Assert ($win -match 'SSH_ROLLUP') 'connect.ps1 SSH_ROLLUP latency rollup'
+Assert ($win -match 'function Add-SshMsSample') 'connect.ps1 Add-SshMsSample ring buffer'
+$lePath = Join-Path $Client '..\server\laptop-exec.sh'
+if (Test-Path $lePath) {
+    $le = Get-Content $lePath -Raw
+    Assert ($le -match 'TUNNEL_PORT_MISSING') 'laptop-exec loud TUNNEL_PORT_MISSING on blank conf'
+}
 $exeBody = Get-Content (Join-Path $Client '..\..\publish\_setup-launch-body.ps1') -Raw
 $exeWorker = Get-Content (Join-Path $Client '..\..\publish\_setup-worker-body.ps1') -Raw
 Assert ($exeBody -match 'function Test-ConnectUiOpen') 'EXE setup defines Test-ConnectUiOpen'
@@ -148,6 +165,14 @@ Assert ($win -match 'FAIL ADMIN_FIX: No admin fix pending') 'AdminFix missing pe
 
 Write-Host '--- E) Session correlation for concurrent agents ---' -ForegroundColor Cyan
 Assert ($bat -match 'CLAUDE_CONNECT_RUN_ID') 'bat sets RUN_ID before update'
+Assert ($bat -match 'Multi-UI: mint a unique RUN_ID') 'bat mints unique RUN_ID before preflight (dual-UI)'
+$mintAt = $bat.IndexOf('Multi-UI: mint a unique RUN_ID')
+$preAt = $bat.IndexOf('if exist "%HERE%connect-preflight.ps1"')
+Assert ($mintAt -ge 0 -and $preAt -gt $mintAt) 'RUN_ID mint precedes preflight block'
+Assert ($bat -match 'if not defined CLAUDE_CONNECT_RUN_ID if exist "%TEMP%\\claude-connect-run-id\.txt"') 'shared RUN_ID file adopted only when unset'
+$preflight = Get-Content (Join-Path $Client 'windows\connect-preflight.ps1') -Raw
+Assert ($preflight -match 'Prefer RUN_ID from parent connect\.bat') 'preflight prefers parent bat RUN_ID'
+Assert ($preflight -match 'claude-connect-run-id\.\{0\}\.txt') 'preflight writes per-PID RUN_ID handoff'
 Assert ($ui -match 'Get-ConnectSessionId') 'session id helper present'
 Assert ($ui -match 'SESSION_FILTER') 'SESSION_FILTER tip for grepping concurrent sessions'
 Assert ($ui -match '\[\$ts\] \[\$Level\] \[\$sid\]') 'log lines include session id bracket'
@@ -185,6 +210,20 @@ Assert ($uiSh -match 'connect_log_ts') 'Mac connect_log has millisecond timestam
 Assert ((Get-Content (Join-Path $Client 'mac\connect.sh') -Raw) -match 'FAIL CONNECT_UNREACHABLE') 'Mac unreachable logs FAIL CONNECT_UNREACHABLE'
 Assert ((Get-Content (Join-Path $Client 'mac\connect.sh') -Raw) -match '_boot_ts') 'Mac BOOTSTRAP uses ms timestamp'
 Assert ((Get-Content (Join-Path $Client 'mac\connect-update.sh') -Raw) -match 'FAIL UPDATE_') 'Mac update ERROR prefixed FAIL UPDATE_'
+
+Write-Host '--- I) Dual-UI false-positive UX (20260726.08) ---' -ForegroundColor Cyan
+$diag = Get-Content (Join-Path $Client 'connect-diagnostic.ps1') -Raw
+$gm = Get-Content (Join-Path $Client 'git-mode.ps1') -Raw
+$gmSh = Get-Content (Join-Path $Client 'git-mode.sh') -Raw
+Assert ($diag -match 'MOUNT_PENDING') 'diagnostic has MOUNT_PENDING (bg mount != MOUNT_FAILED)'
+Assert ($diag -match 'started_in_background') 'diagnostic reconciles started_in_background'
+Assert ($diag -match 'mountPendingLight') 'light SESSION_OPEN allows bg-mount + on_folder'
+Assert ($gm -match 'soft_fail_exhausted_keep_alive') 'Win: no_proc+TCP-open keeps session (no forced drop)'
+Assert ($gm -match 'soft_fail_exhausted_keep_alive[\s\S]{0,240}return \$true') 'Win keep-alive returns $true (not $false)'
+Assert ($gmSh -match 'soft_fail_exhausted_keep_alive') 'Mac: no_ssh_proc+TCP-open keeps session'
+Assert ($win -match 'quiet_tunnel_refresh') 'Win quiet recovery when editor still open'
+Assert ($win -match 'skip_press_o_warn reason=already_on_folder') 'Win skips press-O warn when already on folder'
+Assert ($mac -match 'skip_press_o_warn reason=already_on_folder') 'Mac skips press-O warn when already on folder'
 
 Write-Host ''
 Write-Host ("Hard regressions: {0} passed, {1} failed" -f $passed, $failed) -ForegroundColor $(if ($failed -eq 0) { 'Green' } else { 'Red' })

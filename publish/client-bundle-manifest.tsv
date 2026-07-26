@@ -1,0 +1,31 @@
+# Canonical auto-update client bundle file list (ONE source of truth).
+# Format: kind<TAB>bundle_name<TAB>repo_rel_path
+# kind = win | mac
+# SPECIAL:LIVE_EXE = reuse /usr/local/share/claude-client/Claude-Connect.exe (never rebuild here)
+# Consumers: deploy-scripts-only.ps1, deploy-client-bundles.ps1, deploy-client-bundle.sh
+# Keep in sync via scripts/client/tests/test-client-bundle-manifest.ps1
+win	connect.bat	scripts/client/windows/connect.bat
+win	connect-boot.ps1	scripts/client/windows/connect-boot.ps1
+win	connect-preflight.ps1	scripts/client/windows/connect-preflight.ps1
+win	connect-heal.ps1	scripts/client/windows/connect-heal.ps1
+win	connect-bootstrap.ps1	scripts/client/windows/connect-bootstrap.ps1
+win	connect-version.txt	scripts/client/windows/connect-version.txt
+win	connect.ps1	scripts/client/windows/connect.ps1
+win	connect-rider.bat	scripts/client/windows/connect-rider.bat
+win	connect-update.ps1	scripts/client/windows/connect-update.ps1
+win	cursor-proxy-sidecar.ps1	scripts/client/windows/cursor-proxy-sidecar.ps1
+win	connect-ui.ps1	scripts/client/connect-ui.ps1
+win	connect-diagnostic.ps1	scripts/client/connect-diagnostic.ps1
+win	editor-launch.ps1	scripts/client/editor-launch.ps1
+win	git-mode.ps1	scripts/client/git-mode.ps1
+win	cursor-auth-laptop.ps1	scripts/client/cursor-auth-laptop.ps1
+win	windows-mcp-laptop.ps1	scripts/client/windows/windows-mcp-laptop.ps1
+win	Claude-Connect.exe	SPECIAL:LIVE_EXE
+mac	connect.sh	scripts/client/mac/connect.sh
+mac	connect-update.sh	scripts/client/mac/connect-update.sh
+mac	connect-version.txt	scripts/client/windows/connect-version.txt
+mac	cursor-proxy-sidecar.sh	scripts/client/mac/cursor-proxy-sidecar.sh
+mac	git-mode.sh	scripts/client/git-mode.sh
+mac	connect-ui.sh	scripts/client/connect-ui.sh
+mac	editor-launch.sh	scripts/client/editor-launch.sh
+mac	claude-mount.sh	scripts/server/claude-mount.sh

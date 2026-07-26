@@ -55,6 +55,10 @@ _stage_repo_from_laptop() {
         scripts/client/windows/connect-rider.bat
         scripts/client/windows/connect-update.ps1
         scripts/client/windows/connect-diagnostic.ps1
+        scripts/client/windows/cursor-proxy-sidecar.ps1
+        scripts/client/windows/connect-boot.ps1
+        scripts/client/windows/connect-heal.ps1
+        scripts/client/windows/connect-bootstrap.ps1
         scripts/client/connect-ui.ps1
         scripts/client/editor-launch.ps1
         scripts/client/git-mode.ps1
@@ -62,6 +66,7 @@ _stage_repo_from_laptop() {
         scripts/client/windows/windows-mcp-laptop.ps1
         scripts/client/mac/connect.sh
         scripts/client/mac/connect-update.sh
+        scripts/client/mac/cursor-proxy-sidecar.sh
         scripts/client/connect-ui.sh
         scripts/client/editor-launch.sh
         scripts/client/git-mode.sh
@@ -136,10 +141,14 @@ BUNDLE_ROOT="$STAGE_BUNDLE"
 win_files=(
     connect.bat
     connect-boot.ps1
+    connect-heal.ps1
+    connect-bootstrap.ps1
+    connect-preflight.ps1
     connect-version.txt
     connect.ps1
     connect-rider.bat
     connect-update.ps1
+    cursor-proxy-sidecar.ps1
     connect-ui.ps1
     connect-diagnostic.ps1
     editor-launch.ps1
@@ -159,6 +168,12 @@ for name in "${win_files[@]}"; do
             src="$WIN_SRC/$name"
             ;;
     esac
+    # Keep the already-published EXE when this deploy does not rebuild it
+    # (scripts-only / laptop-exec stage). Never drop Claude-Connect.exe from the live share.
+    if [ ! -f "$src" ] && [ "$name" = "Claude-Connect.exe" ] && [ -f "$BUNDLE_LIVE/Claude-Connect.exe" ]; then
+        src="$BUNDLE_LIVE/Claude-Connect.exe"
+        warn "reusing live Claude-Connect.exe (no new EXE in source)"
+    fi
     if [ ! -f "$src" ]; then
         warn "skip missing: $name"
         continue
@@ -176,6 +191,7 @@ mac_files=(
     connect.sh
     connect-update.sh
     connect-version.txt
+    cursor-proxy-sidecar.sh
     git-mode.sh
     connect-ui.sh
     editor-launch.sh

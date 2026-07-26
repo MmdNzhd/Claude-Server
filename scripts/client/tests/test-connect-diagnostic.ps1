@@ -49,9 +49,37 @@ $v = Get-ConnectProblemVerdict -Ctx @{
 }
 Assert ($v.Code -eq 'CURSOR_ON_FOLDER_OK') 'detects CURSOR_ON_FOLDER_OK'
 
+# Bg mount kickoff must not paint MOUNT_FAILED when live mountpoint / on-folder is fine.
+$v = Get-ConnectProblemVerdict -Ctx @{
+    TunnelUp = $true; MountOk = $false; MountOut = 'started_in_background'
+    MountPoint = 'yes'; PathExists = 'yes'; ServerReachable = $true
+    EditorCmd = 'cursor'; CursorExeFound = $true; AuthOk = $true
+    OnFolder = $true; AgentHome = $false; WindowOpen = $true
+}
+Assert ($v.Code -eq 'CURSOR_ON_FOLDER_OK') 'bg mount + mountpoint=yes + on_folder => CURSOR_ON_FOLDER_OK'
+
+$v = Get-ConnectProblemVerdict -Ctx @{
+    TunnelUp = $true; MountOk = $false; MountOut = 'started_in_background'
+    MountPoint = ''; PathExists = ''; ServerReachable = $true
+    EditorCmd = 'cursor'; CursorExeFound = $true; AuthOk = $true
+    OnFolder = $false; AgentHome = $false; WindowOpen = $false; DidLaunch = $false
+}
+Assert ($v.Code -eq 'MOUNT_PENDING') 'bg mount alone (no live truth yet) => MOUNT_PENDING INFO'
+Assert ($v.Severity -eq 'INFO') 'MOUNT_PENDING is INFO (no red DIAGNOSTIC box)'
+
+$v = Get-ConnectProblemVerdict -Ctx @{
+    TunnelUp = $true; MountOk = $false; MountOut = 'fuse: mount failed'
+    MountPoint = 'no'; PathExists = 'no'; ServerReachable = $true
+    EditorCmd = 'cursor'; CursorExeFound = $true; AuthOk = $true
+    OnFolder = $false
+}
+Assert ($v.Code -eq 'MOUNT_FAILED') 'real mount failure still MOUNT_FAILED'
+
 $diagSrc = Get-Content (Get-ClientFile 'connect-diagnostic.ps1') -Raw
 Assert ($diagSrc -match 'lightDiag = \(\$Phase -eq ''SESSION_OPEN''') 'F7 light SESSION_OPEN diagnostic gate'
 Assert ($diagSrc -match 'skipped=light_session_open') 'F7 skips expensive process snapshot'
+Assert ($diagSrc -match 'mountPendingLight') 'light path includes bg-mount + on_folder'
+Assert ($diagSrc -match 'MOUNT_PENDING') 'MOUNT_PENDING verdict present'
 
 
 Write-Host ''

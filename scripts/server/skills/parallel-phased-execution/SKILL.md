@@ -223,9 +223,10 @@ Then: one capable Worker + Verifier still required for accuracy.
 ## Mounts / laptop-exec
 
 Every Worker/Verifier Task prompt on `~/mounts/` projects must paste the
-SSH-first block from `laptop-exec` skill (`-p PROJECT`, no Read/Grep on
-mounts, no `rg -i/--glob`, prefer ≤4 parallel laptop-exec, hard 8).
-Coordinator prefers ≤4 parallel Tasks that touch the laptop.
+PRIORITY block from `laptop-exec` skill (Read/Grep mount-first ~16–32;
+Write MCP-first ~8–10; Glob MCP; git LE only; no `rg -i/--glob`; LE ≤4,
+hard 8). Coordinator may fan out mount/MCP work; prefer ≤4 parallel Tasks
+that use laptop-exec.
 
 ---
 
