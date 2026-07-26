@@ -5,8 +5,8 @@
 ```text
 User message
   ├─ plan / stages / smoking guns / evidence packs → author
-  ├─ execute stage N / implement / شروع → execute
-  ├─ hard audit / تمام شد؟ / closeout → closeout
+  ├─ execute stage N / implement / start → execute
+  ├─ hard audit / is it done? / closeout → closeout
   ├─ intermittent flake language → intermittent-repro + systematic-debugging
   ├─ ordinary feature, root cause known → writing-plans (skip this skill)
   └─ ambiguous → author stub OR ask once
@@ -45,7 +45,7 @@ Any layer FAIL / still_live / DRIFT?
 
 ```text
 User message contains explicit deploy/publish/ship?
-  NO → LOCKED (even if "done"/"تمام")
+  NO → LOCKED (even if "done"/"finished")
   YES + site freeze allows → release stage pack deploy_ran=yes
   YES + freeze blocks that site → ask; do not ship frozen target
 ```

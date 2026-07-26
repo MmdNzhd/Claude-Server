@@ -25,14 +25,14 @@
 
 | ID | Sev | Symptom (user) | Root cause | Evidence |
 |----|-----|----------------|------------|----------|
-| P0-A | P0 | خیلی طول می‌کشد بعد از انتخاب پروژه | Double `claude-mount check` with `timeout 12` + SshX retry-on-124; then **redundant** second check for `skipRemount` while FUSE ls hangs on stale SSHFS | `4defd864`: 19:00:25–19:01:28, ~56s of exit=124; tunnel banner OK on 20021 |
-| P0-B | P0 | دیر پاورشل/UAC می‌آید | Always-elevate at `connect.ps1` start **after** long unelevated bat chain (bootstrap/heal/update) + unelevated boot then RunAs | `connect.ps1` ~44–86; `connect.bat` multi-PS; `elevated=yes` |
-| P0-C | P0 | چندتا CMD الکی | Bat `/MIN cmd` self-reexec + many `powershell` without `-WindowStyle Hidden` + unelevated→elevated double boot; `connect-preflight.ps1` **missing** so Stage-6 fast path never runs | `connect.bat` 5–9, 57–143, 269–272; preflight absent |
+| P0-A | P0 | Takes too long after project select | Double `claude-mount check` with `timeout 12` + SshX retry-on-124; then **redundant** second check for `skipRemount` while FUSE ls hangs on stale SSHFS | `4defd864`: 19:00:25–19:01:28, ~56s of exit=124; tunnel banner OK on 20021 |
+| P0-B | P0 | PowerShell/UAC appears late | Always-elevate at `connect.ps1` start **after** long unelevated bat chain (bootstrap/heal/update) + unelevated boot then RunAs | `connect.ps1` ~44–86; `connect.bat` multi-PS; `elevated=yes` |
+| P0-C | P0 | Multiple unnecessary CMD windows flash | Bat `/MIN cmd` self-reexec + many `powershell` without `-WindowStyle Hidden` + unelevated→elevated double boot; `connect-preflight.ps1` **missing** so Stage-6 fast path never runs | `connect.bat` 5–9, 57–143, 269–272; preflight absent |
 | P0-D | P0 | Cursor Admin / mutex / updates disabled | `NonElevatedLauncher` fails `win32=5` → `elevated_direct_fallback`; Cursor inherits admin token → mutex + “running as Admin in user setup” | `PROC_START_FAIL … win32=5` then `elevated_direct_fallback`; window title `[Administrator]` |
 | P1-A | P1 | auth failed / password / testsmart | Sticky `REMOTE_USER=testsmart` in shared `connect.conf`; config save **wipes** other keys; no username validation | `a197489f0997` FAIL `remote_user=testsmart`; save at connect.ps1 ~1270/1311 |
-| P1-B | P1 | Syncing Cursor auth کند با اینکه skipped | Skip path still enumerates many Cursor processes (`personal_cursor_dominant`); 16 personal + 9 profile | auth step ~6.8–9.6s; AUTH_WARN |
-| P1-C | P1 | لاگ شلوغ LOG_SYNC_SKIP | `forbid_shrink` by design when local≪remote; INFO spam + remote stat tax; server log bloated | 16+ skips in one session; remote ~2.7MB vs local ~0.5MB |
-| P1-D | P1 | کلی پیام اضافه در کنسول | Cursor Electron stderr (punycode, disable-http2 warn, mutex, TracingService) inherits Connect console — no redirect on Cursor Start-Process | User paste after “Opening Cursor” |
+| P1-B | P1 | Syncing Cursor auth is slow even when skipped | Skip path still enumerates many Cursor processes (`personal_cursor_dominant`); 16 personal + 9 profile | auth step ~6.8–9.6s; AUTH_WARN |
+| P1-C | P1 | Noisy LOG_SYNC_SKIP log spam | `forbid_shrink` by design when local≪remote; INFO spam + remote stat tax; server log bloated | 16+ skips in one session; remote ~2.7MB vs local ~0.5MB |
+| P1-D | P1 | Extra console noise from Cursor stderr | Cursor Electron stderr (punycode, disable-http2 warn, mutex, TracingService) inherits Connect console — no redirect on Cursor Start-Process | User paste after “Opening Cursor” |
 | P2-A | P2 | Reconnect ~15s | Static bootstrap hint, not measured | `Write-BootstrapHint` |
 | P2-B | P2 | SSH tax ~500ms×N | No ControlMaster on Windows SshX; many one-shot remotes | expected; reduce N via P0-A |
 | P2-C | P2 | UPDATE connect-version.txt missing / exe promote fail | Server missing `/usr/local/share/claude-client/connect-version.txt`; Desktop exe locked | `449f07deaaed` WARN; separate ops fix |

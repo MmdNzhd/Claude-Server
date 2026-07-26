@@ -1,4 +1,4 @@
-﻿# editor-launch.ps1 - shared VS Code/Cursor launch (dot-sourced by connect.ps1)
+# editor-launch.ps1 - shared VS Code/Cursor launch (dot-sourced by connect.ps1)
 # Same pattern as mac/connect.sh:  cursor|code --folder-uri "vscode-remote://..."
 
 function Get-CursorRemoteProfileSite {
@@ -648,6 +648,9 @@ public static class NonElevatedLauncher
     const int SecurityImpersonation = 2;
     const int TokenPrimary = 1;
     const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+    // Hard-detach from parent console so Cursor Electron/Node stderr cannot flood connect.bat.
+    const uint DETACHED_PROCESS = 0x00000008;
+    const uint CREATE_NEW_PROCESS_GROUP = 0x00000200;
     const int SW_SHOW = 5;
     public static int LastWin32Error;
 
@@ -723,8 +726,11 @@ public static class NonElevatedLauncher
         }
         // LOGON_WITH_PROFILE (1): load user hive. Do NOT set CREATE_UNICODE_ENVIRONMENT with
         // null env (that can inherit the elevated block and break GUI apps).
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: isolate from elevated parent console;
+        // SW_SHOW still shows the GUI window.
         const uint LOGON_WITH_PROFILE = 0x00000001;
-        bool ok = CreateProcessWithTokenW(hDup, LOGON_WITH_PROFILE, null, cmd, 0, IntPtr.Zero, null, ref si, out pi);
+        uint creationFlags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+        bool ok = CreateProcessWithTokenW(hDup, LOGON_WITH_PROFILE, null, cmd, creationFlags, IntPtr.Zero, null, ref si, out pi);
         if (!ok) { LastWin32Error = Marshal.GetLastWin32Error(); }
         CloseHandle(hDup);
         if (ok) {
@@ -926,39 +932,127 @@ function Get-CursorLaunchDayLogPath {
     return (Join-Path $logDir ("cursor-launch-{0}.log" -f (Get-Date -Format 'yyyyMMdd')))
 }
 
-function Start-EditorProcessQuiet {
-    # DO NOT use this for Cursor/VS Code launch. Live 2026-07-25: wrapping Cursor.exe in
-    # `cmd.exe /C "... >> log 2>&1"` (CreateNoWindow + stdout redirect) breaks Electron's
-    # single-instance IPC handoff - the second process starts but the warm --remote /
-    # --new-window request never opens the folder. Direct Start-Process works in <1s
-    # (confirmed: temp opened immediately; connect's Quiet path polled 20s and failed).
-    # Kept only as a last-resort elevated fallback when interactive launchers are unavailable.
-    param(
-        [Parameter(Mandatory)][string]$FilePath,
-        [string[]]$ArgumentList = @()
-    )
-    $logPath = Get-CursorLaunchDayLogPath
-    $argStr = Format-ProcessArgumentString -ArgumentList $ArgumentList
-    $escapedFile = $FilePath -replace '"', '""'
-    $escapedLog = $logPath -replace '"', '""'
-    $command = '""{0}"{1} >> "{2}" 2>&1"' -f $escapedFile, $(if ($argStr) { " $argStr" } else { '' }), $escapedLog
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }
-    $psi.Arguments = "/D /S /C $command"
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    return [System.Diagnostics.Process]::Start($psi)
+function Initialize-EditorDetachedLaunch {
+    if ($script:EditorDetachedLaunchReady) { return }
+    if (-not ('EditorDetachedLaunch' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class EditorDetachedLaunch
+{
+    public const uint DETACHED_PROCESS = 0x00000008;
+    public const uint CREATE_NEW_PROCESS_GROUP = 0x00000200;
+    public const uint CREATE_NO_WINDOW = 0x08000000;
+    const int STARTF_USESHOWWINDOW = 0x00000001;
+    const int STARTF_USESTDHANDLES = 0x00000100;
+    const short SW_SHOW = 5;
+    const uint GENERIC_WRITE = 0x40000000;
+    const uint FILE_SHARE_READ = 0x00000001;
+    const uint FILE_SHARE_WRITE = 0x00000002;
+    const uint CREATE_ALWAYS = 2;
+    const uint FILE_ATTRIBUTE_NORMAL = 0x80;
+
+    public static int LastWin32Error;
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SECURITY_ATTRIBUTES {
+        public int nLength;
+        public IntPtr lpSecurityDescriptor;
+        public bool bInheritHandle;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct STARTUPINFO {
+        public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+        public int dwX; public int dwY; public int dwXSize; public int dwYSize;
+        public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute;
+        public int dwFlags; public short wShowWindow; public short cbReserved2;
+        public IntPtr lpReserved2; public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION {
+        public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CreateProcessW(string lpApplicationName, StringBuilder lpCommandLine,
+        IntPtr lpProcessAttributes, IntPtr lpThreadAttributes, bool bInheritHandles,
+        uint dwCreationFlags, IntPtr lpEnvironment, string lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo, out PROCESS_INFORMATION lpProcessInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr h);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileW(string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+        ref SECURITY_ATTRIBUTES lpSecurityAttributes, uint dwCreationDisposition,
+        uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+    static IntPtr OpenInheritWrite(string path) {
+        SECURITY_ATTRIBUTES sa = new SECURITY_ATTRIBUTES();
+        sa.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+        sa.bInheritHandle = true;
+        IntPtr h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ref sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+        if (h == new IntPtr(-1)) { LastWin32Error = Marshal.GetLastWin32Error(); }
+        return h;
+    }
+
+    // Direct Cursor/VS Code launch: CreateProcessW (no cmd.exe), argv intact, stdio to day logs,
+    // DETACHED_PROCESS so connect console is never flooded. GUI still shows (SW_SHOW).
+    public static int Start(string file, string args, string stdoutPath, string stderrPath, uint creationFlags) {
+        LastWin32Error = 0;
+        IntPtr hOut = OpenInheritWrite(stdoutPath);
+        if (hOut == new IntPtr(-1)) { return 0; }
+        IntPtr hErr = OpenInheritWrite(stderrPath);
+        if (hErr == new IntPtr(-1)) {
+            CloseHandle(hOut);
+            return 0;
+        }
+        STARTUPINFO si = new STARTUPINFO();
+        si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+        si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+        si.wShowWindow = SW_SHOW;
+        si.hStdInput = IntPtr.Zero;
+        si.hStdOutput = hOut;
+        si.hStdError = hErr;
+        StringBuilder cmd = new StringBuilder(32768);
+        cmd.Append('"');
+        cmd.Append(file);
+        cmd.Append('"');
+        if (!string.IsNullOrEmpty(args)) {
+            cmd.Append(' ');
+            cmd.Append(args);
+        }
+        PROCESS_INFORMATION pi;
+        bool ok = CreateProcessW(file, cmd, IntPtr.Zero, IntPtr.Zero, true, creationFlags,
+            IntPtr.Zero, null, ref si, out pi);
+        if (!ok) { LastWin32Error = Marshal.GetLastWin32Error(); }
+        CloseHandle(hOut);
+        CloseHandle(hErr);
+        if (!ok) { return 0; }
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return pi.dwProcessId;
+    }
+}
+'@ -ErrorAction Stop
+    }
+    $script:EditorDetachedLaunchReady = $true
 }
 
 function Start-EditorProcessDirect {
-    # Canonical Cursor/VS Code launch: Start-Process with ArgumentList array (no cmd.exe wrap).
-    # Warm --remote IPC handoff requires a direct Start-Process of Cursor.exe - NOT cmd /C.
+    # Canonical Cursor/VS Code launch: CreateProcessW with ArgumentList argv (no cmd.exe wrap).
+    # Warm --remote IPC handoff requires a direct Cursor.exe process - NOT cmd /C Quiet wrap.
     #
     # Stdio: Cursor's Node/Electron dumps DeprecationWarning / "disable-http2 is not in the list
     # of known options" / "Error mutex already exists" to the *parent console* when the child
-    # inherits it. That noise showed up inside the connect.bat window even though launch succeeded.
-    # Redirect stdout/stderr to the day log (and set ELECTRON_NO_ATTACH_CONSOLE) so connect stays
-    # clean - without going back to the cmd Quiet wrap that broke IPC.
+    # inherits it. RedirectStandardOutput / RedirectStandardError to cursor-launch day logs, set
+    # ELECTRON_NO_ATTACH_CONSOLE, AND hard-detach (DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+    # so connect stays clean without the Quiet wrap that broke IPC.
     param(
         [Parameter(Mandatory)][string]$FilePath,
         [string[]]$ArgumentList = @()
@@ -976,10 +1070,21 @@ function Start-EditorProcessDirect {
     $env:ELECTRON_NO_ATTACH_CONSOLE = '1'
     $env:NODE_NO_WARNINGS = '1'
     try {
-        # Redirect* forces UseShellExecute=$false (required for redirect) while still creating the
-        # normal GUI window. ArgumentList array keeps argv tokens intact for Electron IPC.
-        return (Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -PassThru `
-            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath)
+        Initialize-EditorDetachedLaunch
+        $argStr = Format-ProcessArgumentString -ArgumentList $ArgumentList
+        # RedirectStandardOutput / RedirectStandardError targets (day logs); Start-Process cannot
+        # set DETACHED_PROCESS, so CreateProcessW opens those files with STARTF_USESTDHANDLES.
+        $RedirectStandardOutput = $stdoutPath
+        $RedirectStandardError = $stderrPath
+        $creationFlags = [uint32]([EditorDetachedLaunch]::DETACHED_PROCESS -bor `
+            [EditorDetachedLaunch]::CREATE_NEW_PROCESS_GROUP -bor `
+            [EditorDetachedLaunch]::CREATE_NO_WINDOW)
+        $procId = [EditorDetachedLaunch]::Start(
+            $FilePath, $argStr, $RedirectStandardOutput, $RedirectStandardError, $creationFlags)
+        if ($procId -le 0) {
+            throw ("EditorDetachedLaunch CreateProcessW failed win32={0}" -f [EditorDetachedLaunch]::LastWin32Error)
+        }
+        return [System.Diagnostics.Process]::GetProcessById($procId)
     } finally {
         if ($null -eq $prevNoAttach) { Remove-Item Env:\ELECTRON_NO_ATTACH_CONSOLE -ErrorAction SilentlyContinue }
         else { $env:ELECTRON_NO_ATTACH_CONSOLE = $prevNoAttach }
@@ -2042,38 +2147,6 @@ function Write-EditorLaunchSnapshot {
         [string]$RemotePath = ''
     )
     Write-EditorLaunchLog "SNAPSHOT[$Label] $(Get-RemoteEditorProcessSnapshot -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)" 'DEBUG'
-}
-
-function Stop-CursorServerProfileTreeIfNeeded {
-    param(
-        [Parameter(Mandatory)][string]$Reason,
-        [switch]$Force
-    )
-    # Hard refuse: auth / proxy / tunnel recovery must never wipe shared profile windows
-    # (VPN flap -> TUNNEL_DROP -> force_auth historically soft-stopped profile_count=14..24).
-    if ($Reason -match 'auth|proxy|recovery') {
-        $n = @(Get-CursorProfileProcesses).Count
-        Write-EditorLaunchLog ("LAUNCH_KILL_SKIP: reason=hard_refuse_$Reason profile_count=$n force=$Force") 'WARN'
-        return 0
-    }
-    # WARNING: -Force kills EVERY Cursor process using ClaudeServerCursorProfile
-    # (all open remote projects). Launch-RemoteEditor must NOT call this with -Force.
-    # Kept for rare operator/manual recovery only.
-    $procs = @(Get-CursorProfileProcesses)
-    if ($procs.Count -eq 0) {
-        Write-EditorLaunchLog "LAUNCH_KILL_SKIP: reason=$Reason profile_count=0" 'DEBUG'
-        return 0
-    }
-    if (-not $Force) {
-        Write-EditorLaunchLog "LAUNCH_KILL_SKIP: reason=$Reason profile_count=$($procs.Count) force_not_set" 'DEBUG'
-        return 0
-    }
-    Write-EditorLaunchLog "LAUNCH_KILL: reason=$Reason profile_count=$($procs.Count) elevated=$(Test-IsElevatedShell) WARNING=closes_all_profile_windows" 'WARN'
-    Stop-CursorServerProfileTree
-    Start-Sleep -Milliseconds 400
-    $remaining = @(Get-CursorProfileProcesses).Count
-    Write-EditorLaunchLog "LAUNCH_KILL_DONE: remaining_profile_procs=$remaining" 'INFO'
-    return $procs.Count
 }
 
 function Get-RemoteEditorDetectionDiag {

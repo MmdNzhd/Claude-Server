@@ -1,12 +1,12 @@
-# Claude Design — راهنمای کامل
+# Claude Design — Complete Guide
 
-> **تفاوت با Designer Connect:** این سند مربوط به `connect-design.bat` (claude.ai/design در Chrome مشترک سرور) است. برای mount فولدر لپ‌تاپ + noVNC ببینید [`users/designer/README.md`](../scripts/client/users/designer/README.md) و [`docs/client-connect.md`](client-connect.md).
+> **Difference from Designer Connect:** This document covers `connect-design.bat` (claude.ai/design in shared server Chrome). For laptop folder mount + noVNC see [`users/designer/README.md`](../scripts/client/users/designer/README.md) and [`docs/client-connect.md`](client-connect.md).
 
-## چیست؟
+## What is it?
 
-Claude Design یک محیط مرور مشترک روی سرور است که به طراحان اجازه می‌دهد با fingerprint سرور (نه laptop خود) به claude.ai/design متصل شوند. یک Chrome session مشترک روی سرور وجود دارد که همه طراحان به آن وصل می‌شوند.
+Claude Design is a shared browser environment on the server that lets designers connect to claude.ai/design using the server fingerprint (not their own laptop). One shared Chrome session runs on the server that all designers connect to.
 
-## معماری
+## Architecture
 
 ```
 Windows (laptop)
@@ -15,140 +15,140 @@ Windows (laptop)
        │                              ├─ Xvfb :UID  (virtual display — 4K max)
        │                              ├─ x11vnc      (VNC server)
        │                              ├─ websockify  (WebSocket bridge)
-       │                              └─ Chrome      (claude.ai/design) ← هیچوقت بسته نمیشه
+       │                              └─ Chrome      (claude.ai/design) ← never closed
        └─ SSH Tunnel  localhost:6080 → server:NOVNC_PORT
-            └─ Edge/Chrome  →  noVNC  →  VNC  →  Chrome روی سرور
+            └─ Edge/Chrome  →  noVNC  →  VNC  →  Chrome on server
 ```
 
-## یوزر مشترک
+## Shared user
 
-همه طراحان با یوزر **`designer`** وصل می‌شوند. فقط یک نفر در هر لحظه می‌تواند کار کند. اگر نفر دوم وصل شود، نفر اول **kick** می‌شود و پیام می‌گیرد. نفر اول می‌تواند با R دوباره session را پس بگیرد.
+All designers connect as user **`designer`**. Only one person can work at a time. If a second person connects, the first is **kicked** and receives a message. The first person can press R to reclaim the session.
 
-## پورت‌بندی
+## Port mapping
 
-| سرویس | پورت |
+| Service | Port |
 |-------|------|
 | VNC | 25000 + UID |
 | noVNC / websockify | 26000 + UID |
-| SSH tunnel (client) | 6080 (ثابت) |
+| SSH tunnel (client) | 6080 (fixed) |
 
-## نصب اولیه روی سرور (یک بار)
+## Initial server install (once)
 
 ```bash
 sudo claude-server add-user designer --no-password-change
 sudo claude-server install    # designer deps + Chrome policy (idempotent)
 ```
 
-## اضافه کردن SSH key طراح جدید
+## Adding a new designer SSH key
 
 ```bash
 sudo claude-server add-user designer   # or append key to designer ~/.ssh/authorized_keys
 ```
 
-## اتصال از Windows
+## Connecting from Windows
 
-فایل‌های مورد نیاز (کنار هم):
+Required files (same folder):
 - `scripts/client/windows/connect-design.bat`
 - `scripts/client/windows/connect-design.ps1`
 
-دابل‌کلیک روی `connect-design.bat` — همه چیز اتوماتیک انجام می‌شود.
+Double-click `connect-design.bat` — everything runs automatically.
 
-## اولین اتصال (login)
+## First connection (login)
 
-Chrome روی سرور باز می‌شود. **یک بار** لاگین به claude.ai انجام دهید. بعد از آن session برای همه طراحان ذخیره است.
+Chrome opens on the server. **Once** log in to claude.ai. After that the session is saved for all designers.
 
-برای خروج از kiosk mode: `Alt+F4` — بعد bat را دوباره بزنید.
+To exit kiosk mode: `Alt+F4` — then run the bat again.
 
-## رفتار Chrome
+## Chrome behavior
 
-- Chrome روی سرور **هیچوقت** بسته نمی‌شود (حتی وقتی کسی وصل نیست)
-- وقتی یک طراح وصل می‌شود، همان Chrome موجود را می‌بیند
-- session، تب‌ها، و login همیشه محفوظ است
-- Chrome profile در `/opt/chrome-design-profile` ذخیره است (مشترک بین همه)
+- Chrome on the server is **never** closed (even when nobody is connected)
+- When a designer connects, they see the same existing Chrome instance
+- Session, tabs, and login are always preserved
+- Chrome profile is stored in `/opt/chrome-design-profile` (shared by everyone)
 
-## رفتار resolution
+## Resolution behavior
 
-- `connect-design.ps1` اندازه مانیتور اصلی را می‌خواند
-- Xvfb با حداکثر اندازه (4K) شروع می‌شود
-- `xrandr` resolution را به اندازه واقعی مانیتور تنظیم می‌کند — بدون restart Chrome
-- اگر xrandr کار نکند، فقط Xvfb/x11vnc/websockify restart می‌شوند (نه Chrome)
+- `connect-design.ps1` reads the primary monitor size
+- Xvfb starts at maximum size (4K)
+- `xrandr` sets resolution to the actual monitor size — without restarting Chrome
+- If xrandr fails, only Xvfb/x11vnc/websockify restart (not Chrome)
 
-## مکانیزم kick
+## Kick mechanism
 
-وقتی طراح B وصل می‌شود در حالی که A متصل است:
-1. B پیام **"Previous user was disconnected"** می‌بیند
-2. websockify A کشته می‌شود → tunnel A قطع می‌شود
-3. A پیام **"You were disconnected by another designer"** می‌بیند
-4. A می‌تواند R بزند تا session را پس بگیرد (که B را kick می‌کند)
-5. Chrome روی سرور در تمام این مراحل **روشن می‌ماند**
+When designer B connects while A is connected:
+1. B sees **"Previous user was disconnected"**
+2. A's websockify is killed → A's tunnel drops
+3. A sees **"You were disconnected by another designer"**
+4. A can press R to reclaim the session (which kicks B)
+5. Chrome on the server stays **running** through all of this
 
-## تنظیمات noVNC
+## noVNC settings
 
 ```
 http://localhost:6080/vnc.html?autoconnect=true&resize=none&quality=9&compression=0&reconnect=true&reconnect_delay=2000&view_only=0
 ```
 
-| پارامتر | مقدار | توضیح |
+| Parameter | Value | Description |
 |---------|-------|-------|
-| resize | none | بدون scale |
-| quality | 9 | بالاترین کیفیت |
-| compression | 0 | بدون فشرده‌سازی (شبکه داخلی) |
-| reconnect | true | auto-reconnect داخل browser |
-| reconnect_delay | 2000 | هر 2 ثانیه retry |
-| view_only | 0 | mouse و keyboard فعال |
+| resize | none | No scaling |
+| quality | 9 | Highest quality |
+| compression | 0 | No compression (internal network) |
+| reconnect | true | Auto-reconnect inside browser |
+| reconnect_delay | 2000 | Retry every 2 seconds |
+| view_only | 0 | Mouse and keyboard active |
 
-## به‌روزرسانی designer-start
+## Updating designer-start
 
-بعد از هر تغییر در `scripts/server/designer-start.sh`:
+After any change to `scripts/server/designer-start.sh`:
 
 ```bash
 sudo install -m 755 /home/smart/mounts/claude-code-server/scripts/server/designer-start.sh /usr/local/bin/designer-start
 ```
 
-## مدیریت سرور با claude-server CLI
+## Server management with claude-server CLI
 
 ```bash
-# نصب روی سرور جدید (یک‌بار)
+# Install on a new server (once)
 git clone <repo> && sudo bash scripts/server/claude-server install
 
-# اضافه کردن developer جدید
+# Add a new developer
 sudo claude-server add-user <username>
 
-# بررسی سلامت همه components
+# Verify health of all components
 claude-server verify
 
-# وضعیت sessions فعال + usage + token cost
+# Active sessions + usage + token cost
 claude-server status
 
-# راهنما
+# Help
 claude-server --help
 ```
 
-## دستورات مدیریتی (روی سرور)
+## Admin commands (on server)
 
 ```bash
-# وضعیت session
+# Session status
 sudo -u designer designer-start status
 
-# توقف کامل (Chrome هم بسته می‌شود)
+# Full stop (Chrome closes too)
 sudo -u designer designer-start stop
 
-# شروع دستی با resolution مشخص
+# Manual start with specific resolution
 sudo -u designer designer-start start 1920 1080
 
-# بررسی process ها
+# Check processes
 ps aux | grep designer | grep -E "Xvfb|x11vnc|websockify|chrome" | grep -v grep
 
-# لاگ session
+# Session log
 tail -f /home/designer/.designer/session.log
 
-# اضافه کردن SSH key
+# Add SSH key
 echo "ssh-ed25519 AAAA..." >> /home/designer/.ssh/authorized_keys
 ```
 
-## رندرینگ Chrome (SwiftShader)
+## Chrome rendering (SwiftShader)
 
-چون سرور GPU فیزیکی ندارد، Chrome با software rendering کار می‌کند. فلگ‌های مورد نیاز در `designer-start.sh`:
+Because the server has no physical GPU, Chrome uses software rendering. Required flags in `designer-start.sh`:
 
 ```bash
 --use-gl=angle
@@ -156,14 +156,14 @@ echo "ssh-ed25519 AAAA..." >> /home/designer/.ssh/authorized_keys
 --enable-unsafe-swiftshader
 ```
 
-**توجه:** فلگ قدیمی `--use-gl=swiftshader` از Chrome 130 به بعد deprecated و از Chrome 139 کاملاً حذف شده. استفاده از آن ANGLE را از pipeline گرافیکی حذف می‌کند و WebGL کار نمی‌کند.
+**Note:** The old flag `--use-gl=swiftshader` is deprecated from Chrome 130 onward and fully removed in Chrome 139. Using it removes ANGLE from the graphics pipeline and WebGL will not work.
 
-## عیب‌یابی
+## Troubleshooting
 
-### chat box باز نمی‌شود / صفحه design لود نمی‌شود
-مشکل permission روی Chrome profile یا `.local/share`:
+### Chat box does not open / design page does not load
+Permission problem on Chrome profile or `.local/share`:
 ```bash
-# نشانه در log:
+# Signs in log:
 # Failed to open persistent cache files ... Permission denied
 # ContextResult::kTransientFailure: Failed to send GpuControl.CreateCommandBuffer
 
@@ -175,45 +175,45 @@ designer-start stop && designer-start start 1920 1080
 ```
 
 ### "ERROR: another start in progress"
-یک lock file مانده. پاک کن:
+A lock file was left behind. Remove it:
 ```bash
 rm -f /home/designer/.designer/start.lock
 ```
 
 ### noVNC keeps reconnecting
-x11vnc یا websockify کرش کرده:
+x11vnc or websockify crashed:
 ```bash
 pkill -u designer x11vnc; pkill -u designer websockify
 sudo -u designer designer-start start 1920 1080
 ```
 
-### Chrome پروفایل جدید باز کرد
-Singleton lock مانده:
+### Chrome opened a new profile
+Singleton lock left behind:
 ```bash
 rm -f /opt/chrome-design-profile/SingletonLock /opt/chrome-design-profile/SingletonSocket /opt/chrome-design-profile/SingletonCookie
 ```
 
-### صفحه سیاه
-x11vnc بالا نیامده:
+### Black screen
+x11vnc did not start:
 ```bash
 pkill -u designer x11vnc
 sudo -u designer designer-start start 1920 1080
 ```
 
-### SSH key تایید نمی‌شود
+### SSH key not accepted
 ```bash
 sudo claude-server add-user designer
 # then add laptop pubkey to designer ~/.ssh/authorized_keys
 ```
 
-### سرور host key تغییر کرده
-PowerShell script خودکار handle می‌کند. اگر دستی لازم شد:
+### Server host key changed
+The PowerShell script handles this automatically. If manual fix is needed:
 ```powershell
 ssh-keygen -R 192.168.210.240
 ```
 
-## فضای دیسک
+## Disk space
 
-- Chrome profile: `/opt/chrome-design-profile` (مشترک)
-- لاگ session: `/home/designer/.designer/session.log` (حداکثر 500KB نگه می‌دارد)
-- RAM مصرفی هر session: حدود 200-400MB
+- Chrome profile: `/opt/chrome-design-profile` (shared)
+- Session log: `/home/designer/.designer/session.log` (keeps max 500KB)
+- RAM per session: roughly 200-400MB

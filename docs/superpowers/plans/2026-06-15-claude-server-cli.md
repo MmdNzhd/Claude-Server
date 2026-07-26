@@ -2,83 +2,83 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** ساخت `claude-server` CLI — یه dispatcher که با یه دستور سرور جدید رو نصب می‌کنه و مدیریت کاربران، verify، و status رو یه‌جا جمع می‌کنه.
+**Goal:** Build the `claude-server` CLI — a dispatcher that installs a new server with one command and consolidates user management, verify, and status in one place.
 
-**Architecture:** یه bash dispatcher در `scripts/server/claude-server` که subcommands رو به فایل‌های جداگانه در `commands/` روت می‌ده. دستور `install` روی سرور جدید bootstrap می‌کنه و خود dispatcher رو روی `/usr/local/bin` نصب می‌کنه.
+**Architecture:** A bash dispatcher in `scripts/server/claude-server` that routes subcommands to separate files in `commands/`. The `install` command bootstraps on a new server and installs the dispatcher itself to `/usr/local/bin`.
 
-**Tech Stack:** Bash, Python3 (فقط برای check-tokens.py موجود)
+**Tech Stack:** Bash, Python3 (only for existing check-tokens.py)
 
 ---
 
 ## File Map
 
-| فایل | عملیات | توضیح |
-|------|--------|-------|
-| `scripts/server/claude-server` | ایجاد | dispatcher اصلی |
-| `scripts/server/commands/install.sh` | ایجاد | نصب کامل سرور |
-| `scripts/server/commands/add-user.sh` | ایجاد | ساخت یوزر developer |
-| `scripts/server/commands/verify.sh` | ایجاد | تست همه components |
-| `scripts/server/commands/status.sh` | ایجاد | sessions + usage |
-| `scripts/server/server-setup.sh` | تغییر | deprecation notice اضافه |
-| `scripts/server/setup-new-user.sh` | تغییر | deprecation notice اضافه |
-| `docs/claude-design.md` | تغییر | دستورات claude-server اضافه |
-| `CLAUDE.md` | ایجاد | قانون sync اسکریپت‌ها |
+| File | Action | Description |
+|------|--------|-------------|
+| `scripts/server/claude-server` | Create | Main dispatcher |
+| `scripts/server/commands/install.sh` | Create | Full server install |
+| `scripts/server/commands/add-user.sh` | Create | Create developer user |
+| `scripts/server/commands/verify.sh` | Create | Test all components |
+| `scripts/server/commands/status.sh` | Create | Sessions + usage |
+| `scripts/server/server-setup.sh` | Modify | Add deprecation notice |
+| `scripts/server/setup-new-user.sh` | Modify | Add deprecation notice |
+| `docs/claude-design.md` | Modify | Add claude-server commands |
+| `CLAUDE.md` | Create | Script sync rules |
 
 ---
 
-## Task 1: CLAUDE.md و ساختار پوشه
+## Task 1: CLAUDE.md and folder structure
 
 **Files:**
 - Create: `CLAUDE.md`
 - Create: `scripts/server/commands/.gitkeep`
 
-- [ ] **Step 1: پوشه commands بساز**
+- [ ] **Step 1: Create commands folder**
 
 ```bash
 mkdir -p /home/smart/mounts/claude-code-server/scripts/server/commands
 ```
 
-- [ ] **Step 2: CLAUDE.md بنویس**
+- [ ] **Step 2: Write CLAUDE.md**
 
-فایل `CLAUDE.md` در ریشه پروژه:
+File `CLAUDE.md` at project root:
 
 ```markdown
 # Claude Code Server — Project Rules
 
-## قانون sync اسکریپت‌ها
+## Script sync rule
 
-هر بار که یکی از فایل‌های زیر تغییر کرد، باید فایل‌های deploy هم آپدیت بشن:
+Whenever one of the files below changes, deploy files must be updated too:
 
-| فایل تغییر کرد | باید آپدیت بشه |
+| Changed file | Must update |
 |----------------|----------------|
-| `scripts/server/hooks/claude-hook-*.sh` | `scripts/server/commands/install.sh` (بخش deploy hooks) |
-| `scripts/server/claude-wrapper.sh` | `scripts/server/commands/install.sh` (بخش deploy wrapper) |
-| `scripts/server/claude-limits.conf` | `scripts/server/commands/install.sh` (بخش deploy config) |
-| `scripts/server/claude-automount.sh` | `scripts/server/commands/install.sh` (بخش deploy scripts) |
-| `scripts/server/commands/add-user.sh` | بررسی کن settings.json template هنوز درسته |
+| `scripts/server/hooks/claude-hook-*.sh` | `scripts/server/commands/install.sh` (deploy hooks section) |
+| `scripts/server/claude-wrapper.sh` | `scripts/server/commands/install.sh` (deploy wrapper section) |
+| `scripts/server/claude-limits.conf` | `scripts/server/commands/install.sh` (deploy config section) |
+| `scripts/server/claude-automount.sh` | `scripts/server/commands/install.sh` (deploy scripts section) |
+| `scripts/server/commands/add-user.sh` | Verify settings.json template is still correct |
 
-هر تغییر در hooks یا wrapper باید با این دستور روی سرور deploy بشه:
+Every change to hooks or wrapper must be deployed on the server with:
 ```bash
 sudo claude-server install
 ```
-این دستور idempotent هست — می‌شه بدون ترس دوباره زد.
+This command is idempotent — safe to run again without worry.
 
-## ساختار scripts/server
+## scripts/server structure
 
-- `claude-server` — CLI dispatcher (نصب می‌شه روی `/usr/local/bin/claude-server`)
-- `commands/` — هر subcommand یه فایل مجزا
-- `hooks/` — Claude Code hooks (deploy می‌شن روی `/usr/local/bin/`)
-- اسکریپت‌های deprecated: `server-setup.sh`, `setup-new-user.sh`, `install-designer-deps.sh`, `setup-designer.sh`
+- `claude-server` — CLI dispatcher (installed to `/usr/local/bin/claude-server`)
+- `commands/` — each subcommand is a separate file
+- `hooks/` — Claude Code hooks (deployed to `/usr/local/bin/`)
+- Deprecated scripts: `server-setup.sh`, `setup-new-user.sh`, `install-designer-deps.sh`, `setup-designer.sh`
 ```
 
-- [ ] **Step 3: verify پوشه ساخته شده**
+- [ ] **Step 3: Verify folder was created**
 
 ```bash
 ls /home/smart/mounts/claude-code-server/scripts/server/commands/
 ls /home/smart/mounts/claude-code-server/CLAUDE.md
 ```
 
-Expected: پوشه وجود داره، CLAUDE.md وجود داره.
+Expected: folder exists, CLAUDE.md exists.
 
 - [ ] **Step 4: commit**
 
@@ -95,7 +95,7 @@ git commit -m "chore: add CLAUDE.md rules and commands/ directory"
 **Files:**
 - Create: `scripts/server/claude-server`
 
-- [ ] **Step 1: فایل dispatcher بنویس**
+- [ ] **Step 1: Write dispatcher file**
 
 ```bash
 #!/bin/bash
@@ -107,7 +107,7 @@ VERSION="1.0.0"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 COMMANDS_DIR="$SCRIPT_DIR/commands"
 
-# اگه از /usr/local/bin اجرا شده، commands dir رو پیدا کن
+# If run from /usr/local/bin, find commands dir
 if [ ! -d "$COMMANDS_DIR" ]; then
     # installed mode: commands are alongside the installed script or in repo
     REPO_COMMANDS="/home/smart/mounts/claude-code-server/scripts/server/commands"
@@ -127,14 +127,14 @@ usage() {
     echo "Usage: claude-server <command> [options]"
     echo ""
     echo "Commands:"
-    echo "  install              نصب کامل سرور از صفر (باید root باشی)"
-    echo "  add-user <name>      اضافه کردن developer جدید"
-    echo "  verify               تست همه components"
-    echo "  status               وضعیت sessions و usage"
+    echo "  install              Full server install from scratch (must be root)"
+    echo "  add-user <name>      Add a new developer"
+    echo "  verify               Test all components"
+    echo "  status               Session and usage status"
     echo ""
     echo "Options:"
-    echo "  --help, -h           این راهنما"
-    echo "  --version, -v        نسخه"
+    echo "  --help, -h           This help"
+    echo "  --version, -v        Version"
     echo ""
     echo "Examples:"
     echo "  sudo claude-server install"
@@ -171,7 +171,7 @@ case "$CMD" in
 esac
 ```
 
-- [ ] **Step 2: executable کن و تست --help**
+- [ ] **Step 2: Make executable and test --help**
 
 ```bash
 chmod +x /home/smart/mounts/claude-code-server/scripts/server/claude-server
@@ -179,16 +179,16 @@ bash /home/smart/mounts/claude-code-server/scripts/server/claude-server --help
 bash /home/smart/mounts/claude-code-server/scripts/server/claude-server --version
 ```
 
-Expected: راهنما نشون داده بشه، نسخه `1.0.0` باشه.
+Expected: help displayed, version is `1.0.0`.
 
-- [ ] **Step 3: تست unknown command**
+- [ ] **Step 3: Test unknown command**
 
 ```bash
 bash /home/smart/mounts/claude-code-server/scripts/server/claude-server foo 2>&1
 echo "exit: $?"
 ```
 
-Expected: پیام `Unknown command: foo` و exit code 1.
+Expected: message `Unknown command: foo` and exit code 1.
 
 - [ ] **Step 4: commit**
 
@@ -202,12 +202,12 @@ git commit -m "feat: add claude-server dispatcher CLI"
 
 ## Task 3: `commands/verify.sh`
 
-این اول بنویس چون بقیه tasks رو باهاش تست می‌کنیم.
+Write this first because other tasks are tested with it.
 
 **Files:**
 - Create: `scripts/server/commands/verify.sh`
 
-- [ ] **Step 1: فایل verify.sh بنویس**
+- [ ] **Step 1: Write verify.sh file**
 
 ```bash
 #!/bin/bash
@@ -314,22 +314,22 @@ fi
 echo ""
 ```
 
-- [ ] **Step 2: executable کن و اجرا کن**
+- [ ] **Step 2: Make executable and run**
 
 ```bash
 chmod +x /home/smart/mounts/claude-code-server/scripts/server/commands/verify.sh
 bash /home/smart/mounts/claude-code-server/scripts/server/commands/verify.sh
 ```
 
-Expected: خروجی رنگی، نشون بده کدوم component‌ها نصبن.
+Expected: colored output showing which components are installed.
 
-- [ ] **Step 3: از طریق dispatcher تست کن**
+- [ ] **Step 3: Test via dispatcher**
 
 ```bash
 bash /home/smart/mounts/claude-code-server/scripts/server/claude-server verify
 ```
 
-Expected: همون خروجی.
+Expected: same output.
 
 - [ ] **Step 4: commit**
 
@@ -346,7 +346,7 @@ git commit -m "feat: add claude-server verify command"
 **Files:**
 - Create: `scripts/server/commands/status.sh`
 
-- [ ] **Step 1: فایل status.sh بنویس**
+- [ ] **Step 1: Write status.sh file**
 
 ```bash
 #!/bin/bash
@@ -433,14 +433,14 @@ print(f\"  {'TOTAL':<16} {'':>7}  \${total_cost:>8.2f}\")
 fi
 ```
 
-- [ ] **Step 2: executable کن و تست**
+- [ ] **Step 2: Make executable and test**
 
 ```bash
 chmod +x /home/smart/mounts/claude-code-server/scripts/server/commands/status.sh
 bash /home/smart/mounts/claude-code-server/scripts/server/claude-server status
 ```
 
-Expected: active sessions و usage نشون داده بشه.
+Expected: active sessions and usage displayed.
 
 - [ ] **Step 3: commit**
 
@@ -457,7 +457,7 @@ git commit -m "feat: add claude-server status command"
 **Files:**
 - Create: `scripts/server/commands/add-user.sh`
 
-- [ ] **Step 1: فایل add-user.sh بنویس**
+- [ ] **Step 1: Write add-user.sh file**
 
 ```bash
 #!/bin/bash
@@ -524,7 +524,7 @@ if [ -f /usr/local/bin/claude-git-setup ]; then
 fi
 
 step "4 - Claude settings + hooks"
-# NOTE: اگه hooks تغییر کردن، این template هم باید آپدیت بشه (ببین CLAUDE.md)
+# NOTE: if hooks change, this template must be updated too (see CLAUDE.md)
 mkdir -p "/home/$USERNAME/.claude"
 cat > "/home/$USERNAME/.claude/settings.json" << 'SETTINGS'
 {
@@ -588,29 +588,29 @@ echo "  Verify: claude-server verify"
 echo ""
 ```
 
-- [ ] **Step 2: executable کن**
+- [ ] **Step 2: Make executable**
 
 ```bash
 chmod +x /home/smart/mounts/claude-code-server/scripts/server/commands/add-user.sh
 ```
 
-- [ ] **Step 3: تست بدون username**
+- [ ] **Step 3: Test without username**
 
 ```bash
 bash /home/smart/mounts/claude-code-server/scripts/server/claude-server add-user 2>&1
 echo "exit: $?"
 ```
 
-Expected: usage message، exit code 1.
+Expected: usage message, exit code 1.
 
-- [ ] **Step 4: تست بدون root**
+- [ ] **Step 4: Test without root**
 
 ```bash
 bash /home/smart/mounts/claude-code-server/scripts/server/commands/add-user.sh testverify 2>&1
 echo "exit: $?"
 ```
 
-Expected: `must run as root`، exit code 1.
+Expected: `must run as root`, exit code 1.
 
 - [ ] **Step 5: commit**
 
@@ -627,7 +627,7 @@ git commit -m "feat: add claude-server add-user command"
 **Files:**
 - Create: `scripts/server/commands/install.sh`
 
-- [ ] **Step 1: فایل install.sh بنویس**
+- [ ] **Step 1: Write install.sh file**
 
 ```bash
 #!/bin/bash
@@ -827,20 +827,20 @@ echo "       claude-server verify"
 echo ""
 ```
 
-- [ ] **Step 2: executable کن**
+- [ ] **Step 2: Make executable**
 
 ```bash
 chmod +x /home/smart/mounts/claude-code-server/scripts/server/commands/install.sh
 ```
 
-- [ ] **Step 3: تست بدون root**
+- [ ] **Step 3: Test without root**
 
 ```bash
 bash /home/smart/mounts/claude-code-server/scripts/server/commands/install.sh 2>&1 | head -3
 echo "exit: $?"
 ```
 
-Expected: `must run as root`، exit code 1.
+Expected: `must run as root`, exit code 1.
 
 - [ ] **Step 4: commit**
 
@@ -859,9 +859,9 @@ git commit -m "feat: add claude-server install command"
 - Modify: `scripts/server/setup-new-user.sh`
 - Modify: `docs/claude-design.md`
 
-- [ ] **Step 1: deprecation به server-setup.sh اضافه کن**
+- [ ] **Step 1: Add deprecation to server-setup.sh**
 
-بعد از `#!/bin/bash` این رو اضافه کن (قبل از هر چیز دیگه):
+After `#!/bin/bash` add this (before anything else):
 
 ```bash
 echo ""
@@ -871,7 +871,7 @@ echo "  Press Ctrl+C to cancel, or Enter to continue anyway."
 read -r _
 ```
 
-- [ ] **Step 2: deprecation به setup-new-user.sh اضافه کن**
+- [ ] **Step 2: Add deprecation to setup-new-user.sh**
 
 ```bash
 echo ""
@@ -880,24 +880,24 @@ echo "  Press Ctrl+C to cancel, or Enter to continue anyway."
 read -r _
 ```
 
-- [ ] **Step 3: دستورات claude-server رو به docs/claude-design.md اضافه کن**
+- [ ] **Step 3: Add claude-server commands to docs/claude-design.md**
 
-بخش «دستورات مدیریتی» رو پیدا کن و این رو اضافه کن:
+Find the "Management commands" section and add:
 
 ```markdown
-## مدیریت سرور با claude-server
+## Server management with claude-server
 
 ```bash
-# نصب روی سرور جدید
+# Install on a new server
 git clone <repo> && sudo bash scripts/server/claude-server install
 
-# اضافه کردن developer
+# Add a developer
 sudo claude-server add-user amir
 
-# بررسی سلامت سرور
+# Check server health
 claude-server verify
 
-# وضعیت sessions و usage
+# Session and usage status
 claude-server status
 ```
 ```
@@ -912,9 +912,9 @@ git commit -m "docs: add deprecation notices and claude-server docs"
 
 ---
 
-## Task 8: تست نهایی end-to-end
+## Task 8: Final end-to-end test
 
-- [ ] **Step 1: همه commands از dispatcher تست کن**
+- [ ] **Step 1: Test all commands from dispatcher**
 
 ```bash
 bash /home/smart/mounts/claude-code-server/scripts/server/claude-server --help
@@ -923,26 +923,26 @@ bash /home/smart/mounts/claude-code-server/scripts/server/claude-server verify
 bash /home/smart/mounts/claude-code-server/scripts/server/claude-server status
 ```
 
-Expected: همه اجرا بشن بدون خطا.
+Expected: all run without error.
 
-- [ ] **Step 2: unknown command تست کن**
+- [ ] **Step 2: Test unknown command**
 
 ```bash
 bash /home/smart/mounts/claude-code-server/scripts/server/claude-server xyz 2>&1
 echo "exit: $?"
 ```
 
-Expected: `Unknown command: xyz`، exit code 1.
+Expected: `Unknown command: xyz`, exit code 1.
 
-- [ ] **Step 3: verify روی سرور واقعی**
+- [ ] **Step 3: verify on real server**
 
 ```bash
 claude-server verify 2>/dev/null || bash /home/smart/mounts/claude-code-server/scripts/server/claude-server verify
 ```
 
-Expected: همه system components ok باشن.
+Expected: all system components ok.
 
-- [ ] **Step 4: commit نهایی**
+- [ ] **Step 4: final commit**
 
 ```bash
 cd /home/smart/mounts/claude-code-server

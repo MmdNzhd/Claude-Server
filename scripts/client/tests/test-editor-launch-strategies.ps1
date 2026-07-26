@@ -27,7 +27,7 @@ Assert (Get-Command Get-RemoteEditorProcessSnapshot -ErrorAction SilentlyContinu
 Assert (Get-Command Write-EditorLaunchSnapshot -ErrorAction SilentlyContinue) 'Write-EditorLaunchSnapshot defined'
 Assert (Get-Command Get-RemoteEditorStateExplain -ErrorAction SilentlyContinue) 'Get-RemoteEditorStateExplain defined'
 Assert (Get-Command Write-EditorLaunchVerboseState -ErrorAction SilentlyContinue) 'Write-EditorLaunchVerboseState defined'
-Assert (Get-Command Stop-CursorServerProfileTreeIfNeeded -ErrorAction SilentlyContinue) 'Stop-CursorServerProfileTreeIfNeeded defined'
+Assert (-not (Get-Command Stop-CursorServerProfileTreeIfNeeded -ErrorAction SilentlyContinue)) 'Stop-CursorServerProfileTreeIfNeeded removed (dead SAFE_DELETE)'
 
 $cursorStrategies = @(Get-RemoteEditorLaunchStrategies -EditorCmd 'cursor' -Alias $alias -RemotePath $path -Uri $uri -NewWindow)
 Assert ($cursorStrategies.Count -eq 4) 'cursor has 4 launch strategies'

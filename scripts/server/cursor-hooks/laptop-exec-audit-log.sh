@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # laptop-exec-audit-log.sh - durable multi-agent diagnostics (shared by laptop-exec + hooks)
 #
-# POLICY (2026-07): LOG HEAVILY while the product is unstable — volume is fine if
+# POLICY (2026-07): LOG HEAVILY while the product is unstable - volume is fine if
 # lines help diagnose user/agent failures. After things stabilize, dial down by:
 #   export LAPTOP_EXEC_AUDIT_VERBOSE=0
 # (keeps ERROR/WARN + important events; drops noisy INFO like CMD_BEGIN/shell allow).
 # Later we can delete debug call sites; for now prefer too much over blindness.
 #
-# ALWAYS on the Linux SERVER (Cursor Remote SSH / agent host) — dual write:
+# ALWAYS on the Linux SERVER (Cursor Remote SSH / agent host) - dual write:
 #   1) ~/.claude/logs/laptop-exec-YYYYMMDD.log   (dedicated, dense)
 #   2) ~/.claude/logs/connect-YYYYMMDD.log       (admin day-log; [multiagent] LAPTOP_EXEC)
 # Purged with connect logs (mtime +1). Safe to source many times. No secrets.
@@ -21,7 +21,7 @@ _le_audit_trunc() {
     local s="$1" max="${2:-400}"
     s=$(printf '%s' "$s" | tr '\n\r\t' '   ')
     if [ "${#s}" -gt "$max" ]; then
-        printf '%s…(len=%s)' "${s:0:$max}" "${#s}"
+        printf '%s...(len=%s)' "${s:0:$max}" "${#s}"
     else
         printf '%s' "$s"
     fi

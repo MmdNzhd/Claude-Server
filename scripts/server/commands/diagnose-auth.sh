@@ -406,7 +406,7 @@ PY
 )"
         fail "golden missing after personal-email quarantine (email=${q_email:-unknown} reason=${q_reason:-unknown})"
         note_fail
-        info "Do NOT restore /etc/cursor-auth/golden.quarantined-personal â€” re-export from a work/team account"
+        info "Do NOT restore /etc/cursor-auth/golden.quarantined-personal - re-export from a work/team account"
         info "Override only with: sudo cursor-auth-export --from-user <name> --allow-personal"
     fi
 fi

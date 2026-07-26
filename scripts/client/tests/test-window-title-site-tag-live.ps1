@@ -37,16 +37,18 @@ Assert ($initSrc -notmatch '\[Claude Server\]\s*\$\{rootName\}"') 'Initialize-Cu
 # writer and the 4 readers (via Get-CursorWindowTitleNeedle) can never drift apart again.
 Assert ($initSrc -match 'Get-CursorWindowTitleTag') 'Initialize-CursorServerProfile delegates the title tag to the shared Get-CursorWindowTitleTag helper (single source of truth with the 4 reader call sites), instead of inlining its own literal ternary'
 
-# Bug 2 FINAL fix (supersedes the earlier Get-CursorWindowTitleNeedle approach): the 4 title-match
-# call sites now delegate to the shared, template-ANCHORED Test-CursorWindowTitleMatchesProject
+# Bug 2 FINAL fix (supersedes the earlier Get-CursorWindowTitleNeedle approach): title-match
+# call sites delegate to the shared, template-ANCHORED Test-CursorWindowTitleMatchesProject
 # helper. Anchoring the root name to its exact position in the title template ("[Claude Server
 # <Site>] <root>" / "<root> [SSH: <alias>]") fixes BOTH the original site-tag collision (project
 # "smart" matching the "Smart" in the tag) AND the prefix-sibling collision ("smart" in
 # "smartdesk", "ai" in "ai-gap-summay") that a bare dynamic needle could not. Count occurrences of
 # THAT call so this test tracks the current source of truth. (Behavioral proof that the real
 # site-tagged window is still detected follows below via the unmodified Test-RemoteEditorOnCorrectFolder.)
+# Current readers: Test-CursorWindowTitleIsAgentHome, Test-RemoteEditorOnCorrectFolder,
+# Get-RemoteEditorStateExplain (3 sites; SessionPresence uses folder URI / other signals).
 $anchoredCallSites = [regex]::Matches($content, 'Test-CursorWindowTitleMatchesProject -Title')
-Assert ($anchoredCallSites.Count -ge 4) "found >= 4 call sites using the anchored Test-CursorWindowTitleMatchesProject helper in editor-launch.ps1 (found $($anchoredCallSites.Count)) - the 4 title-match sites (~1339,~1411,~1473,~1552) now anchor the root to the template position instead of a bare/needle substring"
+Assert ($anchoredCallSites.Count -ge 3) "found >= 3 call sites using the anchored Test-CursorWindowTitleMatchesProject helper in editor-launch.ps1 (found $($anchoredCallSites.Count)) - title-match readers must anchor the root to the template position instead of a bare/needle substring"
 $staleLiteralSites = [regex]::Matches($content, "-match\s+'\\\[Claude Server\\\]'")
 Assert ($staleLiteralSites.Count -eq 0) "zero remaining hardcoded literal -match '\[Claude Server\]' call sites (found $($staleLiteralSites.Count)) - all migrated to the anchored matcher"
 
@@ -63,10 +65,8 @@ foreach ($n in @(
     'Get-CursorMainProfileProcesses', 'Test-CursorWindowTitleIsAgentHome',
     'Test-CursorWindowShowsAgentHome', 'Test-RemoteEditorInAgentHome',
     'Test-RemoteEditorOnCorrectFolder',
-    # Bug 2 GREEN-phase fix (editor-launch.ps1) extracted Get-CursorWindowTitleNeedle as a
-    # shared helper building the needle dynamically from Get-CursorRemoteProfileSite /
-    # Get-CursorWindowTitleTag - the 4 call sites under test now call it instead of a hardcoded
-    # literal, so the isolated dot-source harness needs it (and its own dependencies) too.
+    # Bug 2: anchored project matcher + dynamic site-tag needle (harness must extract both).
+    'Test-CursorWindowTitleMatchesProject',
     'Get-CursorRemoteProfileSite', 'Get-CursorWindowTitleTag', 'Get-CursorWindowTitleNeedle'
 )) {
     $src = Get-FunctionSource -Content $content -Name $n
@@ -228,7 +228,7 @@ Write-Host 'is required as a second detection path beyond CommandLine matching.'
 Write-Host ''
 
 if ($fail -eq 0) {
-    Write-Host 'ALL PASS (GREEN): Bug 2 is FIXED - the shared (Get-CursorWindowTitleNeedle) helper builds the needle dynamically from the real site tag, so all 4 call sites now correctly detect the real site-qualified window title against real code/process/window.' -ForegroundColor Green
+    Write-Host 'ALL PASS (GREEN): Bug 2 is FIXED - anchored Test-CursorWindowTitleMatchesProject + Get-CursorWindowTitleNeedle detect the real site-qualified window title against real code/process/window.' -ForegroundColor Green
     exit 0
 }
 Write-Host "$fail FAIL (unexpected - re-verify against current source)" -ForegroundColor Red

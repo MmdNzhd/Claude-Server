@@ -1,43 +1,60 @@
 @echo off
-REM publish.bat - double-click to build the client distribution package.
-REM Output (Desktop\claude-publish\):
-REM   claude-code-client\     folder (dev/debug)
-REM   claude-code-client.zip  ZIP (optional archive)
-REM   Claude-Connect.exe      GIVE THIS TO USERS (also copied to Desktop\)
-REM Pass -NoZip / -NoExe / -SkipServerDeploy as args to skip those steps.
+REM publish.bat - build Smart+Sepidz client packages, sync Desktop\Claude-Connect, make versioned EXE.
 REM
-REM How others get updates after first install:
-REM   They keep using Desktop\Claude-Connect\connect.bat (or re-run the EXE once).
-REM   On each launch, client auto-pulls new files from the server bundle.
-REM   You do NOT need to re-send bat/zip every version — publish + server deploy is enough.
-REM   Re-send Claude-Connect.exe only for brand-new PCs / cold install.
+REM After success you have:
+REM   Desktop\Claude-Connect\              <- ONE deploy folder (run connect.bat)
+REM   Desktop\Claude-Connect-VERSION.exe   <- optional cold-install EXE (version in name)
+REM   Desktop\claude-publish\              <- build output / ZIP / server bundle source
+REM
+REM Daily use: Desktop\Claude-Connect\connect.bat
+REM Do NOT keep unversioned Desktop\Claude-Connect.exe (removed by publish).
 
-setlocal
+setlocal EnableExtensions
+cd /d "%~dp0"
+
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0publish.ps1" %*
 set "PUB_EC=%ERRORLEVEL%"
-echo.
-set "EXE_DESK=%USERPROFILE%\Desktop\Claude-Connect.exe"
-set "EXE_PUB=%USERPROFILE%\Desktop\claude-publish\Claude-Connect.exe"
-if exist "%EXE_DESK%" (
-  echo   ============================================
-  echo   GIVE TO USERS:  %EXE_DESK%
-  echo   Also at:        %EXE_PUB%
-  echo   ============================================
-  echo.
-  echo   Opening Explorer on the EXE so you can see/copy it...
-  explorer.exe /select,"%EXE_DESK%"
-) else if exist "%EXE_PUB%" (
-  echo   ============================================
-  echo   GIVE TO USERS:  %EXE_PUB%
-  echo   ============================================
-  echo.
-  echo   Opening Explorer on the EXE so you can see/copy it...
-  explorer.exe /select,"%EXE_PUB%"
-) else (
-  echo   EXE: not built (passed -NoExe, or Sepidz-only, or build failed^)
-)
+
 echo.
 if not "%PUB_EC%"=="0" (
-  echo   Publish exited with code %PUB_EC%
+  echo   [X] Publish exited with code %PUB_EC%
+  echo.
+  pause
+  exit /b %PUB_EC%
 )
+
+set "DESK=%USERPROFILE%\Desktop"
+set "FOLDER=%DESK%\Claude-Connect"
+set "VER="
+if exist "%FOLDER%\connect-version.txt" (
+  set /p VER=<"%FOLDER%\connect-version.txt"
+)
+set "EXE_VER=%DESK%\Claude-Connect-%VER%.exe"
+set "EXE_PUB=%DESK%\claude-publish\Claude-Connect.exe"
+
+echo   ============================================
+echo   DEPLOY FOLDER:  %FOLDER%
+if defined VER echo   VERSION:        %VER%
+if exist "%FOLDER%\connect.bat" (
+  echo   RUN:            %FOLDER%\connect.bat
+) else (
+  echo   RUN:            connect.bat missing - publish may have failed
+)
+if exist "%EXE_VER%" (
+  echo   EXE ^(versioned^): %EXE_VER%
+) else if exist "%EXE_PUB%" (
+  echo   EXE ^(publish^):  %EXE_PUB%
+) else (
+  echo   EXE:            not built ^(-NoExe or build failed^)
+)
+echo   ============================================
+echo.
+
+if exist "%FOLDER%\connect.bat" (
+  explorer.exe /select,"%FOLDER%\connect.bat"
+) else if exist "%EXE_VER%" (
+  explorer.exe /select,"%EXE_VER%"
+)
+
 pause
+exit /b 0

@@ -64,12 +64,12 @@ user="${USER:-smart}"
 base='SSH-FIRST HARD STOP: Never call Cursor Read/Grep/Glob/Write/Edit/StrReplace/Delete on ~/mounts/. Deny expected - do NOT retry; run NEXT:. Never laptop-exec rg -i/-l/-n/--glob. Paths: laptop-exec=repo-relative (-p ID); windows-mcp FileSystem=absolute Windows under project root (not Desktop-relative).'
 
 if _windows_hybrid_ready; then
-  hybrid='Windows hybrid ACTIVE: user-windows-mcp ready - PREFER windows-mcp FileSystem/PowerShell/UI/Screenshot/Clipboard for FS+shell+UI. SPEED: when exploring/reading many files, fan out ~8 parallel windows-mcp FileSystem calls in ONE turn (MCP has no SSH mux cap) — do not serialize one-by-one. Keep laptop-exec ONLY for git, content rg, and MCP-down fallback. Do not default every read/write to laptop-exec.'
+  hybrid='Windows hybrid CONFIGURED: prefer windows-mcp FileSystem/PowerShell/UI ONLY if those tools are listed in the catalog. SPEED: ~8 parallel FileSystem calls in ONE turn when MCP works. FAIL-FAST: tools missing OR one ECONNREFUSED/fetch failed => MCP down for session; use laptop-exec immediately; never retry denied Read; never retry same MCP call. user-filesystem≠windows-mcp. Keep laptop-exec for git, content rg, and MCP-down.'
 else
-  hybrid='First I/O = Shell + laptop-exec -p ID (read|rg|write|git|run). On Windows, if user-windows-mcp becomes ready mid-session, switch FS/shell/UI to MCP (hybrid table).'
+  hybrid='First I/O = Shell + laptop-exec -p ID (read|rg|write|git|run). On Windows, if windows-mcp tools become listed mid-session, switch FS/shell/UI to MCP; still FAIL-FAST on one connection error.'
 fi
 
-multi='MULTI-AGENT: Task spawn allowed. EVERY Task prompt MUST paste: SSH-first mandatory; never Read/Grep/Write on /mounts/; never rg -i/-l/-n/--glob; on deny run NEXT:. Parallelism: windows-mcp FileSystem/PowerShell fan-out ~8 (or more) per turn for speed; laptop-exec prefer <=4 parallel (hard cap 8 SSH slots). Windows hybrid: if windows-mcp ready prefer FileSystem/UI/PowerShell; ALWAYS keep laptop-exec for git, content rg, Mac, MCP-down. Children do not inherit parent discipline. Queue OK - never raw ssh. Tunnel DOWN => stop; user connect.bat/sh.'
+multi='MULTI-AGENT: Task spawn allowed. EVERY Task prompt MUST paste hybrid+FAIL-FAST: never Read/Grep/Write on /mounts/; never rg -i/-l/-n/--glob; on deny run NEXT:; windows-mcp only if tools listed; one MCP fail=>laptop-exec only. Parallelism: MCP ~8/turn when ready; laptop-exec <=4 (cap 8). Children do not inherit discipline. Tunnel DOWN => stop; user connect.bat/sh.'
 
 if [[ -z "$pid" ]]; then
   _le_audit_log WARN SESSION_START "project=?" "cwd=$(_le_audit_trunc "${cwd:-${PWD:-}}" 200)" \

@@ -827,7 +827,7 @@ init_connect_log() {
     connect_log "======== session start v$version user=$USER pid=$$ session=$CONNECT_SESSION_ID ========"
     connect_log "log sink: local:$CONNECT_LOG_PATH watermark=$CONNECT_LOG_SYNC_OFF + server:~/.claude/logs/ (local+server purge mtime+1)" 'INFO'
     connect_log "script_dir: $script_dir connect_version: $version" 'DEBUG'
-    connect_log "SESSION_FILTER: grep \"[$CONNECT_SESSION_ID]\" $CONNECT_LOG_PATH (index: $log_dir/sessions.index)" 'INFO'
+    connect_log "SESSION_FILTER: grep -F \"[$CONNECT_SESSION_ID]\" $CONNECT_LOG_PATH (index: $log_dir/sessions.index)" 'INFO'
 }
 log_session_context() {
     # Full snapshot so server logs explain who/what/where without local files.

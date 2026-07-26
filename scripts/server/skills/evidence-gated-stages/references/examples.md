@@ -46,6 +46,6 @@ D. Release LOCKED
 
 ## Example F — Release unlock
 
-User: `deploy کن` (new message)  
+User: `deploy` (new message)  
 → Stage D pack: VERIFY quotes unlock; `deploy_ran=yes`; post-release RUNTIME_GATE  
-Non-unlock: `تمام` / `done` / `execute the plan` → stay LOCKED
+Non-unlock: `finished` / `done` / `execute the plan` → stay LOCKED

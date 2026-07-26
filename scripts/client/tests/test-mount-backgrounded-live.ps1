@@ -27,6 +27,13 @@ if (-not $src) {
 Assert ($content -notmatch '(?ms)else \{\s*Step "Mounting files"\s*\$mountSW = \[System\.Diagnostics\.Stopwatch\]::StartNew\(\)\s*\$mountResult = Invoke-MountProject') `
     'FIXED: the slow-path branch no longer blocks on a synchronous Invoke-MountProject call'
 Assert ($content -match 'Start-MountProjectBackground -ProjectId \$go\.Id') 'connect.ps1 call site kicks off the background mount'
+# Source contract (live spawn cannot prove recover/check was skipped on the parent path):
+# BG up must log MOUNT_CHECK_SKIPPED; recover stays under GIT_MODE=off / $gitModeOff only.
+Assert ($content -match 'MOUNT_CHECK_SKIPPED reason=bg_up') `
+    'connect.ps1 BG path logs MOUNT_CHECK_SKIPPED reason=bg_up (source contract)'
+# Recover stays under $gitModeOff; session_mount_ok TTL may precede the call (wave2 2026-07-25).
+Assert ($content -match '(?ms)if\s*\(\s*\$gitModeOff\s*\)\s*\{.*?\$recoverCheckOk\s*=\s*Invoke-RecoverIfNeeded') `
+    'Invoke-RecoverIfNeeded is structurally inside if ($gitModeOff) (source contract)'
 
 $tmpLogDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cc-mountbg-live-{0}" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $tmpLogDir | Out-Null
@@ -63,6 +70,10 @@ try {
     }
     Assert $found "the real detached background process actually wrote a MOUNT_BG_* result line to the day log within 20s (session=$sessionId)"
     if ($found) {
+        $logAll = Get-Content -LiteralPath $dayLog -Raw -ErrorAction SilentlyContinue
+        # Harden false-green: kickoff must also emit MOUNT_BG_BEGIN (not only a terminal OK/FAIL).
+        Assert ($logAll -match "\[$sessionId\]\s*MOUNT_BG_BEGIN") `
+            'day log contains MOUNT_BG_BEGIN for this session (Task 8: not presence-only FAIL/OK)'
         $matchedLine = (Get-Content -LiteralPath $dayLog | Select-String "\[$sessionId\] MOUNT_BG_(OK|FAIL|EXCEPTION)" | Select-Object -First 1).Line
         Write-Host "  INFO  logged result: $matchedLine" -ForegroundColor DarkGray
         Assert ($matchedLine -match 'MOUNT_BG_(FAIL|EXCEPTION)') 'against the deliberately-unreachable alias, the background process correctly logs a failure (not a false OK)'

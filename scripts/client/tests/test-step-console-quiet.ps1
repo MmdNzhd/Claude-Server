@@ -7,7 +7,7 @@
 # SSH key...ok", "Mounting files...ok", "Syncing Cursor auth...ok") even when
 # the recovery silently self-healed with nothing the user needs to see. Over a
 # long session with any tunnel soft-fails this produced a lot of visible
-# scrollback ("خیلی لاگ میزنه"). Fix: gate the routine "ok" console lines to
+# scrollback ("too much log spam" / "scrollback flooded"). Fix: gate the routine "ok" console lines to
 # the FIRST session-loop pass only; every pass keeps writing the full detail
 # to the day-log file (Write-ConnectLog / connect_log) unconditionally, so no
 # diagnostic signal is lost - only the repeat console repaint is suppressed.
@@ -87,8 +87,11 @@ $stepOkBlock = ''
 if ($win -match '(?s)function StepOk\s*\{.*?\r?\n\}\r?\n') { $stepOkBlock = $Matches[0] }
 Assert ($stepOkBlock.Length -gt 50) 'extracted StepOk function body'
 Assert (
-    $stepOkBlock -match '(?s)if\s*\(-not\s*\$script:StepConsoleQuiet\)\s*\{\s*if\s*\(\$d\)\s*\{\s*Write-Host " \$d"'
-) 'StepOk result line (" ok" / " $d") is gated behind "if (-not $script:StepConsoleQuiet)"'
+    $stepOkBlock -match '(?s)if\s*\(-not\s*\$script:StepConsoleQuiet\)\s*\{' -and (
+        $stepOkBlock -match 'Write-Host " \$d"' -or
+        $stepOkBlock -match 'StepProgressActive'
+    )
+) 'StepOk result line (" ok" / " $d" / progress rewrite) is gated behind "if (-not $script:StepConsoleQuiet)"'
 Assert (
     $stepOkBlock -match '(?s)if\s*\(-not\s*\$script:StepConsoleQuiet\)\s*\{\s*foreach\s*\(\$fx in \$script:pendingFixes\)'
 ) 'StepOk "-> fixed:" loop is gated behind "if (-not $script:StepConsoleQuiet)"'

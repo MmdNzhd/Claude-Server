@@ -119,7 +119,7 @@ function Resolve-DesignKeyLetter {
     $code = if ($kc.Length -eq 1) { [int][char]$kc[0] } else { 0 }
     $ascii = ($code -ge 32 -and $code -le 126)
     $letter = if ($ascii) { $kc.ToLowerInvariant() } else { '' }
-    # VK fallback ONLY for null/control KeyChar - never Persian printable (ض on Q).
+    # VK fallback ONLY for null/control KeyChar - never non-ASCII printable KeyChar (e.g. Arabic/Persian letter on Q key under FA layout).
     $useVk = ($code -eq 0 -or ($code -gt 0 -and $code -lt 32))
     return @{ Letter = $letter; UseVk = $useVk; Code = $code }
 }
@@ -368,7 +368,7 @@ try {
                 if ($resolved) {
                     $action = $resolved; $gotKey = $true; break
                 }
-                # Persian/other printable non-ASCII: ignore, keep waiting
+                # Non-ASCII printable KeyChar (e.g. FA layout letter on command key): ignore, keep waiting
             }
             Start-Sleep -Milliseconds 500
         }

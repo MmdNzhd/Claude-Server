@@ -537,7 +537,7 @@ while true; do
                 q|$'\n'|$'\r') _resolved="q" ;;
             esac
             if [ -z "$_resolved" ]; then
-                # Non-ASCII printable (e.g. Persian ض): ignore and keep waiting.
+                # Non-ASCII printable KeyChar (e.g. Arabic/Persian letter on Q under FA layout): ignore and keep waiting.
                 _ord="$(printf '%s' "$_key" | od -An -tuC | tr -s ' ' | awk '{print $1; exit}')"
                 if [ -n "$_ord" ] && [ "$_ord" -gt 127 ]; then
                     continue
@@ -577,7 +577,7 @@ done
 
 trap - EXIT
 
-# Post-disconnect menu (ASCII commands only; ignore Persian/other glyphs).
+# Post-disconnect menu (ASCII commands only; ignore non-ASCII layout glyphs).
 echo ""
 printf '    \033[0;36mDisconnected. What would you like to do?\033[0m\n'
 printf '    \033[0;90mC = connect again   X = exit\033[0m\n'

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # run-all.ps1 - run all client regression / audit scripts
 $ErrorActionPreference = 'Stop'
 $TestsDir = $PSScriptRoot
@@ -9,18 +9,24 @@ $suites = @(
     @{ Name = 'connect-ui';           Script = 'test-connect-ui.ps1' }
     @{ Name = 'select-project';       Script = 'test-select-project.ps1' }
     @{ Name = 'connect-pipeline';     Script = 'test-connect-pipeline.ps1' }
+    @{ Name = 'baseline-connect-working-invariants'; Script = 'test-baseline-connect-working-invariants.ps1' }
     @{ Name = 'ssh-user-fix-retry';  Script = 'test-ssh-user-fix-retry.ps1' }
     @{ Name = 'auth-stamp-skip';      Script = 'test-auth-stamp-skip.ps1' }
+    @{ Name = 'auth-stamp-prefetch-no-block'; Script = 'test-auth-stamp-prefetch-no-block.ps1' }
     @{ Name = 'laptop-ssh-ready';     Script = 'test-laptop-ssh-ready.ps1' }
     @{ Name = 'git-mode-deep';        Script = 'test-git-mode-deep.ps1' }
     @{ Name = 'cursor-proxy-lifetime'; Script = 'test-cursor-proxy-lifetime.ps1' }
+    @{ Name = 'mac-proxy-release-on-clear'; Script = 'test-mac-proxy-release-on-clear.ps1' }
+    @{ Name = 'designer-close-log'; Script = 'test-designer-close-log.ps1' }
     @{ Name = 'editor-launch';        Script = 'test-editor-launch.ps1' }
+    @{ Name = 'dead-safe-delete-connect'; Script = 'test-dead-safe-delete-connect.ps1' }
     @{ Name = 'editor-launch-strategies'; Script = 'test-editor-launch-strategies.ps1' }
     @{ Name = 'folder-uri-equals-arg-live'; Script = 'test-folder-uri-equals-arg-live.ps1' }
     @{ Name = 'connect-diagnostic';     Script = 'test-connect-diagnostic.ps1' }
     @{ Name = 'mounts-cache';           Script = 'test-mounts-cache.ps1' }
     @{ Name = 'xray-probe-cache';       Script = 'test-xray-probe-cache.ps1' }
     @{ Name = 'pushconf-tcp-gate';      Script = 'test-pushconf-tcp-gate.ps1' }
+    @{ Name = 'server-setup-step-progress'; Script = 'test-server-setup-step-progress.ps1' }
     @{ Name = 'tunnel-tcp-state-cache'; Script = 'test-tunnel-tcp-state-cache.ps1' }
     @{ Name = 'xray-http-leg-resilience'; Script = 'test-xray-http-leg-resilience.ps1' }
     @{ Name = 'launch-fresh-project-windows-open'; Script = 'test-launch-fresh-project-windows-open.ps1' }
@@ -46,8 +52,14 @@ $suites = @(
     @{ Name = 'session-log-contracts'; Script = 'test-session-log-contracts.ps1' }
     @{ Name = 'log-sync-contracts';     Script = 'test-log-sync-contracts.ps1' }
     @{ Name = 'log-sync-forbid-shrink'; Script = 'test-log-sync-forbid-shrink.ps1' }
+    @{ Name = 'log-sync-mkdir-no-find-on-fast-path'; Script = 'test-log-sync-mkdir-no-find-on-fast-path.ps1' }
     @{ Name = 'error-flush-contract';   Script = 'test-error-flush-contract.ps1' }
     @{ Name = 'mount-failfast'; Script = 'test-mount-failfast.ps1' }
+    @{ Name = 'session-fresh-probe-skips'; Script = 'test-session-fresh-probe-skips.ps1' }
+    @{ Name = 'session-fresh-probe-skips-deep'; Script = 'test-session-fresh-probe-skips-deep.ps1' }
+    @{ Name = 'session-fresh-ttl-matrix'; Script = 'test-session-fresh-ttl-matrix.ps1' }
+    @{ Name = 'mount-check-skipped-on-bg-up'; Script = 'test-mount-check-skipped-on-bg-up.ps1' }
+    @{ Name = 'mount-hash-seed-from-setup'; Script = 'test-mount-hash-seed-from-setup.ps1' }
     @{ Name = 'elevate-when-needed'; Script = 'test-elevate-when-needed.ps1' }
     @{ Name = 'save-connect-conf-key'; Script = 'test-save-connect-conf-key.ps1' }
     @{ Name = 'hard-connect-ux-20260723'; Script = 'test-hard-connect-ux-20260723.ps1' }
@@ -65,10 +77,14 @@ $suites = @(
     @{ Name = 'sidecar-watchdog-lease'; Script = 'test-sidecar-watchdog-lease.ps1' }
     @{ Name = 'pushconf-am-only'; Script = 'test-pushconf-am-only.ps1' }
     @{ Name = 'connect-scorecard'; Script = 'test-connect-scorecard.ps1' }
+    @{ Name = 'editor-opened-script-scope'; Script = 'test-editor-opened-script-scope.ps1' }
+    @{ Name = 'launch-trust-path-no-double-relaunch'; Script = 'test-launch-trust-path-no-double-relaunch.ps1' }
+    @{ Name = 'opening-fail-clears-editor-seen'; Script = 'test-opening-fail-clears-editor-seen.ps1' }
     @{ Name = 'sidecar-job-object'; Script = 'test-sidecar-job-object.ps1' }
     @{ Name = 'windows-shadow-canon'; Script = 'test-windows-shadow-canon.ps1' }
     @{ Name = 'skip-12-fingerprint-hold'; Script = 'test-skip-12-fingerprint-hold.ps1' }
     @{ Name = 'step-console-quiet'; Script = 'test-step-console-quiet.ps1' }
+    @{ Name = 'cursor-launch-console-detached'; Script = 'test-cursor-launch-console-detached.ps1' }
     @{ Name = 'tunnel-job-object'; Script = 'test-tunnel-job-object.ps1' }
     @{ Name = 'tunnel-job-object-live'; Script = 'test-tunnel-job-object-live.ps1' }
     @{ Name = 'sshx-hard-kill'; Script = 'test-sshx-hard-kill.ps1' }
@@ -102,6 +118,8 @@ $suites = @(
     @{ Name = 'setup-debounce-bounded-live'; Script = 'test-setup-debounce-bounded-live.ps1' }
     @{ Name = 'console-declutter-warnings'; Script = 'test-console-declutter-warnings.ps1' }
     @{ Name = 'mount-backgrounded-live'; Script = 'test-mount-backgrounded-live.ps1' }
+    @{ Name = 'mount-bg-daylog-mutex-contention-live'; Script = 'test-mount-bg-daylog-mutex-contention-live.ps1' }
+    @{ Name = 'tunnel-sync-down-debounce-returns-true'; Script = 'test-tunnel-sync-down-debounce-returns-true.ps1' }
 )
 
 $fail = 0

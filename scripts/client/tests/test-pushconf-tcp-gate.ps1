@@ -34,6 +34,10 @@ Assert ($foreignIdx -ge 0 -and $hostkeyIdx -ge 0) 'foreign-peer + hostkey-mismat
 Assert ($tcpIdx -lt $foreignIdx -and $tcpIdx -lt $hostkeyIdx) 'tcp-open gate runs BEFORE both safety probes'
 Assert ($fn -match 'pushPortListening') 'uses a listening-gate variable'
 Assert ($fn -match 'safety_probes_skipped.*tcp_closed') 'logs the closed-port skip for observability'
+Assert ($fn -match 'safety_probes_skipped.*session_tunnel_fresh') 'logs session_tunnel_fresh skip (post Ensure-Tunnel Prepare path)'
+Assert ($fn -match 'LastTunnelSpawnSuccessAt') 'session_tunnel_fresh consults LastTunnelSpawnSuccessAt'
+Assert ($fn -match 'LastTunnelSpawnSuccessPort') 'session_tunnel_fresh checks port match'
+Assert ($fn -match 'TotalSeconds\s*-lt\s*30') 'session_tunnel_fresh TTL is 30s (matches ENSURE recent_success)'
 
 # The gate must guard both checks (they live inside the if-listening block, not unconditionally).
 Assert ($fn -match 'if\s*\(\s*\$pushPortListening\s*\)') 'both safety probes are inside the if($pushPortListening) block'

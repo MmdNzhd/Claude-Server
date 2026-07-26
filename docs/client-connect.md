@@ -2,7 +2,7 @@
 
 Developer and end-user guide for `connect.bat` / `connect.sh`.
 
-**Current client version:** **`20260725.37`**
+**Current client version:** **`20260725.41`**
 
 See also: [sshfs-performance.md](sshfs-performance.md) (GIT_MODE deep dive), [CLAUDE.md](../CLAUDE.md) (server admin).
 
@@ -62,7 +62,7 @@ Designer Windows and connect-design dot-source the same `connect-ui` helpers as 
 
 ### Tunnel orphan cleanup (peer safety)
 
-When connect acquires or recovers a tunnel port, `Remove-LocalOrphanTunnel` (Windows) / `remove_local_orphan_tunnel` (Mac) kills **stale** local `ssh -R` forwards only. The live session tunnel PID is always skipped â€” look for `ORPHAN_TUNNEL: skip_current` in connect logs. Cleanup must never terminate another active connect session on the same port.
+When connect acquires or recovers a tunnel port, `Remove-LocalOrphanTunnel` (Windows) / `remove_local_orphan_tunnel` (Mac) kills **stale** local `ssh -R` forwards only. The live session tunnel PID is always skipped Ã¢â‚¬â€ look for `ORPHAN_TUNNEL: skip_current` in connect logs. Cleanup must never terminate another active connect session on the same port.
 
 
 ## Smart vs Sepidz
@@ -88,7 +88,7 @@ Publish: `publish\publish.bat` (or `-SmartOnly` / `-SepidzOnly`). Admin: `sudo c
 - Smart optional update remains separate: policy mode `optional` in `scripts/server/client-update-policy.json` (Quiet = check/log only; never auto-apply).
 - **FINAL Desktop artifact:** `C:\Users\Smart\Desktop\claude-publish\claude-code-sepidz` is the frozen snapshot tree. Launchers may be `.DISABLED`; do **not** treat that folder as a live connect package. Do **not** edit it. Smart users: `Desktop\Claude-Connect\` only.
 - Marker file also documents this FINAL ARTIFACT stanza (see `publish/SEPIDZ_PUBLISH_FROZEN`).
-- Smart user layout: primary install folder `Desktop\Claude-Connect\` (full script tree). Outer `Desktop\Claude-Connect.exe` is a sibling fallback launcher Ã¢â‚¬â€ do not ship Smart users an EXE-only `windows\` strip as the folder package.
+- Smart user layout: primary install folder `Desktop\Claude-Connect\` (full script tree). Outer `Desktop\Claude-Connect.exe` is a sibling fallback launcher ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â do not ship Smart users an EXE-only `windows\` strip as the folder package.
 
 ## Single project per session
 
@@ -146,11 +146,11 @@ If hide fails (Cursor locks `.git`): close Remote SSH / git on laptop, then pres
 - Also writes the Electron profile-root `machineid` / `machineId` files from the server golden identity (login fails if SQLite tokens match but this file drifts).
 - Skip path (auth already complete) still heals `machineid`.
 - **Stamp-first skip:** when local `golden-synced-at.txt` matches server `exported-at` and auth is already complete, connect skips the heavy merge (still heals `machineid` if it drifted).
-- After golden token **rotation** (~6h), if the editor stayed open through a stale window, press **`O`** or fully quit `[Claude Server]` â€” Reload Window alone is not enough.
+- After golden token **rotation** (~6h), if the editor stayed open through a stale window, press **`O`** or fully quit `[Claude Server]` Ã¢â‚¬â€ Reload Window alone is not enough.
 
 If Cursor opens **Agent home** instead of the project folder, check the **server** connect log (see [Logging](#logging)). Correct-folder detection requires the **full remote path** (not only `ssh-remote+alias`).
 
-After auth sync, if Chat still fails: **Developer â†’ Reload Window** in the `[Claude Server]` window. Do **not** sign in with a personal account in that window.
+After auth sync, if Chat still fails: **Developer Ã¢â€ â€™ Reload Window** in the `[Claude Server]` window. Do **not** sign in with a personal account in that window.
 
 ---
 
@@ -163,10 +163,10 @@ After auth sync, if Chat still fails: **Developer â†’ Reload Window** in th
 - Writes profile-root `machineid` / `machineId` to match `/etc/cursor-auth/golden/machine-id.txt`.
 - After auth sync, connect sets `CURSOR_AUTH_RELAUNCH=1` so a long-lived profile process is soft-stopped and relaunched (avoids reusing a weeks-old logged-out window).
 - **Stamp-first skip:** same `golden-synced-at.txt` / `exported-at` stamp match avoids redundant merges when auth is current.
-- After golden **rotation**, if Chat fails but logs show auth ok and the editor never relaunched, press **`O`** (or fully quit) â€” do not personal-login into `[Claude Server]`.
+- After golden **rotation**, if Chat fails but logs show auth ok and the editor never relaunched, press **`O`** (or fully quit) Ã¢â‚¬â€ do not personal-login into `[Claude Server]`.
 - Correct-folder checks require the **full** remote path (e.g. `/home/mohammad/mounts/...`). Matching only `ssh-remote+claude-server` is wrong when several server users share the same SSH alias.
 
-**Remote SSH extension:** install **`anysphere.remote-ssh`** only. Uninstall Microsoft's `ms-vscode-remote.remote-ssh` if present (Extensions â†’ search `@id:anysphere.remote-ssh`).
+**Remote SSH extension:** install **`anysphere.remote-ssh`** only. Uninstall Microsoft's `ms-vscode-remote.remote-ssh` if present (Extensions Ã¢â€ â€™ search `@id:anysphere.remote-ssh`).
 
 **Mac socket bug:** profile template sets `"remote.SSH.useLocalServer": false`. If Remote SSH still fails with `listen EINVAL`, run once in Terminal then fully quit Cursor:
 
@@ -178,13 +178,13 @@ Connect also sets `TMPDIR=/tmp` automatically when needed.
 
 If Cursor still asks to log in after sync shows **ok**: fully quit the `[Claude Server]` window (or press **`O`**), do not personal-login into that profile. Reload Window alone is not enough if a stale process held old in-memory auth.
 
-If Cursor opens **Agent home** / wrong user mount path, press **`O`** or reconnect (v20260725.37+).
+If Cursor opens **Agent home** / wrong user mount path, press **`O`** or reconnect (v20260725.41+).
 
 ## Logging
 
-**Policy (v20260725.37+):** zero-loss offline-first. The laptop appends a **durable local day log** and watermark-syncs new bytes to the server when SSH works. `Close-ConnectLog` / `flush_connect_log_to_server` do **not** delete the local day file (offline / failed-SSH sessions stay auditable).
+**Policy (v20260725.41+):** zero-loss offline-first. The laptop appends a **durable local day log** and watermark-syncs new bytes to the server when SSH works. `Close-ConnectLog` / `flush_connect_log_to_server` do **not** delete the local day file (offline / failed-SSH sessions stay auditable).
 
-**Console vs file (v20260725.37+):** the day-log *file* always captures every STEP/SESSION_LOOP/TUNNEL_* line (nothing removed - full diagnostics preserved). The *console* is quieter: routine step "ok" lines (`Verifying laptop SSH key`, `Mounting files`, `Syncing Cursor auth`, ...) only paint on the first session-loop pass of a connect. If a tunnel soft-fail silently self-heals on a later pass, that repaint is suppressed - only real failures (`StepFail` / `step_fail`) always stay visible on console, since those drive the R=retry/Q=quit prompts.
+**Console vs file (v20260725.41+):** the day-log *file* always captures every STEP/SESSION_LOOP/TUNNEL_* line (nothing removed - full diagnostics preserved). The *console* is quieter: routine step "ok" lines (`Verifying laptop SSH key`, `Mounting files`, `Syncing Cursor auth`, ...) only paint on the first session-loop pass of a connect. If a tunnel soft-fail silently self-heals on a later pass, that repaint is suppressed - only real failures (`StepFail` / `step_fail`) always stay visible on console, since those drive the R=retry/Q=quit prompts.
 
 | Where | Path |
 |-------|------|
@@ -197,13 +197,13 @@ Legacy beside-script `connect.log` / `connect.log.1` are removed on start. Short
 
 **Retention:** connect logs older than **1 day** (`mtime +1`) are deleted on both sides:
 
-- Laptop local day logs (`~/.config/claude-connect/logs/`): purged on each connect start (`Clear-ConnectLocalLogsOlderThan` / `find â€¦ -mtime +1`); `sessions.index` is kept
-- Server `~/.claude/logs/`: client `find â€¦ -mtime +1 -delete` on each sync flush
+- Laptop local day logs (`~/.config/claude-connect/logs/`): purged on each connect start (`Clear-ConnectLocalLogsOlderThan` / `find ... -mtime +1`); `sessions.index` is kept
+- Server `~/.claude/logs/`: client `find ... -mtime +1 -delete` on each sync flush
 - Server cron: `/usr/local/bin/claude-connect-logs-cleanup` via `/etc/cron.d/claude-connect-logs` (hourly, as root)
 
 Session end does **not** delete today's local day file (offline / failed-SSH sessions stay auditable until the next day's retention window).
 
-### What a full log contains (v20260725.37+)
+### What a full log contains (v20260725.41+)
 
 Each connect run uploads a timeline to `~/.claude/logs/connect-YYYYMMDD.log`. Look for these markers in order:
 
@@ -217,6 +217,8 @@ Each connect run uploads a timeline to `~/.claude/logs/connect-YYYYMMDD.log`. Lo
 | `SESSION_LOOP begin` + `CONTEXT phase=session_loop` | Mount/auth/editor cycle (reconnect bumps iter) |
 | `SSH_BEGIN` / `SSH_END` / `SSH_TIMEOUT` | Every remote `ssh`/`sshx` call |
 | `MOUNT` / `PERF[mount_*]` | SSHFS up result + timing |
+| `MOUNT_CHECK_SKIPPED` / `MOUNT_BG_*` | BG mount path (skip sync check; child BEGIN/OK/FAIL) |
+| `SCORECARD` | Auth/mount/editor summary; `editor=` from `$script:EditorOpened` |
 | `AUTH_*` / `AUTH_SYNC` / `AUTH_REFRESH` / `FOLDER_CHECK` / `LAUNCH_*` | Cursor auth merge, machineid heal, relaunch, folder decisions |
 | `STATUS` / `HEARTBEAT` | Live tunnel/editor state while session open |
 | `LAPTOP_SSH_DIAG` | Reverse-SSH failure details (also `laptop-ssh-diag-latest.txt`) |
@@ -284,15 +286,80 @@ Useful lines:
 [INFO]  STATUS: [... | Cursor]
 ```
 
+
+### Mount background path (v20260725.41+)
+
+When `GIT_MODE` is not `off` and the project is not already a healthy skip-remount, Windows Connect **does not** run a synchronous `claude-mount check` on the critical path. It logs `MOUNT_CHECK_SKIPPED reason=bg_up`, starts SSHFS `up` in a background job, paints **Mounting files** as StepOk `started in background`, and continues to Opening Cursor.
+
+| Marker | Meaning |
+|--------|---------|
+| `MOUNT_CHECK_SKIPPED reason=bg_up` | Sync mount health check skipped because BG `up` was kicked |
+| `MOUNT_BG_STARTED` | Parent spawned the background mount runner (pid) |
+| `MOUNT_BG_BEGIN` | Child began `claude-mount up` |
+| `MOUNT_BG_OK` / `MOUNT_BG_FAIL` | Child finished success or failure (same day log; grep session id) |
+
+`GIT_MODE=off` and the healthy `skip_remount` path still use the sync/skip-remount contracts (no BG skip). Agents use `laptop-exec` / Windows-MCP; SSHFS is for the Cursor tree only and may lag until `MOUNT_BG_OK`.
+
+### MountOk pending vs StepOk
+
+- **UI StepOk** for BG mount may show `started in background` (user-facing progress).
+- **`$mountOk` / SCORECARD / `SESSION_OPEN -MountOk`** stay **false** while `Out=started_in_background` / `Pending=true` until live remount evidence (`MOUNT_BG_OK` observed or a healthy re-probe / `skip_remount`).
+- Do not treat StepOk paint as MountOk=true.
+
+### SCORECARD / EditorOpened (script scope)
+
+`Write-ConnectScorecard` prefers **`$script:EditorOpened`** (wired by `connect.ps1`). Scope-local `$editorOpened` is secondary. **`$script:EditorSeenOpen` alone must not** OR into SCORECARD `editor=` (sticky SeenOpen caused false-green). After a failed Opening Cursor step, sticky flags clear when no window is still proven open (`EDITOR_SEEN_CLEAR reason=opening_step_fail`).
+
+### Cursor launch console detach
+
+Windows Cursor launch uses `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` (and related no-attach env) so the Connect console does **not** inherit Cursor Chromium `[main]` / COPUpdater spam. GUI still shows (`SW_SHOW`).
+
+### Log sync: fast mkdir + Needed restore
+
+- Fast / non-Force sync SSH runs **mkdir + chmod only** â€” **no** `find -mtime +1` on that path (retention `find` runs on Force / rebuild paths).
+- `Complete-ConnectLogAsyncDrain -Force`: if the force sync fails, **`ConnectLogSyncNeeded` is restored to true** (no silent clear of Needed). Watch `LOG_SYNC_OK` / `LOG_SYNC_FAIL` / `LOG_SYNC_ASYNC scheduled=1`.
+
+### Mac / Designer parity notes
+
+- Mac `clear_session_mount` calls `release_cursor_proxy_owner` so disconnect releases the Cursor proxy claim.
+- Designer Windows `connect.ps1` calls `Close-ConnectLog` on exit paths so day-log drain/sync matches main Connect.
+
+### Before / after acceptance table (fill after live measure)
+
+Do **not** invent a "3x faster" claim. Use measured STEP/SCORECARD/SSH counts from day logs. Stage-2 baseline evidence (Smart laptop, 2026-07-25 plan) for **before** columns only:
+
+| Metric | Before (cite day log / Stage-2) | After (v20260725.41 measure) | Notes |
+|--------|----------------------------------|------------------------------|-------|
+| Mounting files median (success) | ~46 ms (Jul 25 BG UI) / ~15467 ms (Jul 24 sync) | _TBD ms_ | BG path should stay near-instant in UI |
+| Sync `claude-mount check` after pick (BG path) | present (pre-Task-1) | _expect 0_ `SSH_BEGIN ... check` | Look for `MOUNT_CHECK_SKIPPED` |
+| `MOUNT_BG_BEGIN` / `OK` / `FAIL` in day log | 0 body events (Jul 25 silence) | _count_ | Child must share mutex path |
+| Opening Cursor fail rate | 68.4% (13/19 Jul 25) | _%_ | Target below Jul 25 rate |
+| SCORECARD `editor=` vs visible Cursor | false-green risk | _match / mismatch_ | Uses `$script:EditorOpened` |
+| `SESSION_OPEN` MountOk while BG pending | was optimistic true | _expect false until OK_ | |
+| `LOG_SYNC_OK` per session end | 0 (Jul 25) | _count / Needed retry_ | Needed must not silent-clear on Force fail |
+
+### Acceptance checklist (plan Task 11)
+
+Fresh connect, pick project, then confirm in the local day log:
+
+1. [ ] No `SSH_BEGIN ... claude-mount check` between project pick and Opening Cursor on the BG path
+2. [ ] `MOUNT_BG_BEGIN` then `MOUNT_BG_OK` or `MOUNT_BG_FAIL` in the same day log
+3. [ ] SCORECARD `editor=` matches visible Cursor window state
+4. [ ] `SESSION_OPEN` MountOk false while mount pending; true after BG OK or skipRemount
+5. [ ] `LOG_SYNC_OK` at least once at session end, or Needed remains true with retry (not silent clear)
+6. [ ] Opening Cursor fail rate measured on the new day log (report; target below Jul 25 68%)
+
+Publish: bump is ready in-tree; run `publish\publish.bat` only when shipping the client ZIP (not part of this docs slice).
+
 ---
 
 ## Mac: Remote Login / reverse SSH
 
 The reverse tunnel needs the **server** to SSH into the Mac as `LAPTOP_USER` (`whoami` short name, e.g. `mohmmad`). That is separate from the **server Linux username** (e.g. `mohammad`).
 
-1. System Settings â†’ Sharing â†’ **Remote Login** = On
-2. Allow the Mac account shown by `whoami`, or **All users** (Sharing UI often shows Full Name â€” allow that row if listed)
-3. User must **not** remain only in `com.apple.access_ssh-disabled` (connect heals this from v20260725.37+ / current v20260725.37+: remove from disabled + add to `com.apple.access_ssh`)
+1. System Settings -> Sharing Ã¢â€ â€™ **Remote Login** = On
+2. Allow the Mac account shown by `whoami`, or **All users** (Sharing UI often shows Full Name - allow that row if listed)
+3. User must **not** remain only in `com.apple.access_ssh-disabled` (connect heals this from v20260725.41+: remove from disabled + add to `com.apple.access_ssh`)
 4. If key auth still fails, leave connect running until it finishes; diagnostics upload to `~/.claude/logs/laptop-ssh-diag-latest.txt` on the server
 
 Admin password is requested **at most once** per connect run (45s timeout). Destructive Remote Login cycling is skipped when login is already on.
@@ -301,7 +368,7 @@ Admin password is requested **at most once** per connect run (45s timeout). Dest
 
 ## Stale / foreign session heal
 
-If `~/.claude-connect.conf` points at another laptop user but the tunnel port is **not** listening, connect clears the stale conf and continues (avoids â€œforeign sessionâ€ dead-ends after a crash or shared account mistake).
+If `~/.claude-connect.conf` points at another laptop user but the tunnel port is **not** listening, connect clears the stale conf and continues (avoids "foreign session" dead-ends after a crash or shared account mistake).
 
 ---
 
@@ -332,24 +399,24 @@ Mac: `scripts/client/tests/verify-all.sh`
 |---------|-----|
 | Join-Path ChildPath prompt | Old `connect.ps1` - copy full `windows\` folder from latest ZIP |
 | connect.bat OUTDATED | Missing `connect-ui.ps1` or wrong version in header |
-| Cursor Agent home / wrong user path | Update to **v20260725.37+**; press `O`; check `LAUNCH_*` in server log (folder match needs full path) |
+| Cursor Agent home / wrong user path | Update to **v20260725.41+**; press `O`; check `LAUNCH_*` in server log (folder match needs full path) |
 | Cursor asks to log in (Mac/Win) after auth **ok** | Quit `[Claude Server]` fully or press `O` (stale process); do not personal-login; confirm `machineid` matches golden |
-| Cursor Chat cannot send (Mac/Win) | Reconnect, then **Developer â†’ Reload Window** in `[Claude Server]` window |
-| Mac Remote SSH `listen EINVAL` | Update to v20260725.37+; or `launchctl setenv TMPDIR /tmp` + quit Cursor fully |
+| Cursor Chat cannot send (Mac/Win) | Reconnect, then **Developer Ã¢â€ â€™ Reload Window** in `[Claude Server]` window |
+| Mac Remote SSH `listen EINVAL` | Update to v20260725.41+; or `launchctl setenv TMPDIR /tmp` + quit Cursor fully |
 | Mac Remote SSH timeout | Use `anysphere.remote-ssh` (not Microsoft extension) |
 | Laptop SSH key / Permission denied (Mac) | Enable Remote Login; remove user from `access_ssh-disabled`; read `laptop-ssh-diag-latest.txt` on server |
 | Empty project list on Mac after Windows session | Auto-adds / purges incompatible `rpath`; add the Mac folder once |
-| Stale â€œforeign sessionâ€ / wrong LAPTOP_USER | Auto-cleared when tunnel port is down; reconnect |
-| No `connect.log` beside bat | Expected â€” durable day log is `%USERPROFILE%\.config\claude-connect\logs\` (Win) or `~/.config/claude-connect/logs/` (Mac); synced copy at `~/.claude/logs/` |
+| Stale Ã¢â‚¬Å“foreign sessionÃ¢â‚¬Â / wrong LAPTOP_USER | Auto-cleared when tunnel port is down; reconnect |
+| No `connect.log` beside bat | Expected Ã¢â‚¬â€ durable day log is `%USERPROFILE%\.config\claude-connect\logs\` (Win) or `~/.config/claude-connect/logs/` (Mac); synced copy at `~/.claude/logs/` |
 | git hide failed | Close Cursor/git on laptop, press `G` |
 | Second connect refused | Close the other connect window first (one UI per PC) |
 | Tunnel drops | Auto-reconnect; editor not re-opened on reconnect |
-| Server path `$HOME/~/...` or leftover `~/` under home | Fixed in v20260725.37+ (`${var#~/}` tilde pitfall); admin may `rm -rf ~/\~` leftover dir |
+| Server path `$HOME/~/...` or leftover `~/` under home | Fixed in v20260725.41+ (`${var#~/}` tilde pitfall); admin may `rm -rf ~/\~` leftover dir |
 
 
 ## Windows Smart package layout
 
-**Folder / ZIP is primary.** Hand users `Desktop\Claude-Connect\` (full `windows\` script tree: bat + ps1) or the ZIP folder extract. Outer `Desktop\Claude-Connect.exe` is an optional sibling fallback launcher only Ã¢â‚¬â€ do not treat EXE-only as the default handoff.
+**Folder / ZIP is primary.** Hand users `Desktop\Claude-Connect\` (full `windows\` script tree: bat + ps1) or the ZIP folder extract. Outer `Desktop\Claude-Connect.exe` is an optional sibling fallback launcher only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â do not treat EXE-only as the default handoff.
 
 - Publish keeps the Smart `claude-publish\claude-code-client\windows\` script tree (EXE-only strip is opt-in via `CLAUDE_PUBLISH_STRIP_WINDOWS_EXE_ONLY=1`).
 - Optional client updates (when the server bundle exists) apply into the folder; Quiet never auto-applies optional updates.
@@ -357,13 +424,13 @@ Mac: `scripts/client/tests/verify-all.sh`
 
 ### SmartScreen / Defender false positives (unsigned IExpress EXE)
 
-`Claude-Connect.exe` built by `publish/build-windows-exe.ps1` is an **unsigned IExpress** self-extractor. Windows SmartScreen / Microsoft Defender may show "Windows protected your PC", quarantine, or a cloud false positive on first run Ã¢â‚¬â€ especially for brand-new hashes with no reputation.
+`Claude-Connect.exe` built by `publish/build-windows-exe.ps1` is an **unsigned IExpress** self-extractor. Windows SmartScreen / Microsoft Defender may show "Windows protected your PC", quarantine, or a cloud false positive on first run ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â especially for brand-new hashes with no reputation.
 
 **User steps (do not disable Defender):**
 
-1. Prefer the **folder / ZIP** path (`Desktop\Claude-Connect\connect.bat`) Ã¢â‚¬â€ fewer SmartScreen prompts than a cold EXE.
-2. If SmartScreen blocks the EXE: **More info Ã¢â€ â€™ Run anyway** (Allow) when you trust the source.
-3. If the file is blocked by Mark of the Web (MOTW): right-click Ã¢â€ â€™ Properties Ã¢â€ â€™ **Unblock** Ã¢â€ â€™ OK (or `Unblock-File` in PowerShell on that path only).
+1. Prefer the **folder / ZIP** path (`Desktop\Claude-Connect\connect.bat`) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â fewer SmartScreen prompts than a cold EXE.
+2. If SmartScreen blocks the EXE: **More info ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Run anyway** (Allow) when you trust the source.
+3. If the file is blocked by Mark of the Web (MOTW): right-click ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Properties ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ **Unblock** ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ OK (or `Unblock-File` in PowerShell on that path only).
 4. Optional scoped exclusion **only** for `%USERPROFILE%\Desktop\Claude-Connect` (the install folder). Never exclude the whole Desktop, Downloads, or user profile. Never turn off Microsoft Defender / real-time protection in scripts or docs.
 5. Future hardening: sign the published EXE with **Authenticode** (OV code-signing cert + RFC 3161 timestamp) so SmartScreen reputation builds on a stable publisher identity.
 6. False-positive remediation: submit the EXE/hash to Microsoft via [WDSI file submission](https://www.microsoft.com/en-us/wdsi/filesubmission) ("Incorrectly detected as malware").
@@ -371,5 +438,5 @@ Mac: `scripts/client/tests/verify-all.sh`
 Scripts must **never** disable Defender, SmartScreen, or real-time protection.
 ## Client auto-update policy
 
-Default mode is **optional forever** (`scripts/server/client-update-policy.json`, `latest` tracks connect version): users can defer (`defer_hours`). Quiet/silent mid-session checks never auto-apply and never log `UPDATE_FORCE` / `applied_ok` unless `mode` is `force` **and** `force_min_version` is set. Smart hard-refuses Sepidz path names (`claude-code-sepidz` / `Claude-Connect-Sepidz`) and Sepidz IP `192.168.250.70` outside a Sepidz tree. Laptop VPN is not a supported Cursor egress path Ã¢â‚¬â€ use Connect xray proxy (PROXY_HEALTH).
+Default mode is **optional forever** (`scripts/server/client-update-policy.json`, `latest` tracks connect version): users can defer (`defer_hours`). Quiet/silent mid-session checks never auto-apply and never log `UPDATE_FORCE` / `applied_ok` unless `mode` is `force` **and** `force_min_version` is set. Smart hard-refuses Sepidz path names (`claude-code-sepidz` / `Claude-Connect-Sepidz`) and Sepidz IP `192.168.250.70` outside a Sepidz tree. Laptop VPN is not a supported Cursor egress path ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â use Connect xray proxy (PROXY_HEALTH).
 

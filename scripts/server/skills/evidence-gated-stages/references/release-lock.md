@@ -11,13 +11,13 @@
 
 1. Fix stages packs candidate_complete (or explicit user waiver).
 2. **New** user message in the unlocking turn with clear intent:
-   - Examples: `deploy کن`, `publish کن`, `ship to production`, `deploy-client-bundle`
+   - Examples: `deploy`, `publish`, `ship to production`, `deploy-client-bundle`
 3. Quote that message verbatim in release pack VERIFY.
 4. Site-specific freezes in the project plan still apply (unlock Smart ≠ unlock frozen site B).
 
 ## Non-unlock language (examples)
 
-- execute the plan / شروع کن / تمام / سبز شد / done / LGTM / به نظر اوکیه
+- execute the plan / start / finished / green / done / LGTM / looks ok
 - Product DONE / closeout YES (admission ≠ release)
 
 ## Pack rules

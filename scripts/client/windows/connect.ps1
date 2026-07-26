@@ -120,10 +120,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260725.38'
+$script:ConnectVersion = '20260725.41'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = 'c657a031-06ee-4137-bed9-9778e96aa9e7'
+$script:ConnectBuildId = '21059021-b14e-4c6c-87a9-87815dbcbece'
 $CfgDir   = Join-Path $env:USERPROFILE ".config\claude-connect"
 $Cfg      = Join-Path $CfgDir "connect.conf"
 $SshDir   = Join-Path $env:USERPROFILE ".ssh"
@@ -175,12 +175,26 @@ function Warn($m) {
 function Step($m) {
     $script:currentStepName = $m
     $script:currentStepStartedAt = Get-Date
+    $script:StepProgressActive = $false
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
         Write-ConnectLog "STEP begin: $m"
     }
     if (-not $script:StepConsoleQuiet) {
         Write-Host ("    " + $m).PadRight(46, '.') -NoNewline -ForegroundColor DarkCyan
     }
+}
+function Update-StepProgress {
+    param([string]$Detail)
+    if (-not $script:currentStepName) { return }
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog "STEP progress: $($script:currentStepName) detail=$Detail" 'TRACE'
+    }
+    if ($script:StepConsoleQuiet) { return }
+    $script:StepProgressActive = $true
+    $left = ("    " + $script:currentStepName).PadRight(46, '.')
+    $line = ($left + " " + $Detail)
+    if ($line.Length -lt 78) { $line = $line.PadRight(78) }
+    Write-Host ("`r" + $line) -NoNewline -ForegroundColor DarkCyan
 }
 function StepOk  {
     param([string]$d='')
@@ -204,7 +218,16 @@ function StepOk  {
     # burst every time a soft tunnel hiccup silently self-heals. Failures (StepFail) are
     # never gated - those must always be visible.
     if (-not $script:StepConsoleQuiet) {
-        if ($d) { Write-Host " $d" -ForegroundColor Green } else { Write-Host " ok" -ForegroundColor Green }
+        if ($script:StepProgressActive) {
+            $left = ("    " + $script:currentStepName).PadRight(46, '.')
+            $tail = if ($d) { " $d" } else { " ok" }
+            Write-Host ("`r" + ($left + $tail).PadRight(78)) -ForegroundColor Green
+            $script:StepProgressActive = $false
+        } elseif ($d) {
+            Write-Host " $d" -ForegroundColor Green
+        } else {
+            Write-Host " ok" -ForegroundColor Green
+        }
     }
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
         $detail = if ($d) { $d } else { 'ok' }
@@ -229,7 +252,13 @@ function StepFail {
         Write-ConnectLog "STEP end: $($script:currentStepName) failed ms=$ms detail=$detail" 'ERROR'
         Write-ConnectLog ("FAIL STEP name={0} detail={1}" -f $script:currentStepName, $detail) 'ERROR'
     }
-    Write-Host " failed" -ForegroundColor Red
+    if ($script:StepProgressActive) {
+        $left = ("    " + $script:currentStepName).PadRight(46, '.')
+        Write-Host ("`r" + ($left + " failed").PadRight(78)) -ForegroundColor Red
+        $script:StepProgressActive = $false
+    } else {
+        Write-Host " failed" -ForegroundColor Red
+    }
     if ($d) { Write-Host "      -> $d" -ForegroundColor DarkGray }
     $script:pendingFixes = @()
     $script:currentStepStartedAt = $null
@@ -237,6 +266,7 @@ function StepFail {
 $script:pendingFixes = @()
 $script:currentStepName = ''
 $script:currentStepStartedAt = $null
+$script:StepProgressActive = $false
 $script:StepConsoleQuiet = $false
 
 $script:ConnectScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -758,13 +788,21 @@ function Initialize-ServerSession {
     # into this same initial round trip (which Acquire-TunnelPort's $uidStr parse must already
     # wait for) removes one full ~5-7s ssh handshake from the step, with no ordering change in
     # what any later code observes.
+    if (Get-Command Update-StepProgress -ErrorAction SilentlyContinue) { Update-StepProgress 'key' }
     $initOut = (SshX "id -u && (test -f ~/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f ~/.ssh/claude_laptop -q) && cat ~/.ssh/claude_laptop.pub && mkdir -p ~/.local/bin && echo MOUNT_HASH:`$(sha256sum ~/.local/bin/claude-mount 2>/dev/null | awk '{print `$1}') && echo GIT_HASH:`$(sha256sum ~/.local/bin/claude-git-setup 2>/dev/null | awk '{print `$1}')") -join "`n"
     $lines = ($initOut -replace "`r",'') -split "`n" | Where-Object { $_.Trim() -ne '' }
     $uidStr = [string]($lines | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1) -replace '\D',''
     $pubB = ([string](($lines | Where-Object { $_ -match '^ssh-' } | Select-Object -First 1) + '')).Trim()
     $remoteHash = (($lines | Where-Object { $_ -match '^MOUNT_HASH:' } | Select-Object -First 1) -replace '^MOUNT_HASH:', '').Trim()
     $gitRemote = (($lines | Where-Object { $_ -match '^GIT_HASH:' } | Select-Object -First 1) -replace '^GIT_HASH:', '').Trim()
+    # P0-S4: seed verified hash from Server setup MOUNT_HASH so
+    # Prepare-ServerSessionParallel can skip the sha256sum SshX round trip when
+    # local claude-mount already matches (ClaudeMountSyncVerifiedHash -eq localHash).
+    if ($remoteHash) {
+        $script:ClaudeMountSyncVerifiedHash = $remoteHash
+    }
     $script:ServerUidStr = $uidStr
+    if (Get-Command Update-StepProgress -ErrorAction SilentlyContinue) { Update-StepProgress 'port' }
     if (-not (Acquire-TunnelPort -UidStr $uidStr)) {
         $base = [int](Get-TunnelPortUserBase -UidStr $uidStr)
         # Port 20000 is reserved (guard: 20000 < PORT). UID 1000 base is 20000 -
@@ -803,6 +841,8 @@ function Initialize-ServerSession {
             $localHash = (Get-FileHash -Algorithm SHA256 -Path $uploadSrc).Hash
             if (-not ($localHash -and $remoteHash -and ($localHash.ToLower() -eq $remoteHash.ToLower()))) {
                 $scpJobs += Start-ScpPushJob -Name 'claude-mount' -LocalPath $uploadSrc -RemoteDest "${Alias}:~/.local/bin/claude-mount.new"
+            } elseif ($localHash) {
+                $script:ClaudeMountSyncVerifiedHash = $localHash
             }
         }
         if ($hasGitSrc) {
@@ -813,11 +853,13 @@ function Initialize-ServerSession {
         }
     }
 
+    if (Get-Command Update-StepProgress -ErrorAction SilentlyContinue) { Update-StepProgress 'laptop ssh' }
     Install-ServerKey $pubB
     if (-not (Ensure-LaptopSshReady -PubB $pubB)) {
         return @{ Ok = $false; Error = 'laptop SSH key setup failed'; PubB = $pubB }
     }
 
+    if (Get-Command Update-StepProgress -ErrorAction SilentlyContinue) { Update-StepProgress 'ssh config' }
     Remove-SshHostBlock $SshCfgPath $Alias
     $sshCfgUser = Get-SshConfigUserForServer -Ip $ServerIP -FallbackUser $RemoteUser
     @"
@@ -830,10 +872,14 @@ Host $Alias
 "@ | Add-Content -Path $SshCfgPath -Encoding ASCII
     Sanitize-SshAliasConfig -CfgPath $SshCfgPath -AliasName $Alias
     Repair-SshPerm $SshCfgPath "SSH config"
+    if (Get-Command Update-StepProgress -ErrorAction SilentlyContinue) { Update-StepProgress 'conf' }
     Push-ServerConnectConf
 
     $pushOk = $true
     $pushedOk = @{}
+    if ($scpJobs.Count -gt 0 -and (Get-Command Update-StepProgress -ErrorAction SilentlyContinue)) {
+        Update-StepProgress 'scripts'
+    }
     foreach ($job in $scpJobs) {
         try {
             # $job.Proc comes from Start-ScpPushJob (raw System.Diagnostics.Process), not
@@ -859,6 +905,9 @@ Host $Alias
                 }
             } else {
                 $pushedOk[$job.Name] = $true
+                if ($job.Name -eq 'claude-mount' -and $localHash) {
+                    $script:ClaudeMountSyncVerifiedHash = $localHash
+                }
             }
         } catch {
             $pushOk = $false
@@ -883,10 +932,6 @@ Host $Alias
 
     # Script push failure is non-fatal (same as Mac v20260717.6+); port/key already OK.
     return @{ Ok = $true; PubB = $pubB; Error = ''; PushOk = $pushOk }
-}
-
-function Escape-BashSingleQuoted([string]$Text) {
-    return $Text -replace "'", "'\''"
 }
 
 function Add-SshRecentLog([string]$Line) {
@@ -1046,12 +1091,31 @@ param(
 )
 $ErrorActionPreference = 'Continue'
 function Write-MountBgLog([string]$Msg, [string]$Level = 'INFO') {
+    if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null }
+    $day = Join-Path $LogDir ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd'))
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+    $line = "[$ts] [$Level] [$SessionId] $Msg"
+    $dayTag = if ($day -match 'connect-(\d{8})\.log$') { $Matches[1] } else { Get-Date -Format 'yyyyMMdd' }
+    $mutexName = "Global\ClaudeConnectDayLogWrite-$dayTag"
+    $mutex = $null
+    $got = $false
     try {
-        if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null }
-        $day = Join-Path $LogDir ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd'))
-        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
-        [System.IO.File]::AppendAllText($day, "[$ts] [$Level] [$SessionId] $Msg`r`n", [System.Text.UTF8Encoding]::new($false))
-    } catch { }
+        $mutex = New-Object System.Threading.Mutex($false, $mutexName)
+        $got = $mutex.WaitOne(5000)
+        $fs = [System.IO.FileStream]::new($day, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+        try {
+            $null = $fs.Seek(0, [System.IO.SeekOrigin]::End)
+            $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($line + "`r`n")
+            $fs.Write($bytes, 0, $bytes.Length)
+        } finally { $fs.Dispose() }
+    } catch {
+        try { Add-Content -LiteralPath ($day + '.mount-bg') -Value $line -Encoding UTF8 } catch { }
+    } finally {
+        if ($mutex) {
+            if ($got) { try { $mutex.ReleaseMutex() } catch { } }
+            try { $mutex.Dispose() } catch { }
+        }
+    }
 }
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 Write-MountBgLog "MOUNT_BG_BEGIN project=$ProjectId"
@@ -1218,12 +1282,6 @@ function Remove-SshHostBlock($cfgPath, $alias) {
         if (-not $skip) { $out.Add($ln) }
     }
     Set-Content -Path $cfgPath -Value $out -Encoding ASCII
-}
-
-function Get-ActiveMountId {
-    $line = ((SshX "grep -E '^ACTIVE_MOUNT=' ~/.claude-connect.conf 2>/dev/null") -join '').Trim()
-    if ($line -match 'ACTIVE_MOUNT=(.*)$') { return $matches[1].Trim() }
-    return ''
 }
 
 function Get-Mounts {
@@ -1786,6 +1844,8 @@ if (-not $laptopReady) {
 }
 $script:LaptopSshVerified = $false
 $script:SessionBgTunnel = $null
+$script:LastMountCheckOkAt = $null
+$script:LastMountCheckOkProject = $null
 $null = Initialize-SessionBgTunnel -Alias $Alias -SshCfgPath $sshCfg -Quiet
 
 $script:tunnelAuthAdminFixAttempted = $false
@@ -1940,6 +2000,7 @@ if (Get-Command Write-ConnectSessionContext -ErrorAction SilentlyContinue) { Wri
     $script:SessionTunnelInitedForPick = [bool]($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited)
 
     $editorOpened = $false
+    $script:EditorOpened = $false
     $script:EditorSeenOpen = $false
     $script:CursorAuthNeedsBootstrap = $false
     $script:RecoveryGeneration = 0
@@ -2036,12 +2097,41 @@ $script:WindowsMcpEnsured = $false
             }
             if (Get-Command Write-ConnectSessionContext -ErrorAction SilentlyContinue) { Write-ConnectSessionContext -Phase 'server_ready' }
 
-            $recoverCheckOk = Invoke-RecoverIfNeeded -ProjectId $go.Id -FreshTunnel:(-not $tunnelReused)
+            # Sync mount health check (Invoke-RecoverIfNeeded -> Test-ProjectMountHealthy /
+            # timeout 12 claude-mount check) is only needed for GIT_MODE=off skipRemount
+            # reuse. Cold BG up skips it - agents use laptop-exec, not SSHFS.
+            $recoverCheckOk = $false
+            $gitModeOff = $false
+            try { $gitModeOff = ((Get-GitMode) -eq 'off') } catch { $gitModeOff = $false }
+            if ($gitModeOff) {
+                # Session mount-ok TTL (2026-07-25): same ProjectId already passed
+                # Invoke-RecoverIfNeeded / Test-ProjectMountHealthy within 60s - skip the
+                # ~0.8s check SSH on re-pick / reconnect in the same Connect session.
+                # Cold first pick and different ProjectId still run the full check.
+                $mountCheckSessionOk = $false
+                if ($script:LastMountCheckOkAt -and $script:LastMountCheckOkProject -and
+                    [string]$script:LastMountCheckOkProject -eq [string]$go.Id -and
+                    ((Get-Date) - $script:LastMountCheckOkAt).TotalSeconds -lt 60) {
+                    $mountCheckSessionOk = $true
+                    $recoverCheckOk = $true
+                    Write-ConnectLog 'MOUNT_CHECK_SKIPPED reason=session_mount_ok' 'DEBUG'
+                }
+                if (-not $mountCheckSessionOk) {
+                    $recoverCheckOk = Invoke-RecoverIfNeeded -ProjectId $go.Id -FreshTunnel:(-not $tunnelReused)
+                    if ($recoverCheckOk) {
+                        $script:LastMountCheckOkAt = Get-Date
+                        $script:LastMountCheckOkProject = [string]$go.Id
+                    } else {
+                        $script:LastMountCheckOkAt = $null
+                        $script:LastMountCheckOkProject = $null
+                    }
+                }
 
-            if (-not (Test-TunnelUp)) {
-                Write-Host "      -> tunnel dropped during recover, restarting..." -ForegroundColor DarkGray
-                $script:LaptopSshVerified = $false
-                continue
+                if (-not (Test-TunnelUp)) {
+                    Write-Host "      -> tunnel dropped during recover, restarting..." -ForegroundColor DarkGray
+                    $script:LaptopSshVerified = $false
+                    continue
+                }
             }
 
             Step 'Verifying laptop SSH key'
@@ -2136,7 +2226,7 @@ $script:WindowsMcpEnsured = $false
 
             $skipRemount = $false
             try {
-                if ((Get-GitMode) -eq 'off') { $skipRemount = [bool]$recoverCheckOk }
+                if ($gitModeOff) { $skipRemount = [bool]$recoverCheckOk }
             } catch { $skipRemount = $false }
             if ($skipRemount) {
                 Write-ConnectLog "MOUNT skip_remount reason=healthy git_mode=off project=$($go.Id)" 'INFO'
@@ -2158,8 +2248,9 @@ $script:WindowsMcpEnsured = $false
                 # after-the-fact diagnosis instead of blocking with a synchronous retry/fail
                 # prompt here.
                 Step "Mounting files"
+                Write-ConnectLog 'MOUNT_CHECK_SKIPPED reason=bg_up' 'DEBUG'
                 [void](Start-MountProjectBackground -ProjectId $go.Id -Alias $Alias -LogDir (Join-Path $env:USERPROFILE '.config\claude-connect\logs') -SessionId (Get-ConnectSessionId))
-                $mountResult = [pscustomobject]@{ Ok = $true; Out = 'started_in_background'; Skipped = $true }
+                $mountResult = [pscustomobject]@{ Ok = $false; Out = 'started_in_background'; Skipped = $true; Pending = $true }
                 $mountOut = $mountResult.Out
                 $mountT = 0
             }
@@ -2233,18 +2324,35 @@ $script:WindowsMcpEnsured = $false
                 # Harvest the background stamp fetch kicked off before "Mounting files" - by now
                 # the mount step has almost certainly already covered its cost. A short WaitForExit
                 # is just a safety margin, not the normal path (it should already be HasExited).
+                # When mount is backgrounded that cover disappears - skip the 5s wait if local
+                # stamp TTL already says current (Test-CursorAuthStampCurrent Source=local_ttl).
+                $stampAlreadyCurrent = $false
+                try {
+                    if (Get-Command Test-CursorAuthStampCurrent -ErrorAction SilentlyContinue) {
+                        $preStampCheck = Test-CursorAuthStampCurrent -DbPath $gsPath -Alias $Alias
+                        $stampAlreadyCurrent = [bool]$preStampCheck.Current
+                    }
+                } catch { }
                 if ($script:BgAuthStampProc) {
                     try {
-                        $script:BgAuthStampProc.WaitForExit(5000) | Out-Null
-                        $bgStamp = $script:BgAuthStampTask.Result.Trim()
-                        if ($bgStamp -and $script:BgAuthStampProc.ExitCode -eq 0) {
-                            if (-not $script:CursorGoldenStampCache) { $script:CursorGoldenStampCache = @{ Stamp = ''; At = $null } }
-                            $script:CursorGoldenStampCache.Stamp = $bgStamp
-                            $script:CursorGoldenStampCache.At = Get-Date
-                            Write-ConnectLog "AUTH_STAMP_PREFETCH hit stamp=$bgStamp" 'DEBUG'
-                        if (Get-Command Clear-CursorGoldenMissingCache -ErrorAction SilentlyContinue) {
-                            Clear-CursorGoldenMissingCache
+                        if (-not $script:BgAuthStampProc.HasExited) {
+                            if ($stampAlreadyCurrent) {
+                                Write-ConnectLog 'AUTH_STAMP_WAIT_SKIPPED reason=local_ttl' 'DEBUG'
+                            } else {
+                                $null = $script:BgAuthStampProc.WaitForExit(5000)
+                            }
                         }
+                        if ($script:BgAuthStampProc.HasExited) {
+                            $bgStamp = $script:BgAuthStampTask.Result.Trim()
+                            if ($bgStamp -and $script:BgAuthStampProc.ExitCode -eq 0) {
+                                if (-not $script:CursorGoldenStampCache) { $script:CursorGoldenStampCache = @{ Stamp = ''; At = $null } }
+                                $script:CursorGoldenStampCache.Stamp = $bgStamp
+                                $script:CursorGoldenStampCache.At = Get-Date
+                                Write-ConnectLog "AUTH_STAMP_PREFETCH hit stamp=$bgStamp" 'DEBUG'
+                                if (Get-Command Clear-CursorGoldenMissingCache -ErrorAction SilentlyContinue) {
+                                    Clear-CursorGoldenMissingCache
+                                }
+                            }
                         }
                     } catch {
                         Write-ConnectLog "AUTH_STAMP_PREFETCH error=$($_.Exception.Message)" 'DEBUG'
@@ -2429,6 +2537,20 @@ $script:WindowsMcpEnsured = $false
                     $launchOk = [bool](Launch-RemoteEditor -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -AuthRelaunch:$authRelaunch -KnownOnFolder:$onCorrectFolder)
                     if (-not $launchOk) {
                         StepFail "$EditorName did not open the project folder. Press O to retry (resets server Cursor profile windows if stuck), or open Cursor with ClaudeServerCursorProfile."
+                        # Opening failed: drop sticky editor-open so session does not pretend Cursor is up.
+                        # Keep sticky only when a window is still proven open (user may retry with O).
+                        $windowOpenInit = $false
+                        if (Get-Command Test-RemoteEditorWindowOpen -ErrorAction SilentlyContinue) {
+                            try {
+                                $windowOpenInit = [bool](Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)
+                            } catch { $windowOpenInit = $false }
+                        }
+                        if (-not $windowOpenInit) {
+                            $script:EditorSeenOpen = $false
+                            $script:EditorOpened = $false
+                            $editorOpened = $false
+                            Write-ConnectLog 'EDITOR_SEEN_CLEAR reason=opening_step_fail' 'INFO'
+                        }
                     } elseif (Get-Command Confirm-RemoteEditorLaunchVisible -ErrorAction SilentlyContinue) {
                         if (-not (Confirm-RemoteEditorLaunchVisible -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)) {
                             StepFail "elevated launch failed - no $EditorName window (try non-elevated Connect or check $EditorName install)"
@@ -2472,6 +2594,7 @@ $script:WindowsMcpEnsured = $false
             }
             if ($onFolderNow) {
                 $editorOpened = $true
+                $script:EditorOpened = $true
                 $script:EditorSeenOpen = $true
             } else {
                 $windowOpenInit = $false
@@ -2481,6 +2604,7 @@ $script:WindowsMcpEnsured = $false
                     } catch { $windowOpenInit = $false }
                 }
                 $editorOpened = $false
+                $script:EditorOpened = $false
                 if (-not $windowOpenInit) {
                     if ($script:EditorSeenOpen) {
                         Write-ConnectLog 'EDITOR_SEEN_CLEAR reason=editor_closed phase=session_open' 'INFO'
@@ -2503,7 +2627,7 @@ $script:WindowsMcpEnsured = $false
 
             $authOkForDiag = ($script:LastAuthDetail -match '^(ok|already ok|skipped|tokens only|n/a)$')
             $diagSw = [System.Diagnostics.Stopwatch]::StartNew()
-            $null = Write-SessionDiagnosticReport -Phase 'SESSION_OPEN' -MountOk $true -MountOut $mountOut `
+            $null = Write-SessionDiagnosticReport -Phase 'SESSION_OPEN' -MountOk $mountOk -MountOut $mountOut `
                 -OnFolder $onFolderNow -DidLaunch $didLaunch -AuthOk $authOkForDiag `
                 -AuthDetail $script:LastAuthDetail -ProjectId $go.Id -RemotePath $go.Path `
                 -EditorCmd $EditorCmd -EditorName $EditorName
@@ -2515,7 +2639,7 @@ $script:WindowsMcpEnsured = $false
             if (Get-Command Write-ConnectScorecard -ErrorAction SilentlyContinue) {
                 Write-ConnectScorecard -Phase 'boot'
             }
-            Complete-PostTunnelRecovery -MountOk $true -AuthDetail $script:LastAuthDetail `
+            Complete-PostTunnelRecovery -MountOk $mountOk -AuthDetail $script:LastAuthDetail `
                 -ProjectId $go.Id -RemotePath $go.Path -EditorCmd $EditorCmd -EditorName $EditorName `
                 -OnFolder $onFolderNow -DidLaunch $didLaunch
 
@@ -2564,11 +2688,13 @@ $script:WindowsMcpEnsured = $false
                     $windowOpen = [bool]$presence.WindowOpen
                     if ($onFolderNow) {
                         $editorOpened = $true
+                        $script:EditorOpened = $editorOpened
                         $script:EditorSeenOpen = $true
                         $script:EditorClosedPollStreak = 0
                         $script:AgentHomeStreak = 0
                     } elseif ($windowOpen) {
                         $editorOpened = $false
+                        $script:EditorOpened = $editorOpened
                         $script:EditorClosedPollStreak = 0
                         # Auto-recover ONLY when Cursor is genuinely on Agent/home.
                         # Folder detection often flaps for ~15-30s after a successful open
@@ -2607,6 +2733,7 @@ $script:WindowsMcpEnsured = $false
                                         $onFolderNow = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
                                         if ($onFolderNow) {
                                             $editorOpened = $true
+                                            $script:EditorOpened = $editorOpened
                                             $script:EditorSeenOpen = $true
                                             $script:AgentHomeStreak = 0
                                         }
@@ -2620,6 +2747,7 @@ $script:WindowsMcpEnsured = $false
                         $script:EditorClosedPollStreak++
                         if ($script:EditorClosedPollStreak -ge 2) {
                             $editorOpened = $false
+                            $script:EditorOpened = $editorOpened
                             if ($script:EditorSeenOpen) {
                                 Write-ConnectLog 'EDITOR_SEEN_CLEAR reason=editor_closed phase=session_poll' 'INFO'
                             }
@@ -2712,17 +2840,31 @@ $script:WindowsMcpEnsured = $false
                     Step "Reopening $EditorName"
                     if (-not (Launch-RemoteEditor -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)) {
                         StepFail "$EditorName did not open the project folder. Press O to retry (resets server Cursor profile windows if stuck), or open Cursor with ClaudeServerCursorProfile."
+                        $windowOpenRetry = $false
+                        if (Get-Command Test-RemoteEditorWindowOpen -ErrorAction SilentlyContinue) {
+                            try {
+                                $windowOpenRetry = [bool](Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)
+                            } catch { $windowOpenRetry = $false }
+                        }
+                        if (-not $windowOpenRetry) {
+                            $script:EditorSeenOpen = $false
+                            $script:EditorOpened = $false
+                            $editorOpened = $false
+                            Write-ConnectLog 'EDITOR_SEEN_CLEAR reason=opening_step_fail' 'INFO'
+                        }
                     } elseif (Get-Command Confirm-RemoteEditorLaunchVisible -ErrorAction SilentlyContinue) {
                         if (-not (Confirm-RemoteEditorLaunchVisible -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)) {
                             StepFail "elevated launch failed - no $EditorName window (try non-elevated Connect or check $EditorName install)"
                         } else {
                             StepOk $go.Path
                             $editorOpened = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
+                            $script:EditorOpened = $editorOpened
                             if ($editorOpened) { $script:EditorSeenOpen = $true }
                         }
                     } else {
                         StepOk $go.Path
                         $editorOpened = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
+                        $script:EditorOpened = $editorOpened
                         if ($editorOpened) { $script:EditorSeenOpen = $true }
                     }
                     Write-Host ''
@@ -2735,6 +2877,7 @@ $script:WindowsMcpEnsured = $false
                     Begin-ConnectRecovery -Trigger 'manual' -ProjectId $go.Id -EditorWasOpen $editorOpened
                     $script:EditorSeenOpen = $false
                     $editorOpened = $false
+                    $script:EditorOpened = $editorOpened
                     $script:LaptopSshVerified = $false
                     $alreadyDown = $false
                     Write-Host ''
@@ -2751,11 +2894,13 @@ $script:WindowsMcpEnsured = $false
                         if ($presence.OnFolder) {
                             $skipRecoveryClear = $true
                             $editorOpened = $true
+                            $script:EditorOpened = $editorOpened
                             $script:EditorSeenOpen = $true
                         } elseif ($presence.WindowOpen) {
                             # Window open but not on folder: preserve mount, do not fake on-folder.
                             $skipRecoveryClear = $true
                             $editorOpened = $false
+                            $script:EditorOpened = $editorOpened
                             Write-ConnectLog 'RECOVERY_SKIP_CLEAR_MOUNT reason=editor_window_open_not_on_folder' 'INFO'
                         } else {
                             if ($script:EditorSeenOpen) {
@@ -2763,6 +2908,7 @@ $script:WindowsMcpEnsured = $false
                             }
                             $script:EditorSeenOpen = $false
                             $editorOpened = $false
+                            $script:EditorOpened = $editorOpened
                         }
                     } catch {
                         # Transient CIM failure: keep prior sticky only if still marked; do not force editorOpened.
@@ -2791,6 +2937,7 @@ $script:WindowsMcpEnsured = $false
                     $alreadyDown = $false
                 } else {
                     $editorOpened = $false
+                    $script:EditorOpened = $editorOpened
                     Write-ConnectLog 'TUNNEL: recovering session (down mount, restart tunnel)' 'WARN'
                     Clear-SessionMount -ProjectId $go.Id -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -Reason 'auto_recovery'
                     Stop-SessionTunnelCleanup -BgTunnel ([ref]$bgTunnel) -ClearServerForward
@@ -2805,6 +2952,7 @@ $script:WindowsMcpEnsured = $false
                 # Explicit quit only (never fall through from ignored Persian keys / empty action).
                 $script:EditorSeenOpen = $false
                 $editorOpened = $false
+                $script:EditorOpened = $editorOpened
                 Write-Host ""
                 Write-Host "    Disconnecting..." -ForegroundColor DarkGray
                 Write-ConnectLog "SESSION: disconnect project=$($go.Id) reason=user_quit"
@@ -2829,6 +2977,7 @@ $script:WindowsMcpEnsured = $false
                         -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path) {
                         $keepTunnelForEditor = $true
                         $editorOpened = $true
+                        $script:EditorOpened = $editorOpened
                         $script:EditorSeenOpen = $true
                     } else {
                         $windowStillOpen = $false
@@ -2839,6 +2988,7 @@ $script:WindowsMcpEnsured = $false
                         if ($windowStillOpen) {
                             $keepTunnelForEditor = $true
                             $editorOpened = $false
+                            $script:EditorOpened = $editorOpened
                             Write-ConnectLog 'FINALLY_KEEP_TUNNEL reason=editor_window_open' 'INFO'
                         } else {
                             if ($script:EditorSeenOpen) {
@@ -2846,6 +2996,7 @@ $script:WindowsMcpEnsured = $false
                             }
                             $script:EditorSeenOpen = $false
                             $editorOpened = $false
+                            $script:EditorOpened = $editorOpened
                             $keepTunnelForEditor = $false
                         }
                     }
@@ -2906,6 +3057,7 @@ $script:WindowsMcpEnsured = $false
         'm' {
             Write-Host '    Back to project menu...' -ForegroundColor Green
             $editorOpened = $false
+            $script:EditorOpened = $editorOpened
             $null = Initialize-SessionBgTunnel -Alias $Alias -SshCfgPath $sshCfg -Quiet
             Start-Sleep -Seconds 1
             Write-Host ''
@@ -2914,6 +3066,7 @@ $script:WindowsMcpEnsured = $false
         'c' {
             Write-Host '    Reconnecting...' -ForegroundColor Green
             $editorOpened = $false
+            $script:EditorOpened = $editorOpened
             Start-Sleep -Seconds 1
             Write-Host ''
             continue mainLoop

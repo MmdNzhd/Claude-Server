@@ -37,18 +37,29 @@ $mountHealth = Get-FunctionSource $gitMode 'Test-ProjectMountHealthy'
 Assert ($mountHealth.Length -gt 100) 'Test-ProjectMountHealthy exists'
 Assert ($mountHealth -match '(?s)SshX.*check.*NoRetryOnTimeout|SshX.*NoRetryOnTimeout.*check') 'Mount health check disables timeout retry'
 
-# Mount step backgrounded (2026-07-24): the old synchronous "$mountResult = Invoke-MountProject"
-# end-anchor no longer exists on this path (Start-MountProjectBackground replaced it, see
-# connect.ps1 - the mount runs detached, doesn't block Opening Cursor). Match either form so
-# this test still proves its real intent (skipRemount correctly reuses the recover health
-# result, no redundant health re-check) regardless of which mount call style is current.
-$sessionMount = [regex]::Match(
+# Mount step backgrounded (2026-07-24) + skip sync check on BG up (2026-07-25):
+# Cold BG path logs MOUNT_CHECK_SKIPPED and sets Ok=$false/Pending=$true.
+# GIT_MODE=off skipRemount may still call Invoke-RecoverIfNeeded — allowed.
+Assert ($connect -match 'Start-MountProjectBackground') 'Session mount path calls Start-MountProjectBackground'
+Assert ($connect -match 'MOUNT_CHECK_SKIPPED reason=bg_up') 'BG up path logs MOUNT_CHECK_SKIPPED reason=bg_up'
+Assert ($connect -match '\$skipRemount') 'skipRemount path still present'
+Assert ($connect -match '\$skipRemount\s*=\s*(?:\[bool\]\s*)?\$recoverCheckOk') 'Session remount decision reuses recover health result'
+Assert ($connect -match 'Invoke-RecoverIfNeeded') 'git=off path may still call Invoke-RecoverIfNeeded'
+$bgKick = [regex]::Match(
     $connect,
-    '(?ms)\$recoverCheckOk\s*=\s*Invoke-RecoverIfNeeded.*?(?:\$mountResult\s*=\s*Invoke-MountProject|Start-MountProjectBackground)'
+    '(?ms)# User request \(2026-07-24\): don''t block.*?Start-MountProjectBackground.*?\$mountResult\s*=\s*\[pscustomobject\]@\{[^}]+\}'
 ).Value
-Assert ($sessionMount.Length -gt 100) 'Session mount path exists'
-Assert ($sessionMount -match '\$skipRemount\s*=\s*(?:\[bool\]\s*)?\$recoverCheckOk') 'Session remount decision reuses recover health result'
-Assert ($sessionMount -notmatch 'Test-ProjectMountHealthy') 'Session mount path does not repeat health check'
+if ($bgKick.Length -lt 80) {
+    $bgKick = [regex]::Match(
+        $connect,
+        '(?ms)Step\s+"Mounting files".*?Start-MountProjectBackground.*?\$mountResult\s*=\s*\[pscustomobject\]@\{[^}]+\}'
+    ).Value
+}
+Assert ($bgKick.Length -gt 80) 'Extracted BG kick branch'
+Assert ($bgKick -match 'MOUNT_CHECK_SKIPPED reason=bg_up') 'BG kick logs MOUNT_CHECK_SKIPPED'
+Assert ($bgKick -match 'Ok\s*=\s*\$false') 'BG mountResult Ok=$false'
+Assert ($bgKick -match 'Pending\s*=\s*\$true') 'BG mountResult Pending=$true'
+Assert ($bgKick -notmatch 'Test-ProjectMountHealthy') 'BG kick branch does not call Test-ProjectMountHealthy'
 
 $isMounted = Get-ShellFunctionSource $mount '_is_mounted'
 Assert ($isMounted.Length -gt 20) '_is_mounted exists'

@@ -32,6 +32,20 @@ session (same session as explorer). Process started only via SSH Session 0 may
 serve HTTP/FS but fail screen grab / some PowerShell. Prefer official `install`
 or user-started `start-server.cmd` on the desktop.
 
+## FAIL-FAST (agents)
+
+`~/.config/windows-mcp/env` existing only means hybrid is *configured*, not that
+Cursor can call tools.
+
+1. If `windows-mcp` / `user-windows-mcp` tools are **not listed** → treat as down;
+   use `laptop-exec` immediately (do not poll / rediscover in a loop).
+2. If **one** call fails with `ECONNREFUSED`, fetch failed, or not connected →
+   mark down for the session; switch to `laptop-exec`; **never** retry that MCP
+   call; **never** retry Cursor Read on `/mounts/`.
+3. `user-filesystem` is a different MCP (narrow allowlist) — not a substitute.
+4. Tell the user once: `connect.bat`, laptop `~\.windows-mcp\start-server.cmd`,
+   Reload Window.
+
 ## Server helpers
 
 | Item | Path |

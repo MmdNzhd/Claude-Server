@@ -19,19 +19,19 @@
 
 ```mermaid
 graph TD
-    subgraph WIN["🪟 Windows Laptop"]
+    subgraph WIN["Windows Laptop"]
         FILES["D:/Smart/SqlSimulator/\n├── .git.server-session  ← hidden\n├── .claude/rules/        ← stub\n├── .claude/commands/     ← stub\n├── .mcp.json             ← stub\n└── source files"]
         SSHD["OpenSSH Server\nport 22"]
     end
 
-    subgraph NET["🌐 VPN + SSH Tunnel"]
+    subgraph NET["VPN + SSH Tunnel"]
         TUNNEL["connect.bat creates:\nserver port 21002 → Windows:22"]
     end
 
-    subgraph SRV["🐧 Ubuntu 24 Server"]
+    subgraph SRV["Ubuntu 24 Server"]
         MOUNT["~/mounts/sqlsimulator/\n(SSHFS — no .git visible)"]
-        GIT["git status\nfatal: not a git repository\n⏱ 0.004s"]
-        CLAUDE["claude\n⏱ 4s startup"]
+        GIT["git status\nfatal: not a git repository\n0.004s"]
+        CLAUDE["claude\n4s startup"]
         SCRIPTS["claude-mount\nclaude-automount\nclaude-watchdog"]
     end
 
@@ -62,7 +62,7 @@ flowchart TD
     H --> I{mount\nsucceeded?}
 
     I -->|no| J[restore .git immediately\nshow specific error]
-    J --> ERR([❌ error shown to user])
+    J --> ERR([error shown to user])
 
     I -->|yes| K{ls -A\nverification}
     K -->|timeout/fail| L[restore .git\nlazy unmount]
@@ -70,7 +70,7 @@ flowchart TD
 
     K -->|ok| M[background:\nls .claude/ → warm dcache\nls .claude/rules/\nls .claude/commands/]
 
-    M --> Z([✅ VSCode opens\ngit status → 0.004s\nclaude startup → 4s])
+    M --> Z([VSCode opens\ngit status → 0.004s\nclaude startup → 4s])
 ```
 
 ---
@@ -81,7 +81,7 @@ flowchart TD
 flowchart LR
     subgraph HAPPY["Normal Session"]
         S1([user connects]) -->|mount up| H1[.git hidden\nSSSHFS active]
-        H1 -->|mount down| R1[.git restored ✅]
+        H1 -->|mount down| R1[.git restored OK]
     end
 
     subgraph CRASH["Crash / Abnormal Disconnect"]
@@ -108,24 +108,24 @@ flowchart LR
     PROB["628 files\n× 670ms per stat\n= 7 minutes"]
 
     PROB --> A1["Local .git\n--separate-git-dir"]
-    A1 -->|❌ still stats\nworking tree files| FAIL
+    A1 -->|still stats\nworking tree files| FAIL
 
     PROB --> A2["core.checkStat\n= minimal"]
-    A2 -->|❌ fewer fields\nsame call count| FAIL
+    A2 -->|fewer fields\nsame call count| FAIL
 
     PROB --> A3["attr_timeout=30\nSSHFS cache"]
-    A3 -->|❌ cold cache\nevery 30 seconds| FAIL
+    A3 -->|cold cache\nevery 30 seconds| FAIL
 
     PROB --> A4["rsync Windows\n→ local disk"]
-    A4 -->|❌ rsync reads\nfrom SSHFS too\n4m13s enumeration| FAIL
+    A4 -->|rsync reads\nfrom SSHFS too\n4m13s enumeration| FAIL
 
     PROB --> A5["FSMonitor"]
-    A5 -->|❌ SSHFS has\nno inotify support| FAIL
+    A5 -->|SSHFS has\nno inotify support| FAIL
 
-    PROB --> SOL["✅ Hide .git\nrename on mount\nrestore on unmount"]
-    SOL --> WIN["0.004s ⚡"]
+    PROB --> SOL["Hide .git\nrename on mount\nrestore on unmount"]
+    SOL --> WIN["0.004s fast"]
 
-    FAIL["❌ still slow"]
+    FAIL["still slow"]
 ```
 
 ---

@@ -3,7 +3,6 @@
 
 Callers: author-mode agents / humans. CLI only (argparse). No network API.
 Writes STAGE-0.md, HYPOTHESES.md, CLOSEOUT.md, README.md under docs/<feature>-evidence/.
-User instruction (verbatim): کامل ترش کنی
 
 Usage:
   python3 scaffold-evidence-dir.py --root /path/to/repo --feature orders-nre

@@ -42,6 +42,25 @@ When MCP is ready and ops are **independent**:
    - **Windows + MCP ready:** windows-mcp (`FileSystem` / `PowerShell` / UI)
    - **Otherwise:** Shell + `laptop-exec` with **`-p PROJECT` every call**
 
+## FAIL-FAST (windows-mcp) — stop the 100-retry loop
+
+Env file / hybrid hint ≠ tools actually working. Agents burn turns retrying Read or MCP.
+
+**MCP ready only if both are true:**
+
+1. Tool catalog lists `windows-mcp` or `user-windows-mcp` with `FileSystem` / `PowerShell` (not merely `user-filesystem`).
+2. One real call succeeds (or you have not yet tried this session).
+
+**After ONE failure** (`ECONNREFUSED`, fetch failed, not connected, 401 loop, tools missing):
+
+- Mark MCP **down for this session**.
+- Switch to **`laptop-exec` only** for FS/shell (still LE for git/rg).
+- **Do not** retry the failed MCP call.
+- **Do not** retry Cursor Read/Grep/Write on `/mounts/`.
+- Tell user once: reconnect `connect.bat` / start laptop `windows-mcp` / Reload Window.
+
+`user-filesystem` is **not** windows-mcp (different allowlist; often useless for project roots).
+
 ```bash
 laptop-exec status    # must be UP for LE path; else user connect.bat/sh — stop
 laptop-exec read  -p PROJECT REL
@@ -122,15 +141,16 @@ Task spawn is allowed. **Children do not inherit this skill.** If the Task `prom
 **Paste verbatim into every Task `prompt` (replace PROJECT):**
 
 ```
-Windows-MCP first (when ready); laptop-exec fallback.
-On Windows+MCP ready: use windows-mcp FileSystem/PowerShell/UI by default.
+Windows-MCP first ONLY if tools listed (windows-mcp/user-windows-mcp FileSystem/PowerShell). Else laptop-exec immediately.
+FAIL-FAST: one MCP connection error (ECONNREFUSED/fetch failed) => MCP down for session; laptop-exec only; never retry same MCP call; never retry Read on /mounts/.
+user-filesystem ≠ windows-mcp.
 ALWAYS laptop-exec for git + content rg; Mac; or when MCP is down.
 laptop-exec status first when using LE. Use -p PROJECT on every laptop-exec call.
 Paths: MCP = absolute Windows under project root; LE = repo-relative (never /home/.../mounts/...).
 Never Read/Grep/Glob/Write/Edit/Shell-heavy on /mounts/.
 Never laptop-exec rg -i/-l/-n/--glob.
 On deny: run NEXT: immediately — do not retry the denied tool.
-MCP: ~8 parallel FileSystem/PowerShell in ONE turn (never one-by-one for independent ops). laptop-exec: prefer ≤4 parallel (hard cap 8 SSH slots).
+MCP: ~8 parallel FileSystem/PowerShell in ONE turn when ready. laptop-exec: prefer ≤4 parallel (hard cap 8 SSH slots).
 Never remove laptop-exec.
 ```
 
@@ -151,9 +171,12 @@ Prefer ≤4 parallel Tasks that touch the laptop via SSH. One hung `run` blocks 
 | "I'll retry the denied tool" | Forbidden; run `NEXT:` |
 | "windows-mcp replaces laptop-exec" | False — Mac/git/rg need LE |
 | "MCP FileSystem search = rg" | False — use `laptop-exec rg` for content search |
+| "Hybrid env exists so MCP must work" | False — tools must be listed AND one call ok |
+| "Retry windows-mcp until it works" | Forbidden — one fail → LE for session |
+| "user-filesystem is windows-mcp" | False — different server/allowlist |
 
 ## Red flags → stop
 
-Defaulting to LE while MCP ready · Serializing independent MCP calls · Retry after deny · `rg -i/--glob/-l` · Task without paste block · omit `-p` · `cd mounts && git` · long unbounded `run` · ask for SSHFS/sudo password → `sudo-from-laptop` · delete/disable laptop-exec because MCP exists
+Defaulting to LE while MCP ready · Serializing independent MCP calls · Retry after deny · Retry MCP after ECONNREFUSED · Calling Read on mounts after deny · `rg -i/--glob/-l` · Task without paste block · omit `-p` · `cd mounts && git` · long unbounded `run` · ask for SSHFS/sudo password → `sudo-from-laptop` · delete/disable laptop-exec because MCP exists · Treating user-filesystem as windows-mcp
 
 Detail: `laptop-exec --help`. Do not paste CLAUDE.md SSH encyclopedia into prompts.

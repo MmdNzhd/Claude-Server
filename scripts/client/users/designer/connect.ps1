@@ -577,7 +577,7 @@ try {
         # Flush buffered keypresses before entering wait loop
         while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
 
-        # VK fallback ONLY for null/control KeyChar - never Persian printable non-ASCII (ض on Q).
+        # VK fallback ONLY for null/control KeyChar - never non-ASCII printable KeyChar (e.g. Arabic/Persian letter on Q key under FA layout).
         $action = ''
         $gotKey = $false
         while (-not $bgTunnel.HasExited) {
@@ -610,7 +610,7 @@ try {
                 $useVk = ($code -eq 0 -or ($code -gt 0 -and $code -lt 32))
                 if ($letter -eq 'r' -or ($useVk -and $ki.Key -eq [ConsoleKey]::R)) { $action = 'r' }
                 elseif ($letter -eq 'q' -or ($useVk -and $ki.Key -eq [ConsoleKey]::Q) -or $ki.Key -eq [ConsoleKey]::Enter) { $action = 'q' }
-                else { $action = 'r' }  # ignore non-command (incl. Persian); auto-recover
+                else { $action = 'r' }  # ignore non-command (incl. non-ASCII layout glyphs); auto-recover
             } else {
                 $action = 'r'
                 Write-Host "    Connection dropped - reconnecting..." -ForegroundColor Yellow
@@ -653,6 +653,8 @@ try {
     if ($bgTunnel -and -not $bgTunnel.HasExited) {
         Stop-Process -Id $bgTunnel.Id -Force -ErrorAction SilentlyContinue
     }
+    # Parity with windows/connect.ps1: flush day log + Force drain on session teardown.
+    if (Get-Command Close-ConnectLog -ErrorAction SilentlyContinue) { Close-ConnectLog }
     if (Get-Command Exit-ConnectSingleInstance -ErrorAction SilentlyContinue) { Exit-ConnectSingleInstance }
 elseif ($script:ConnectInstanceMutex) {
     try { $script:ConnectInstanceMutex.ReleaseMutex() } catch { }
@@ -695,6 +697,7 @@ while ($choice -ne "c" -and $choice -ne "x") {
 } # end :mainLoop
 Write-Host ""
 
+if (Get-Command Close-ConnectLog -ErrorAction SilentlyContinue) { Close-ConnectLog }
 if (Get-Command Exit-ConnectSingleInstance -ErrorAction SilentlyContinue) { Exit-ConnectSingleInstance }
 elseif ($script:ConnectInstanceMutex) {
     try { $script:ConnectInstanceMutex.ReleaseMutex() } catch { }

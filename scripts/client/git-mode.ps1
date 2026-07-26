@@ -258,7 +258,7 @@ function Get-TunnelBanner {
     elseif (Get-Command Get-SessionTunnelPort -ErrorAction SilentlyContinue) { $probePort = [int](Get-SessionTunnelPort) }
     elseif ($Port) { $probePort = [int]$Port }
     if ($probePort -le 0) { return '' }
-    # Positive cache only A<"ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¯ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¿ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½<"ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¯ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¿ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½,<"ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¯ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¿ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½<"ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¯ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¿ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½?? never cache empty/false for 3s (poisoned DROP1 recovery).
+    # Positive cache only - never cache empty/false for 3s (poisoned DROP1 recovery).
     if (-not $script:TunnelBannerCacheInvalidate -and $script:TunnelBannerCacheAt -and $script:TunnelBannerCacheUp) {
         $ageMs = [int]((Get-Date) - $script:TunnelBannerCacheAt).TotalMilliseconds
         if ($ageMs -lt 3000) {
@@ -573,27 +573,6 @@ function Get-LocalTunnelSshPids {
         Where-Object { $_.CommandLine -match "-R\s+${TargetPort}:localhost:22" } |
         ForEach-Object { $pids += [int]$_.ProcessId }
     return @($pids | Select-Object -Unique)
-}
-
-function Test-TunnelPortOccupiedByPeer {
-    param(
-        [Parameter(Mandatory)][int]$TargetPort,
-        [System.Diagnostics.Process]$CurrentBgTunnel = $null,
-        [int[]]$ProtectedProcessIds = @()
-    )
-    $protected = @($ProtectedProcessIds)
-    if ($CurrentBgTunnel -and -not $CurrentBgTunnel.HasExited) {
-        $protected += [int]$CurrentBgTunnel.Id
-    }
-    if ($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) {
-        $protected += [int]$script:SessionBgTunnel.Id
-    }
-    foreach ($processId in (Get-LocalTunnelSshPids -TargetPort $TargetPort)) {
-        if ($protected -contains $processId) { continue }
-        $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
-        if ($proc -and -not $proc.HasExited) { return $true }
-    }
-    return $false
 }
 
 # Peer safety: kill stale local ssh -R on this port only; never the live session PID
@@ -993,7 +972,7 @@ $tcpOpen = $false
         }
     } catch { $tcpOpen = $false }
         if (-not $tcpOpen) {
-            # Closed port cannot be a live foreign peer ÃƒÆ'Ã†'Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â skip expensive banner/hostkey SSH.
+            # Closed port cannot be a live foreign peer - skip expensive banner/hostkey SSH.
             return $false
         }
         Clear-TunnelBannerCache
@@ -1063,7 +1042,7 @@ function Get-ServerOpenTunnelPorts {
         return ,$set
     }
     $list = (@($Ports) | Select-Object -Unique) -join ' '
-    # One SSH, parallel short probes ÃƒÆ'Ã†'Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â closed ports fail in ~250ms, not 1s serial each.
+    # One SSH, parallel short probes - closed ports fail in ~250ms, not 1s serial each.
     $script = @"
 for p in $list; do
   ( timeout 0.25 bash -c "exec 3<>/dev/tcp/127.0.0.1/`$p" 2>/dev/null && echo OPEN:`$p ) &
@@ -1578,8 +1557,8 @@ function Get-TunnelProxyLegState {
     # Classify reverse-tunnel ssh cmdline for the xray proxy leg.
     # ok           = SOCKS + HTTP -L to server xray
     # missing_http = SOCKS -L without HTTP -L
-    # legacy_D     = old ssh -D (office-IP egress) ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â must reseed
-    # missing  = no -L / -D for our socks port ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â must reseed when xray is up
+    # legacy_D     = old ssh -D (office-IP egress) - must reseed
+    # missing  = no -L / -D for our socks port - must reseed when xray is up
     # unknown  = process gone / unreadable
     param([Parameter(Mandatory)][int]$TunnelPid)
     $socksCandidate = Get-SocksProxyPort
@@ -1731,7 +1710,7 @@ function Acquire-TunnelPort {
     $portBase = Get-TunnelPortUserBase -UidStr $UidStr
     if (-not $UidStr) { return $false }
 
-    # Already bound to a live session tunnel ÃƒÆ'Ã†'Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â do not rescan.
+    # Already bound to a live session tunnel - do not rescan.
     if ($Port -and $script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) {
         $mine = @($ProtectedProcessIds)
         $mine += [int]$script:SessionBgTunnel.Id
@@ -1887,7 +1866,7 @@ function Acquire-TunnelPort {
     }
     Write-GitModeLog ("ACQUIRE_FAST prep_ms={0} candidates={1} probe={2} open={3}" -f $sw.ElapsedMilliseconds, $candidates.Count, $probePorts.Count, $openSet.Count) 'INFO'
 
-    # Pass 1: claim first CLOSED port (truly free) ÃƒÆ'Ã†'Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â no banner/hostkey/foreign SSH.
+    # Pass 1: claim first CLOSED port (truly free) - no banner/hostkey/foreign SSH.
     foreach ($c in $candidates) {
         $candPort = [int]$c.Port
         $slot = [int]$c.Slot
@@ -1902,7 +1881,7 @@ function Acquire-TunnelPort {
         return $true
     }
 
-    # Pass 2: TCP-open ports ÃƒÆ'Ã†'Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã†'Ãƒâ€šÃ‚Â¢ÃƒÆ'Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ'Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â only then do ownership/foreign checks (expensive).
+    # Pass 2: TCP-open ports - only then do ownership/foreign checks (expensive).
     foreach ($c in $candidates) {
         $candPort = [int]$c.Port
         $slot = [int]$c.Slot
@@ -1966,6 +1945,23 @@ function Acquire-TunnelPort {
 function Test-TunnelUp {
     param([int]$Retries = 0)
     if (-not $Port) { return $false }
+    # Session-fresh spawn trust (2026-07-25): Wait-ForTunnelUp already proved this reverse
+    # port for THIS Connect's SessionBgTunnel. Within 30s (same TTL as ENSURE recent_success /
+    # PUSH_CONF session_tunnel_fresh), skip Get-TunnelBanner (~0.6-1.5s). Distinct from the
+    # generic TunnelBannerCache 3s hit below - requires LastTunnelSpawnSuccess* + live pid.
+    if ($script:LastTunnelSpawnSuccessAt -and
+        $script:LastTunnelSpawnSuccessPort -eq $Port -and
+        $script:LastTunnelSpawnPid -and
+        $script:SessionBgTunnel) {
+        $bgAlive = $false
+        try { $bgAlive = -not $script:SessionBgTunnel.HasExited } catch { $bgAlive = $false }
+        if ($bgAlive -and [int]$script:SessionBgTunnel.Id -eq [int]$script:LastTunnelSpawnPid -and
+            ((Get-Date) - $script:LastTunnelSpawnSuccessAt).TotalSeconds -lt 30) {
+            $script:TunnelSoftFailCount = 0
+            Write-GitModeLog "TUNNEL_UP port=$Port up=True reason=session_tunnel_fresh pid=$($script:LastTunnelSpawnPid)" 'TRACE'
+            return $true
+        }
+    }
     if (-not $script:TunnelBannerCacheInvalidate -and $script:TunnelBannerCacheAt -and $script:TunnelBannerCacheUp) {
         $ageMs = [int]((Get-Date) - $script:TunnelBannerCacheAt).TotalMilliseconds
         if ($ageMs -lt 3000) {
@@ -2468,6 +2464,27 @@ function Ensure-LaptopReverseSshCached {
         Write-GitModeLog "LAPTOP_SSH: ensure_cached end rc=0 ms=$cachedMs reason=verified_cache" 'TRACE'
         return 0
     }
+    # Session-fresh (2026-07-25): ENSURE Wait-ForTunnelUp already saw a Windows OpenSSH
+    # banner on this reverse port for SessionBgTunnel. Within 30s skip the duplicate
+    # reverse probe (~1.3-2.7s) that "Verifying laptop SSH" used to pay.
+    # Do NOT require TunnelBannerCacheUp: Invoke-RecoverIfNeeded clears that cache on
+    # need_mount (live 2026-07-25 afb01e2a81b1: reason=probe_ok ms=2725 after recover).
+    # Spawn stamps + live SessionBgTunnel pid are the trust signal (same as PUSH_CONF).
+    # Does NOT skip when spawn markers are absent (cold / foreign / reseed must still probe).
+    if (-not $script:LaptopSshVerified -and $Port -and $script:LastTunnelSpawnSuccessAt -and
+        $script:LastTunnelSpawnSuccessPort -eq $Port -and
+        $script:LastTunnelSpawnPid -and
+        $script:SessionBgTunnel) {
+        $bgAlive = $false
+        try { $bgAlive = -not $script:SessionBgTunnel.HasExited } catch { $bgAlive = $false }
+        if ($bgAlive -and [int]$script:SessionBgTunnel.Id -eq [int]$script:LastTunnelSpawnPid -and
+            ((Get-Date) - $script:LastTunnelSpawnSuccessAt).TotalSeconds -lt 30) {
+            $script:LaptopSshVerified = $true
+            $cachedMs = [int]((Get-Date) - $cachedBegin).TotalMilliseconds
+            Write-GitModeLog "LAPTOP_SSH: ensure_cached end rc=0 ms=$cachedMs reason=session_tunnel_fresh" 'TRACE'
+            return 0
+        }
+    }
     if (Test-LaptopReverseSsh) {
         $script:LaptopSshVerified = $true
         $cachedMs = [int]((Get-Date) - $cachedBegin).TotalMilliseconds
@@ -2927,28 +2944,52 @@ function Push-ServerConnectConf {
     # (so the common case adds no round trip) while removing the wasted keyscan entirely. The
     # open/reconnect path is unchanged in behavior (it just pays one extra ~1.4s tcp probe, and
     # only there both safety checks still run in full, in the same order as before).
-    $pushPortListening = $true
-    if ($sessionPort -and (Get-Command Test-TunnelPortTcpOpen -ErrorAction SilentlyContinue)) {
-        # Reuse the acquire batch verdict (issued ~1-2s earlier for this exact port) instead of a
-        # fresh ssh probe; falls back to a live probe on a cache miss/expiry.
-        $pushPortListening = [bool](Test-TunnelPortTcpOpen -TargetPort ([int]$sessionPort) -MaxCacheAgeMs 8000)
+    #
+    # Session-fresh trust (2026-07-25, live: Prepare-ServerSessionParallel paid ~5s of
+    # tcp+hostkey+banner right after Ensure-Tunnel already proved this port): when THIS
+    # Connect's SessionBgTunnel just spawned/waited successfully for $sessionPort within
+    # 30s (same stamp as ENSURE_TUNNEL recent_success), skip foreign/hostkey re-probes.
+    # ForeignPeer clears TunnelBannerCache and re-runs nc+keyscan - pure waste on that path.
+    # TTL matches LastTunnelSpawnSuccess recent_success window; miss falls through to full checks.
+    $sessionTunnelFresh = $false
+    if ($sessionPort -and $script:LastTunnelSpawnSuccessAt -and
+        $script:LastTunnelSpawnSuccessPort -eq [int]$sessionPort -and
+        $script:LastTunnelSpawnPid -and
+        ((Get-Date) - $script:LastTunnelSpawnSuccessAt).TotalSeconds -lt 30) {
+        $bgAlive = $false
+        if ($script:SessionBgTunnel) {
+            try { $bgAlive = -not $script:SessionBgTunnel.HasExited } catch { $bgAlive = $false }
+            if ($bgAlive -and [int]$script:SessionBgTunnel.Id -eq [int]$script:LastTunnelSpawnPid) {
+                $sessionTunnelFresh = $true
+            }
+        }
     }
-    if ($pushPortListening) {
-        # Never publish another peer's reverse port into ~/.claude-connect.conf.
-        if ($sessionPort -and (Get-Command Test-TunnelPortIsForeignPeer -ErrorAction SilentlyContinue)) {
-            if (Test-TunnelPortIsForeignPeer -TargetPort ([int]$sessionPort)) {
-                Write-GitModeLog "PUSH_CONF blocked: foreign_peer port=$sessionPort" 'ERROR'
-                return
-            }
-        }
-        if ($sessionPort -and (Get-Command Test-TunnelHostKeyMismatch -ErrorAction SilentlyContinue)) {
-            if (Test-TunnelHostKeyMismatch -TargetPort ([int]$sessionPort)) {
-                Write-GitModeLog "PUSH_CONF blocked: hostkey_mismatch port=$sessionPort" 'ERROR'
-                return
-            }
-        }
+    if ($sessionTunnelFresh) {
+        Write-GitModeLog "PUSH_CONF safety_probes_skipped port=$sessionPort reason=session_tunnel_fresh" 'DEBUG'
     } else {
-        Write-GitModeLog "PUSH_CONF safety_probes_skipped port=$sessionPort reason=tcp_closed" 'DEBUG'
+        $pushPortListening = $true
+        if ($sessionPort -and (Get-Command Test-TunnelPortTcpOpen -ErrorAction SilentlyContinue)) {
+            # Reuse the acquire batch verdict (issued ~1-2s earlier for this exact port) instead of a
+            # fresh ssh probe; falls back to a live probe on a cache miss/expiry.
+            $pushPortListening = [bool](Test-TunnelPortTcpOpen -TargetPort ([int]$sessionPort) -MaxCacheAgeMs 8000)
+        }
+        if ($pushPortListening) {
+            # Never publish another peer's reverse port into ~/.claude-connect.conf.
+            if ($sessionPort -and (Get-Command Test-TunnelPortIsForeignPeer -ErrorAction SilentlyContinue)) {
+                if (Test-TunnelPortIsForeignPeer -TargetPort ([int]$sessionPort)) {
+                    Write-GitModeLog "PUSH_CONF blocked: foreign_peer port=$sessionPort" 'ERROR'
+                    return
+                }
+            }
+            if ($sessionPort -and (Get-Command Test-TunnelHostKeyMismatch -ErrorAction SilentlyContinue)) {
+                if (Test-TunnelHostKeyMismatch -TargetPort ([int]$sessionPort)) {
+                    Write-GitModeLog "PUSH_CONF blocked: hostkey_mismatch port=$sessionPort" 'ERROR'
+                    return
+                }
+            }
+        } else {
+            Write-GitModeLog "PUSH_CONF safety_probes_skipped port=$sessionPort reason=tcp_closed" 'DEBUG'
+        }
     }
     # Escape for embedding inside a single-quoted bash assignment (avoid double quotes).
     $lu = ($LaptopUser -replace "'", "'\''")
@@ -3075,11 +3116,6 @@ function Show-MountGitWarn {
     }
 }
 
-function Unmount-OtherProjects {
-    param([Parameter(Mandatory)][string]$KeepProjectId)
-    [void](Invoke-SshXChecked -RemoteCmd "$CM down-others '$KeepProjectId'" -Label 'MOUNT_DOWN_OTHERS')
-}
-
 function Clear-SessionMount {
     param(
         [Parameter(Mandatory)][string]$ProjectId,
@@ -3092,6 +3128,9 @@ function Clear-SessionMount {
     $skipEditor = -not $StopEditor
     $reasonPart = if ($Reason) { " reason=$Reason" } else { '' }
     Write-GitModeLog "CLEAR_MOUNT project=$ProjectId skip_editor=$([int]$skipEditor) editor=$EditorCmd path=$RemotePath$reasonPart" 'INFO'
+    # Invalidate GIT_MODE=off session mount-ok TTL so auto_recovery cannot skipRemount a downed mount.
+    $script:LastMountCheckOkAt = $null
+    $script:LastMountCheckOkProject = $null
     if ($StopEditor -and $EditorCmd -and $Alias -and $RemotePath) {
         if (Get-Command Stop-RemoteEditor -ErrorAction SilentlyContinue) {
             Write-GitModeLog 'CLEAR_MOUNT stopping editor (path-scoped)' 'DEBUG'

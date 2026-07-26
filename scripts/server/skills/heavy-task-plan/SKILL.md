@@ -5,8 +5,8 @@ description: >-
   confirmation, staged execution, wrap-up. Maximizes wall-clock speed via
   parallel subagents while requiring accuracy gates (verified change, not
   agent count). Use ONLY when the user explicitly asks to plan first —
-  e.g. says "plan this", "make a plan before doing it", "برنامه بریز", "پلن
-  کن", "design this first", or names this skill directly. Do not use for
+  e.g. says "plan this", "make a plan before doing it", "design this first",
+  or names this skill directly. Do not use for
   routine requests where the user didn't ask for a plan.
 ---
 

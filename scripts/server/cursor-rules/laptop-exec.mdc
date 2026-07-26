@@ -43,6 +43,12 @@ When MCP is ready and you need **multiple independent** file/shell ops:
 
 Hooks deny on `/mounts/`: Read, Write, Edit, EditNotebook, StrReplace, Delete, Grep, Glob, and heavy Shell. Deny is **expected**. **Do not retry.** First allowed I/O = **windows-mcp when ready**, else Shell + `laptop-exec`. Project `hooks.json` must stay `{"version":1,"hooks":{}}`.
 
+## FAIL-FAST (windows-mcp)
+
+- **Ready** = tools listed (`windows-mcp` / `user-windows-mcp` with `FileSystem`/`PowerShell`) — not merely hybrid env on disk. `user-filesystem` ≠ windows-mcp.
+- **One** MCP failure (`ECONNREFUSED`, fetch failed, not connected) → MCP **down for this session** → `laptop-exec` only. Never retry the same MCP call. Never retry denied Read on `/mounts/`.
+- Tell user once to reconnect / start laptop windows-mcp / Reload Window.
+
 | Denied | Use |
 |--------|-----|
 | Read | windows-mcp `FileSystem` when ready; else `laptop-exec read -p ID REL` |

@@ -53,6 +53,31 @@ $diagSrc = Get-Content (Get-ClientFile 'connect-diagnostic.ps1') -Raw
 Assert ($diagSrc -match 'lightDiag = \(\$Phase -eq ''SESSION_OPEN''') 'F7 light SESSION_OPEN diagnostic gate'
 Assert ($diagSrc -match 'skipped=light_session_open') 'F7 skips expensive process snapshot'
 
+
+Write-Host ''
+
+Write-Host ''
+Write-Host '=== SESSION_FILTER tip (Task 8: usable bracketed sid filter) ===' -ForegroundColor Cyan
+$uiTip = Get-Content (Get-ClientFile 'connect-ui.ps1') -Raw
+$shTip = Get-Content (Get-ClientFile 'connect-ui.sh') -Raw
+Assert ($uiTip -match 'SESSION_FILTER[^\r\n]*tip=Select-String -Pattern') `
+    'Win SESSION_FILTER tip includes Select-String -Pattern (usable filter, not prose-only)'
+Assert ($uiTip -match [regex]::Escape("tip=Select-String -Pattern '\[")) `
+    'Win tip pattern starts with escaped \[ for literal bracketed session id'
+$sid = 'sessfilter01'
+$tipLine = "SESSION_FILTER grep=[$sid] tip=Select-String -Pattern '\[$sid\]'"
+$pm = [regex]::Match($tipLine, "tip=Select-String -Pattern '((?:\\.|[^'])*)'")
+Assert ($pm.Success) 'can parse Pattern from tip line'
+$sample = "[2026-07-25 12:00:00.000] [INFO] [$sid] HELLO"
+$hit = [bool]($sample | Select-String -Pattern $pm.Groups[1].Value)
+Assert $hit 'expanded Win tip Pattern matches bracketed sid in sample log line'
+Assert ($shTip -match 'SESSION_FILTER:[^\r\n]*grep -F') `
+    'Mac SESSION_FILTER tip uses grep -F (fixed string; BRE [sid] char-class is broken)'
+Assert ($shTip -match 'grep -F') `
+    'Mac tip contains grep -F'
+Assert ($shTip -notmatch 'SESSION_FILTER: grep \\"\[') `
+    'Mac tip must not use unescaped BRE grep before bracketed sid'
+
 Write-Host ''
 if ($fail -eq 0) { Write-Host 'All tests passed.' -ForegroundColor Green; exit 0 }
 Write-Host "$fail test(s) failed." -ForegroundColor Red; exit 1

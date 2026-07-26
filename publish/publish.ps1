@@ -227,9 +227,10 @@ Claude Connect - do not run from this folder
 This publish folder is not for end users.
 
 Give users:
-  Desktop\Claude-Connect.exe
+  Desktop\Claude-Connect\connect.bat
+  Desktop\Claude-Connect-VERSION.exe   (optional cold install)
 
-Live install after first run:
+Live install:
   Desktop\Claude-Connect\
 "@
     [IO.File]::WriteAllText(
@@ -318,13 +319,24 @@ if (-not $NoExe) {
     Copy-Item -LiteralPath $exePath -Destination (Join-Path $OutDir 'windows\Claude-Connect.exe') -Force
     Write-Ok ("claude-publish\Claude-Connect.exe + windows\Claude-Connect.exe ({0:N0} bytes)" -f (Get-Item -LiteralPath $exePath).Length)
     try {
-        $deskExe = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect.exe'
-        $deskSetup = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect-Setup.exe'
-        Copy-Item -LiteralPath $exePath -Destination $deskExe -Force
-        Copy-Item -LiteralPath $exePath -Destination $deskSetup -Force
-        Write-Ok 'Desktop\Claude-Connect.exe (+ Setup copy)'
+        # One versioned EXE on Desktop (never unversioned Claude-Connect.exe / Setup —
+        # those used to overwrite Desktop\Claude-Connect with stale extracts).
+        $deskVerExe = Join-Path $env:USERPROFILE ("Desktop\Claude-Connect-{0}.exe" -f $ConnectVersion)
+        Copy-Item -LiteralPath $exePath -Destination $deskVerExe -Force
+        foreach ($stale in @(
+            (Join-Path $env:USERPROFILE 'Desktop\Claude-Connect.exe'),
+            (Join-Path $env:USERPROFILE 'Desktop\Claude-Connect-Setup.exe')
+        )) {
+            if (Test-Path -LiteralPath $stale) {
+                Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Get-ChildItem -LiteralPath (Join-Path $env:USERPROFILE 'Desktop') -Filter 'Claude-Connect-*.exe' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ne ("Claude-Connect-{0}.exe" -f $ConnectVersion) } |
+            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+        Write-Ok ("Desktop\Claude-Connect-{0}.exe" -f $ConnectVersion)
     } catch {
-        Write-Host ("  warn: could not copy EXE to Desktop: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow
+        Write-Host ("  warn: could not copy versioned EXE to Desktop: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow
     }
 }
 
@@ -343,7 +355,7 @@ if (-not $NoZip) {
     }
 
     # Keep full windows\ script tree for Smart folder handoff (Desktop\Claude-Connect primary).
-    # Outer Desktop\Claude-Connect.exe remains sibling fallback. Do not EXE-only-strip OutDir.
+    # Desktop gets Claude-Connect-VERSION.exe only (no unversioned sibling). Do not EXE-only-strip OutDir.
     if ($env:CLAUDE_PUBLISH_STRIP_WINDOWS_EXE_ONLY -eq '1') {
         if (-not $NoExe) {
             Clear-PublishedWindowsToExeOnly -ClientRoot $OutDir -ExePath (Join-Path $OutBase 'Claude-Connect.exe')
@@ -449,12 +461,51 @@ if (-not $NoZip) {
 }
 }
 
+# Laptop deploy: one flat folder Desktop\Claude-Connect (canonical heal path).
+if (-not $SepidzOnly) {
+    try {
+        $winPkg = Join-Path $OutDir 'windows'
+        $deskConnect = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
+        if (Test-Path -LiteralPath $winPkg) {
+            Write-Step "Syncing Desktop\Claude-Connect (single deploy folder)..."
+            if (Test-Path -LiteralPath $deskConnect) {
+                $ji = Get-Item -LiteralPath $deskConnect -Force
+                if ($ji.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                    cmd /c "rmdir `"$deskConnect`"" | Out-Null
+                }
+            }
+            if (-not (Test-Path -LiteralPath $deskConnect)) {
+                $null = New-Item -ItemType Directory -Force -Path $deskConnect
+            }
+            Get-ChildItem -LiteralPath $winPkg -File -ErrorAction Stop | ForEach-Object {
+                # Do not drop SFX into the live deploy folder (Desktop root keeps Claude-Connect-VERSION.exe).
+                if ($_.Name -match '^connect\.log|^\.laptop-deploy|^Design\.|^connect-design\.|^Claude-Connect\.exe$|^READ-ME') { return }
+                Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $deskConnect $_.Name) -Force
+            }
+            Set-Content -Path (Join-Path $deskConnect 'VERSION.txt') -Value $ConnectVersion -Encoding ASCII
+            Get-ChildItem -LiteralPath $deskConnect -Force -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Name -match '^connect-\d{8}\.\d+\.bat$|^Design(\.rar)?$|^connect-design\.|^\.rar$|^Claude-Connect\.exe$|^READ-ME' -or
+                    ($_.PSIsContainer -and $_.Name -match '^(Design|mac)$')
+                } |
+                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+            Write-Ok ("Desktop\Claude-Connect  v{0}" -f $ConnectVersion)
+        }
+    } catch {
+        Write-Host ("  warn: Desktop\Claude-Connect sync failed: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow
+    }
+}
+
 Write-Host ""
 Write-Host "Done." -ForegroundColor Green
 if (-not $SepidzOnly) {
-    Write-Host "  Main (Smart IP)  : Desktop\claude-publish\$PackageName" -ForegroundColor Green
+    Write-Host "  Deploy folder    : Desktop\Claude-Connect  (connect.bat)" -ForegroundColor Green
+    Write-Host "  Build tree       : Desktop\claude-publish\$PackageName" -ForegroundColor Green
     if (-not $NoZip) { Write-Host "  Main ZIP         : Desktop\claude-publish\$PackageName.zip" -ForegroundColor Green }
-    if (-not $NoExe) { Write-Host "  Main EXE         : Desktop\claude-publish\Claude-Connect.exe" -ForegroundColor Green }
+    if (-not $NoExe) {
+        Write-Host ("  Desktop EXE      : Desktop\Claude-Connect-{0}.exe" -f $ConnectVersion) -ForegroundColor Green
+        Write-Host "  Bundle EXE       : Desktop\claude-publish\Claude-Connect.exe" -ForegroundColor Green
+    }
 }
 if ((-not $SmartOnly) -and (-not $SepidzPublishFrozen)) {
     Write-Host "  Sepidz (IP patch): Desktop\claude-publish\$SepidName" -ForegroundColor Green
@@ -463,11 +514,12 @@ if ((-not $SmartOnly) -and (-not $SepidzPublishFrozen)) {
     Write-Host "  Sepidz           : SKIPPED (FROZEN)" -ForegroundColor DarkYellow
 }
 
-# Remove legacy dated publish folders/zips so only the stable replace-in-place dirs remain.
+# Remove legacy dated publish folders/zips + junk archives so only stable dirs remain.
 try {
     $patterns = @()
     if (-not $SepidzOnly) { $patterns += '^claude-code-client-\d{8}(\.zip)?$' }
     if ((-not $SmartOnly) -and (-not $SepidzPublishFrozen)) { $patterns += '^claude-code-sepidz-\d{8}(\.zip)?$' }
+    $patterns += '\.rar$'
     if ($patterns.Count -gt 0) {
         $re = ($patterns -join '|')
         Get-ChildItem -LiteralPath $OutBase -ErrorAction SilentlyContinue | Where-Object {

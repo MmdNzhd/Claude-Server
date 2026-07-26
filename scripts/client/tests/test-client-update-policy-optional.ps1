@@ -56,7 +56,7 @@ Assert ($pub.Contains('keeps full script tree')) 'Smart publish documents full s
 Assert (Test-Path (Join-Path $RepoRoot 'publish\SEPIDZ_PUBLISH_FROZEN')) 'SEPIDZ_PUBLISH_FROZEN marker still present'
 
 # Mac optional prompt parity (Stage 6b)
-$macUpd = Get-Content 'scripts\client\mac\connect-update.sh' -Raw
+$macUpd = Get-Content (Join-Path $RepoRoot 'scripts\client\mac\connect-update.sh') -Raw
 Assert ($macUpd -match '\[y/N/D\]') 'Mac optional prompt shows [y/N/D]'
 Assert ($macUpd -match '(?m)^\s*ans=N\s*$') 'Mac optional ans defaults to N'
 Assert ($macUpd -match '\[ -z "\$ans" \] && ans=N') 'Mac empty Enter keeps N'

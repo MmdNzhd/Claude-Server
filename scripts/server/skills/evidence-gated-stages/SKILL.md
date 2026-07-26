@@ -28,9 +28,9 @@ Announce: `Using evidence-gated-stages (mode=author|execute|closeout)`.
 
 | User signal | Mode |
 |-------------|------|
-| deep plan / پلن / stage the fix / smoking guns | `author` |
-| execute / implement / شروع کن / برو مرحله | `execute` |
-| hard test / closeout / multi-agent audit / آیا تمام شد | `closeout` |
+| deep plan / make a plan / stage the fix / smoking guns | `author` |
+| execute / implement / start / go to stage | `execute` |
+| hard test / closeout / multi-agent audit / is it done | `closeout` |
 | ambiguous | `author` first, then ask once |
 
 ## Compose (do not clone)
@@ -52,10 +52,10 @@ Announce: `Using evidence-gated-stages (mode=author|execute|closeout)`.
 **Use:** multi-stage defect; cross-layer; evidence packs / deploy locked; prior DONE was false; user wants hard audit.
 
 **Example utterances → mode:**  
-- "پلن مرحله‌ای با evidence pack" → `author`  
-- "Stage 3 را اجرا کن" → `execute`  
-- "hard multi-agent ببین تمام شده؟" → `closeout`  
-- "smoking gun از لاگ" → `author` or `closeout`
+- "staged plan with evidence pack" → `author`  
+- "implement stage 3" → `execute`  
+- "hard multi-agent audit — is it done?" → `closeout`  
+- "smoking gun from logs" → `author` or `closeout`
 
 **Skip:** single-file known-cause fix → TDD + verification; approved greenfield feature → brainstorming → writing-plans; casual "deep plan" for a normal feature without evidence/smoking-gun language → `writing-plans`.
 
@@ -156,7 +156,7 @@ Deep rules: [references/release-lock.md](references/release-lock.md)
 ```
 Fix stages = repo (+ tests) only.
 Release = LOCKED until NEW explicit deploy/publish/ship message (quote in pack).
-"execute the plan" / "تمام" / "سبز شد" / "done" ≠ release.
+"execute the plan" / "finished" / "green" / "done" ≠ release.
 If unsure → do not release; ask.
 ```
 

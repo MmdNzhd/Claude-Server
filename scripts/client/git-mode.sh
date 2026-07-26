@@ -280,7 +280,7 @@ resolve_server_script_dir() {
 stop_remote_editor() {
     local editor_cmd="$1" alias_name="$2" remote_path="$3"
 
-    # Path/alias scoped only â€” never kill the whole ClaudeServerCursorProfile tree from mount clear.
+    # Path/alias scoped only - never kill the whole ClaudeServerCursorProfile tree from mount clear.
     _stop_remote_editor_by_uri "$alias_name" "$remote_path"
 }
 
@@ -371,6 +371,10 @@ clear_session_mount() {
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "CLEAR_MOUNT: down end ms=$down_ms project=$project_id" 'INFO'
         fi
+    fi
+    # Win Clear-SessionMount calls Release-CursorProxyOwner before clearing ACTIVE_MOUNT.
+    if declare -F release_cursor_proxy_owner >/dev/null 2>&1; then
+        release_cursor_proxy_owner || true
     fi
     ACTIVE_MOUNT_ID=""
     push_server_connect_conf --clear
@@ -703,7 +707,7 @@ tunnel_tcp_open() {
 tunnel_fetch_banner() {
     local now age_ms banner
     [ -n "${PORT:-}" ] || return 1
-    # Positive cache only ï¿½ï¿½ï¿½?" never poison with empty banner for 3s.
+    # Positive cache only - never poison with empty banner for 3s.
     if [ "$_TUNNEL_BANNER_CACHE_INVALID" -eq 0 ] && [ "$_TUNNEL_BANNER_CACHE_AT" -gt 0 ] && [ "$_TUNNEL_BANNER_CACHE_UP" -eq 1 ]; then
         now="$(date +%s 2>/dev/null || printf '0')"
         age_ms=$(( (now - _TUNNEL_BANNER_CACHE_AT) * 1000 ))
@@ -1534,7 +1538,7 @@ tunnel_needs_proxy_reseed() {
         ok|unknown) return 1 ;;
     esac
     # Adopted proxy: this pid has no -L (or only SOCKS), but another process already
-    # serves fixed backends 19080/19180 or front doors 18998/18999 — do not reseed.
+    # serves fixed backends 19080/19180 or front doors 18998/18999 - do not reseed.
     # legacy_D still needs reseed (clears stale -D binding).
     case "$state" in
         missing|missing_http)
@@ -1870,7 +1874,7 @@ release_stale_tunnel_port() {
             clear_server_stale_tunnel_forward "$PORT" || true
             return 0
         fi
-        # Windows peer banners are NOT "this laptop" on Mac â€” never kill them here.
+        # Windows peer banners are NOT "this laptop" on Mac - never kill them here.
         if tunnel_banner_is_windows "$banner"; then
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "STALE_FORWARD: skip_foreign_peer port=$PORT banner=$banner" 'INFO'

@@ -31,9 +31,11 @@ $startAt = $src.IndexOf('function Start-ProcessAsInteractiveUser')
 $endAt = $src.IndexOf('$script:EditorCimCache', $startAt)
 $launchFn = if ($startAt -ge 0 -and $endAt -gt $startAt) { $src.Substring($startAt, $endAt - $startAt) } else { '' }
 Assert ($src -match 'cursor-launch-\{0\}\.log' -and $src -match "Get-Date -Format 'yyyyMMdd'") 'Cursor stdout/stderr uses a day log'
-Assert ($src -match 'ProcessStartInfo' -and $src -match 'UseShellExecute\s*=\s*\$false' -and $src -match 'CreateNoWindow\s*=\s*\$true') 'quiet launch uses hidden ProcessStartInfo'
-Assert ($src -match '>> \"\{2\}\" 2>&1') 'quiet launch appends stdout and stderr'
-Assert (([regex]::Matches($launchFn, 'Start-EditorProcessQuiet -FilePath')).Count -eq 2) 'both direct launch paths use quiet launcher'
+Assert ($src -match 'function Start-EditorProcessDirect') 'Start-EditorProcessDirect helper defined'
+Assert ($src -match 'RedirectStandardOutput' -and $src -match 'RedirectStandardError') 'direct launch redirects stdout and stderr'
+Assert (([regex]::Matches($launchFn, 'Start-EditorProcessDirect -FilePath')).Count -eq 2) 'both direct launch paths use Direct launcher'
+Assert (([regex]::Matches($launchFn, 'Start-EditorProcessQuiet -FilePath')).Count -eq 0) 'interactive launch does not use Quiet launcher'
+Assert ($src -notmatch 'function\s+Start-EditorProcessQuiet\b') 'Start-EditorProcessQuiet helper removed (dead SAFE_DELETE)'
 Assert ($launchFn -notmatch 'Start-Process\s+-FilePath') 'interactive launch has no direct Start-Process call'
 $neAt = $launchFn.IndexOf('[NonElevatedLauncher]::Start')
 $taskAt = $launchFn.IndexOf('Start-ProcessViaLaunchTask')

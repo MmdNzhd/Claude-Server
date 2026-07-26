@@ -5,8 +5,8 @@ description: >-
   agent waves: dependency-free slices only, never same-file parallel writes,
   TDD RED then GREEN, Coordinator→Workers→Verifier gates. Use when executing
   a written plan, heavy-task-plan Stage 4, subagent-driven plan runs, or the
-  user asks for multi-agent / phased / wave execution (موجی، فازبه‌فاز،
-  مولتی‌اجنت، نهایت سرعت، نهایت دقت).
+  user asks for multi-agent / phased / wave execution ("maximum speed",
+  "maximum accuracy", "wave execution").
 ---
 
 # Parallel Phased Execution
@@ -245,7 +245,7 @@ Coordinator prefers ≤4 parallel Tasks that touch the laptop.
 ## Why Task/subagents die mid-wave (Cursor reality)
 
 **Fleet note (Remote SSH / this server):** local laptop multi-agent can run
-hours; **on the Claude server they die/restart**. User "ادامه" is usually
+hours; **on the Claude server they die/restart**. User "continue" is usually
 **after** death — not the root cause. Do not blame the user first.
 
 ### Primary cause on this server (evidence 2026-07-23)

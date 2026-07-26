@@ -5,7 +5,9 @@ $fail = 0
 
 $SmartIp = '192.168.210.240'
 $SepidIp = '192.168.250.70'
-$Forbidden = @('21000', 'claude-connect-sepidz', 'claude-server-sepidz', 'users\sepidz', 'users/sepidz')
+# Intentional hard-refuse strings (claude-*-sepidz) live in client sources - do NOT forbid those.
+# Block only real fork packaging leftovers / old port-base fork.
+$Forbidden = @('21000', 'users\sepidz', 'users/sepidz')
 
 function Assert($cond, $msg) {
     if ($cond) { Write-Host "  PASS  $msg" -ForegroundColor Green }
@@ -20,7 +22,8 @@ function Test-PackageRoot {
     }
     $serverDirs = @(Get-ChildItem -Path $Root -Recurse -Directory -Filter 'server' -ErrorAction SilentlyContinue)
     Assert ($serverDirs.Count -eq 0) "$Label has no server/ folder"
-    foreach ($name in @('deploy-server-mount-fix.ps1', 'deploy-server-mount-fix.bat', 'deploy-mount-fix.sh', 'claude-automount.sh', 'claude-watchdog.sh')) {
+    # claude-automount.sh / claude-self-heal.sh are intentionally shipped (laptop bootstrap copies).
+    foreach ($name in @('deploy-server-mount-fix.ps1', 'deploy-server-mount-fix.bat', 'deploy-mount-fix.sh', 'claude-watchdog.sh')) {
         $hits = @(Get-ChildItem -Path $Root -Recurse -File -Filter $name -ErrorAction SilentlyContinue)
         Assert ($hits.Count -eq 0) "$Label has no $name"
     }
@@ -57,7 +60,7 @@ function Test-NoForbiddenStrings {
             }
         }
     }
-    Assert ($hitCount -eq 0) "$Label has no sepidz-fork strings (21000, claude-connect-sepidz, ...); hits=$hitCount"
+    Assert ($hitCount -eq 0) "$Label has no sepidz-fork packaging leftovers (21000, users/sepidz); hits=$hitCount"
 }
 
 function Test-NoUtf8Bom {
@@ -89,11 +92,16 @@ function Test-BinaryIdenticalExceptIp {
     }
 }
 
-function Test-SingleIpLiteral {
+function Test-ServerIpAssignment {
     param([string]$Path, [string]$ExpectedIp, [string]$Label)
     $raw = Get-Content $Path -Raw
-    $count = ([regex]::Matches($raw, [regex]::Escape($ExpectedIp))).Count
-    Assert ($count -eq 1) "$Label has exactly 1 IP literal (got $count)"
+    # Site-tag helpers may mention the same IP again; require the assignment (or SERVER_IP=) once.
+    $assign = ([regex]::Matches($raw, '(?m)^\s*\$ServerIP\s*=\s*"' + [regex]::Escape($ExpectedIp) + '"')).Count
+    if ($assign -eq 0) {
+        $assign = ([regex]::Matches($raw, '(?m)^\s*SERVER_IP="' + [regex]::Escape($ExpectedIp) + '"')).Count
+    }
+    Assert ($assign -eq 1) "$Label has exactly 1 SERVER_IP assignment to $ExpectedIp (got $assign)"
+    Assert ($raw -match [regex]::Escape($ExpectedIp)) "$Label contains $ExpectedIp"
 }
 
 function Test-SmartSepidzDiff {
@@ -169,12 +177,16 @@ if ($main) {
     Assert ($mainFiles -contains 'windows\connect-update.ps1') 'main has windows\connect-update.ps1'
     Assert ($mainFiles -contains 'mac\connect-update.sh') 'main has mac\connect-update.sh'
     Assert ($mainFiles -contains 'windows\connect-diagnostic.ps1') 'main has windows\connect-diagnostic.ps1'
-    Assert ($mainFiles.Count -eq 18) "main has exactly 18 client files (got $($mainFiles.Count))"
+    Assert ($mainFiles -contains 'windows\claude-automount.sh') 'main has windows\claude-automount.sh bootstrap copy'
+    Assert ($mainFiles -contains 'mac\claude-automount.sh') 'main has mac\claude-automount.sh bootstrap copy'
+    Assert ($mainFiles -contains 'windows\Claude-Connect.exe') 'main has windows\Claude-Connect.exe'
+    # ClientFiles in publish.ps1 + README.txt + Claude-Connect.exe (keep floor; allow modest growth).
+    Assert ($mainFiles.Count -ge 28 -and $mainFiles.Count -le 36) "main client file count in expected band 28-36 (got $($mainFiles.Count))"
     $smartPs1 = Get-Content (Join-Path $main.FullName 'windows\connect.ps1') -Raw
     Assert ($smartPs1 -match 'claude-server') 'main connect.ps1 alias claude-server'
     Assert ($smartPs1 -match 'claude-connect') 'main connect.ps1 cfg claude-connect'
-    Assert ($smartPs1 -match '20000 \+') 'main connect.ps1 port base 20000'
-    Test-SingleIpLiteral -Path (Join-Path $main.FullName 'windows\connect.ps1') -ExpectedIp $SmartIp -Label 'main connect.ps1'
+    Assert ($smartPs1 -match 'Get-TunnelPortUserBase') 'main connect.ps1 uses Get-TunnelPortUserBase (port base 20000+(UID-1000)*10)'
+    Test-ServerIpAssignment -Path (Join-Path $main.FullName 'windows\connect.ps1') -ExpectedIp $SmartIp -Label 'main connect.ps1'
     Test-NoUtf8Bom -Path (Join-Path $main.FullName 'windows\connect.ps1') -Label 'main'
     $bat = Get-Content (Join-Path $main.FullName 'windows\connect.bat') -Raw
     Assert ($bat -match 'connect-version\.txt') 'connect.bat requires connect-version.txt'
@@ -183,6 +195,7 @@ if ($main) {
     Assert $false 'main publish folder found (run publish.ps1)'
 }
 
+$sepidzFrozen = Test-Path -LiteralPath (Join-Path $script:RepoRoot 'publish\SEPIDZ_PUBLISH_FROZEN')
 if ($sepid) {
     Test-PackageRoot -Root $sepid.FullName -Label 'sepidz publish folder'
     Test-NoForbiddenStrings -Root $sepid.FullName -Label 'sepidz'
@@ -203,9 +216,11 @@ if ($sepid) {
             -Name 'connect.sh'
         Test-NoUtf8Bom -Path (Join-Path $cc 'windows\connect.ps1') -Label 'sepidz'
         Test-NoUtf8Bom -Path (Join-Path $cc 'mac\connect.sh') -Label 'sepidz'
-        Test-SingleIpLiteral -Path (Join-Path $cc 'windows\connect.ps1') -ExpectedIp $SepidIp -Label 'sepidz connect.ps1'
-        Test-SingleIpLiteral -Path (Join-Path $cc 'mac\connect.sh') -ExpectedIp $SepidIp -Label 'sepidz connect.sh'
-        Test-BinaryIdenticalExceptIp -MainRoot $main.FullName -SepidRoot $cc -PatchRel @('windows\connect.ps1', 'mac\connect.sh')
+        Test-ServerIpAssignment -Path (Join-Path $cc 'windows\connect.ps1') -ExpectedIp $SepidIp -Label 'sepidz connect.ps1'
+        Test-ServerIpAssignment -Path (Join-Path $cc 'mac\connect.sh') -ExpectedIp $SepidIp -Label 'sepidz connect.sh'
+        # EXE and README may differ; compare script tree only (exclude exe + README).
+        $patchRel = @('windows\connect.ps1', 'mac\connect.sh')
+        Test-BinaryIdenticalExceptIp -MainRoot $main.FullName -SepidRoot $cc -PatchRel $patchRel
         $mainPs1 = Join-Path $main.FullName 'windows\connect.ps1'
         $sepidPs1 = Join-Path $cc 'windows\connect.ps1'
         $mainBytes = [IO.File]::ReadAllBytes($mainPs1)
@@ -215,6 +230,8 @@ if ($sepid) {
     }
     $desPs1 = Get-Content (Join-Path $des 'windows\connect.ps1') -Raw
     Assert ($desPs1 -match [regex]::Escape($SepidIp)) 'designer Sepidz IP patched'
+} elseif ($sepidzFrozen) {
+    Write-Host '  SKIP  sepidz ZIP (publish\SEPIDZ_PUBLISH_FROZEN present)' -ForegroundColor DarkYellow
 } else {
     Assert $false 'sepidz publish folder found (run publish.ps1)'
 }

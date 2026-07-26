@@ -6,7 +6,7 @@ Server-side Cursor agents get a shared **MCP pack** synced into each user's `~/.
 
 ---
 
-## نصب‌شده / Installed servers
+## Installed servers
 
 | Server | Purpose |
 |---|---|
@@ -15,6 +15,7 @@ Server-side Cursor agents get a shared **MCP pack** synced into each user's `~/.
 | **Playwright** | Browser automation for UI verification |
 | **Sequential Thinking** | Structured multi-step reasoning for complex tasks |
 | **Memory** | Persistent knowledge-graph memory across chats (`~/.cursor/mcp-memory.jsonl`) |
+| **sqlserver** | Read-only SQL Server queries (shared dev DB) |
 
 ## Memory
 
@@ -22,13 +23,11 @@ Cursor MCP id: `user-memory`. Agents are steered by always-on rule `mcp-memory.m
 to `search_nodes` / `create_entities` / `add_observations` for durable project facts.
 Storage: `MEMORY_FILE_PATH` → `~/.cursor/mcp-memory.jsonl` (per user). Never store secrets.
 
-| **sqlserver** | Read-only SQL Server queries (shared dev DB) |
-
 Claude Code (terminal) keeps codegraph/headroom/sqlserver from add-user; `cursor-mcp-sync` also merges HTTP `figma`/`context7` (with Figma Bearer) and injects SQL env from `/etc/claude-code/sqlserver.env` — see [`CLAUDE.md`](../CLAUDE.md).
 
 ---
 
-## رفتار عام / General behavior
+## General behavior
 
 - MCP tools appear in the agent tool list after sync; the model **chooses** when to call them.
 - Missing or auth-failed servers: the agent should say MCP is unavailable and point here — not silently guess.

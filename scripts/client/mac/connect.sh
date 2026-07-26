@@ -50,7 +50,7 @@ if [ -f "$_update_script" ]; then
     fi
 fi
 
-CONNECT_VERSION='20260725.38'
+CONNECT_VERSION='20260725.41'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).
@@ -123,8 +123,8 @@ step_fail() {
 
 sshx() {
     local orig_cmd="$*" remote_cmd ec=0 ms=0 trunc_cmd out b64
-    # Base64-wrap so nested quotes survive Mac ssh ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ server.
-    # Old: bash -lc '$esc' broke on any single quote (grep -E '^X=', ssh-keygen -N '', ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦)
+    # Base64-wrap so nested quotes survive Mac ssh ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ server.
+    # Old: bash -lc '$esc' broke on any single quote (grep -E '^X=', ssh-keygen -N '', ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦)
     # and made warn_foreign_server_session show "unexpected EOF" instead of the real laptop name.
     if ! printf '%s' "$orig_cmd" | grep -qE '^[[:space:]]*timeout[[:space:]]'; then
         b64="$(printf '%s' "$orig_cmd" | base64 | tr -d '\n\n')"
@@ -293,7 +293,7 @@ if declare -F enter_connect_single_instance >/dev/null 2>&1; then
 fi
 if declare -F log_session_context >/dev/null 2>&1; then log_session_context 'startup'; fi
 # Upload+wipe temp log on any early exit (before session cleanup_session trap).
-# CONNECT_LOG_EARLY_FLUSH ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â nonzero exit: ERROR then force flush (set -u/pipefail has no ERR without -e).
+# CONNECT_LOG_EARLY_FLUSH ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â nonzero exit: ERROR then force flush (set -u/pipefail has no ERR without -e).
 trap 'ec=$?; if [ "$ec" -ne 0 ] && [ -n "${CONNECT_LOG_PATH:-}" ] && declare -F connect_log >/dev/null 2>&1; then connect_log "FAIL UNHANDLED: exit=$ec" "ERROR"; connect_log "FAIL EXIT reason=trap_exit code=$ec" "ERROR" || true; fi; if declare -F flush_connect_log_to_server >/dev/null 2>&1; then flush_connect_log_to_server || true; fi' EXIT
 # Unexpected error flush (fires if errexit enabled later / in sourced helpers).
 trap 'ec=$?; if declare -F connect_log >/dev/null 2>&1; then connect_log "FAIL UNHANDLED: exit=$ec line=$LINENO cmd=$BASH_COMMAND" "ERROR" || true; fi; if declare -F flush_connect_log_to_server >/dev/null 2>&1; then flush_connect_log_to_server || true; fi' ERR
@@ -827,7 +827,7 @@ while [ "$exit_requested" -eq 0 ]; do
 
             recover_mounts_if_needed "$go_id" "$(( TUNNEL_REUSED ^ 1 ))"
 
-            # Win Test-TunnelUp parity ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â banner/TCP, not PID-only.
+            # Win Test-TunnelUp parity ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â banner/TCP, not PID-only.
             if ! tunnel_up; then
                 printf '      -> tunnel dropped during recover, restarting...\n'
                 LAPTOP_SSH_VERIFIED=0
@@ -1052,7 +1052,7 @@ while [ "$exit_requested" -eq 0 ]; do
                         _editor_seen_open=1
                         export CURSOR_AUTH_RELAUNCH=0
                         if [ "$EDITOR_CMD" = "cursor" ]; then
-                            printf '      -> \033[0;33mIf Cursor asks to log in: [Claude Server] window ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Developer ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ Reload Window\033[0m\n'
+                            printf '      -> \033[0;33mIf Cursor asks to log in: [Claude Server] window ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ Developer ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ Reload Window\033[0m\n'
                             printf '      -> \033[0;90mDo NOT use a personal login in that window\033[0m\n'
 
                             printf '      -> \033[0;90mServer profile [Claude Server] - personal Cursor is separate\033[0m\n'
@@ -1161,7 +1161,7 @@ while [ "$exit_requested" -eq 0 ]; do
                         o) _resolved="o" ;;
                         q|$'\n'|$'\r') _resolved="q" ;;
                     esac
-                    # Non-ASCII printable (e.g. ÃƒËœÃ‚Â¶): ignore and keep waiting.
+                    # Non-ASCII printable (e.g. ÃƒÆ’Ã†â€™Ãƒâ€¹Ã…â€œÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¶): ignore and keep waiting.
                     if [ -z "$_resolved" ]; then
                         _ord="$(printf '%s' "$_key" | od -An -tuC | tr -s ' ' | awk '{print $1; exit}')"
                         if [ -n "$_ord" ] && [ "$_ord" -gt 127 ]; then

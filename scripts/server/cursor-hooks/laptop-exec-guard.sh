@@ -311,15 +311,17 @@ _remap_hint() {
       wabs=$(_win_abs_path "$rpath" "$rel" 2>/dev/null || true)
     fi
   fi
+  # FAIL-FAST suffix: hybrid env ≠ live tools; stop Read/MCP retry storms (seen in logs).
+  local ff=' FAIL-FAST: if windows-mcp tools not listed OR one MCP call fails (ECONNREFUSED/fetch failed): laptop-exec immediately; never retry Read; never retry same MCP call. user-filesystem≠windows-mcp.'
   case "$tool" in
     Read)
       if [[ "$hybrid" -eq 1 ]]; then
         if [[ -n "$wabs" ]]; then
-          printf 'NEXT (do not retry Read): windows-mcp FileSystem read "%s" (prefer; fast). Fan-out ~8 parallel FileSystem reads in one turn when fetching many files. Fallback: laptop-exec read%s %s' "$wabs" "$pflag" "$rel"
+          printf 'NEXT (do not retry Read): if windows-mcp FileSystem tools listed, read "%s" once (prefer; ~8 parallel/turn). Else laptop-exec read%s %s.%s' "$wabs" "$pflag" "$rel" "$ff"
         elif [[ -n "$rpath" ]]; then
-          printf 'NEXT (do not retry Read): windows-mcp FileSystem read absolute path under %s + REL (prefer; fast). Fan-out ~8 parallel FileSystem reads/turn. Fallback: laptop-exec read%s REL' "$rpath" "$pflag"
+          printf 'NEXT (do not retry Read): if windows-mcp tools listed, FileSystem read under %s + REL once. Else laptop-exec read%s REL.%s' "$rpath" "$pflag" "$ff"
         else
-          printf 'NEXT (do not retry Read): windows-mcp FileSystem read absolute Windows path under project root (prefer; fast). Fan-out ~8 parallel FileSystem reads/turn. Fallback: laptop-exec read%s REL' "$pflag"
+          printf 'NEXT (do not retry Read): if windows-mcp tools listed, FileSystem read absolute Windows path once. Else laptop-exec read%s REL.%s' "$pflag" "$ff"
         fi
       elif [[ -n "$rel" ]]; then
         printf 'NEXT (do not retry Read): laptop-exec read%s %s' "$pflag" "$rel"
@@ -330,11 +332,11 @@ _remap_hint() {
     Write|Edit|StrReplace|Delete|EditNotebook)
       if [[ "$hybrid" -eq 1 ]]; then
         if [[ -n "$wabs" ]]; then
-          printf 'NEXT (do not retry %s): windows-mcp FileSystem write "%s" (prefer; fast). Parallel MCP OK; keep laptop-exec git/rg <=4. Fallback: laptop-exec write%s %s' "$tool" "$wabs" "$pflag" "$rel"
+          printf 'NEXT (do not retry %s): if windows-mcp tools listed, FileSystem write "%s" once. Else laptop-exec write%s %s.%s' "$tool" "$wabs" "$pflag" "$rel" "$ff"
         elif [[ -n "$rpath" ]]; then
-          printf 'NEXT (do not retry %s): windows-mcp FileSystem write absolute path under %s + REL (prefer; fast). Fallback: laptop-exec write%s REL' "$tool" "$rpath" "$pflag"
+          printf 'NEXT (do not retry %s): if windows-mcp tools listed, FileSystem write under %s + REL once. Else laptop-exec write%s REL.%s' "$tool" "$rpath" "$pflag" "$ff"
         else
-          printf 'NEXT (do not retry %s): windows-mcp FileSystem write absolute Windows path (prefer; fast). Fallback: laptop-exec write%s REL' "$tool" "$pflag"
+          printf 'NEXT (do not retry %s): if windows-mcp tools listed, FileSystem write once. Else laptop-exec write%s REL.%s' "$tool" "$pflag" "$ff"
         fi
       elif [[ -n "$rel" ]]; then
         printf 'NEXT (do not retry %s): laptop-exec write%s %s  <<EOF ... EOF' "$tool" "$pflag" "$rel"
@@ -348,21 +350,21 @@ _remap_hint() {
       ;;
     Shell)
       if [[ "$hybrid" -eq 1 ]]; then
-        printf 'NEXT (do not retry heavy shell on mounts): windows-mcp PowerShell (prefer; fast) OR laptop-exec git|rg|run|read%s ... (git/rg always laptop-exec)' "$pflag"
+        printf 'NEXT (do not retry heavy shell on mounts): if windows-mcp PowerShell listed use once, else laptop-exec git|rg|run|read%s ...%s' "$pflag" "$ff"
       else
         printf 'NEXT (do not retry heavy shell on mounts): laptop-exec git|rg|run|read%s ...' "$pflag"
       fi
       ;;
     Task)
       if [[ "$hybrid" -eq 1 ]]; then
-        printf 'NEXT: Task spawn allowed; child MUST paste hybrid block: prefer windows-mcp FileSystem/PowerShell/UI; laptop-exec for git/rg/fallback; -p ID; no Read/Grep on /mounts/.'
+        printf 'NEXT: Task spawn allowed; child MUST paste hybrid+FAIL-FAST block: windows-mcp only if tools listed; one MCP fail=>laptop-exec; -p ID; no Read/Grep on /mounts/.'
       else
         printf 'NEXT: Task spawn allowed; each child MUST use laptop-exec -p ID. Do not retry Read/Grep/Shell on /mounts/.'
       fi
       ;;
     *)
       if [[ "$hybrid" -eq 1 ]]; then
-        printf 'NEXT: prefer windows-mcp FileSystem/PowerShell; laptop-exec%s for git|rg|fallback' "$pflag"
+        printf 'NEXT: windows-mcp if tools listed else laptop-exec%s; one MCP fail=>LE only.%s' "$pflag" "$ff"
       else
         printf 'NEXT: use laptop-exec%s (read|rg|write|git|run)' "$pflag"
       fi

@@ -13,8 +13,8 @@ planning on your own initiative — not even for heavy/multi-file tasks. Stay
 silent about this and just work normally.
 
 Only act when the **user's own words** ask for a plan first — e.g. "plan
-this", "make a plan before doing it", "برنامه بریز", "پلن کن", "let's design
-this first", or they explicitly name the skill.
+this", "make a plan", "make a plan before doing it", "let's design this
+first", or they explicitly name the skill.
 
 - User did not ask for a plan → proceed with the normal agent workflow.
   Never mention this rule or offer a plan unprompted.

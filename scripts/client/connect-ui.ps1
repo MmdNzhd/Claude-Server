@@ -185,7 +185,7 @@ function Test-ConnectRemoteLogNeedsRebuild {
     # Stage 9: never replace remote day log with a smaller local file (forbid shrink).
     if ($RemoteSize -lt 0) { return $false }
     if ($LocalSize -lt $RemoteSize) { return $false }
-    # Prior "bloated remote" triggers all required remote > local — forbidden above.
+    # Prior "bloated remote" triggers all required remote > local Ã¢â‚¬â€ forbidden above.
     # Rebuild remains available only when local >= remote (no shrink); currently unused.
     return $false
 }
@@ -381,7 +381,7 @@ function Initialize-ConnectLog {
         $elev = if (Test-IsElevatedShell) { 'yes' } else { 'no' }
     }
     Write-ConnectLog "======== session start v$Version user=$env:USERNAME elevated=$elev pid=$PID session=$($script:ConnectSessionId) ========"
-    Write-ConnectLog "SESSION_FILTER grep=[$($script:ConnectSessionId)] tip=filter day log by bracketed session id"
+    Write-ConnectLog "SESSION_FILTER grep=[$($script:ConnectSessionId)] tip=Select-String -Pattern '\[$($script:ConnectSessionId)\]'"
     Write-ConnectLog "log sink: local:$($script:ConnectLogPath) watermark=$($script:ConnectLogSyncOffset) + server:~/.claude/logs/ (local+server purge mtime+1)"
     Write-ConnectLog "script_dir: $ScriptDir connect_version: $Version" 'DEBUG'
     Write-ConnectSessionIndex -Phase 'start'
@@ -647,10 +647,17 @@ function Sync-ConnectLogToServer {
         if ($remoteBefore -lt 0) { $remoteBefore = [int64]0 }
         Write-ConnectLogSyncPending -Offset $off -Take $take -RemoteBefore $remoteBefore -LogPath $path
 
-        $mk = 'mkdir -p "$HOME/.claude/logs" && chmod 700 "$HOME/.claude" "$HOME/.claude/logs" 2>/dev/null; find "$HOME/.claude/logs" -type f -mtime +1 -delete 2>/dev/null; true'
+        $mk = 'mkdir -p "$HOME/.claude/logs" && chmod 700 "$HOME/.claude" "$HOME/.claude/logs" 2>/dev/null; true'
+        # Retention find is slow; keep it off the fast/non-Force mkdir SSH (P0-L3 / Task 7).
+        $retain = 'find "$HOME/.claude/logs" -type f -mtime +1 -delete 2>/dev/null; true'
         # Bug 11: cat must surface append failure (no trailing true).
         $cat = 'cat "$HOME/' + $remoteTmp + '" >> "$HOME/' + $remoteDay + '"; ec=$?; rm -f "$HOME/' + $remoteTmp + '"; chmod 600 "$HOME/' + $remoteDay + '" 2>/dev/null; exit $ec'
         $mkRes = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $mk)) -TimeoutMs $script:LogSyncFastMkdirMs
+        if ($Force -and $mkRes.Ok) {
+            try {
+                Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $retain)) -TimeoutMs $script:LogSyncFastMkdirMs | Out-Null
+            } catch { }
+        }
         if (-not $mkRes.Ok) {
             if (-not $script:ConnectLogSyncFailLogged) {
                 $script:ConnectLogSyncFailLogged = $true
@@ -680,7 +687,7 @@ function Sync-ConnectLogToServer {
             $catRes = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $cat)) -TimeoutMs $script:LogSyncFastCatMs
             if ($catRes.Ok) { $appendOk = $true }
         }
-        # Even if the timed wait says fail, the remote cat may have succeeded — verify by size.
+        # Even if the timed wait says fail, the remote cat may have succeeded Ã¢â‚¬â€ verify by size.
         if (-not $appendOk) {
             $remoteAfter = Get-ConnectRemoteLogByteSize -Target $target -Day $day -SshOpts $sshOpts -TimeoutMs $script:LogSyncFastProbeMs
             if ($remoteAfter -ge 0 -and $remoteAfter -ge ($remoteBefore + [int64]$take)) {
@@ -836,7 +843,7 @@ function Ensure-ConnectLogAsyncTimer {
                     if ($script:ConnectLogWarnPendingUntil -and (Get-Date) -ge $script:ConnectLogWarnPendingUntil) {
                         $script:ConnectLogWarnPendingUntil = $null
                     }
-                    # Only clear Needed when caught up (was clearing on lock/fail â€" stalled drain).
+                    # Only clear Needed when caught up (was clearing on lock/fail ÃƒÂ¢Ã¢â€šÂ¬" stalled drain).
                     $left = [int64]0
                     if (Get-Command Get-ConnectLogUnsyncedByteCount -ErrorAction SilentlyContinue) {
                         $left = Get-ConnectLogUnsyncedByteCount
@@ -872,7 +879,7 @@ function Request-ConnectLogSync {
     $script:ConnectLogSyncNeeded = $true
     if (Get-Command Get-ConnectLogUnsyncedByteCount -ErrorAction SilentlyContinue) {
         $u = Get-ConnectLogUnsyncedByteCount
-        # Stall Force after 60s if backlog > 8KB (was 256KB/120s â€" never tripped).
+        # Stall Force after 60s if backlog > 8KB (was 256KB/120s ÃƒÂ¢Ã¢â€šÂ¬" never tripped).
         if ($u -gt 8192 -and -not $script:ConnectLogAsyncStallSince) { $script:ConnectLogAsyncStallSince = Get-Date }
         elseif ($u -le 8192) { $script:ConnectLogAsyncStallSince = $null }
     }
@@ -926,15 +933,26 @@ function Complete-ConnectLogAsyncDrain {
             $script:ConnectLogAsyncTimer = $null
         }
         $script:ConnectLogAsyncDrainerRunning = $false
+        # Remember Needed before drain; do not clear it until Force sync succeeds (P0-L3 / Task 7).
+        $hadNeeded = [bool]$script:ConnectLogSyncNeeded
         # Drain any coalesced Needed/WARN state before the (optional) final Force sync.
         if (($script:ConnectLogSyncNeeded -or $script:ConnectLogWarnPendingUntil) -and (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue)) {
             try { Sync-ConnectLogToServer | Out-Null } catch { }
         }
+        if ($Force -and (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue)) {
+            try {
+                Sync-ConnectLogToServer -Force | Out-Null
+                if (-not $script:LastConnectLogSyncOk -and $hadNeeded) {
+                    $script:ConnectLogSyncNeeded = $true
+                    return
+                }
+            } catch {
+                if ($hadNeeded) { $script:ConnectLogSyncNeeded = $true }
+                return
+            }
+        }
         $script:ConnectLogSyncNeeded = $false
         $script:ConnectLogWarnPendingUntil = $null
-        if ($Force -and (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue)) {
-            Sync-ConnectLogToServer -Force | Out-Null
-        }
     } catch { }
 }
 
@@ -1254,26 +1272,6 @@ function Write-ConnectTrace {
     Write-ConnectLog $Message 'TRACE'
 }
 
-function Write-ConnectPhaseLog {
-    param(
-        [Parameter(Mandatory)][string]$Phase,
-        [Parameter(Mandatory)][string]$Message,
-        [ValidateSet('INFO', 'WARN', 'ERROR', 'DEBUG', 'TRACE')][string]$Level = 'INFO'
-    )
-    Write-ConnectLog "${Phase}: $Message" $Level
-}
-
-function Write-ConnectTimedLog {
-    param(
-        [Parameter(Mandatory)][string]$Label,
-        [Parameter(Mandatory)][int]$Ms,
-        [string]$Detail = '',
-        [ValidateSet('INFO', 'WARN', 'ERROR', 'DEBUG', 'TRACE')][string]$Level = 'INFO'
-    )
-    $suffix = if ($Detail) { " $Detail" } else { '' }
-    Write-ConnectLog "${Label} ms=$Ms$suffix" $Level
-}
-
 function Test-ConnectPerfEnabled {
     # Default OFF: hot session loop was spamming PERF[cim_query] every 200ms.
     # Opt-in: set CLAUDE_CONNECT_PERF_LOG=1
@@ -1292,22 +1290,6 @@ function Write-ConnectPerfLog {
     $suffix = if ($Extra) { " $Extra" } else { '' }
     Write-ConnectLog "PERF[$Mark] ms=$Ms$suffix" $Level
 }
-
-function Invoke-ConnectPerfBlock {
-    param(
-        [Parameter(Mandatory)][string]$Mark,
-        [Parameter(Mandatory)][scriptblock]$Block,
-        [string]$Extra = ''
-    )
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    try {
-        return & $Block
-    } finally {
-        $sw.Stop()
-        Write-ConnectPerfLog -Mark $Mark -Ms $sw.ElapsedMilliseconds -Extra $Extra
-    }
-}
-
 
 function Invoke-ConnectBatRelaunch {
     param([string]$ScriptDir)
@@ -1333,7 +1315,7 @@ function Invoke-ConnectBatRelaunch {
         $relaunchRunId = [guid]::NewGuid().ToString('N').Substring(0, 12)
         $marker = Join-Path $ScriptDir '.client-update-relaunch'
         Set-Content -LiteralPath $marker -Value $relaunchRunId -Encoding ASCII -NoNewline -ErrorAction Stop
-        # Inherit env into a single visible Connect window â€" do NOT cmd/c start (spawns extra consoles).
+        # Inherit env into a single visible Connect window ÃƒÂ¢Ã¢â€šÂ¬" do NOT cmd/c start (spawns extra consoles).
         $prevDepth = $env:CLAUDE_CONNECT_UPDATE_DEPTH
         $prevRun = $env:CLAUDE_CONNECT_RUN_ID
         $prevRelaunch = $env:CLAUDE_CONNECT_IS_RELAUNCH
@@ -1461,7 +1443,7 @@ function Write-ConnectScorecard {
     param(
         [Parameter(Mandatory)][ValidateSet('boot', 'end')][string]$Phase
     )
-    # #19: always-on day-log INFO — not gated by CLAUDE_CONNECT_PERF_LOG.
+    # #19: always-on day-log INFO Ã¢â‚¬â€ not gated by CLAUDE_CONNECT_PERF_LOG.
     if (-not (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue)) { return }
     $ver = if ($script:ConnectVersion) { $script:ConnectVersion } else { 'unknown' }
     $am = 'none'
@@ -1479,7 +1461,15 @@ function Write-ConnectScorecard {
     if ($null -ne $script:ConnectPerf -and $null -ne $script:ConnectPerf.MountMs) {
         $mount = [string][int]$script:ConnectPerf.MountMs
     }
-    $ed = if ($script:EditorOpened -or $script:EditorSeenOpen) { 'open' } else { 'closed' }
+    # Prefer $script:EditorOpened (wired by connect.ps1). Scope-1 $editorOpened is secondary.
+    # Do NOT OR $script:EditorSeenOpen here - sticky SeenOpen alone causes false-green SCORECARD.
+    $edOpen = $false
+    if ($null -ne $script:EditorOpened) {
+        $edOpen = [bool]$script:EditorOpened
+    } elseif (Get-Variable -Name editorOpened -Scope 1 -ErrorAction SilentlyContinue) {
+        try { $edOpen = [bool](Get-Variable -Name editorOpened -Scope 1 -ValueOnly) } catch { $edOpen = $false }
+    }
+    $ed = if ($edOpen) { 'open' } else { 'closed' }
     $slot = ($env:CLAUDE_CONNECT_UI_SLOT + '')
     if (-not $slot) { $slot = '0' }
     $line = ("SCORECARD {0} auth_ms={1} banner={2} mount_ms={3} am={4} editor={5} slot={6} ver={7}" -f `
