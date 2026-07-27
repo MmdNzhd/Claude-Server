@@ -122,7 +122,7 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260727.27'
+$script:ConnectVersion = '20260727.28'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
 $script:ConnectBuildId = 'dad9bb13-060e-41bd-afa2-e51688147f1c'
@@ -2875,7 +2875,27 @@ $script:WindowsMcpEnsured = $false
                     }
                 }
             } elseif ($onCorrectFolder) {
-                Write-ConnectLog 'EDITOR_LAUNCH_SKIP reason=known_on_folder'
+                # Title/cmd match can false-positive (shared profile, stale title). If we cannot
+                # confirm a visible window on this folder, open for real instead of skipping.
+                $visibleOk = $true
+                if (Get-Command Confirm-RemoteEditorLaunchVisible -ErrorAction SilentlyContinue) {
+                    try {
+                        $visibleOk = [bool](Confirm-RemoteEditorLaunchVisible -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)
+                    } catch { $visibleOk = $false }
+                }
+                if (-not $visibleOk) {
+                    Write-ConnectLog 'EDITOR_LAUNCH_SKIP_OVERRIDE reason=known_on_folder_not_visible launching' 'WARN'
+                    Step "Opening $EditorName"
+                    $launchOk = [bool](Launch-RemoteEditor -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -KnownOnFolder:$false)
+                    if ($launchOk) {
+                        $didLaunch = $true
+                        StepOk $($go.Path)
+                    } else {
+                        StepFail "$EditorName did not open the project folder. Press O to retry."
+                    }
+                } else {
+                    Write-ConnectLog 'EDITOR_LAUNCH_SKIP reason=known_on_folder'
+                }
             }
             if ($didLaunch -and $launchOk) {
                 # Trust path: the launch already confirmed the correct folder/window - do NOT

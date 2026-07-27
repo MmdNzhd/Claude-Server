@@ -12,7 +12,7 @@
 #   C. uv python install 3.12   (uv-managed CPython; no system Python)
 #   D. uv tool install --managed-python windows-mcp   (retry x3)
 #   E. last resort: pip install --user windows-mcp (needs system Python from B3)
-#   F. auth --force + install scheduled task + schtasks /Run + listen :LPORT
+#   F. auth --force + install scheduled task (logon) + DIRECT hidden serve + listen :LPORT
 #   G. SSH sync auth -> server ~/.config/windows-mcp/env + mcp.json + forward
 #
 # Notes:
@@ -21,6 +21,8 @@
 # - Secrets: auth_key in config.toml (auth.key mirrored when present); Bearer sync over SSH alias.
 # - Default local port is NOT 8000: Hyper-V/WSL often reserves 7916-8015 (WinError
 #   10013 on bind). Prefer 18765; fall back to the first bindable candidate.
+# - Never invoke the logon task mid-session (vendor start-server.cmd flashes cmd.exe). Prefer
+#   Start-WindowsMcpProcessDirect (CreateNoWindow). Logon task uses a VBS style-0 trampoline.
 
 # Laptop-side streamable-http listen port (server forward targets this).
 $script:WindowsMcpLocalPortDefault = 18765
@@ -489,35 +491,94 @@ function Ensure-WindowsMcpAuth {
 }
 
 
+function Write-WindowsMcpHiddenLogonLauncher {
+    # Replace vendor start-server.cmd (visible console under schtasks) with a VBS style-0
+    # trampoline so At-logon does not flash cmd.exe. Mid-session start never uses this path.
+    param([string]$WmExe)
+    $cfgDir = Join-Path $env:USERPROFILE '.windows-mcp'
+    if (-not (Test-Path -LiteralPath $cfgDir)) {
+        New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+    }
+    $lport = Get-WindowsMcpLocalPort
+    $vbs = Join-Path $cfgDir 'start-server-hidden.vbs'
+    $cmd = Join-Path $cfgDir 'start-server.cmd'
+    $filePath = $null
+    $argStr = $null
+    $via = 'python'
+    if ($WmExe -and (Test-Path -LiteralPath $WmExe)) {
+        $filePath = $WmExe
+        $argStr = "serve --transport streamable-http --host 127.0.0.1 --port $lport"
+        $via = 'exe'
+    } else {
+        $py = Get-PythonLauncher
+        if (-not $py) { return $false }
+        $filePath = $py
+        $argStr = "-m windows_mcp serve --transport streamable-http --host 127.0.0.1 --port $lport"
+    }
+    # Quote for VBScript string literal: double any embedded double-quotes.
+    $fpQ = ($filePath -replace '"', '""')
+    $argQ = ($argStr -replace '"', '""')
+    $vbsBody = @"
+Option Explicit
+Dim sh
+Set sh = CreateObject("WScript.Shell")
+' style 0 = hidden (not minimized); False = do not wait
+sh.Run """$fpQ"" $argQ", 0, False
+"@
+    Set-Content -LiteralPath $vbs -Value $vbsBody -Encoding ASCII
+    $cmdBody = "@echo off`r`nwscript.exe //B //Nologo `"%~dp0start-server-hidden.vbs`"`r`n"
+    Set-Content -LiteralPath $cmd -Value $cmdBody -Encoding ASCII
+    Write-WindowsMcpEnsureLog ("hidden_logon_launcher port={0} via={1}" -f $lport, $via)
+    return $true
+}
+
 function Ensure-WindowsMcpTask {
     param([string]$WmExe)
     if (-not $WmExe) { return $false }
     $lport = Get-WindowsMcpLocalPort
     $task = Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue
+    $startCmd = Join-Path $env:USERPROFILE '.windows-mcp\start-server.cmd'
+    $hideVbs = Join-Path $env:USERPROFILE '.windows-mcp\start-server-hidden.vbs'
     # Reinstall when missing, OR when start-server.cmd still pins a Hyper-V-blocked
     # port (old default :8000) so reconnect cannot revive a dead bind.
     $needInstall = -not [bool]$task
     if (-not $needInstall) {
-        $startCmd = Join-Path $env:USERPROFILE '.windows-mcp\start-server.cmd'
         if (Test-Path -LiteralPath $startCmd) {
             $raw = (Get-Content -LiteralPath $startCmd -Raw -ErrorAction SilentlyContinue) + ''
-            if ($raw -notmatch [regex]::Escape("--port',$lport") -and $raw -notmatch "--port['\s]+$lport") {
-                $needInstall = $true
+            # Vendor cmd embeds --port; our hidden trampoline only calls wscript — port lives in VBS.
+            $hasHidden = (Test-Path -LiteralPath $hideVbs) -and ($raw -match 'start-server-hidden\.vbs')
+            $hasPort = ($raw -match [regex]::Escape("--port',$lport") -or $raw -match "--port['\s]+$lport")
+            if (-not $hasHidden) {
+                if ($raw -notmatch [regex]::Escape("--port',$lport") -and $raw -notmatch "--port['\s]+$lport" -and $raw -notmatch 'start-server-hidden\.vbs') {
+                    $needInstall = $true
+                } elseif (-not $hasPort -and $raw -match 'python\.exe|windows_mcp|windows-mcp') {
+                    # Stale vendor cmd with wrong port
+                    $needInstall = $true
+                }
+            } else {
+                # Refresh VBS when port/exe drifted
+                $vbsRaw = (Get-Content -LiteralPath $hideVbs -Raw -ErrorAction SilentlyContinue) + ''
+                if ($vbsRaw -notmatch "--port\s+$lport") {
+                    [void](Write-WindowsMcpHiddenLogonLauncher -WmExe $WmExe)
+                }
             }
         } else {
             $needInstall = $true
         }
     }
-    if (-not $needInstall) { return $true }
-    Write-WindowsMcpHost ("      -> registering windows-mcp login task (port {0})..." -f $lport)
-    Write-WindowsMcpEnsureLog ("registering scheduled task port={0}" -f $lport)
-    try {
-        & $WmExe install --transport streamable-http --host 127.0.0.1 --port $lport --force 2>&1 | Out-Null
-        return [bool](Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue)
-    } catch {
-        Write-WindowsMcpEnsureLog ("install_task_failed {0}" -f $_.Exception.Message) 'WARN'
-        return $false
+    if ($needInstall) {
+        Write-WindowsMcpHost ("      -> registering windows-mcp login task (port {0})..." -f $lport)
+        Write-WindowsMcpEnsureLog ("registering scheduled task port={0}" -f $lport)
+        try {
+            & $WmExe install --transport streamable-http --host 127.0.0.1 --port $lport --force 2>&1 | Out-Null
+        } catch {
+            Write-WindowsMcpEnsureLog ("install_task_failed {0}" -f $_.Exception.Message) 'WARN'
+            return $false
+        }
     }
+    # Always rewrite logon launcher to hidden VBS (idempotent; kills vendor cmd flash).
+    [void](Write-WindowsMcpHiddenLogonLauncher -WmExe $WmExe)
+    return [bool](Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue)
 }
 
 
@@ -589,20 +650,18 @@ function Stop-WindowsMcpOrphanCmdWrappers {
 
 function Restart-WindowsMcpServer {
     Write-WindowsMcpEnsureLog 'restarting_server_after_auth_rotate'
+    # Stop logon-task instance if any; do not /Run it (visible cmd).
     try { schtasks /End /TN 'windows-mcp-server' 2>&1 | Out-Null } catch { }
-    Start-Sleep -Seconds 1
-    # Kill stray listeners on LPORT (task End can leave orphan python)
+    Start-Sleep -Milliseconds 400
     $lport = Get-WindowsMcpLocalPort
     try {
         Get-NetTCPConnection -LocalPort $lport -State Listen -ErrorAction SilentlyContinue |
             ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
     } catch { }
-    Start-Sleep -Seconds 1
-    try { schtasks /Run /TN 'windows-mcp-server' 2>&1 | Out-Null } catch { }
-    if (-not (Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue)) {
-        [void](Start-WindowsMcpProcessDirect)
-    }
-    for ($i = 0; $i -lt 20; $i++) {
+    Start-Sleep -Milliseconds 400
+    Write-WindowsMcpEnsureLog 'restart_direct_hidden'
+    [void](Start-WindowsMcpProcessDirect)
+    for ($i = 0; $i -lt 8; $i++) {
         Start-Sleep -Seconds 1
         if (Test-WindowsMcpListening) {
             Stop-WindowsMcpOrphanCmdWrappers
@@ -619,13 +678,12 @@ function Start-WindowsMcpIfNeeded {
         Stop-WindowsMcpOrphanCmdWrappers
         return $true
     }
-    Write-WindowsMcpHost '      -> starting windows-mcp-server task...'
-    Write-WindowsMcpEnsureLog 'starting scheduled task'
-    try { schtasks /Run /TN 'windows-mcp-server' 2>&1 | Out-Null } catch { }
-    if (-not (Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue)) {
-        [void](Start-WindowsMcpProcessDirect)
-    }
-    for ($i = 0; $i -lt 20; $i++) {
+    # Always direct hidden start. Never /Run the logon task (flashes cmd.exe and
+    # blocked the Connect UI for up to 20s on the first maintain tick).
+    Write-WindowsMcpHost '      -> starting windows-mcp (background)...'
+    Write-WindowsMcpEnsureLog 'starting_direct_hidden'
+    [void](Start-WindowsMcpProcessDirect)
+    for ($i = 0; $i -lt 8; $i++) {
         Start-Sleep -Seconds 1
         if (Test-WindowsMcpListening) {
             Stop-WindowsMcpOrphanCmdWrappers
@@ -634,6 +692,7 @@ function Start-WindowsMcpIfNeeded {
     }
     $ok = Test-WindowsMcpListening
     if ($ok) { Stop-WindowsMcpOrphanCmdWrappers }
+    else { Write-WindowsMcpEnsureLog 'start_direct_not_listening_after_wait' 'WARN' }
     return $ok
 }
 
@@ -817,6 +876,9 @@ function Ensure-WindowsMcp {
 function Maintain-WindowsMcpSession {
     # Lightweight mid-session heal: keep laptop listen + server forward alive.
     # Safe for live sessions (does not touch SSH tunnels / editor). Call every few minutes.
+    # Quiet on Connect UI — never print "starting windows-mcp..." on the session loop.
+    $prevQuiet = $env:WINDOWS_MCP_ENSURE_QUIET
+    $env:WINDOWS_MCP_ENSURE_QUIET = '1'
     try {
         Update-WindowsMcpPath
         $exe = Get-WindowsMcpExe
@@ -834,6 +896,12 @@ function Maintain-WindowsMcpSession {
     } catch {
         Write-WindowsMcpEnsureLog ("maintain_exception {0}" -f $_.Exception.Message) 'WARN'
         return $false
+    } finally {
+        if ($null -eq $prevQuiet -or $prevQuiet -eq '') {
+            Remove-Item Env:\WINDOWS_MCP_ENSURE_QUIET -ErrorAction SilentlyContinue
+        } else {
+            $env:WINDOWS_MCP_ENSURE_QUIET = $prevQuiet
+        }
     }
 }
 

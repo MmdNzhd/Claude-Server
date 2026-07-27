@@ -37,6 +37,13 @@ Assert ($start -match 'Start-WindowsMcpProcessDirect') 'Start-WindowsMcpIfNeeded
 Assert ($restart -match 'Start-WindowsMcpProcessDirect') 'Restart-WindowsMcpServer uses direct helper'
 Assert ($start -match 'Stop-WindowsMcpOrphanCmdWrappers') 'Start path calls orphan reaper'
 Assert ($restart -match 'Stop-WindowsMcpOrphanCmdWrappers') 'Restart path calls orphan reaper'
+# Code lines only (comments may mention the anti-pattern)
+Assert (-not [regex]::IsMatch($start, '(?m)^\s*try\s*\{\s*schtasks\s+/Run')) 'Start-WindowsMcpIfNeeded never schtasks /Run (cmd flash)'
+Assert (-not [regex]::IsMatch($restart, '(?m)^\s*try\s*\{\s*schtasks\s+/Run')) 'Restart-WindowsMcpServer never schtasks /Run'
+Assert (-not [regex]::IsMatch($start, '(?m)^\s*schtasks\s+/Run')) 'Start has no bare schtasks /Run'
+Assert (-not [regex]::IsMatch($restart, '(?m)^\s*schtasks\s+/Run')) 'Restart has no bare schtasks /Run'
+Assert ($mcp -match 'Write-WindowsMcpHiddenLogonLauncher|start-server-hidden\.vbs') 'Hidden logon VBS launcher present'
+Assert ($mcp -match 'WINDOWS_MCP_ENSURE_QUIET') 'Maintain path can quiet host messages'
 
 # No bare Start-Process of start-server.cmd in start/restart (allow mention in reaper/comments only)
 $badStart = [regex]::IsMatch($start, 'Start-Process\s+-FilePath\s+\$cmd')

@@ -1597,16 +1597,19 @@ function Test-RemoteEditorOnCorrectFolder {
     $aliasOnlyNeedle = [regex]::Escape($Alias)
     foreach ($p in @(Get-CursorMainProfileProcesses)) {
         $cmd = $p.CommandLine
+        $visibleWins = @()
+        try { $visibleWins = @(Get-ProcessTopLevelWindows -ProcessId $p.ProcessId | Where-Object { $_.Visible -and $_.Title }) } catch { $visibleWins = @() }
         if ($cmd) {
             if (Test-PathNeedleBoundaryMatch -CommandLine $cmd -NeedleEscaped $uriNeedle) {
                 if (-not (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath)) {
-                    return $true
+                    # Cmdline match alone is not enough (stale / headless). Need a visible window.
+                    if ($visibleWins.Count -gt 0) { return $true }
                 }
                 continue
             }
             if ($cmd -match $aliasNeedle -and (Test-PathNeedleBoundaryMatch -CommandLine $cmd -NeedleEscaped $pathNeedle)) {
                 if (-not (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath)) {
-                    return $true
+                    if ($visibleWins.Count -gt 0) { return $true }
                 }
                 continue
             }
@@ -1618,11 +1621,8 @@ function Test-RemoteEditorOnCorrectFolder {
             # forever and this check would never see a genuinely-opened window for a
             # different project hosted in the very same process. Enumerate every top-level
             # window actually owned by the PID and apply the exact same title-match rule to
-            # each one. This is strictly a superset of the single-window check (the previous
-            # MainWindowTitle is itself always one of the enumerated windows), so it can only
-            # ADD matches the old check missed - it cannot cause a false positive that the
-            # single-window check would not also have produced.
-            foreach ($win in @(Get-ProcessTopLevelWindows -ProcessId $p.ProcessId)) {
+            # each one. Require Visible so we do not skip launch for a zombie/invisible title.
+            foreach ($win in $visibleWins) {
                 $title = $win.Title
                 # Accept either our custom "[Claude Server <Site>] <root>" title template or Cursor's
                 # own default Remote-SSH title "... [SSH: <alias>] - Cursor". Match the root ONLY at the
