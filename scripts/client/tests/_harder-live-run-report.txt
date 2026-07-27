@@ -1,0 +1,19 @@
+﻿harder-live sequential report
+SUITES pass=16 fail=1 / 17
+ASSERTS pass=210 fail=2
+
+FAIL suite: test-harder-live-exe-atomic-swap.ps1
+  FAIL FileShare.None lock: Copy-ExeAtomicSwap returns true (rename-swap path)
+  FAIL FileShare.None lock: destination SHA256 matches source after true return
+
+ROOT CAUSE (no prod code changed):
+Copy-ExeAtomicSwap rename-swap is designed for a RUNNING EXE image.
+Windows maps running images with FILE_SHARE_DELETE, so Rename-Item of the directory
+entry succeeds while the process runs. The hard test opens destination with
+FileShare.None (exclusive), which also blocks Rename-Item — so swap returns false.
+Contrast: test-harder-live-update-filelock.ps1 (running-style lock) PASSES rename-swap.
+
+SKIPPED LIVE (0 free ClaudeConnect# slots on this machine):
+  test-harder-live-slot-storm.ps1 (need >=4)
+  test-harder-live-deferred-slot.ps1 (need >=2)
+  test-harder-live-bat-boot-handoff.ps1 (need >=2)

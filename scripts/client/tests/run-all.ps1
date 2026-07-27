@@ -93,6 +93,24 @@ $suites = @(
     @{ Name = 'connect-ui-menu-hard-batch'; Script = 'test-connect-ui-menu-hard-batch.ps1' }
     @{ Name = 'server-laptop-exec-hard-batch'; Script = 'test-server-laptop-exec-hard-batch.ps1' }
     @{ Name = 'diagnostic-scorecard-hard-batch'; Script = 'test-diagnostic-scorecard-hard-batch.ps1' }
+    # HARDER LIVE multi-agent suites (2026-07-27) — sequential; do not soften fails by editing prod
+    @{ Name = 'harder-live-bat-boot-handoff'; Script = 'test-harder-live-bat-boot-handoff.ps1' }
+    @{ Name = 'harder-live-daylog-hammer'; Script = 'test-harder-live-daylog-hammer.ps1' }
+    @{ Name = 'harder-live-deferred-slot'; Script = 'test-harder-live-deferred-slot.ps1' }
+    @{ Name = 'harder-live-editor-launch'; Script = 'test-harder-live-editor-launch.ps1' }
+    @{ Name = 'harder-live-elevate-adminak'; Script = 'test-harder-live-elevate-adminak.ps1' }
+    @{ Name = 'harder-live-exe-atomic-swap'; Script = 'test-harder-live-exe-atomic-swap.ps1' }
+    @{ Name = 'harder-live-hygiene-race'; Script = 'test-harder-live-hygiene-race.ps1' }
+    @{ Name = 'harder-live-instant-launcher'; Script = 'test-harder-live-instant-launcher.ps1' }
+    @{ Name = 'harder-live-log-flush'; Script = 'test-harder-live-log-flush.ps1' }
+    @{ Name = 'harder-live-mount-active'; Script = 'test-harder-live-mount-active.ps1' }
+    @{ Name = 'harder-live-orphan-tunnel'; Script = 'test-harder-live-orphan-tunnel.ps1' }
+    @{ Name = 'harder-live-promote-race'; Script = 'test-harder-live-promote-race.ps1' }
+    @{ Name = 'harder-live-runid-bat'; Script = 'test-harder-live-runid-bat.ps1' }
+    @{ Name = 'harder-live-sidecar-backend'; Script = 'test-harder-live-sidecar-backend.ps1' }
+    @{ Name = 'harder-live-slot-storm'; Script = 'test-harder-live-slot-storm.ps1' }
+    @{ Name = 'harder-live-update-filelock'; Script = 'test-harder-live-update-filelock.ps1' }
+    @{ Name = 'harder-live-versioned-prune'; Script = 'test-harder-live-versioned-prune.ps1' }
     @{ Name = 'hard-cmd-flash-fleet-push'; Script = 'test-hard-cmd-flash-fleet-push.ps1' }
     @{ Name = 'p0-connect-fixes'; Script = 'test-p0-connect-fixes.ps1' }
     @{ Name = 'windows-mcp-no-orphan-cmd'; Script = 'test-windows-mcp-no-orphan-cmd.ps1' }
