@@ -73,6 +73,9 @@ $suites = @(
     @{ Name = 'save-connect-conf-key'; Script = 'test-save-connect-conf-key.ps1' }
     @{ Name = 'hard-connect-ux-20260723'; Script = 'test-hard-connect-ux-20260723.ps1' }
     @{ Name = 'hard-multi-agent-regressions'; Script = 'test-hard-multi-agent-regressions.ps1' }
+    @{ Name = 'multi-agent-boot-slots-live'; Script = 'test-multi-agent-boot-slots-live.ps1' }
+    @{ Name = 'multi-agent-deferred-slot-live'; Script = 'test-multi-agent-deferred-slot-live.ps1' }
+    @{ Name = 'multi-agent-promote-shared-dir-live'; Script = 'test-multi-agent-promote-shared-dir-live.ps1' }
     @{ Name = 'hard-cmd-flash-fleet-push'; Script = 'test-hard-cmd-flash-fleet-push.ps1' }
     @{ Name = 'p0-connect-fixes'; Script = 'test-p0-connect-fixes.ps1' }
     @{ Name = 'windows-mcp-no-orphan-cmd'; Script = 'test-windows-mcp-no-orphan-cmd.ps1' }
