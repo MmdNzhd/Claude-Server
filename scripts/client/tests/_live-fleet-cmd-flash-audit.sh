@@ -24,7 +24,9 @@ check live_mount_no_attrib "! grep -qE 'cmd /c .attrib' /usr/local/lib/claude-mo
 check global_heal_no_cmd "! grep -q 'cmd /c exit 0' /usr/local/bin/claude-self-heal"
 check global_le_no_cmd "! grep -q 'cmd /c exit 0' /usr/local/bin/laptop-exec"
 check global_le_no_cmd_any "! grep -vE '^[[:space:]]*#' /usr/local/bin/laptop-exec | grep -q 'cmd /c'"
-check bundle_ver "grep -q 20260727.02 /usr/local/share/claude-client/connect-version.txt"
+# Version must be self-consistent (txt == ConnectVersion in connect.ps1), not a hard-coded stamp.
+BUNDLE_VER="$(tr -d '\r\n' </usr/local/share/claude-client/connect-version.txt)"
+check bundle_ver "printf '%s' \"$BUNDLE_VER\" | grep -Eq '^[0-9]{8}\\.[0-9]+$' && grep -Fq \"ConnectVersion = '$BUNDLE_VER'\" /usr/local/share/claude-client/connect.ps1"
 check bundle_git_clean "! grep -q 'cmd /c exit 0' /usr/local/share/claude-client/git-mode.ps1"
 
 check src_mount_no_cmd "! grep -q 'cmd /c exit 0' /usr/local/lib/claude-server/claude-mount.sh"

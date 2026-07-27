@@ -2470,6 +2470,227 @@ EOF
     return 0
 }
 
+_connect_slot_marker_dir() {
+    if [ -n "${CFG_DIR:-}" ]; then printf '%s' "$CFG_DIR"; else printf '%s' "$HOME/.config/claude-connect"; fi
+}
+
+write_connect_session_slot_marker() {
+    local slot="${1:-0}" port="${2:-0}" project_id="${3:-}" remote_path="${4:-}" pid="${5:-$$}"
+    local dir path
+    dir="$(_connect_slot_marker_dir)"
+    mkdir -p "$dir" 2>/dev/null || true
+    path="$dir/session-slot-${slot}.json"
+    printf '{"pid":%s,"slot":%s,"port":%s,"projectId":"%s","remotePath":"%s","updated":"%s"}\n' \
+        "$pid" "$slot" "$port" \
+        "$(printf '%s' "$project_id" | tr -d '"')" \
+        "$(printf '%s' "$remote_path" | tr -d '"')" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$path" 2>/dev/null || true
+}
+
+clear_connect_session_slot_marker() {
+    local slot="${1:-${CLAUDE_CONNECT_UI_SLOT:-}}"
+    [ -n "$slot" ] || return 0
+    rm -f "$(_connect_slot_marker_dir)/session-slot-${slot}.json" 2>/dev/null || true
+}
+
+_close_cursor_project_windows_mac() {
+    # Best-effort: close Cursor windows whose name contains project root; skip protect root.
+    local root="$1" protect="${2:-}"
+    [ -n "$root" ] || return 0
+    if [ -n "$protect" ] && [ "$root" = "$protect" ]; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "HYGIENE_SIBLING_CURSOR_SKIP root=$root reason=protect_current" 'WARN'
+        fi
+        return 0
+    fi
+    osascript >/dev/null 2>&1 <<EOF || true
+tell application "System Events"
+  if not (exists process "Cursor") then return
+  tell process "Cursor"
+    set wins to every window
+    repeat with w in wins
+      try
+        set t to name of w as text
+        if t contains "$root" then
+          if "$protect" is "" or t does not contain "$protect" then
+            try
+              click button 1 of w
+            end try
+          end if
+        end if
+      end try
+    end repeat
+  end tell
+end tell
+EOF
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "HYGIENE_SIBLING_CURSOR_WINDOW root=$root" 'INFO'
+    fi
+}
+
+show_connect_hygiene_interactive() {
+    local uid_str="${1:-}" protect_path="${2:-}" protect_project="${3:-}"
+    local port_base=20000 slot port p protect_root="" orphans=0 siblings=0
+    local -a sib_ports=() sib_pids=() sib_projects=()
+    if declare -F connect_log >/dev/null 2>&1; then connect_log 'HYGIENE_SCAN begin' 'INFO'; fi
+    if [ -n "$uid_str" ] && declare -F tunnel_port_user_base >/dev/null 2>&1; then
+        port_base="$(tunnel_port_user_base "$uid_str")"
+    fi
+    if [ -n "$protect_path" ]; then
+        protect_root="$(basename "$protect_path")"
+    elif [ -n "$protect_project" ]; then
+        protect_root="$protect_project"
+    fi
+    echo ""
+    printf '    \033[0;36mHygiene scan\033[0m\n'
+    for slot in 0 1 2 3 4 5 6 7 8 9; do
+        port=$((port_base + slot))
+        for p in $(pgrep -f "ssh.*-R ${port}:localhost:22" 2>/dev/null || true); do
+            if [ -n "${bg_pid:-}" ] && [ "$p" = "$bg_pid" ]; then
+                printf '      [current] port=%s tunnel=%s\n' "$port" "$p"
+                continue
+            fi
+            # Heuristic: if parent tree includes connect.sh and not us -> sibling
+            if ps -p "$p" -o command= 2>/dev/null | grep -q .; then
+                local pp="$p" hops=0 is_sib=0
+                while [ "$pp" -gt 1 ] && [ "$hops" -lt 12 ]; do
+                    hops=$((hops + 1))
+                    local cmd
+                    cmd="$(ps -p "$pp" -o command= 2>/dev/null || true)"
+                    if printf '%s' "$cmd" | grep -qE 'connect\.sh|connect-boot'; then
+                        if [ "$pp" != "$$" ]; then is_sib=1; fi
+                        break
+                    fi
+                    pp="$(ps -p "$pp" -o ppid= 2>/dev/null | tr -d ' ')"
+                    [ -n "$pp" ] || break
+                done
+                if [ "$is_sib" -eq 1 ]; then
+                    siblings=$((siblings + 1))
+                    sib_ports+=("$port")
+                    sib_pids+=("$p")
+                    local proj="?"
+                    if [ -f "$(_connect_slot_marker_dir)/session-slot-${slot}.json" ]; then
+                        proj="$(sed -n 's/.*"projectId":"\([^"]*\)".*/\1/p' "$(_connect_slot_marker_dir)/session-slot-${slot}.json" | head -1)"
+                        [ -n "$proj" ] || proj="?"
+                    fi
+                    sib_projects+=("$proj")
+                    printf '      [sibling] port=%s tunnel=%s project=%s\n' "$port" "$p" "$proj"
+                else
+                    orphans=$((orphans + 1))
+                    printf '      [orphan]  port=%s tunnel=%s\n' "$port" "$p"
+                fi
+            fi
+        done
+    done
+    printf '    Orphan tunnels : %s\n' "$orphans"
+    printf '    Sibling Connect: %s\n' "$siblings"
+    echo ""
+    if [ "$orphans" -le 0 ] && [ "$siblings" -le 0 ]; then
+        printf '    \033[0;32mNothing to clean.\033[0m\n\n'
+        return 0
+    fi
+    local ans=""
+    if declare -F connect_prompt >/dev/null 2>&1; then
+        ans="$(connect_prompt "    Soft-clean orphans/idle? [Y/N] " "HYGIENE_SOFT")"
+    else
+        read -rp "    Soft-clean orphans/idle? [Y/N] " ans || true
+    fi
+    ans="$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')"
+    if [ "$ans" != "y" ] && [ "$ans" != "yes" ]; then
+        printf '    \033[0;90mCancelled.\033[0m\n\n'
+        return 0
+    fi
+    if declare -F connect_log >/dev/null 2>&1; then connect_log 'HYGIENE_SOFT begin' 'INFO'; fi
+    for slot in 0 1 2 3 4 5 6 7 8 9; do
+        port=$((port_base + slot))
+        remove_local_orphan_tunnel "$port" "${bg_pid:-}" || true
+    done
+    if declare -F sshx >/dev/null 2>&1; then
+        sshx 'command -v cursor-server-reaper >/dev/null && cursor-server-reaper --apply --user "$USER" 2>&1 | tail -3 || true' >/dev/null 2>&1 || true
+        sshx 'n=0; for s in "$HOME/.cache/laptop-exec"/cm-*; do [ -e "$s" ] || continue; ssh -O check -o ControlPath="$s" -o ControlMaster=no -o BatchMode=yes -o ConnectTimeout=2 x >/dev/null 2>&1 || { rm -f "$s"; n=$((n+1)); }; done; echo MUX_DEAD_REMOVED=$n' >/dev/null 2>&1 || true
+    fi
+    printf '    \033[0;32mSoft done.\033[0m\n'
+    # Re-scan siblings after soft (parity with Windows Get-ConnectHygieneReport -SkipServer).
+    siblings=0
+    sib_ports=()
+    sib_pids=()
+    sib_projects=()
+    for slot in 0 1 2 3 4 5 6 7 8 9; do
+        port=$((port_base + slot))
+        for p in $(pgrep -f "ssh.*-R ${port}:localhost:22" 2>/dev/null || true); do
+            if [ -n "${bg_pid:-}" ] && [ "$p" = "$bg_pid" ]; then
+                continue
+            fi
+            local pp="$p" hops=0 is_sib=0
+            while [ "$pp" -gt 1 ] && [ "$hops" -lt 12 ]; do
+                hops=$((hops + 1))
+                local cmd
+                cmd="$(ps -p "$pp" -o command= 2>/dev/null || true)"
+                if printf '%s' "$cmd" | grep -qE 'connect\.sh|connect-boot'; then
+                    if [ "$pp" != "$$" ]; then is_sib=1; fi
+                    break
+                fi
+                pp="$(ps -p "$pp" -o ppid= 2>/dev/null | tr -d ' ')"
+                [ -n "$pp" ] || break
+            done
+            if [ "$is_sib" -eq 1 ]; then
+                siblings=$((siblings + 1))
+                sib_ports+=("$port")
+                sib_pids+=("$p")
+                local proj="?"
+                if [ -f "$(_connect_slot_marker_dir)/session-slot-${slot}.json" ]; then
+                    proj="$(sed -n 's/.*"projectId":"\([^"]*\)".*/\1/p' "$(_connect_slot_marker_dir)/session-slot-${slot}.json" | head -1)"
+                    [ -n "$proj" ] || proj="?"
+                fi
+                sib_projects+=("$proj")
+            fi
+        done
+    done
+    if [ "$siblings" -le 0 ]; then echo ""; return 0; fi
+    echo ""
+    printf '    \033[0;33m%s sibling Connect session(s) still listed.\033[0m\n' "$siblings"
+    printf '    \033[0;90mCloses their tunnel, Connect process, and that project Cursor window only.\033[0m\n'
+    local ans2=""
+    if declare -F connect_prompt >/dev/null 2>&1; then
+        ans2="$(connect_prompt "    Close sibling sessions? [Y/N] " "HYGIENE_SIBLING")"
+    else
+        read -rp "    Close sibling sessions? [Y/N] " ans2 || true
+    fi
+    ans2="$(printf '%s' "$ans2" | tr '[:upper:]' '[:lower:]')"
+    if [ "$ans2" != "y" ] && [ "$ans2" != "yes" ]; then
+        printf '    \033[0;90mLeft siblings running.\033[0m\n\n'
+        return 0
+    fi
+    if declare -F connect_log >/dev/null 2>&1; then connect_log 'HYGIENE_SIBLING begin' 'INFO'; fi
+    local i=0
+    for i in "${!sib_pids[@]}"; do
+        p="${sib_pids[$i]}"
+        port="${sib_ports[$i]}"
+        local proj="${sib_projects[$i]:-}"
+        kill "$p" 2>/dev/null || true
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "HYGIENE_SIBLING_STOP tunnel pid=$p port=$port" 'INFO'
+        fi
+        # Kill sibling connect.sh from slot marker pid (never $$).
+        local mark_slot=$((port - port_base)) mark_file mark_pid=""
+        mark_file="$(_connect_slot_marker_dir)/session-slot-${mark_slot}.json"
+        if [ -f "$mark_file" ]; then
+            mark_pid="$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$mark_file" | head -1)"
+        fi
+        if [ -n "$mark_pid" ] && [ "$mark_pid" != "$$" ] && kill -0 "$mark_pid" 2>/dev/null; then
+            kill "$mark_pid" 2>/dev/null || true
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "HYGIENE_SIBLING_STOP connect_ui pid=$mark_pid" 'INFO'
+            fi
+        fi
+        if [ -n "$proj" ] && [ "$proj" != "?" ]; then
+            _close_cursor_project_windows_mac "$proj" "$protect_root"
+        fi
+        clear_connect_session_slot_marker "$mark_slot" || true
+    done
+    printf '    \033[0;32mSibling clean done.\033[0m\n\n'
+}
+
 configure_git_mode() {
     echo ""
     printf '    \033[1;37mGit on server (SSHFS)\033[0m\n\n'

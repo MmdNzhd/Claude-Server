@@ -2219,6 +2219,77 @@ function Stop-RemoteEditor {
     }
 }
 
+function Initialize-Win32WindowClose {
+    if ($script:Win32WindowCloseReady) { return }
+    if (-not ('ClaudeConnectWin32Close' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ClaudeConnectWin32Close
+{
+    [DllImport("user32.dll")]
+    public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    public const uint WM_CLOSE = 0x0010;
+}
+'@ -ErrorAction Stop
+    }
+    $script:Win32WindowCloseReady = $true
+}
+
+function Close-CursorProjectWindows {
+    # Window-scoped close for ONE project root. Never Stop-CursorServerProfileTree.
+    # Never closes personal Cursor. Skips windows matching ProtectRootName (current session).
+    param(
+        [Parameter(Mandatory)][string]$ProjectRootName,
+        [string]$ProtectRootName = '',
+        [string]$Alias = 'claude-server'
+    )
+    $root = ($ProjectRootName + '').Trim()
+    if (-not $root) { return 0 }
+    $protect = ($ProtectRootName + '').Trim()
+    if ($protect -and ($protect -ieq $root)) {
+        if (Get-Command Write-EditorLaunchLog -ErrorAction SilentlyContinue) {
+            Write-EditorLaunchLog "CLOSE_CURSOR_PROJECT_WINDOW: skip root=$root reason=equals_protect" 'WARN'
+        }
+        return 0
+    }
+    Initialize-Win32WindowClose
+    $titleTag = Get-CursorWindowTitleTag
+    $aliasEsc = [regex]::Escape(($Alias + '').Trim())
+    $closed = 0
+    $protectStillOpen = $false
+    foreach ($p in @(Get-CursorMainProfileProcesses)) {
+        foreach ($win in @(Get-ProcessTopLevelWindows -ProcessId $p.ProcessId)) {
+            $title = [string]$win.Title
+            if (-not $title) { continue }
+            if ($protect -and (Test-CursorWindowTitleMatchesProject -Title $title -RootName $protect -TitleTag $titleTag -AliasNeedleEscaped $aliasEsc)) {
+                $protectStillOpen = $true
+                continue
+            }
+            if (-not (Test-CursorWindowTitleMatchesProject -Title $title -RootName $root -TitleTag $titleTag -AliasNeedleEscaped $aliasEsc)) {
+                continue
+            }
+            try {
+                [void][ClaudeConnectWin32Close]::PostMessage([IntPtr]$win.Hwnd, [ClaudeConnectWin32Close]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+                $closed++
+                if (Get-Command Write-EditorLaunchLog -ErrorAction SilentlyContinue) {
+                    Write-EditorLaunchLog ("CLOSE_CURSOR_PROJECT_WINDOW: hwnd={0} root={1} title={2}" -f $win.Hwnd, $root, $title) 'INFO'
+                }
+            } catch {
+                if (Get-Command Write-EditorLaunchLog -ErrorAction SilentlyContinue) {
+                    Write-EditorLaunchLog ("CLOSE_CURSOR_PROJECT_WINDOW_FAIL: root={0} err={1}" -f $root, $_.Exception.Message) 'WARN'
+                }
+            }
+        }
+    }
+    if ($closed -eq 0 -and $protectStillOpen) {
+        if (Get-Command Write-EditorLaunchLog -ErrorAction SilentlyContinue) {
+            Write-EditorLaunchLog "CLOSE_CURSOR_PROJECT_WINDOW: no_match root=$root protect_open=1 (shared profile; skipped process kill)" 'WARN'
+        }
+    }
+    return $closed
+}
+
 function Get-CursorLaunchWindowPlan {
     # profile_all>0 with profile_main=False ("orphan helpers") means either helpers from
     # an existing/half-dead profile session, OR another concurrent connect session's window

@@ -90,12 +90,57 @@ try {
     Assert (Test-Path -LiteralPath $audit) 'LIVE audit script exists in tests/'
     $rid = [guid]::NewGuid().ToString('N').Substring(0, 8)
     $remote = "/tmp/hard-cmd-flash-fleet-audit-$rid.sh"
-    & scp -o BatchMode=yes -o ConnectTimeout=12 $audit "smart@192.168.210.240:$remote" 2>&1 | Out-Null
+    # Prefer System32 OpenSSH + empty config: user ssh_config ProxyJump to a DOWN
+    # reverse-tunnel (127.0.0.1:20020) falsely fails LIVE when the LAN host is fine.
+    $sshBin = Join-Path $env:SystemRoot 'System32\OpenSSH\ssh.exe'
+    $scpBin = Join-Path $env:SystemRoot 'System32\OpenSSH\scp.exe'
+    if (-not (Test-Path -LiteralPath $sshBin)) { $sshBin = 'ssh' }
+    if (-not (Test-Path -LiteralPath $scpBin)) { $scpBin = 'scp' }
+    $sshOpts = @('-F', 'NUL', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=25', '-o', 'StrictHostKeyChecking=accept-new')
+    & $scpBin @sshOpts $audit "smart@192.168.210.240:$remote" 2>&1 | Out-Null
     # Must run as root: other users' ~/.local/bin is mode 700/750 and smart cannot sha256sum them.
-    $sshCmd = "sed -i '1s/^\xEF\xBB\xBF//' '$remote'; chmod 755 '$remote'; sudo-from-laptop --smart -- bash '$remote'; ec=`$?; rm -f '$remote'; exit `$ec"
-    $out = & ssh -o BatchMode=yes -o ConnectTimeout=60 smart@192.168.210.240 $sshCmd 2>&1
+    # Prefer sudo-from-laptop (tunnel UP). If tunnel DOWN, CLAUDE_SERVER_SUDO may supply sudo -S
+    # (never hard-code a password in this repo/test).
+    $wrapper = "/tmp/hard-cmd-flash-wrap-$rid.sh"
+    $wrapBody = @'
+#!/bin/bash
+set -uo pipefail
+REMOTE_AUDIT="$1"
+sed -i '1s/^\xEF\xBB\xBF//' "$REMOTE_AUDIT" 2>/dev/null || true
+chmod 755 "$REMOTE_AUDIT"
+ec=1
+# Prefer CLAUDE_SERVER_SUDO when set (tunnel often DOWN on the Smart laptop).
+if [ -n "${CLAUDE_SERVER_SUDO:-}" ]; then
+  printf '%s\n' "$CLAUDE_SERVER_SUDO" | sudo -S -p '' bash "$REMOTE_AUDIT"
+  ec=$?
+elif command -v sudo-from-laptop >/dev/null 2>&1 && sudo-from-laptop --smart -- bash "$REMOTE_AUDIT"; then
+  ec=0
+else
+  echo 'LIVE_FAIL need_sudo_via_tunnel_or_CLAUDE_SERVER_SUDO'
+  ec=1
+fi
+rm -f "$REMOTE_AUDIT"
+exit "$ec"
+'@
+    $wrapLocal = Join-Path $env:TEMP ("hard-cmd-flash-wrap-$rid.sh")
+    [IO.File]::WriteAllText($wrapLocal, ($wrapBody -replace "`r`n", "`n"), [Text.UTF8Encoding]::new($false))
+    & $scpBin @sshOpts $wrapLocal "smart@192.168.210.240:$wrapper" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "scp wrapper failed exit=$LASTEXITCODE via $scpBin" }
+    # Pass sudo via env file to avoid shell-metachar issues (@ in passwords, etc.).
+    $remoteCmd = "chmod 755 '$wrapper' '$remote'"
+    if ($env:CLAUDE_SERVER_SUDO) {
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($env:CLAUDE_SERVER_SUDO))
+        $remoteCmd += "; export CLAUDE_SERVER_SUDO=`$(printf '%s' '$b64' | base64 -d); bash '$wrapper' '$remote'; ec=`$?; unset CLAUDE_SERVER_SUDO; rm -f '$wrapper'; exit `$ec"
+    } else {
+        $remoteCmd += "; bash '$wrapper' '$remote'; ec=`$?; rm -f '$wrapper'; exit `$ec"
+    }
+    $out = & $sshBin @sshOpts -o ConnectTimeout=90 smart@192.168.210.240 $remoteCmd 2>&1
+    $sshEc = $LASTEXITCODE
     $text = ($out | ForEach-Object { "$_" }) -join "`n"
     Write-Host $text
+    if ($sshEc -ne 0 -and $text -notmatch 'LIVE_PASS ') {
+        throw "ssh live audit failed exit=$sshEc via $sshBin"
+    }
     $livePass = ([regex]::Matches($text, 'LIVE_PASS ')).Count
     $liveFail = ([regex]::Matches($text, 'LIVE_FAIL ')).Count
     Assert ($livePass -ge 28) ("LIVE fleet checks passed count>=28 (got $livePass)")
@@ -109,11 +154,20 @@ try {
 }
 
 Write-Host ''
-Write-Host '--- Desktop Claude-Connect parity ---' -ForegroundColor Cyan
+Write-Host '--- Client handoff parity (portable / server-first) ---' -ForegroundColor Cyan
+$expectVer = (Get-Content (Join-Path $script:RepoRoot 'scripts\client\windows\connect-version.txt') -Raw).Trim()
+$pub = Join-Path $env:USERPROFILE 'Desktop\claude-publish'
+$pubExe = Join-Path $pub ("Claude-Connect-{0}.exe" -f $expectVer)
+Assert (Test-Path -LiteralPath $pubExe) ("claude-publish has Claude-Connect-{0}.exe" -f $expectVer)
 $desk = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
 if (Test-Path -LiteralPath $desk) {
     $dv = (Get-Content (Join-Path $desk 'connect-version.txt') -Raw).Trim()
-    Assert ($dv -eq '20260727.02') ("Desktop connect-version is 20260727.02 (got $dv)")
+    # Portable/server-first deploys may leave Desktop stale on purpose; warn only.
+    if ($dv -eq $expectVer) {
+        Assert $true ("Desktop connect-version matches repo $expectVer")
+    } else {
+        Write-Host ("  WARN  Desktop connect-version=$dv (repo=$expectVer) - OK under portable/server-first policy") -ForegroundColor Yellow
+    }
     $dg = Get-Content (Join-Path $desk 'git-mode.ps1') -Raw
     Assert ($dg -notmatch 'cmd /c exit 0') 'Desktop git-mode.ps1 no cmd /c exit 0'
     Assert ($dg -match 'WindowStyle Hidden -Command exit') 'Desktop git-mode.ps1 hidden probe'

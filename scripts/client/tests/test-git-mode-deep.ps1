@@ -138,7 +138,7 @@ foreach ($rel in @('mac\connect.sh')) {
     Assert ($src -match "CONNECT_VERSION='$([regex]::Escape($ver))'") "$rel has current CONNECT_VERSION ($ver)"
     Assert ($src -match 'exit_requested|menuLoop') "$rel has post-disconnect menu loop"
     Assert ($src -match 'read_post_disconnect_key') "$rel has post-disconnect countdown"
-    Assert ($src -match 'ui_session_box|G = git mode') "$rel has session git hotkey"
+    Assert ($src -match 'ui_session_box|H = hygiene|show_connect_hygiene_interactive') "$rel has session hygiene hotkey"
     Assert ($src -match 'clear_session_mount') "$rel clears mount on disconnect"
     Assert ($src -match 'initialize_server_session') "$rel uses parallel server setup"
     Assert ($src -notmatch 'unmount_other_projects|Unmount-OtherProjects') "$rel does not unmount other projects on connect"

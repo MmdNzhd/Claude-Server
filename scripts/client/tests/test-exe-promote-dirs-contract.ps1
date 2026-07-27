@@ -18,6 +18,9 @@ $updPath = Get-ClientFile 'windows\connect-update.ps1'
 $src = Get-Content -LiteralPath $updPath -Raw
 
 Assert ($src -match 'function Get-ConnectExePromoteDirs') 'Get-ConnectExePromoteDirs defined'
+Assert ($src -match 'function Test-IsConnectVersionedRootDir') 'skips Claude-Connect root when versioned'
+Assert ($src -match 'function Test-IsConnectVersionedSrcDir') 'skips src\ for EXE promote'
+Assert ($src -match 'do NOT drop EXEs here' -or $src -match 'never litter the root') 'documents no EXE litter at versioned root'
 Assert ($src -match 'function Sync-ConnectExeBesideClient') 'Sync-ConnectExeBesideClient defined'
 Assert ($src -match 'last-launch-dir\.txt') 'connect-update persists last-launch-dir.txt'
 Assert ($src -match 'CLAUDE_CONNECT_LAUNCH_DIR') 'connect-update honors CLAUDE_CONNECT_LAUNCH_DIR'
@@ -30,6 +33,7 @@ Assert ($promoteFn -and ($promoteFn -match 'return \$dirs')) 'Get-ConnectExeProm
 $syncFn = Get-FunctionSource -Content $src -Name 'Sync-ConnectExeBesideClient'
 Assert ($syncFn -and ($syncFn -match 'Get-ConnectExePromoteDirs')) 'Sync-ConnectExeBesideClient calls Get-ConnectExePromoteDirs'
 Assert ($syncFn -and ($syncFn -match 'Claude-Connect-\{0\}\.exe' -or $syncFn -match 'Claude-Connect-\$\{')) 'Sync writes versioned Claude-Connect-{ver}.exe'
+Assert ($syncFn -and ($syncFn -match 'foreign_verdir')) 'Sync skips Claude-Connect-NEW.exe inside OLD \{ver\} folders'
 
 Assert ($src -match 'Sync-ConnectExeBesideClient -VersionLabel \$remoteVer') 'apply path calls Sync with remoteVer'
 Assert ($src -match 'EXE ready:') 'apply path prints EXE ready lines'
@@ -41,6 +45,8 @@ Assert (Test-Path -LiteralPath $setupLaunch) 'publish/_setup-launch-body.ps1 exi
 if (Test-Path -LiteralPath $setupLaunch) {
     $sl = Get-Content -LiteralPath $setupLaunch -Raw
     Assert ($sl -match 'CLAUDE_CONNECT_LAUNCH_DIR') 'SFX setup-launch stamps CLAUDE_CONNECT_LAUNCH_DIR'
+    Assert ($sl -match 'CLAUDE_CONNECT_INSTALL_DIR') 'SFX setup-launch stamps CLAUDE_CONNECT_INSTALL_DIR'
+    Assert (($sl -match 'Resolve-ConnectLaunchExe') -or ($sl -match 'Resolve-VersionedTree')) 'SFX setup-launch has launch / versioned resolver'
     Assert ($sl -match 'last-launch-dir\.txt') 'SFX setup-launch writes last-launch-dir.txt'
 }
 

@@ -9,6 +9,8 @@ $suites = @(
     @{ Name = 'connect-ui';           Script = 'test-connect-ui.ps1' }
     @{ Name = 'select-project';       Script = 'test-select-project.ps1' }
     @{ Name = 'connect-pipeline';     Script = 'test-connect-pipeline.ps1' }
+    @{ Name = 'connect-hygiene-menu'; Script = 'test-connect-hygiene-menu.ps1' }
+    @{ Name = 'connect-hygiene-complete'; Script = 'test-connect-hygiene-complete.ps1' }
     @{ Name = 'connect-preflight-skip-heal'; Script = 'test-connect-preflight-skip-heal.ps1' }
     @{ Name = 'connect-preflight-skip-update'; Script = 'test-connect-preflight-skip-update.ps1' }
     @{ Name = 'connect-task7-prefetch-foreign-cache'; Script = 'test-connect-task7-prefetch-foreign-cache.ps1' }
@@ -80,7 +82,13 @@ $suites = @(
     @{ Name = 'client-update-policy-optional'; Script = 'test-client-update-policy-optional.ps1' }
     @{ Name = 'smartscreen-docs-contract'; Script = 'test-smartscreen-docs-contract.ps1' }
     @{ Name = 'never-again-ship-gates'; Script = 'test-never-again-ship-gates.ps1' }
+    @{ Name = 'harder-adversarial'; Script = 'test-harder-adversarial.ps1' }
+    @{ Name = 'versioned-layout'; Script = 'test-versioned-layout.ps1' }
+    @{ Name = 'versioned-layout-deep-live'; Script = 'test-versioned-layout-deep-live.ps1' }
+    @{ Name = 'versioned-layout-hard-regressions'; Script = 'test-versioned-layout-hard-regressions.ps1' }
+    @{ Name = 'versioned-layout-harder-adversarial'; Script = 'test-versioned-layout-harder-adversarial.ps1' }
     @{ Name = 'exe-launch-slot-gate'; Script = 'test-exe-launch-slot-gate.ps1' }
+    @{ Name = 'exe-spaced-path-launch'; Script = 'test-exe-spaced-path-launch.ps1' }
     @{ Name = 'cursor-profile-db-tool'; Script = 'test-cursor-profile-db-tool.ps1' }
     @{ Name = 'chat-freeze-skip-paths'; Script = 'test-chat-freeze-skip-paths.ps1' }
     @{ Name = 'banner-probe-interval'; Script = 'test-banner-probe-interval.ps1' }
@@ -115,6 +123,7 @@ $suites = @(
     @{ Name = 'update-relaunch-no-press-enter-live'; Script = 'test-update-relaunch-no-press-enter-live.ps1' }
     @{ Name = 'local-port-free-bind-live'; Script = 'test-local-port-free-bind-live.ps1' }
     @{ Name = 'orphan-tunnel-kill-vs-sibling-live'; Script = 'test-orphan-tunnel-kill-vs-sibling-live.ps1' }
+    @{ Name = 'connect-hygiene-soft-vs-sibling-live'; Script = 'test-connect-hygiene-soft-vs-sibling-live.ps1' }
     @{ Name = 'auth-stamp-current-live'; Script = 'test-auth-stamp-current-live.ps1' }
     @{ Name = 'auth-golden-missing-cache-live'; Script = 'test-auth-golden-missing-cache-live.ps1' }
     @{ Name = 'sidecar-listening-live'; Script = 'test-sidecar-listening-live.ps1' }

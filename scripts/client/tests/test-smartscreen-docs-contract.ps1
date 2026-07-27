@@ -47,9 +47,11 @@ Assert ($hay -match '(?i)never.*disable.*(Defender|SmartScreen)|do not disable D
 Assert ($build -match '(?i)client-connect\.md|SmartScreen|false.?positive') 'build-windows-exe.ps1 comments point at FP docs'
 
 # AV regression guard (Mehrdad): IExpress AppLaunched must NOT be hidden Bypass PowerShell.
-# That parent-line pattern was fine historically via cmd -> setup-claude-connect.cmd.
-Assert ($build -match "(?m)^\s*\[void\]\`$sb\.AppendLine\('AppLaunched=cmd\.exe /c setup-claude-connect\.cmd'\)") `
-    'AppLaunched uses cmd.exe /c setup-claude-connect.cmd (pre-regression path)'
+# Hidden console = wscript -> cmd /c setup.cmd (style 0); never powershell Bypass+Hidden on AppLaunched.
+Assert ($build -match "(?m)^\s*\[void\]\`$sb\.AppendLine\('AppLaunched=wscript\.exe //B //Nologo setup-run-hidden\.vbs'\)") `
+    'AppLaunched uses hidden wscript setup-run-hidden.vbs (no console flash)'
+Assert ($build -match 'setup-claude-connect\.cmd') `
+    'setup still chains through setup-claude-connect.cmd'
 Assert (-not ($build -match "(?i)AppLaunched=powershell\.exe.*ExecutionPolicy\s+Bypass.*WindowStyle\s+Hidden")) `
     'AppLaunched is not powershell Bypass+Hidden (Defender dropper heuristic)'
 Assert (-not ($build -match "(?i)AppendLine\('AppLaunched=powershell")) `

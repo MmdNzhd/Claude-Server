@@ -135,9 +135,29 @@ MAC_SRC="$CLIENT_DIR/mac"
 [ -f "$MAC_SRC/connect.sh" ] || fail "missing $MAC_SRC/connect.sh"
 
 _strip_crlf() {
+    # Portable CR strip. NEVER use sed 's/\r$//' — on BusyBox/some sed builds
+    # \r is a literal letter "r", which truncates identifiers ending in r
+    # ($uidStr->$uidSt, Get-InteractiveLaptopUser->...Use). That shipped a
+    # corrupted connect.ps1 in 20260727.03 and breaks update consumers.
     local f="$1"
     [ -f "$f" ] || return 0
-    sed -i 's/\r$//' "$f"
+    if command -v perl >/dev/null 2>&1; then
+        perl -pi -e 's/\r$//' "$f"
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$f" <<'PY'
+import sys
+p = sys.argv[1]
+data = open(p, 'rb').read().replace(b'\r\n', b'\n').replace(b'\r', b'')
+open(p, 'wb').write(data)
+PY
+        return 0
+    fi
+    # GNU sed with explicit CR byte (ANSI-C quoting). Still prefer perl/python3.
+    local cr
+    cr=$(printf '\r')
+    sed -i "s/${cr}$//" "$f"
 }
 
 echo ""
@@ -376,7 +396,22 @@ _verify_staged_client_bundle() {
 
     f="$root/connect-version.txt"
     [ -f "$f" ] || fail "ship-gate: connect-version.txt missing"
-    ok "ship-gates passed (diagnostic canon, proxy backend_down, update hard-exit, EXE heuristic)"
+
+    # Fail closed: trailing-"r" truncation (broken CRLF strip / BusyBox sed \r).
+    f="$root/connect.ps1"
+    [ -f "$f" ] || fail "ship-gate: connect.ps1 missing"
+    if grep -qE 'Get-InteractiveLaptopUse([^r]|$)|\$uidSt([^r]|$)|\$launchDi([^r]|$)|\$ConnectScriptDi([^r]|$)|\$OnFolde([^r]|$)|\$RemoteUse([^r]|$)|\$sshCfgUse([^r]|$)' "$f" 2>/dev/null; then
+        fail "ship-gate: connect.ps1 has truncated identifiers (trailing-r strip corruption)"
+    fi
+    grep -q 'Get-InteractiveLaptopUser' "$f" || fail "ship-gate: connect.ps1 missing Get-InteractiveLaptopUser"
+    grep -q '\$uidStr' "$f" || fail "ship-gate: connect.ps1 missing \$uidStr"
+    f="$root/connect-diagnostic.ps1"
+    if grep -qE '\$OnFolde([^r]|$)' "$f" 2>/dev/null; then
+        fail "ship-gate: connect-diagnostic.ps1 has truncated \$OnFolder"
+    fi
+    grep -q '\$OnFolder' "$f" || fail "ship-gate: connect-diagnostic.ps1 missing \$OnFolder"
+
+    ok "ship-gates passed (diagnostic canon, proxy backend_down, update hard-exit, EXE heuristic, no-r-truncation)"
 }
 _verify_staged_client_bundle "$BUNDLE_ROOT"
 

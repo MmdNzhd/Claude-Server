@@ -31,6 +31,106 @@ if (-not $ScriptDir) {
 $ScriptDir = $ScriptDir.TrimEnd('\', '/')
 try { $ScriptDir = [IO.Path]::GetFullPath($ScriptDir) } catch {}
 
+function Test-ConnectLaunchDirUsable {
+    # Reject System32 / PowerShell / IExpress extract temps (old launch_dir bug).
+    param([string]$Dir)
+    if (-not $Dir) { return $false }
+    try { $full = [IO.Path]::GetFullPath($Dir) } catch { return $false }
+    if ($full -match '(?i)(?:^|[\\/])(?:WindowsPowerShell|System32|SysWOW64)(?:[\\/]|$)') { return $false }
+    if ($full -match '(?i)[\\/]Temp[\\/](IXP|IE[A-Z0-9]{3}|wextract)') { return $false }
+    return $true
+}
+
+function Get-ConnectVersionedLayout {
+    # Detect ...\Claude-Connect\{ver}\src layout (or flat Claude-Connect root).
+    param([string]$Dir)
+    if (-not $Dir) { return $null }
+    try { $Dir = [IO.Path]::GetFullPath($Dir) } catch { return $null }
+    $leaf = Split-Path -Leaf $Dir
+    if ($leaf -eq 'src') {
+        $verDir = Split-Path -Parent $Dir
+        $verName = Split-Path -Leaf $verDir
+        $root = Split-Path -Parent $verDir
+        if ($verName -match '^\d{8}\.\d+$' -and (Split-Path -Leaf $root) -eq 'Claude-Connect') {
+            return @{ Kind = 'versioned'; Root = $root; VerDir = $verDir; SrcDir = $Dir; Ver = $verName }
+        }
+    }
+    if ($leaf -eq 'Claude-Connect' -and (Test-Path -LiteralPath (Join-Path $Dir 'connect.ps1'))) {
+        return @{ Kind = 'flat'; Root = $Dir; VerDir = $null; SrcDir = $Dir; Ver = '' }
+    }
+    return $null
+}
+
+function Invoke-PruneConnectVersionDirs {
+    param([string]$Root, [int]$Keep = 3)
+    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return }
+    $dirs = @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d{8}\.\d+$' } |
+        Sort-Object {
+            if ($_.Name -match '^(\d{8})\.(\d+)$') { [int64]$Matches[1] * 10000 + [int]$Matches[2] } else { 0 }
+        } -Descending)
+    if ($dirs.Count -le $Keep) { return }
+    foreach ($d in $dirs[$Keep..($dirs.Count - 1)]) {
+        try {
+            Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            Write-UpdateFileLog ("version_prune removed={0}" -f $d.Name)
+        } catch { }
+    }
+}
+
+function ConvertTo-ConnectVersionedLayout {
+    # One-time: flat Desktop\Claude-Connect\*.ps1 -> Claude-Connect\{ver}\src\
+    param([string]$FlatRoot)
+    if (-not $FlatRoot) { return $null }
+    $vf = Join-Path $FlatRoot 'connect-version.txt'
+    if (-not (Test-Path -LiteralPath $vf)) { return $null }
+    $ver = (Get-Content -LiteralPath $vf -Raw -ErrorAction SilentlyContinue).Trim()
+    if ($ver -notmatch '^\d{8}\.\d+$') { return $null }
+    if (-not (Test-Path -LiteralPath (Join-Path $FlatRoot 'connect.ps1'))) { return $null }
+    # Already versioned?
+    if (Test-Path -LiteralPath (Join-Path $FlatRoot 'current.txt')) {
+        $cv = (Get-Content -LiteralPath (Join-Path $FlatRoot 'current.txt') -Raw -ErrorAction SilentlyContinue).Trim()
+        $src = Join-Path (Join-Path $FlatRoot $cv) 'src'
+        if ($cv -and (Test-Path -LiteralPath (Join-Path $src 'connect.ps1'))) {
+            return @{ Kind = 'versioned'; Root = $FlatRoot; VerDir = (Join-Path $FlatRoot $cv); SrcDir = $src; Ver = $cv }
+        }
+    }
+    $verDir = Join-Path $FlatRoot $ver
+    $srcDir = Join-Path $verDir 'src'
+    try {
+        New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
+        Get-ChildItem -LiteralPath $FlatRoot -File -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.Name -eq 'current.txt') { return }
+            Move-Item -LiteralPath $_.FullName -Destination (Join-Path $srcDir $_.Name) -Force -ErrorAction SilentlyContinue
+        }
+        # Move nested windows/ if present
+        $win = Join-Path $FlatRoot 'windows'
+        if (Test-Path -LiteralPath $win) {
+            Get-ChildItem -LiteralPath $win -File -ErrorAction SilentlyContinue | ForEach-Object {
+                Move-Item -LiteralPath $_.FullName -Destination (Join-Path $srcDir $_.Name) -Force -ErrorAction SilentlyContinue
+            }
+        }
+        $destExe = Join-Path $verDir ("Claude-Connect-{0}.exe" -f $ver)
+        foreach ($cand in @(
+            (Join-Path $FlatRoot 'Claude-Connect.exe'),
+            (Join-Path $FlatRoot ("Claude-Connect-{0}.exe" -f $ver))
+        )) {
+            if ((Test-Path -LiteralPath $cand) -and -not (Test-Path -LiteralPath $destExe)) {
+                try { Move-Item -LiteralPath $cand -Destination $destExe -Force } catch {
+                    try { Copy-Item -LiteralPath $cand -Destination $destExe -Force } catch { }
+                }
+            }
+        }
+        Set-Content -LiteralPath (Join-Path $FlatRoot 'current.txt') -Value $ver -Encoding ASCII -NoNewline
+        Write-UpdateFileLog ("flat_migrated_to_versioned ver={0} src={1}" -f $ver, $srcDir)
+        Invoke-PruneConnectVersionDirs -Root $FlatRoot -Keep 3
+        return @{ Kind = 'versioned'; Root = $FlatRoot; VerDir = $verDir; SrcDir = $srcDir; Ver = $ver }
+    } catch {
+        Write-UpdateFileLog ("flat_migrate_fail err=$($_.Exception.Message)") 'WARN'
+        return $null
+    }
+}
+
 function Save-ConnectLaunchDirStamp {
     # Persist where the user launched Claude-Connect*.exe so post-update can drop
     # Claude-Connect-{ver}.exe beside that folder (e.g. Desktop\claude-publish).
@@ -38,17 +138,19 @@ function Save-ConnectLaunchDirStamp {
     try {
         $d = ($Dir + '').Trim()
         if (-not $d -and $env:CLAUDE_CONNECT_LAUNCH_DIR) { $d = $env:CLAUDE_CONNECT_LAUNCH_DIR.Trim() }
+        if ($d -and -not (Test-ConnectLaunchDirUsable -Dir $d)) { $d = '' }
         if (-not $d) {
             try {
                 Get-CimInstance Win32_Process -Filter "Name LIKE 'Claude-Connect%'" -ErrorAction SilentlyContinue | ForEach-Object {
                     $p = [string]$_.ExecutablePath
                     if (-not $p) { return }
                     $leaf = Split-Path -Leaf $p
+                    $parent = Split-Path -Parent $p
+                    if (-not (Test-ConnectLaunchDirUsable -Dir $parent)) { return }
                     # Prefer versioned / Setup names over the install-folder Claude-Connect.exe
                     if ($leaf -match '^Claude-Connect-\d{8}\.\d+\.exe$' -or $leaf -eq 'Claude-Connect-Setup.exe') {
-                        $d = Split-Path -Parent $p
+                        $d = $parent
                     } elseif (-not $d -and $leaf -eq 'Claude-Connect.exe') {
-                        $parent = Split-Path -Parent $p
                         $canon = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
                         try {
                             if ([IO.Path]::GetFullPath($parent) -ne [IO.Path]::GetFullPath($canon)) { $d = $parent }
@@ -60,18 +162,44 @@ function Save-ConnectLaunchDirStamp {
         if (-not $d) { return }
         try { $d = [IO.Path]::GetFullPath($d) } catch { return }
         if (-not (Test-Path -LiteralPath $d)) { return }
+        if (-not (Test-ConnectLaunchDirUsable -Dir $d)) { return }
         $env:CLAUDE_CONNECT_LAUNCH_DIR = $d
         $stampDir = Join-Path $env:USERPROFILE '.config\claude-connect'
         New-Item -ItemType Directory -Force -Path $stampDir | Out-Null
         Set-Content -LiteralPath (Join-Path $stampDir 'last-launch-dir.txt') -Value $d -Encoding ASCII -NoNewline
     } catch {}
 }
+# Drop a previously poisoned stamp (PowerShell/System32) so promote does not aim there.
+try {
+    $stampPath = Join-Path $env:USERPROFILE '.config\claude-connect\last-launch-dir.txt'
+    if (Test-Path -LiteralPath $stampPath) {
+        $prev = (Get-Content -LiteralPath $stampPath -Raw -ErrorAction SilentlyContinue).Trim()
+        if ($prev -and -not (Test-ConnectLaunchDirUsable -Dir $prev)) {
+            Remove-Item -LiteralPath $stampPath -Force -ErrorAction SilentlyContinue
+            if ($env:CLAUDE_CONNECT_LAUNCH_DIR -and -not (Test-ConnectLaunchDirUsable -Dir $env:CLAUDE_CONNECT_LAUNCH_DIR)) {
+                Remove-Item Env:CLAUDE_CONNECT_LAUNCH_DIR -ErrorAction SilentlyContinue
+            }
+        }
+    }
+} catch {}
 Save-ConnectLaunchDirStamp
+
+# Prefer versioned ...\Claude-Connect\{ver}\src as ScriptDir when present / after flat migrate.
+try {
+    $layout0 = Get-ConnectVersionedLayout -Dir $ScriptDir
+    if ($layout0 -and $layout0.Kind -eq 'flat') {
+        $migrated = ConvertTo-ConnectVersionedLayout -FlatRoot $layout0.Root
+        if ($migrated -and $migrated.SrcDir) { $ScriptDir = $migrated.SrcDir }
+    } elseif (-not $layout0 -and (Split-Path -Leaf $ScriptDir) -eq 'Claude-Connect') {
+        $migrated = ConvertTo-ConnectVersionedLayout -FlatRoot $ScriptDir
+        if ($migrated -and $migrated.SrcDir) { $ScriptDir = $migrated.SrcDir }
+    }
+} catch {}
 
 $null = Ensure-ConnectRunId
 
 $RemoteBundle = if ($env:CLAUDE_CLIENT_BUNDLE) { $env:CLAUDE_CLIENT_BUNDLE.TrimEnd('/') } else { '/usr/local/share/claude-client' }
-$StagingDir = Join-Path $ScriptDir '.client-update-staging'
+$StagingDir = Join-Path $env:TEMP ("claude-client-update-staging-{0}" -f $PID)
 $script:SshCommonOpts = @(
     '-o', 'BatchMode=yes',
     '-o', 'ConnectTimeout=8',
@@ -275,9 +403,33 @@ function Copy-ExeAtomicSwap {
     }
 }
 
+function Test-IsConnectVersionedSrcDir {
+    # ...\Claude-Connect\{ver}\src — scripts only; never park EXEs here.
+    param([string]$Dir)
+    if (-not $Dir) { return $false }
+    try { $Dir = [IO.Path]::GetFullPath($Dir) } catch { return $false }
+    if ((Split-Path -Leaf $Dir) -ne 'src') { return $false }
+    $verDir = Split-Path -Parent $Dir
+    $root = Split-Path -Parent $verDir
+    return (((Split-Path -Leaf $verDir) -match '^\d{8}\.\d+$') -and ((Split-Path -Leaf $root) -eq 'Claude-Connect'))
+}
+
+function Test-IsConnectVersionedRootDir {
+    # ...\Claude-Connect root that already has version dirs — do NOT drop EXEs here
+    # (canonical launch EXE lives in {ver}\ next to src).
+    param([string]$Dir)
+    if (-not $Dir) { return $false }
+    try { $Dir = [IO.Path]::GetFullPath($Dir) } catch { return $false }
+    if ((Split-Path -Leaf $Dir) -ne 'Claude-Connect') { return $false }
+    $hasVer = @(Get-ChildItem -LiteralPath $Dir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d{8}\.\d+$' }).Count -gt 0
+    return $hasVer
+}
+
 function Get-ConnectExePromoteDirs {
-    # Dirs where the new Claude-Connect-{ver}.exe should appear: install/script dir +
-    # wherever the user actually launched the EXE (claude-publish, Desktop, …).
+    # Dirs where Claude-Connect-{ver}.exe should appear.
+    # Versioned layout: ONLY {ver}\ (beside src) + external launch folders
+    # (claude-publish, drop folder). Never Claude-Connect\ root, never src\.
     # Never deletes older versioned EXEs.
     param([string]$WinDir)
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
@@ -287,19 +439,44 @@ function Get-ConnectExePromoteDirs {
         if (-not $d) { return }
         try { $d = [IO.Path]::GetFullPath($d) } catch { return }
         if (-not (Test-Path -LiteralPath $d)) { return }
+        if (Test-IsConnectVersionedSrcDir -Dir $d) { return }
+        if (Test-IsConnectVersionedRootDir -Dir $d) { return }
         if ($seenSet.Add($d)) { [void]$list.Add($d) }
     }
     & $addDir $WinDir $seen $dirs
     if ($ScriptDir) { & $addDir $ScriptDir $seen $dirs }
-    if ($env:CLAUDE_CONNECT_LAUNCH_DIR) { & $addDir $env:CLAUDE_CONNECT_LAUNCH_DIR $seen $dirs }
+    # Versioned layout: promote beside VerDir only (not Root, not src).
+    try {
+        $vl = Get-ConnectVersionedLayout -Dir $ScriptDir
+        if ($vl -and $vl.Kind -eq 'versioned') {
+            & $addDir $vl.VerDir $seen $dirs
+        }
+    } catch {}
+    if ($env:CLAUDE_CONNECT_VER_DIR -and (Test-ConnectLaunchDirUsable -Dir $env:CLAUDE_CONNECT_VER_DIR)) {
+        & $addDir $env:CLAUDE_CONNECT_VER_DIR $seen $dirs
+    }
+    # CLAUDE_CONNECT_ROOT is the Claude-Connect folder — skip when versioned (would duplicate EXE at root).
+    if ($env:CLAUDE_CONNECT_ROOT -and (Test-ConnectLaunchDirUsable -Dir $env:CLAUDE_CONNECT_ROOT)) {
+        if (-not (Test-IsConnectVersionedRootDir -Dir $env:CLAUDE_CONNECT_ROOT)) {
+            & $addDir $env:CLAUDE_CONNECT_ROOT $seen $dirs
+        }
+    }
+    if ($env:CLAUDE_CONNECT_LAUNCH_DIR -and (Test-ConnectLaunchDirUsable -Dir $env:CLAUDE_CONNECT_LAUNCH_DIR)) {
+        & $addDir $env:CLAUDE_CONNECT_LAUNCH_DIR $seen $dirs
+    }
     $stamp = Join-Path $env:USERPROFILE '.config\claude-connect\last-launch-dir.txt'
     if (Test-Path -LiteralPath $stamp) {
-        try { & $addDir ((Get-Content -LiteralPath $stamp -Raw -ErrorAction Stop).Trim()) $seen $dirs } catch {}
+        try {
+            $sd = (Get-Content -LiteralPath $stamp -Raw -ErrorAction Stop).Trim()
+            if (Test-ConnectLaunchDirUsable -Dir $sd) { & $addDir $sd $seen $dirs }
+        } catch {}
     }
     try {
         Get-CimInstance Win32_Process -Filter "Name LIKE 'Claude-Connect%'" -ErrorAction SilentlyContinue | ForEach-Object {
             $p = [string]$_.ExecutablePath
-            if ($p -and (Test-Path -LiteralPath $p)) { & $addDir (Split-Path -Parent $p) $seen $dirs }
+            if (-not $p -or -not (Test-Path -LiteralPath $p)) { return }
+            $parent = Split-Path -Parent $p
+            if (Test-ConnectLaunchDirUsable -Dir $parent) { & $addDir $parent $seen $dirs }
         }
     } catch {}
     return $dirs
@@ -320,6 +497,17 @@ function Sync-ConnectExeBesideClient {
             $winDir = $ScriptDir
         }
         $exe = Join-Path $winDir 'Claude-Connect.exe'
+        # Versioned tree: EXE lives in VerDir (parent of src), not inside src.
+        if (-not (Test-Path -LiteralPath $exe)) {
+            $vl = Get-ConnectVersionedLayout -Dir $ScriptDir
+            if ($vl -and $vl.Kind -eq 'versioned') {
+                $cand = Join-Path $vl.VerDir ("Claude-Connect-{0}.exe" -f $vl.Ver)
+                if (Test-Path -LiteralPath $cand) { $exe = $cand; $winDir = $vl.VerDir }
+                elseif (Test-Path -LiteralPath (Join-Path $vl.VerDir 'Claude-Connect.exe')) {
+                    $exe = Join-Path $vl.VerDir 'Claude-Connect.exe'; $winDir = $vl.VerDir
+                }
+            }
+        }
         if (-not (Test-Path -LiteralPath $exe)) { return }
 
         $verLabel = ($VersionLabel + '').Trim()
@@ -330,13 +518,36 @@ function Sync-ConnectExeBesideClient {
         $promoteDirs = @(Get-ConnectExePromoteDirs -WinDir $winDir)
         $written = New-Object System.Collections.Generic.List[string]
         foreach ($dir in $promoteDirs) {
-            $dstExe = Join-Path $dir 'Claude-Connect.exe'
+            $isVerDir = $false
             try {
-                if (([IO.Path]::GetFullPath($dstExe)) -ne ([IO.Path]::GetFullPath($exe))) {
-                    [void](Copy-ExeAtomicSwap -Source $exe -Destination $dstExe)
+                $vlProbe = Get-ConnectVersionedLayout -Dir (Join-Path $dir 'src')
+                if ($vlProbe -and $vlProbe.Kind -eq 'versioned') {
+                    try {
+                        $isVerDir = ([IO.Path]::GetFullPath($dir) -eq [IO.Path]::GetFullPath($vlProbe.VerDir))
+                    } catch { $isVerDir = $false }
                 }
-            } catch {}
+            } catch { $isVerDir = $false }
+
+            # Inside Claude-Connect\{ver}\: only the versioned filename (one EXE, not two).
+            # External launch dirs still get Claude-Connect.exe + Claude-Connect-{ver}.exe.
+            if (-not $isVerDir) {
+                $dstExe = Join-Path $dir 'Claude-Connect.exe'
+                try {
+                    if (([IO.Path]::GetFullPath($dstExe)) -ne ([IO.Path]::GetFullPath($exe))) {
+                        [void](Copy-ExeAtomicSwap -Source $exe -Destination $dstExe)
+                    }
+                } catch {}
+            }
             if ($verLabel -match '^\d{8}\.\d+$') {
+                # Never drop Claude-Connect-NEW.exe into an OLD {ver}\ folder
+                # (last-launch-dir / running EXE parent still list prior VerDirs).
+                if ($isVerDir) {
+                    $dirLeaf = Split-Path -Leaf $dir
+                    if ($dirLeaf -ne $verLabel) {
+                        Write-UpdateFileLog ("exe_versioned_skip foreign_verdir want={0} dir={1}" -f $verLabel, $dir)
+                        continue
+                    }
+                }
                 $verExe = Join-Path $dir ("Claude-Connect-{0}.exe" -f $verLabel)
                 $okVer = Copy-ExeAtomicSwap -Source $exe -Destination $verExe
                 Write-UpdateFileLog ("exe_versioned_promoted ver={0} ok={1} path={2}" -f $verLabel, [int]$okVer, $verExe)
@@ -361,7 +572,17 @@ function Sync-ConnectExeBesideClient {
 
 function Complete-UpdateCheckHandoff {
     Close-UpdateProgressUi
-    Sync-ConnectExeBesideClient
+    try { Sync-ConnectExeBesideClient } catch {}
+    # Surface versioned EXE handoff even on "up to date" (portable folders need this).
+    try {
+        $paths = @()
+        if ($script:LastExeVersionedPaths) { $paths = @($script:LastExeVersionedPaths) }
+        if ($paths.Count -gt 0 -and -not $script:Quiet) {
+            foreach ($p in $paths) {
+                Write-UpdateMsg ("  EXE ready: {0}" -f $p) 'DarkGray'
+            }
+        }
+    } catch {}
     # Boot path: connect.bat runs update then connect.ps1 in the same console.
     if (-not $script:Quiet) { [Console]::Out.Flush() }
 }
@@ -1159,8 +1380,11 @@ try { if ($policy.mode) { $mode = [string]$policy.mode } } catch {}
 $forceApply = ($mode -eq 'force') -and $forceReq
 
 if (-not $forceApply) {
-    # UPDATE_SILENT / Quiet must never auto-apply optional updates
-    if ($script:Quiet) {
+    # Quiet mid-session checks skip optional updates — unless caller set UPDATE_YES
+    # (EXE setup-worker / automation) so portable first-launch can pull server latest
+    # with a progress bar instead of staying on the packaged stale version.
+    $autoYes = ($env:CLAUDE_CONNECT_UPDATE_YES -eq '1')
+    if ($script:Quiet -and -not $autoYes) {
         Write-UpdateMsg 'Optional client update available (skipped in silent check)' 'DarkYellow'
         Write-UpdateFileLog "UPDATE_OPTIONAL_SKIP reason=silent local=$localVer remote=$remoteVer"
         Complete-UpdateCheckHandoff
@@ -1177,7 +1401,7 @@ if (-not $forceApply) {
     $answer = 'N'
     # Automation / hard tests: avoid [Console]::ReadLine when stdin is a pipe that SSH
     # or redirected hosts may already have consumed. Interactive UI unchanged.
-    if ($env:CLAUDE_CONNECT_UPDATE_YES -eq '1') {
+    if ($autoYes) {
         $answer = 'Y'
         Write-UpdateFileLog 'UPDATE_OPTIONAL_ANSWER source=CLAUDE_CONNECT_UPDATE_YES'
     } else {
@@ -1402,27 +1626,74 @@ function Swap-LiveDir {
 $swapOk = $true
 $winNew = Join-Path $NewRoot 'windows'
 $winBak = Join-Path $BakRoot 'windows'
-if (-not (Swap-LiveDir -Live $windowsDir -NewDir $winNew -Bak $winBak)) {
-    $swapOk = $false
+$script:VersionedApplyDone = $false
+$verLayoutApply = Get-ConnectVersionedLayout -Dir $ScriptDir
+if ($verLayoutApply -and $verLayoutApply.Kind -eq 'versioned' -and $remoteVer -match '^\d{8}\.\d+$') {
+    # New version folder under Claude-Connect\{remoteVer}\src (keep old versions; prune to 3).
+    $newVerDir = Join-Path $verLayoutApply.Root $remoteVer
+    $newSrc = Join-Path $newVerDir 'src'
+    try {
+        New-Item -ItemType Directory -Force -Path $newSrc | Out-Null
+        Get-ChildItem -LiteralPath $winNew -Force -ErrorAction Stop | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $newSrc $_.Name) -Force -Recurse -ErrorAction Stop
+        }
+        $destExe = Join-Path $newVerDir ("Claude-Connect-{0}.exe" -f $remoteVer)
+        $exeSrc = $null
+        foreach ($c in @(
+            (Join-Path $winNew 'Claude-Connect.exe'),
+            (Join-Path $verLayoutApply.VerDir ("Claude-Connect-{0}.exe" -f $verLayoutApply.Ver)),
+            (Join-Path $verLayoutApply.VerDir 'Claude-Connect.exe')
+        )) {
+            if (Test-Path -LiteralPath $c) { $exeSrc = $c; break }
+        }
+        if ($exeSrc) {
+            [void](Copy-ExeAtomicSwap -Source $exeSrc -Destination $destExe)
+        }
+        Set-Content -LiteralPath (Join-Path $verLayoutApply.Root 'current.txt') -Value $remoteVer -Encoding ASCII -NoNewline
+        Invoke-PruneConnectVersionDirs -Root $verLayoutApply.Root -Keep 3
+        $ScriptDir = $newSrc
+        $windowsDir = $newSrc
+        $script:VersionedApplyDone = $true
+        $env:CLAUDE_CONNECT_INSTALL_DIR = $newSrc
+        $env:CLAUDE_CONNECT_ROOT = $verLayoutApply.Root
+        $env:CLAUDE_CONNECT_VER_DIR = $newVerDir
+        $env:CLAUDE_CONNECT_LAUNCH_DIR = $newVerDir
+        try {
+            $stampDir = Join-Path $env:USERPROFILE '.config\claude-connect'
+            New-Item -ItemType Directory -Force -Path $stampDir | Out-Null
+            Set-Content -LiteralPath (Join-Path $stampDir 'last-launch-dir.txt') -Value $newVerDir -Encoding ASCII -NoNewline
+        } catch {}
+        Write-UpdateFileLog ("versioned_apply ok remote={0} src={1}" -f $remoteVer, $newSrc)
+        Write-UpdateMsg ("  installed under: {0}" -f $newVerDir) 'DarkGray'
+    } catch {
+        Write-UpdateFileLog ("versioned_apply_fail err=$($_.Exception.Message)") 'ERROR'
+        $swapOk = $false
+    }
 }
 
-$macNew = Join-Path $NewRoot 'mac'
-if ($swapOk -and (Test-Path -LiteralPath $macNew)) {
-    if (-not (Test-Path -LiteralPath $macDir)) {
-        $null = New-Item -ItemType Directory -Force -Path $macDir
-    }
-    $macBak = Join-Path $BakRoot 'mac'
-    try {
-        if (Test-Path -LiteralPath $macDir) {
-            if (Test-Path -LiteralPath $macBak) { Remove-Item $macBak -Recurse -Force -ErrorAction SilentlyContinue }
-            Move-Item -LiteralPath $macDir -Destination $macBak -Force -ErrorAction Stop
-        }
-        Move-Item -LiteralPath $macNew -Destination $macDir -Force -ErrorAction Stop
-    } catch {
-        Write-UpdateFileLog ("swap_fail live=$macDir err=$($_.Exception.Message)") 'ERROR'
-        Restore-FromBak -Live $macDir -Bak $macBak
-        Restore-FromBak -Live $windowsDir -Bak $winBak
+if (-not $script:VersionedApplyDone) {
+    if (-not (Swap-LiveDir -Live $windowsDir -NewDir $winNew -Bak $winBak)) {
         $swapOk = $false
+    }
+
+    $macNew = Join-Path $NewRoot 'mac'
+    if ($swapOk -and (Test-Path -LiteralPath $macNew)) {
+        if (-not (Test-Path -LiteralPath $macDir)) {
+            $null = New-Item -ItemType Directory -Force -Path $macDir
+        }
+        $macBak = Join-Path $BakRoot 'mac'
+        try {
+            if (Test-Path -LiteralPath $macDir) {
+                if (Test-Path -LiteralPath $macBak) { Remove-Item $macBak -Recurse -Force -ErrorAction SilentlyContinue }
+                Move-Item -LiteralPath $macDir -Destination $macBak -Force -ErrorAction Stop
+            }
+            Move-Item -LiteralPath $macNew -Destination $macDir -Force -ErrorAction Stop
+        } catch {
+            Write-UpdateFileLog ("swap_fail live=$macDir err=$($_.Exception.Message)") 'ERROR'
+            Restore-FromBak -Live $macDir -Bak $macBak
+            Restore-FromBak -Live $windowsDir -Bak $winBak
+            $swapOk = $false
+        }
     }
 }
 

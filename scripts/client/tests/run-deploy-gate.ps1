@@ -6,6 +6,7 @@ $RunAllPath = Join-Path $TestsDir 'run-all.ps1'
 
 # Scripts that must run when present (even if absent from run-all.ps1).
 $CriticalScripts = @(
+    'test-exe-spaced-path-launch.ps1'
     'test-exe-promote-launch-dir-hard.ps1'
     'test-client-update-policy-optional.ps1'
     'test-empty-menu-manual-update.ps1'

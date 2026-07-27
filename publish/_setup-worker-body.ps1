@@ -1,22 +1,11 @@
 #Requires -Version 5.1
 # setup-worker.ps1 - detached background worker spawned by setup-launch.ps1.
 #
-# WHY THIS EXISTS (2026-07-25): the IExpress self-extractor (wextract.exe) that wraps
-# Claude-Connect.exe holds its OWN single-instance mutex for the ENTIRE lifetime of the
-# AppLaunched command (setup-launch.ps1), which IExpress blocks on until it exits. The old
-# setup-launch.ps1 ran the (network) update check + started the UI + slept a debounce all
-# inline, so wextract kept its mutex for ~5-13s. During that window:
-#   - a 2nd double-click of Claude-Connect.exe hit wextract's built-in
-#     "Setup has detected that Setup is currently running. Please close all instances..." dialog;
-#   - the transient extractor cmd window lingered for the whole update instead of closing fast.
-#
-# Fix: setup-launch.ps1 now only copies files (fast) then spawns THIS worker detached and exits
-# within ~1s, releasing wextract's mutex immediately. All the slow/gated work lives here, in a
-# process that OUTLIVES the IExpress wrapper. The Global\ClaudeConnectExeLaunch double-launch gate
-# (and the post-boot debounce) moved here too, so two rapid launches still can't race a double UI.
-$ErrorActionPreference = 'Stop'
+# 1) Optional relocate cleanup
+# 2) Pre-boot update (progress UI when download needed; UPDATE_YES auto-applies)
+# 3) Boot Connect UI from versioned src dir (no install MessageBox / no confirm)
 
-$Dest = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
+$ErrorActionPreference = 'Stop'
 $Log = Join-Path $env:TEMP 'claude-connect-setup.log'
 
 function Log([string]$m) {
@@ -37,8 +26,93 @@ function Log([string]$m) {
     } catch { }
 }
 
+function Test-ConnectBootPresent {
+    param([string]$Dir)
+    if (-not $Dir) { return $false }
+    try {
+        return (Test-Path -LiteralPath (Join-Path ([IO.Path]::GetFullPath($Dir)) 'connect-boot.ps1'))
+    } catch { return $false }
+}
+
+function Find-NewestVersionedSrc {
+    param([string]$Root)
+    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return $null }
+    $dirs = @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d{8}\.\d+$' } |
+        Sort-Object {
+            if ($_.Name -match '^(\d{8})\.(\d+)$') { [int64]$Matches[1] * 10000 + [int]$Matches[2] } else { 0 }
+        } -Descending)
+    foreach ($d in $dirs) {
+        $src = Join-Path $d.FullName 'src'
+        if (Test-ConnectBootPresent -Dir $src) { return $src }
+    }
+    return $null
+}
+
+function Resolve-ConnectWorkerDest {
+    # Always returns a directory that contains connect-boot.ps1, or $null.
+    # Never returns Claude-Connect\ root when only versioned {ver}\src exists.
+    $dest = $null
+    if ($env:CLAUDE_CONNECT_INSTALL_DIR) {
+        try {
+            $cand = [IO.Path]::GetFullPath($env:CLAUDE_CONNECT_INSTALL_DIR.Trim())
+            if (Test-ConnectBootPresent -Dir $cand) { $dest = $cand }
+        } catch { }
+    }
+
+    $rootHint = $null
+    if ($env:CLAUDE_CONNECT_ROOT) {
+        try { $rootHint = [IO.Path]::GetFullPath($env:CLAUDE_CONNECT_ROOT.Trim()) } catch { }
+    }
+    if (-not $rootHint -and $dest) {
+        try {
+            $verDir = Split-Path -Parent $dest
+            $maybeRoot = Split-Path -Parent $verDir
+            if ((Split-Path -Leaf $dest) -eq 'src' -and (Split-Path -Leaf $maybeRoot) -eq 'Claude-Connect') {
+                $rootHint = $maybeRoot
+            }
+        } catch { }
+    }
+    if (-not $rootHint -and $env:CLAUDE_CONNECT_VER_DIR) {
+        try {
+            $vd = [IO.Path]::GetFullPath($env:CLAUDE_CONNECT_VER_DIR.Trim())
+            $rootHint = Split-Path -Parent $vd
+        } catch { }
+    }
+    if (-not $rootHint) {
+        $rootHint = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
+    }
+
+    $curFile = Join-Path $rootHint 'current.txt'
+    if (Test-Path -LiteralPath $curFile) {
+        $cv = (Get-Content -LiteralPath $curFile -Raw -ErrorAction SilentlyContinue).Trim()
+        $cand = Join-Path (Join-Path $rootHint $cv) 'src'
+        if ($cv -and (Test-ConnectBootPresent -Dir $cand)) { return $cand }
+    }
+
+    if ($dest) { return $dest }
+
+    $newest = Find-NewestVersionedSrc -Root $rootHint
+    if ($newest) { return $newest }
+
+    if (Test-ConnectBootPresent -Dir $rootHint) { return $rootHint }
+
+    $desk = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
+    if ($rootHint -ne $desk) {
+        $cur2 = Join-Path $desk 'current.txt'
+        if (Test-Path -LiteralPath $cur2) {
+            $cv2 = (Get-Content -LiteralPath $cur2 -Raw -ErrorAction SilentlyContinue).Trim()
+            $cand2 = Join-Path (Join-Path $desk $cv2) 'src'
+            if ($cv2 -and (Test-ConnectBootPresent -Dir $cand2)) { return $cand2 }
+        }
+        $n2 = Find-NewestVersionedSrc -Root $desk
+        if ($n2) { return $n2 }
+        if (Test-ConnectBootPresent -Dir $desk) { return $desk }
+    }
+    return $null
+}
+
 function Test-ConnectUiOpen {
-    # True only when zero free Global\ClaudeConnect#0..#9 slots (same pool as connect-boot).
     $free = 0
     for ($i = 0; $i -lt 10; $i++) {
         $name = "Global\ClaudeConnect#$i"
@@ -60,20 +134,39 @@ function Test-ConnectUiOpen {
     return ($free -eq 0)
 }
 
+function Stop-OldConnectUiBestEffort {
+    param([string]$KeepSrcDir)
+    try {
+        $keep = ''
+        try { $keep = [IO.Path]::GetFullPath($KeepSrcDir).TrimEnd('\') } catch { $keep = $KeepSrcDir }
+        Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'pwsh.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+            $cmd = [string]$_.CommandLine
+            if (-not $cmd) { return }
+            if ($cmd -notmatch '(?i)connect-(boot|ui)\.ps1|connect\.ps1') { return }
+            if ($keep -and $cmd -like ("*{0}*" -f $keep)) { return }
+            try {
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                Log ("relocate_closed_old_ui pid={0}" -f $_.ProcessId)
+            } catch { }
+        }
+    } catch { }
+}
+
 try {
     if (-not $env:CLAUDE_CONNECT_RUN_ID) {
         $env:CLAUDE_CONNECT_RUN_ID = [guid]::NewGuid().ToString('N').Substring(0, 12)
+    }
+
+    $Dest = Resolve-ConnectWorkerDest
+    if (-not (Test-ConnectBootPresent -Dir $Dest)) {
+        throw 'No usable Claude Connect install found (connect-boot.ps1 missing). Open a fresh Claude-Connect-*.exe from Desktop\claude-publish.'
     }
     Log ("worker begin dest={0} pid={1} run_id={2}" -f $Dest, $PID, $env:CLAUDE_CONNECT_RUN_ID)
 
     $upd = Join-Path $Dest 'connect-update.ps1'
     $boot = Join-Path $Dest 'connect-boot.ps1'
     if (-not (Test-Path -LiteralPath $upd)) { throw "connect-update.ps1 missing: $upd" }
-    if (-not (Test-Path -LiteralPath $boot)) { throw "connect-boot.ps1 missing: $boot" }
 
-    # Double-launch gate (moved here from setup-launch.ps1 so it is held across update+boot by a
-    # process that outlives the IExpress wrapper, NOT by wextract's own mutex). WaitOne timeout is
-    # short: if another worker already holds it, a UI is already coming up - just exit quietly.
     $launchMutex = $null
     $launchCreated = $false
     try {
@@ -89,8 +182,12 @@ try {
     }
 
     $env:CLAUDE_CONNECT_FROM_EXE = '1'
-    # Clear Mark-of-the-Web on install folder only (helps Defender/SmartScreen FP on unsigned SFX).
-    # Never disables Defender / real-time protection.
+    $env:CLAUDE_CONNECT_INSTALL_DIR = $Dest
+
+    if ($env:CLAUDE_CONNECT_RELOCATE -eq '1') {
+        Stop-OldConnectUiBestEffort -KeepSrcDir $Dest
+    }
+
     try {
         Get-ChildItem -LiteralPath $Dest -File -ErrorAction SilentlyContinue | ForEach-Object {
             try { Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue } catch { }
@@ -99,39 +196,67 @@ try {
     } catch {
         Log ("unblock_motw_warn $($_.Exception.Message)")
     }
-    $env:CLAUDE_CONNECT_UPDATE_UI = '1'
-    Log 'update check begin (detached worker; WinForms progress UI only if a download is needed)'
-    $updEc = 0
-    try {
-        & $upd -ScriptDir $Dest -Quiet
-        if ($null -ne $LASTEXITCODE) { $updEc = [int]$LASTEXITCODE }
-    } catch {
-        Log ("update_warn $($_.Exception.Message)")
-        $updEc = 1
+
+    # Pre-boot update only on first install/repair. Fast-path launches boot from setup-launch
+    # directly (no worker). If worker still runs with FAST_PATH, skip network wait.
+    if ($env:CLAUDE_CONNECT_SETUP_NO_UPDATE -eq '1' -or $env:CLAUDE_CONNECT_FAST_PATH -eq '1') {
+        Log 'preboot update skipped reason=fast_path_or_NO_UPDATE'
+    } else {
+        $destBefore = $Dest
+        $env:CLAUDE_CONNECT_UPDATE_UI = '1'
+        $env:CLAUDE_CONNECT_UPDATE_YES = '1'
+        Log 'preboot update begin (progress UI if download needed; UPDATE_YES=1)'
+        $updProc = Start-Process -FilePath 'powershell.exe' -WorkingDirectory $Dest -ArgumentList @(
+            '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+            '-File', "`"$upd`"",
+            '-ScriptDir', "`"$Dest`"",
+            '-Quiet'
+        ) -PassThru -WindowStyle Hidden
+        if (-not $updProc) { throw 'Start-Process connect-update.ps1 returned null' }
+        Wait-Process -Id $updProc.Id
+        $updEc = 0
+        try { $updEc = [int]$updProc.ExitCode } catch { $updEc = 0 }
+        Log ("UPDATE_EXIT exit={0}" -f $updEc)
+
+        # versioned_apply may move scripts to a newer {ver}\src — re-resolve carefully.
+        # Never fall back to Claude-Connect\ root (no connect-boot there).
+        $resolved = Resolve-ConnectWorkerDest
+        if (Test-ConnectBootPresent -Dir $resolved) {
+            $Dest = $resolved
+        } elseif (Test-ConnectBootPresent -Dir $destBefore) {
+            $Dest = $destBefore
+            Log ("post_update keep_prior_dest reason=resolve_miss exit={0}" -f $updEc)
+        } else {
+            throw 'Install files missing after update (connect-boot.ps1). Folder may have been deleted mid-update — open a fresh Claude-Connect-*.exe from Desktop\claude-publish.'
+        }
+        $env:CLAUDE_CONNECT_INSTALL_DIR = $Dest
+        $upd = Join-Path $Dest 'connect-update.ps1'
+        $boot = Join-Path $Dest 'connect-boot.ps1'
+        Log ("post_update dest={0}" -f $Dest)
     }
-    Log ("UPDATE_EXIT exit=$updEc")
-    if ($updEc -eq 2) {
-        Log 'UPDATE_EXIT exit=2 need_relaunch continuing_to_connect_boot (EXE path; no bat_relaunch)'
-    } elseif ($updEc -eq 1) {
-        Log 'UPDATE_EXIT exit=1 update_failed continuing_to_connect_boot'
+
+    $boot = Join-Path $Dest 'connect-boot.ps1'
+    if (-not (Test-ConnectBootPresent -Dir $Dest)) {
+        throw "connect-boot.ps1 missing before boot: $boot"
     }
 
     if (Test-ConnectUiOpen) {
-        Log 'worker skip boot reason=ui_already_open_after_update'
+        Log 'worker skip boot reason=ui_already_open'
     } else {
-        Log 'connect-boot start begin'
+        Log 'connect-boot start begin (after_preboot_update=1)'
+        # Quote -File: ArgumentList array does not auto-quote paths with spaces.
         $p = Start-Process -FilePath 'powershell.exe' -WorkingDirectory $Dest -ArgumentList @(
-            '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', $boot
+            '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+            '-File', "`"$boot`""
         ) -PassThru -WindowStyle Normal
         if (-not $p) { throw 'Start-Process connect-boot.ps1 returned null' }
         Log ("connect-boot started pid=$($p.Id) dir=$Dest")
 
-        # Short debounce so a racing 2nd worker sees this launch in progress (mutex held) before we
-        # release the gate - long enough for the new connect-boot.ps1 to claim its own UI slot,
-        # short enough to add no meaningful tax. This no longer holds wextract's mutex (the worker
-        # is detached), so it can never re-trigger "Setup is currently running".
-        $debounceMs = 3000
-        Start-Sleep -Milliseconds $debounceMs
+        # Short hold so a double-click does not spawn a second worker while boot starts.
+        $debounceMs = 100
+        if ($debounceMs -gt 0) {
+            Start-Sleep -Milliseconds $debounceMs
+        }
         Log ("connect-boot debounce done ms=$debounceMs")
     }
 

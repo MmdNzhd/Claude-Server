@@ -679,6 +679,396 @@ function Remove-LocalOrphanTunnel {
     return $true
 }
 
+function Get-ConnectUiPidForProcess {
+    param([Parameter(Mandatory)][int]$StartProcessId)
+    $cur = [int]$StartProcessId
+    $hops = 0
+    while ($cur -gt 0 -and $hops -lt 14) {
+        $hops++
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$cur" -ErrorAction SilentlyContinue
+        if (-not $cim) { break }
+        if (Test-ProcessCommandIsConnectUi -CommandLine ([string]$cim.CommandLine)) {
+            return [int]$cim.ProcessId
+        }
+        $parent = [int]$cim.ParentProcessId
+        if ($parent -le 0 -or $parent -eq $cur) { break }
+        $cur = $parent
+    }
+    return 0
+}
+
+function Get-ConnectSessionSlotMarkerDir {
+    if ($CfgDir) { return $CfgDir }
+    return (Join-Path $env:USERPROFILE '.config\claude-connect')
+}
+
+function Get-ConnectSessionSlotMarkerPath {
+    param([Parameter(Mandatory)][int]$Slot)
+    return (Join-Path (Get-ConnectSessionSlotMarkerDir) ("session-slot-{0}.json" -f $Slot))
+}
+
+function Write-ConnectSessionSlotMarker {
+    param(
+        [Parameter(Mandatory)][int]$Slot,
+        [Parameter(Mandatory)][int]$Port,
+        [string]$ProjectId = '',
+        [string]$RemotePath = '',
+        [int]$ProcessId = 0
+    )
+    try {
+        $dir = Get-ConnectSessionSlotMarkerDir
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
+        $markerPid = if ($ProcessId -gt 0) { $ProcessId } else { [int]$PID }
+        $obj = [ordered]@{
+            pid        = $markerPid
+            slot       = $Slot
+            port       = $Port
+            projectId  = ($ProjectId + '').Trim()
+            remotePath = ($RemotePath + '').Trim()
+            updated    = (Get-Date).ToString('o')
+        }
+        $json = ($obj | ConvertTo-Json -Compress)
+        # UTF-8 without BOM: Windows PowerShell 5.1 ConvertFrom-Json often fails on BOM.
+        $path = Get-ConnectSessionSlotMarkerPath -Slot $Slot
+        [System.IO.File]::WriteAllText($path, $json, [System.Text.UTF8Encoding]::new($false))
+    } catch {
+        Write-GitModeLog ("HYGIENE_MARKER_WRITE_FAIL slot={0} err={1}" -f $Slot, $_.Exception.Message) 'WARN'
+    }
+}
+
+function Clear-ConnectSessionSlotMarker {
+    param([int]$Slot = -1)
+    try {
+        if ($Slot -ge 0) {
+            $p = Get-ConnectSessionSlotMarkerPath -Slot $Slot
+            if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+            return
+        }
+        $slotEnv = ($env:CLAUDE_CONNECT_UI_SLOT + '').Trim()
+        if ($slotEnv -match '^\d+$') {
+            Clear-ConnectSessionSlotMarker -Slot ([int]$slotEnv)
+        }
+    } catch { }
+}
+
+function Get-ConnectSessionSlotMarkers {
+    # Use List + foreach (not ForEach-Object + $out +=): in Windows PowerShell 5.1,
+    # `$out +=` inside ForEach-Object often binds a *local* $out and leaves the outer empty.
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    $dir = Get-ConnectSessionSlotMarkerDir
+    if (-not (Test-Path -LiteralPath $dir)) { return @() }
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'session-slot-*.json' -ErrorAction SilentlyContinue)) {
+        try {
+            $raw = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop
+            $o = $raw | ConvertFrom-Json
+            # Never name this $pid — PowerShell aliases it to read-only automatic $PID.
+            $markerPid = [int]$o.pid
+            $alive = $false
+            if ($markerPid -gt 0) {
+                $pr = Get-Process -Id $markerPid -ErrorAction SilentlyContinue
+                if ($pr) {
+                    try { $alive = -not $pr.HasExited } catch { $alive = $true }
+                }
+            }
+            if (-not $alive) {
+                Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+                continue
+            }
+            [void]$out.Add([pscustomobject]@{
+                Pid        = $markerPid
+                Slot       = [int]$o.slot
+                Port       = [int]$o.port
+                ProjectId  = [string]$o.projectId
+                RemotePath = [string]$o.remotePath
+                IsCurrent  = ($markerPid -eq [int]$PID)
+            })
+        } catch { }
+    }
+    return @($out.ToArray())
+}
+
+function Get-ConnectHygieneReport {
+    param(
+        [string]$UidStr = '',
+        [string]$ProtectRemotePath = '',
+        [string]$ProtectProjectId = '',
+        [switch]$SkipServer
+    )
+    Write-GitModeLog 'HYGIENE_SCAN begin' 'INFO'
+    $base = 20000
+    if ($UidStr -and (Get-Command Get-TunnelPortUserBase -ErrorAction SilentlyContinue)) {
+        $base = [int](Get-TunnelPortUserBase -UidStr $UidStr)
+    }
+    $currentTunnelPid = 0
+    if ($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) {
+        $currentTunnelPid = [int]$script:SessionBgTunnel.Id
+    }
+    $markers = @(Get-ConnectSessionSlotMarkers)
+    $tunnels = @()
+    $orphanPids = @()
+    $siblingEntries = @()
+    for ($slot = 0; $slot -lt 10; $slot++) {
+        $port = $base + $slot
+        foreach ($sshPid in @(Get-LocalTunnelSshPids -TargetPort $port)) {
+            $sshPid = [int]$sshPid
+            $uiPid = Get-ConnectUiPidForProcess -StartProcessId $sshPid
+            $class = 'orphan'
+            if ($sshPid -eq $currentTunnelPid -or $uiPid -eq [int]$PID) {
+                $class = 'current'
+            } elseif ($uiPid -gt 0 -and $uiPid -ne [int]$PID) {
+                $class = 'sibling'
+            }
+            $mark = @($markers | Where-Object { $_.Port -eq $port -or $_.Pid -eq $uiPid } | Select-Object -First 1)
+            $projectId = if ($mark) { [string]$mark.ProjectId } else { '' }
+            $remotePath = if ($mark) { [string]$mark.RemotePath } else { '' }
+            $row = [pscustomobject]@{
+                Port       = $port
+                Slot       = $slot
+                TunnelPid  = $sshPid
+                ConnectUiPid = $uiPid
+                Class      = $class
+                ProjectId  = $projectId
+                RemotePath = $remotePath
+            }
+            $tunnels += $row
+            if ($class -eq 'orphan') { $orphanPids += $sshPid }
+            if ($class -eq 'sibling') { $siblingEntries += $row }
+        }
+    }
+    $protectRoot = ''
+    if ($ProtectRemotePath) {
+        $protectRoot = [System.IO.Path]::GetFileName(($ProtectRemotePath.TrimEnd('/','\')))
+    } elseif ($ProtectProjectId) {
+        $protectRoot = $ProtectProjectId
+    }
+    $server = [pscustomobject]@{
+        Ok           = $false
+        Detail       = 'skipped'
+        MuxMaster    = ''
+        SftpCount    = -1
+        ServerMain   = @()
+        ListenPorts  = @()
+    }
+    if (-not $SkipServer -and (Get-Command SshX -ErrorAction SilentlyContinue)) {
+        try {
+            $cmd = @'
+set +e
+echo LISTEN_BEGIN
+ss -ltnp 2>/dev/null | grep -E "127\.0\.0\.1:20[0-9]{3}" || true
+echo LISTEN_END
+echo MUX_BEGIN
+ls -1 "$HOME/.cache/laptop-exec"/cm-* 2>/dev/null | head -20 || true
+for s in "$HOME/.cache/laptop-exec"/cm-*; do
+  [ -S "$s" ] || continue
+  ssh -O check -o ControlPath="$s" -o ControlMaster=no -o BatchMode=yes -o ConnectTimeout=2 x 2>&1 | head -1 | sed "s|^|MUX:$s:|"
+done
+echo MUX_END
+echo SFTP_BEGIN
+ps -u "$USER" -o pid= -o cmd= 2>/dev/null | grep -c "[s]ftp" || echo 0
+echo SFTP_END
+echo SM_BEGIN
+ps -u "$USER" -o pid=,etime=,cmd= 2>/dev/null | grep "server-main.js" | grep -v grep || true
+echo SM_END
+'@ -replace "`r", ''
+            $raw = SshX $cmd
+            $server.Ok = $true
+            $server.Detail = 'ok'
+            $server.ListenPorts = @([regex]::Matches([string]$raw, '127\.0\.0\.1:(20\d{3})') | ForEach-Object { [int]$_.Groups[1].Value } | Select-Object -Unique)
+            if ($raw -match '(?m)^(\d+)\s*$' -and $raw -match 'SFTP_BEGIN') {
+                $m = [regex]::Match([string]$raw, '(?s)SFTP_BEGIN\s*(\d+)')
+                if ($m.Success) { $server.SftpCount = [int]$m.Groups[1].Value }
+            }
+            $server.MuxMaster = (($raw -split "`n" | Where-Object { $_ -match '^MUX:' -and $_ -match 'Master running' }) -join ';')
+            $server.ServerMain = @(($raw -split "`n" | Where-Object { $_ -match 'server-main\.js' } | Select-Object -First 5))
+        } catch {
+            $server.Detail = $_.Exception.Message
+        }
+    }
+    $report = [pscustomobject]@{
+        PortBase        = $base
+        CurrentPid      = [int]$PID
+        CurrentTunnelPid = $currentTunnelPid
+        ProtectRootName = $protectRoot
+        ProtectRemotePath = ($ProtectRemotePath + '').Trim()
+        Markers         = $markers
+        Tunnels         = $tunnels
+        OrphanTunnelPids = @($orphanPids | Select-Object -Unique)
+        Siblings        = $siblingEntries
+        SoftTargetCount = @($orphanPids | Select-Object -Unique).Count
+        SiblingCount    = @($siblingEntries).Count
+        Server          = $server
+    }
+    Write-GitModeLog ("HYGIENE_SCAN orphans={0} siblings={1} tunnels={2} server_ok={3}" -f $report.SoftTargetCount, $report.SiblingCount, @($tunnels).Count, $server.Ok) 'INFO'
+    return $report
+}
+
+function Invoke-ConnectHygieneClean {
+    param(
+        [Parameter(Mandatory)][ValidateSet('Soft','Sibling')][string]$Mode,
+        [Parameter(Mandatory)]$Report,
+        [string]$ProtectRemotePath = '',
+        [string]$ProtectProjectId = ''
+    )
+    $protectRoot = ($Report.ProtectRootName + '').Trim()
+    if (-not $protectRoot) {
+        if ($ProtectRemotePath) {
+            $protectRoot = [System.IO.Path]::GetFileName(($ProtectRemotePath.TrimEnd('/','\')))
+        } elseif ($ProtectProjectId) {
+            $protectRoot = $ProtectProjectId
+        }
+    }
+    $result = [pscustomobject]@{
+        Mode            = $Mode
+        OrphansKilled   = 0
+        SiblingTunnels  = 0
+        SiblingConnects = 0
+        CursorWindows   = 0
+        ServerReaper    = ''
+        MuxCleaned      = 0
+    }
+    if ($Mode -eq 'Soft') {
+        Write-GitModeLog 'HYGIENE_SOFT begin' 'INFO'
+        $base = [int]$Report.PortBase
+        for ($slot = 0; $slot -lt 10; $slot++) {
+            $port = $base + $slot
+            $before = @(Get-LocalTunnelSshPids -TargetPort $port)
+            $null = Remove-LocalOrphanTunnel -TargetPort $port -CurrentBgTunnel $script:SessionBgTunnel -ProtectedProcessIds @([int]$PID, [int]$Report.CurrentTunnelPid)
+            $after = @(Get-LocalTunnelSshPids -TargetPort $port)
+            $result.OrphansKilled += [Math]::Max(0, $before.Count - $after.Count)
+        }
+        if (Get-Command SshX -ErrorAction SilentlyContinue) {
+            try {
+                $reaperOut = SshX 'command -v cursor-server-reaper >/dev/null && cursor-server-reaper --apply --user "$USER" 2>&1 | tail -5 || echo REAPER_SKIP'
+                $result.ServerReaper = ([string]$reaperOut).Trim()
+                $reaperOne = ($result.ServerReaper -replace '\s+', ' ')
+                if ($reaperOne.Length -gt 200) { $reaperOne = $reaperOne.Substring(0, 200) }
+                Write-GitModeLog ("HYGIENE_SOFT reaper={0}" -f $reaperOne) 'INFO'
+            } catch {
+                $result.ServerReaper = 'fail-open'
+            }
+            try {
+                $muxOut = SshX @'
+set +e
+n=0
+for s in "$HOME/.cache/laptop-exec"/cm-*; do
+  [ -e "$s" ] || continue
+  if ! ssh -O check -o ControlPath="$s" -o ControlMaster=no -o BatchMode=yes -o ConnectTimeout=2 x >/dev/null 2>&1; then
+    rm -f "$s" 2>/dev/null && n=$((n+1))
+  fi
+done
+echo MUX_DEAD_REMOVED=$n
+'@
+                if ($muxOut -match 'MUX_DEAD_REMOVED=(\d+)') { $result.MuxCleaned = [int]$Matches[1] }
+            } catch { }
+        }
+        Write-GitModeLog ("HYGIENE_SOFT done orphans_killed={0} mux_dead={1}" -f $result.OrphansKilled, $result.MuxCleaned) 'INFO'
+        return $result
+    }
+
+    # Sibling mode
+    Write-GitModeLog 'HYGIENE_SIBLING begin' 'INFO'
+    $seenUi = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($sib in @($Report.Siblings)) {
+        $tPid = [int]$sib.TunnelPid
+        $uiPid = [int]$sib.ConnectUiPid
+        $port = [int]$sib.Port
+        if ($tPid -gt 0 -and $tPid -ne [int]$Report.CurrentTunnelPid) {
+            Write-GitModeLog ("HYGIENE_SIBLING_STOP tunnel pid={0} port={1}" -f $tPid, $port) 'INFO'
+            Stop-TunnelProcessWithExitLog -ProcessId $tPid -Reason 'hygiene_sibling'
+            $result.SiblingTunnels++
+        }
+        if ($uiPid -gt 0 -and $uiPid -ne [int]$PID -and -not $seenUi.Contains($uiPid)) {
+            [void]$seenUi.Add($uiPid)
+            try {
+                Stop-Process -Id $uiPid -Force -ErrorAction Stop
+                Write-GitModeLog ("HYGIENE_SIBLING_STOP connect_ui pid={0}" -f $uiPid) 'INFO'
+                $result.SiblingConnects++
+            } catch {
+                Write-GitModeLog ("HYGIENE_SIBLING_STOP connect_ui_fail pid={0} err={1}" -f $uiPid, $_.Exception.Message) 'WARN'
+            }
+        }
+        $root = ''
+        if ($sib.RemotePath) {
+            $root = [System.IO.Path]::GetFileName(($sib.RemotePath.TrimEnd('/','\')))
+        } elseif ($sib.ProjectId) {
+            $root = [string]$sib.ProjectId
+        }
+        if ($root -and (Get-Command Close-CursorProjectWindows -ErrorAction SilentlyContinue)) {
+            if ($protectRoot -and ($root -ieq $protectRoot)) {
+                Write-GitModeLog ("HYGIENE_SIBLING_CURSOR_SKIP root={0} reason=protect_current" -f $root) 'WARN'
+            } else {
+                $n = Close-CursorProjectWindows -ProjectRootName $root -ProtectRootName $protectRoot
+                $result.CursorWindows += [int]$n
+                Write-GitModeLog ("HYGIENE_SIBLING_CURSOR_WINDOW root={0} closed={1}" -f $root, $n) 'INFO'
+            }
+        } elseif (-not $root) {
+            Write-GitModeLog 'HYGIENE_SIBLING_CURSOR_SKIP reason=unknown_project' 'WARN'
+        }
+        try {
+            if ($sib.Slot -ge 0) { Clear-ConnectSessionSlotMarker -Slot ([int]$sib.Slot) }
+        } catch { }
+    }
+    Write-GitModeLog ("HYGIENE_SIBLING done tunnels={0} connects={1} cursor_windows={2}" -f $result.SiblingTunnels, $result.SiblingConnects, $result.CursorWindows) 'INFO'
+    return $result
+}
+
+function Show-ConnectHygieneInteractive {
+    param(
+        [string]$UidStr = '',
+        [string]$ProtectRemotePath = '',
+        [string]$ProtectProjectId = '',
+        [string]$Alias = 'claude-server'
+    )
+    $report = Get-ConnectHygieneReport -UidStr $UidStr -ProtectRemotePath $ProtectRemotePath -ProtectProjectId $ProtectProjectId
+    Write-Host ''
+    Write-Host '    Hygiene scan' -ForegroundColor Cyan
+    Write-Host ("    Orphan tunnels : {0}" -f $report.SoftTargetCount) -ForegroundColor DarkGray
+    Write-Host ("    Sibling Connect: {0}" -f $report.SiblingCount) -ForegroundColor DarkGray
+    foreach ($t in @($report.Tunnels)) {
+        Write-Host ("      [{0}] port={1} tunnel={2} ui={3} project={4}" -f $t.Class, $t.Port, $t.TunnelPid, $t.ConnectUiPid, $(if ($t.ProjectId) { $t.ProjectId } else { '?' })) -ForegroundColor DarkGray
+    }
+    if ($report.Server.Ok) {
+        Write-Host ("    Server mux/sftp : sftp={0} listens={1}" -f $report.Server.SftpCount, (@($report.Server.ListenPorts) -join ',')) -ForegroundColor DarkGray
+    } else {
+        Write-Host ("    Server scan    : {0}" -f $report.Server.Detail) -ForegroundColor DarkGray
+    }
+    Write-Host ''
+    if ($report.SoftTargetCount -le 0 -and $report.SiblingCount -le 0) {
+        Write-Host '    Nothing to clean.' -ForegroundColor Green
+        Write-Host ''
+        return
+    }
+    $ans = ''
+    try { $ans = (Read-Host '    Soft-clean orphans/idle? [Y/N]').Trim().ToLowerInvariant() } catch { $ans = 'n' }
+    if ($ans -ne 'y' -and $ans -ne 'yes') {
+        Write-Host '    Cancelled.' -ForegroundColor DarkGray
+        Write-Host ''
+        return
+    }
+    $soft = Invoke-ConnectHygieneClean -Mode Soft -Report $report -ProtectRemotePath $ProtectRemotePath -ProtectProjectId $ProtectProjectId
+    Write-Host ("    Soft done: orphans_removed~{0} mux_dead={1}" -f $soft.OrphansKilled, $soft.MuxCleaned) -ForegroundColor Green
+    $report2 = Get-ConnectHygieneReport -UidStr $UidStr -ProtectRemotePath $ProtectRemotePath -ProtectProjectId $ProtectProjectId -SkipServer
+    if ($report2.SiblingCount -le 0) {
+        Write-Host ''
+        return
+    }
+    Write-Host ''
+    Write-Host ("    {0} sibling Connect session(s) still live." -f $report2.SiblingCount) -ForegroundColor Yellow
+    Write-Host '    This closes their tunnel, Connect window, and that project Cursor window only.' -ForegroundColor DarkGray
+    $ans2 = ''
+    try { $ans2 = (Read-Host '    Close sibling sessions? [Y/N]').Trim().ToLowerInvariant() } catch { $ans2 = 'n' }
+    if ($ans2 -ne 'y' -and $ans2 -ne 'yes') {
+        Write-Host '    Left siblings running.' -ForegroundColor DarkGray
+        Write-Host ''
+        return
+    }
+    $sib = Invoke-ConnectHygieneClean -Mode Sibling -Report $report2 -ProtectRemotePath $ProtectRemotePath -ProtectProjectId $ProtectProjectId
+    Write-Host ("    Sibling clean: tunnels={0} connects={1} cursor_windows={2}" -f $sib.SiblingTunnels, $sib.SiblingConnects, $sib.CursorWindows) -ForegroundColor Green
+    Write-Host ''
+}
+
 function Get-StoredLaptopHostKeyFingerprint {
     if ($script:LaptopHostKeyFp) { return [string]$script:LaptopHostKeyFp }
     if (-not $Cfg -or -not (Test-Path $Cfg)) { return '' }

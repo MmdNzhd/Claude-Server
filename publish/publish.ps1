@@ -317,12 +317,19 @@ if (-not $NoExe) {
     }
     # Ship inside windows\ so server bundle + bat auto-update drops EXE beside connect.bat
     Copy-Item -LiteralPath $exePath -Destination (Join-Path $OutDir 'windows\Claude-Connect.exe') -Force
-    Write-Ok ("claude-publish\Claude-Connect.exe + windows\Claude-Connect.exe ({0:N0} bytes)" -f (Get-Item -LiteralPath $exePath).Length)
+    # One versioned Smart EXE in claude-publish (portable handoff); keep unversioned alias too.
+    $pubVerExe = Join-Path $OutBase ("Claude-Connect-{0}.exe" -f $ConnectVersion)
+    Copy-Item -LiteralPath $exePath -Destination $pubVerExe -Force
+    Get-ChildItem -LiteralPath $OutBase -Filter 'Claude-Connect-*.exe' -File -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -ne ("Claude-Connect-{0}.exe" -f $ConnectVersion) -and
+            $_.Name -notmatch '(?i)Sepidz'
+        } |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+    Write-Ok ("claude-publish\Claude-Connect-{0}.exe (+ Claude-Connect.exe alias, {1:N0} bytes)" -f $ConnectVersion, (Get-Item -LiteralPath $exePath).Length)
     try {
-        # One versioned EXE on Desktop (never unversioned Claude-Connect.exe / Setup —
-        # those used to overwrite Desktop\Claude-Connect with stale extracts).
-        $deskVerExe = Join-Path $env:USERPROFILE ("Desktop\Claude-Connect-{0}.exe" -f $ConnectVersion)
-        Copy-Item -LiteralPath $exePath -Destination $deskVerExe -Force
+        # Never leave unversioned Claude-Connect.exe / Setup on Desktop root —
+        # those used to overwrite Desktop\Claude-Connect with stale extracts.
         foreach ($stale in @(
             (Join-Path $env:USERPROFILE 'Desktop\Claude-Connect.exe'),
             (Join-Path $env:USERPROFILE 'Desktop\Claude-Connect-Setup.exe')
@@ -332,11 +339,10 @@ if (-not $NoExe) {
             }
         }
         Get-ChildItem -LiteralPath (Join-Path $env:USERPROFILE 'Desktop') -Filter 'Claude-Connect-*.exe' -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -ne ("Claude-Connect-{0}.exe" -f $ConnectVersion) } |
             ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
-        Write-Ok ("Desktop\Claude-Connect-{0}.exe" -f $ConnectVersion)
+        Write-Ok 'Desktop root cleared of Claude-Connect*.exe (handoff = claude-publish only)'
     } catch {
-        Write-Host ("  warn: could not copy versioned EXE to Desktop: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow
+        Write-Host ("  warn: could not clean Desktop root EXEs: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow
     }
 }
 
@@ -503,8 +509,8 @@ if (-not $SepidzOnly) {
     Write-Host "  Build tree       : Desktop\claude-publish\$PackageName" -ForegroundColor Green
     if (-not $NoZip) { Write-Host "  Main ZIP         : Desktop\claude-publish\$PackageName.zip" -ForegroundColor Green }
     if (-not $NoExe) {
-        Write-Host ("  Desktop EXE      : Desktop\Claude-Connect-{0}.exe" -f $ConnectVersion) -ForegroundColor Green
-        Write-Host "  Bundle EXE       : Desktop\claude-publish\Claude-Connect.exe" -ForegroundColor Green
+        Write-Host ("  Publish EXE      : Desktop\claude-publish\Claude-Connect-{0}.exe" -f $ConnectVersion) -ForegroundColor Green
+        Write-Host "  Bundle EXE alias : Desktop\claude-publish\Claude-Connect.exe" -ForegroundColor Green
     }
 }
 if ((-not $SmartOnly) -and (-not $SepidzPublishFrozen)) {

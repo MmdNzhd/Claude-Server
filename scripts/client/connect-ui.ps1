@@ -2005,7 +2005,7 @@ function Write-ProjectTable {
         $i++
     }
     Write-Host ''
-    Write-Host '    a add   e edit   d delete   c config   g git   u update   q quit' -ForegroundColor DarkGray
+    Write-Host '    a add   e edit   d delete   c config   u update   q quit' -ForegroundColor DarkGray
     Write-Host ''
 }
 
@@ -2016,7 +2016,7 @@ function Write-SessionBox {
     # Compact one-liner (the framed multi-line "Session active" box was visual noise).
     # Hotkeys still work; the live status line prints right after this.
     Write-Host ''
-    Write-Host '    G git   R reconnect   O reopen   Q disconnect' -ForegroundColor DarkGray
+    Write-Host '    H hygiene   R reconnect   O reopen   Q disconnect' -ForegroundColor DarkGray
 }
 
 

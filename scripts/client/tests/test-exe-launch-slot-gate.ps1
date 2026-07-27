@@ -30,15 +30,26 @@ Assert ($body -match 'already open') 'MessageBox/text mentions already open'
 
 # setup-launch.ps1 must exit fast: spawn the detached worker, and NOT run the update inline.
 Assert ($body -match 'setup-worker\.ps1') 'setup-launch spawns the detached setup-worker.ps1'
+Assert ($body -match '`"\$workerDest`"' -or $body -match '\$workerDest`""') 'setup-launch quotes -File worker path (spaces-safe)'
+Assert ($worker -match '`"\$boot`"' -or $worker -match '\$boot`""') 'worker quotes -File boot path (spaces-safe)'
+Assert ($body -match 'Copy-Item -LiteralPath \$workerSrc -Destination \$workerDest -Force') 'setup-launch refreshes worker on first install/repair'
+Assert ($body -match 'fast_path direct_boot') 'setup-launch fast path boots without worker'
 Assert (-not ($body -match '&\s+\$upd\b')) 'setup-launch does NOT run the update inline (moved to worker - keeps wextract mutex hold short)'
 Assert (-not ($body -match 'Start-Sleep')) 'setup-launch has no debounce sleep (would hold wextract mutex) - debounce moved to worker'
-Assert ($worker -match '&\s+\$upd\b') 'worker runs the update check'
+Assert ($worker -match 'preboot update begin') 'worker can run pre-boot update on first install'
+Assert ($worker -match 'CLAUDE_CONNECT_UPDATE_YES') 'worker sets UPDATE_YES so optional bumps auto-apply from EXE'
+Assert ($worker -match 'after_preboot_update') 'worker boots UI after pre-boot update'
+Assert ($worker -match 'fast_path_or_NO_UPDATE') 'worker skips preboot update on fast path'
+Assert ($worker -match 'Find-NewestVersionedSrc' -or $worker -match 'keep_prior_dest') 'worker recovers dest after update (no bare Claude-Connect root)'
+Assert ($worker -match 'Test-ConnectBootPresent') 'worker never boots a folder without connect-boot.ps1'
 Assert ($worker -match 'connect-boot\.ps1') 'worker starts connect-boot.ps1'
 
-# Must NOT gate on connect.ps1/connect-boot.ps1 process CommandLine (false single-instance)
+# Must NOT gate on connect.ps1/connect-boot.ps1 process CommandLine (false single-instance).
+# Win32_Process is OK for portable EXE path resolve (Resolve-ConnectLaunchExe), not for UI gate.
 Assert (-not ($body -match "(?i)CommandLine -match '\(\?i\)connect-boot")) 'no connect-boot CommandLine process gate'
 Assert (-not ($body -match "(?i)CommandLine -match '\(\?i\)connect\.ps1")) 'no connect.ps1 CommandLine process gate'
-Assert (-not ($body -match 'Get-CimInstance Win32_Process')) 'no Win32_Process scan for UI-open gate'
+Assert (($body -match 'Resolve-ConnectLaunchExe') -or ($body -match 'Resolve-VersionedTree')) 'portable/versioned install resolves beside double-clicked EXE'
+Assert ($body -match 'function Test-ConnectUiOpen') 'UI-open gate is still a dedicated function (mutex slots)'
 
 # Block only when zero free slots (return true iff all 10 held)
 Assert ($body -match '(?i)free|slot') 'slot/free vocabulary present'

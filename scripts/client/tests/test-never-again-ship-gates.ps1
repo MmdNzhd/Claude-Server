@@ -4,6 +4,8 @@
 #   2) IExpress AppLaunched powershell Bypass+Hidden (Defender dropper heuristic)
 #   3) Sticky 18998 repair when xray backend is down (agent PROXY ECONNREFUSED)
 #   4) Manual update leaving stale "Press Enter to close"
+#   5) BusyBox sed \r truncating trailing "r" on identifiers
+#   6) Versioned layout: NEW.exe leaked into OLD VerDir; orphan cmd from instant .cmd
 $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 $Pass = 0; $Fail = 0
@@ -41,8 +43,12 @@ Assert ($diagCanon -notmatch 'STALE-SHADOW REPLACED') 'canon diagnostic is not a
 Assert ($diagShadow -match 'STALE-SHADOW REPLACED') 'windows/ diagnostic remains repo-dev shadow only'
 
 # --- 2) EXE AppLaunched must stay cmd -> setup.cmd ---
-Assert ($build -match "AppLaunched=cmd\.exe /c setup-claude-connect\.cmd") `
-    'IExpress AppLaunched is cmd.exe /c setup-claude-connect.cmd'
+Assert ($build -match "AppLaunched=wscript\.exe //B //Nologo setup-run-hidden\.vbs") `
+    'IExpress AppLaunched is hidden wscript -> setup-run-hidden.vbs'
+Assert ($build -match 'setup-claude-connect\.cmd') `
+    'IExpress stage still runs setup-claude-connect.cmd under the hidden launcher'
+Assert ($build -match 'sh\.Run cmd, 0, True') `
+    'hidden VBS runs cmd with window style 0 (no console flash)'
 Assert (-not ($build -match "AppLaunched=powershell\.exe")) `
     'IExpress AppLaunched is not raw powershell.exe'
 
@@ -63,6 +69,30 @@ Assert ($ui -match "Reason -eq 'update_manual_relaunch'") `
     'Wait-ConnectExit still knows update_manual_relaunch'
 Assert ($ui -match 'Never fall through to a stale in-memory Wait-ConnectExit') `
     'manual update path documents no Press Enter fallthrough'
+
+# --- 5) BusyBox sed \r must not truncate trailing "r" on identifiers ---
+Assert ($dcb -match 'NEVER use sed .s/\\r\$') `
+    'deploy documents BusyBox sed \\r = letter-r hazard'
+Assert ($dcb -match 'perl -pi -e .s/\\r\$') `
+    'deploy prefers perl for CR strip (not sed \\r)'
+Assert ($dcb -match 'trailing-r strip corruption') `
+    'ship-gate rejects truncated connect.ps1 identifiers'
+Assert ($dcb -match 'Get-InteractiveLaptopUser') `
+    'ship-gate requires intact Get-InteractiveLaptopUser in connect.ps1'
+
+# --- 6) Versioned layout: no NEW.exe in OLD VerDir; no orphan cmd instant launcher ---
+$upd = Get-Content (Join-Path $RepoRoot 'scripts\client\windows\connect-update.ps1') -Raw
+$launch = Get-Content (Join-Path $RepoRoot 'publish\_setup-launch-body.ps1') -Raw
+Assert ($upd -match 'foreign_verdir') `
+    'update Sync skips Claude-Connect-NEW.exe inside OLD \{ver\} folders'
+Assert ($upd -match 'dirLeaf -ne \$verLabel') `
+    'update compares VerDir leaf to VersionLabel before promote'
+Assert ($launch -match 'Claude-Connect\.vbs') `
+    'setup-launch writes Claude-Connect.vbs instant reopen'
+Assert ($launch -match 'wscript\.exe //B //Nologo') `
+    'instant .cmd trampoline uses hidden wscript (no lingering console)'
+Assert ($launch -notmatch 'start "Claude Connect" /D') `
+    'instant launcher must not use titled start /D powershell (orphan cmd)'
 
 Write-Host ''
 if ($Fail -eq 0) {

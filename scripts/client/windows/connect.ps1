@@ -1,5 +1,5 @@
-# connect.ps1 - Claude Code launcher for Windows.
-# connect.bat invariant: g git (menu footer lives in connect-ui.ps1)
+﻿# connect.ps1 - Claude Code launcher for Windows.
+# connect.bat invariant: menu footer lives in connect-ui.ps1
 # Usage:  double-click connect.bat
 #         connect.bat -Setup   (reconfigure username)
 
@@ -122,10 +122,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260727.03'
+$script:ConnectVersion = '20260727.21'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = '8cbd99f8-29b2-4bc7-8e63-ff3e137d6d4f'
+$script:ConnectBuildId = 'b3f0f7c0-10fa-4578-8b74-86cac60e3a48'
 $script:SshMsSamples = [System.Collections.Generic.List[int]]::new()
 $script:SshMsSampleStartUnix = 0
 $script:LastSshRollupUnix = 0
@@ -1770,7 +1770,6 @@ function Choose-Project {
                 Write-Host ''
                 Write-Host '    1  Change server username' -ForegroundColor DarkGray
                 Write-Host '    2  Change IDE preference' -ForegroundColor DarkGray
-                Write-Host '    3  Change git mode' -ForegroundColor DarkGray
                 Write-Host ''
                 $cfgChoice = (Read-ConnectPrompt '    >' -Tag 'MENU_CONFIG').Trim()
                 Write-ConnectDecision 'config_choice' $cfgChoice
@@ -1791,17 +1790,15 @@ function Choose-Project {
                         }
                     }
                     '2' { Configure-EditorPref -CfgDir $CfgDir }
-                    '3' { Configure-GitMode }
                     default { Write-Host '    Cancelled.' -ForegroundColor DarkGray; Write-Host '' }
                 }
             }
-            "g" { Write-ConnectDecision 'project_menu' 'git_mode'; Configure-GitMode }
             "q" { Write-ConnectDecision 'project_menu' 'quit'; if (Get-Command Close-ConnectLog -ErrorAction SilentlyContinue) { Close-ConnectLog }; Write-Host ""; exit 0 }
             default {
                 $raw = [string]$_
                 $isAscii = $raw.Length -ge 1 -and ($raw.ToCharArray() | Where-Object { [int]$_ -gt 127 } | Measure-Object).Count -eq 0
                 if ($isAscii) {
-                    Warn "Enter a number or a/e/d/c/g/u/q."
+                    Warn "Enter a number or a/e/d/c/u/q."
                 } elseif (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
                     Write-ConnectLog ("PROJECT_MENU ignore non_command choice={0}" -f $raw) 'INFO'
                 }
@@ -2928,6 +2925,13 @@ $script:WindowsMcpEnsured = $false
             }
             Write-SessionBox -ExtraLines $sessionExtras
             Set-ConnectTitle ('Claude Connect | {0} | {1}' -f $go.Id, (Get-GitModeLabel))
+            if (Get-Command Write-ConnectSessionSlotMarker -ErrorAction SilentlyContinue) {
+                $slotMark = 0
+                if (($env:CLAUDE_CONNECT_UI_SLOT + '') -match '^\d+$') { $slotMark = [int]$env:CLAUDE_CONNECT_UI_SLOT }
+                $portMark = 0
+                if ($Port) { $portMark = [int]$Port }
+                Write-ConnectSessionSlotMarker -Slot $slotMark -Port $portMark -ProjectId $go.Id -RemotePath $go.Path -ProcessId $PID
+            }
 
             $authOkForDiag = ($script:LastAuthDetail -match '^(ok|already ok|skipped|tokens only|n/a)$')
             $diagSw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -3081,7 +3085,7 @@ $script:WindowsMcpEnsured = $false
                     $useVk = ($code -eq 0 -or ($code -gt 0 -and $code -lt 32))
                     $resolved = ''
                     if ($letter -eq 'r' -or ($useVk -and $ki.Key -eq [ConsoleKey]::R)) { $resolved = 'r' }
-                    elseif ($letter -eq 'g' -or ($useVk -and $ki.Key -eq [ConsoleKey]::G)) { $resolved = 'g' }
+                    elseif ($letter -eq 'h' -or ($useVk -and $ki.Key -eq [ConsoleKey]::H)) { $resolved = 'h' }
                     elseif ($letter -eq 'o' -or ($useVk -and $ki.Key -eq [ConsoleKey]::O)) { $resolved = 'o' }
                     elseif ($letter -eq 'q' -or ($useVk -and $ki.Key -eq [ConsoleKey]::Q) -or $ki.Key -eq [ConsoleKey]::Enter) { $resolved = 'q' }
                     Write-ConnectDecision 'session_key' ("action={0} key={1} keychar={2} ascii={3} useVk={4}" -f $resolved, $ki.Key, $ki.KeyChar, $ascii, $useVk)
@@ -3132,8 +3136,14 @@ $script:WindowsMcpEnsured = $false
                 $action = 'r'
             }
 
-            if ($action -eq 'g') {
-                Configure-GitMode
+            if ($action -eq 'h') {
+                $uidHygiene = ''
+                if ($script:ServerUidStr) { $uidHygiene = [string]$script:ServerUidStr }
+                if (Get-Command Show-ConnectHygieneInteractive -ErrorAction SilentlyContinue) {
+                    Show-ConnectHygieneInteractive -UidStr $uidHygiene -ProtectRemotePath $go.Path -ProtectProjectId $go.Id -Alias $Alias
+                } else {
+                    Write-Host '    Hygiene helper not loaded.' -ForegroundColor Yellow
+                }
                 continue sessionLoop
             }
 
@@ -3262,6 +3272,9 @@ $script:WindowsMcpEnsured = $false
                 Write-Host ""
                 Write-Host "    Disconnecting..." -ForegroundColor DarkGray
                 Write-ConnectLog "SESSION: disconnect project=$($go.Id) reason=user_quit"
+                if (Get-Command Clear-ConnectSessionSlotMarker -ErrorAction SilentlyContinue) {
+                    Clear-ConnectSessionSlotMarker
+                }
                 Clear-SessionMount -ProjectId $go.Id -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -Reason 'user_quit'
                 Stop-SessionTunnelCleanup -BgTunnel ([ref]$bgTunnel) -ClearServerForward
                 $alreadyDown = $true

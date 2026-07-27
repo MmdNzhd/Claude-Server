@@ -2,7 +2,7 @@
 
 Developer and end-user guide for `connect.bat` / `connect.sh`.
 
-**Current client version:** **`20260726.10`**
+**Current client version:** **`20260727.21`**
 
 See also: [sshfs-performance.md](sshfs-performance.md) (GIT_MODE deep dive), [CLAUDE.md](../CLAUDE.md) (server admin).
 
@@ -111,14 +111,11 @@ Project definitions in `~/.claude-mounts.d/<id>.conf` are never deleted when swi
 | **hide** (HIDE) | Rename `.git` -> `.git.server-session` on laptop before SSHFS (faster mount) |
 | **server** (SLOW) | Keep `.git` on SSHFS mount; full git over network (slow) |
 
-| Key | When |
-|-----|------|
-| `g` | Project menu - toggle mode before session |
-| `G` | Active session - toggle + remount |
+Git mode UI (`g` / `G` / project-menu `3`) is removed; site policy forces **off**. `Configure-GitMode` may remain as a dead helper with no menu path.
 
 Config: `~/.config/claude-connect/git.conf` (laptop) pushed to `~/.claude-connect.conf` on server.
 
-If hide fails (Cursor locks `.git`): close Remote SSH / git on laptop, then press `G` to remount.
+If hide fails (Cursor locks `.git`): close Remote SSH / git on laptop, then reconnect (`R`).
 
 ---
 
@@ -128,7 +125,7 @@ If hide fails (Cursor locks `.git`): close Remote SSH / git on laptop, then pres
 |-----|--------|
 | `R` | Reconnect tunnel |
 | `Q` / Enter | Disconnect (editor down, mount down, restore `.git`) |
-| `G` | Change git mode + remount |
+| `H` | Hygiene: scan stale multi-Connect leftovers → soft-clean orphans/idle → optional second confirm to close sibling Connect tunnels, sibling Connect windows, and that sibling's Cursor project window only (never personal Cursor or the current project window) |
 | `O` | Relaunch Cursor on correct remote folder |
 | `P` | Push Cursor golden auth (bootstrap only) |
 | `M` | Project menu after disconnect |
@@ -178,13 +175,13 @@ Connect also sets `TMPDIR=/tmp` automatically when needed.
 
 If Cursor still asks to log in after sync shows **ok**: fully quit the `[Claude Server]` window (or press **`O`**), do not personal-login into that profile. Reload Window alone is not enough if a stale process held old in-memory auth.
 
-If Cursor opens **Agent home** / wrong user mount path, press **`O`** or reconnect (v20260726.10+).
+If Cursor opens **Agent home** / wrong user mount path, press **`O`** or reconnect (v20260727.21+).
 
 ## Logging
 
-**Policy (v20260726.10+):** zero-loss offline-first. The laptop appends a **durable local day log** and watermark-syncs new bytes to the server when SSH works. `Close-ConnectLog` / `flush_connect_log_to_server` do **not** delete the local day file (offline / failed-SSH sessions stay auditable).
+**Policy (v20260727.21+):** zero-loss offline-first. The laptop appends a **durable local day log** and watermark-syncs new bytes to the server when SSH works. `Close-ConnectLog` / `flush_connect_log_to_server` do **not** delete the local day file (offline / failed-SSH sessions stay auditable).
 
-**Console vs file (v20260726.10+):** the day-log *file* always captures every STEP/SESSION_LOOP/TUNNEL_* line (nothing removed - full diagnostics preserved). The *console* is quieter: routine step "ok" lines (`Verifying laptop SSH key`, `Mounting files`, `Syncing Cursor auth`, ...) only paint on the first session-loop pass of a connect. If a tunnel soft-fail silently self-heals on a later pass, that repaint is suppressed - only real failures (`StepFail` / `step_fail`) always stay visible on console, since those drive the R=retry/Q=quit prompts.
+**Console vs file (v20260727.21+):** the day-log *file* always captures every STEP/SESSION_LOOP/TUNNEL_* line (nothing removed - full diagnostics preserved). The *console* is quieter: routine step "ok" lines (`Verifying laptop SSH key`, `Mounting files`, `Syncing Cursor auth`, ...) only paint on the first session-loop pass of a connect. If a tunnel soft-fail silently self-heals on a later pass, that repaint is suppressed - only real failures (`StepFail` / `step_fail`) always stay visible on console, since those drive the R=retry/Q=quit prompts.
 
 | Where | Path |
 |-------|------|
@@ -203,7 +200,7 @@ Legacy beside-script `connect.log` / `connect.log.1` are removed on start. Short
 
 Session end does **not** delete today's local day file (offline / failed-SSH sessions stay auditable until the next day's retention window).
 
-### What a full log contains (v20260726.10+)
+### What a full log contains (v20260727.21+)
 
 Each connect run uploads a timeline to `~/.claude/logs/connect-YYYYMMDD.log`. Look for these markers in order:
 
@@ -292,7 +289,7 @@ Useful lines:
 ```
 
 
-### Mount background path (v20260726.10+)
+### Mount background path (v20260727.21+)
 
 When `GIT_MODE` is not `off` and the project is not already a healthy skip-remount, Windows Connect **does not** run a synchronous `claude-mount check` on the critical path. It logs `MOUNT_CHECK_SKIPPED reason=bg_up`, starts SSHFS `up` in a background job, paints **Mounting files** as StepOk `started in background`, and continues to Opening Cursor.
 
@@ -333,7 +330,7 @@ Windows Cursor launch uses `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` (and re
 
 Do **not** invent a "3x faster" claim. Use measured STEP/SCORECARD/SSH counts from day logs. Stage-2 baseline evidence (Smart laptop, 2026-07-25 plan) for **before** columns only:
 
-| Metric | Before (cite day log / Stage-2) | After (v20260726.10 measure) | Notes |
+| Metric | Before (cite day log / Stage-2) | After (v20260727.21 measure) | Notes |
 |--------|----------------------------------|------------------------------|-------|
 | Mounting files median (success) | ~46 ms (Jul 25 BG UI) / ~15467 ms (Jul 24 sync) | _TBD ms_ | BG path should stay near-instant in UI |
 | Sync `claude-mount check` after pick (BG path) | present (pre-Task-1) | _expect 0_ `SSH_BEGIN ... check` | Look for `MOUNT_CHECK_SKIPPED` |
@@ -364,7 +361,7 @@ The reverse tunnel needs the **server** to SSH into the Mac as `LAPTOP_USER` (`w
 
 1. System Settings -> Sharing Ã¢â€ â€™ **Remote Login** = On
 2. Allow the Mac account shown by `whoami`, or **All users** (Sharing UI often shows Full Name - allow that row if listed)
-3. User must **not** remain only in `com.apple.access_ssh-disabled` (connect heals this from v20260726.10+: remove from disabled + add to `com.apple.access_ssh`)
+3. User must **not** remain only in `com.apple.access_ssh-disabled` (connect heals this from v20260727.21+: remove from disabled + add to `com.apple.access_ssh`)
 4. If key auth still fails, leave connect running until it finishes; diagnostics upload to `~/.claude/logs/laptop-ssh-diag-latest.txt` on the server
 
 Admin password is requested **at most once** per connect run (45s timeout). Destructive Remote Login cycling is skipped when login is already on.
@@ -404,10 +401,10 @@ Mac: `scripts/client/tests/verify-all.sh`
 |---------|-----|
 | Join-Path ChildPath prompt | Old `connect.ps1` - copy full `windows\` folder from latest ZIP |
 | connect.bat OUTDATED | Missing `connect-ui.ps1` or wrong version in header |
-| Cursor Agent home / wrong user path | Update to **v20260726.10+**; press `O`; check `LAUNCH_*` in server log (folder match needs full path) |
+| Cursor Agent home / wrong user path | Update to **v20260727.21+**; press `O`; check `LAUNCH_*` in server log (folder match needs full path) |
 | Cursor asks to log in (Mac/Win) after auth **ok** | Quit `[Claude Server]` fully or press `O` (stale process); do not personal-login; confirm `machineid` matches golden |
 | Cursor Chat cannot send (Mac/Win) | Reconnect, then **Developer Ã¢â€ â€™ Reload Window** in `[Claude Server]` window |
-| Mac Remote SSH `listen EINVAL` | Update to v20260726.10+; or `launchctl setenv TMPDIR /tmp` + quit Cursor fully |
+| Mac Remote SSH `listen EINVAL` | Update to v20260727.21+; or `launchctl setenv TMPDIR /tmp` + quit Cursor fully |
 | Mac Remote SSH timeout | Use `anysphere.remote-ssh` (not Microsoft extension) |
 | Laptop SSH key / Permission denied (Mac) | Enable Remote Login; remove user from `access_ssh-disabled`; read `laptop-ssh-diag-latest.txt` on server |
 | Empty project list on Mac after Windows session | Auto-adds / purges incompatible `rpath`; add the Mac folder once |
@@ -416,7 +413,7 @@ Mac: `scripts/client/tests/verify-all.sh`
 | git hide failed | Close Cursor/git on laptop, press `G` |
 | Second connect refused | Close the other connect window first (one UI per PC) |
 | Tunnel drops | Auto-reconnect; editor not re-opened on reconnect |
-| Server path `$HOME/~/...` or leftover `~/` under home | Fixed in v20260726.10+ (`${var#~/}` tilde pitfall); admin may `rm -rf ~/\~` leftover dir |
+| Server path `$HOME/~/...` or leftover `~/` under home | Fixed in v20260727.21+ (`${var#~/}` tilde pitfall); admin may `rm -rf ~/\~` leftover dir |
 | `AUTH_SYNC_SKIP db_too_large` / Cursor UI very slow | Chat cache in `%LOCALAPPDATA%\ClaudeServerCursorProfile-*\User\globalStorage\state.vscdb` > 500 MiB. **Close** `[Claude Server]` Cursor, then from repo: `powershell -File scripts\client\cursor-profile-db-tool.ps1 -PruneChatAgent -Force`. Reopen connect. (Manual only — not auto-wired into connect.) |
 | Agents Stop but `dotnet`/build keep running | Fixed in laptop-exec abort trap (TERM/INT kills `timeout`/`ssh` tree + `CMD_END meaning=aborted`). Redeploy: `sudo claude-server deploy-laptop-exec` / install. |
 | Many old `extensionHost` / `server-main` on server | Hourly `cursor-server-reaper --apply` (idle, age≥1h, no TCP clients). Dry-run: `cursor-server-reaper --user YOU`. Log: `/var/log/cursor-server-reaper.log`. |

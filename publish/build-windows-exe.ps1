@@ -58,14 +58,17 @@ Claude Connect - for end users
 ==============================
 Double-click Claude-Connect.exe (this package).
 
-It installs into:
+It installs into the SAME folder as this .exe (portable).
+Example: if you run from C:\Temp\my-test\, scripts land there too.
+
+Legacy fallback (only if the EXE path cannot be detected):
   Desktop\Claude-Connect
 
 Do NOT run connect.bat from a publish\windows folder.
 That folder is for the publisher/admin only.
 
 First run: enter server username / project path when asked.
-Later updates: automatic from the server when you connect again.
+Later updates: press u (or automatic) — files update in this same folder.
 '@
     [System.IO.File]::WriteAllText(
         (Join-Path $stage 'READ-ME-USERS.txt'),
@@ -73,26 +76,31 @@ Later updates: automatic from the server when you connect again.
         [System.Text.UTF8Encoding]::new($false)
     )
 
+    # Silent .cmd: no echo/pause (console is Hidden via VBS AppLaunched). Failures
+    # surface via setup-launch.ps1 MessageBox + %TEMP%\claude-connect-setup.log.
     $setupCmd = @'
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0"
-echo.
-echo   Claude Connect - installing / starting...
-echo   A progress window appears if an update is downloading.
-echo.
-powershell -NoProfile -STA -ExecutionPolicy Bypass -File "%~dp0setup-launch.ps1"
-set "EC=%ERRORLEVEL%"
-if not "%EC%"=="0" (
-  echo.
-  echo   [X] Setup failed. Log: %TEMP%\claude-connect-setup.log
-  echo.
-  pause
-)
-exit /b %EC%
+powershell -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "%~dp0setup-launch.ps1"
+exit /b %ERRORLEVEL%
 '@
     $setupPath = Join-Path $stage 'setup-claude-connect.cmd'
     [System.IO.File]::WriteAllText($setupPath, ($setupCmd -replace "`n", "`r`n"), [System.Text.UTF8Encoding]::new($false))
+
+    # Hide the cmd console completely. AppLaunched must NOT be
+    # "powershell -ExecutionPolicy Bypass -WindowStyle Hidden" (Defender SFX heuristic).
+    # Chain stays: wscript (hidden) -> cmd /c setup.cmd -> Hidden powershell setup-launch.
+    $setupVbs = @(
+        "' Claude Connect - hide setup console (IExpress AppLaunched)"
+        'Set sh = CreateObject("WScript.Shell")'
+        'Set fso = CreateObject("Scripting.FileSystemObject")'
+        'dir = fso.GetParentFolderName(WScript.ScriptFullName)'
+        'cmd = "cmd.exe /c """ & dir & "\setup-claude-connect.cmd"""'
+        'sh.Run cmd, 0, True'
+    ) -join "`r`n"
+    $vbsPath = Join-Path $stage 'setup-run-hidden.vbs'
+    [System.IO.File]::WriteAllText($vbsPath, $setupVbs + "`r`n", [System.Text.Encoding]::ASCII)
 
     $files = @(Get-ChildItem -LiteralPath $stage -File | Sort-Object Name)
     if ($files.Count -lt 3) { Write-ExeErr "Too few staged files: $($files.Count)" }
@@ -126,10 +134,9 @@ exit /b %EC%
     [void]$sb.AppendLine(("FriendlyName={0}" -f $FriendlyName))
     # IMPORTANT (AV regression): do NOT put "powershell -ExecutionPolicy Bypass -WindowStyle Hidden"
     # on the IExpress AppLaunched line. That exact pattern is a classic Defender/SmartScreen
-    # heuristic for unsigned SFX droppers. Older builds that worked for users (Mehrdad etc.)
-    # launched via cmd -> setup-claude-connect.cmd; the .cmd then starts setup-launch.ps1.
-    # Keep that parent chain. Fast-exit + detached worker still live inside setup-launch.ps1.
-    [void]$sb.AppendLine('AppLaunched=cmd.exe /c setup-claude-connect.cmd')
+    # heuristic for unsigned SFX droppers. Hidden console uses wscript -> cmd -> setup.cmd
+    # (style 0). Fast-exit + detached worker still live inside setup-launch.ps1.
+    [void]$sb.AppendLine('AppLaunched=wscript.exe //B //Nologo setup-run-hidden.vbs')
     [void]$sb.AppendLine('PostInstallCmd=<None>')
     [void]$sb.AppendLine('AdminQuietInstCmd=')
     [void]$sb.AppendLine('UserQuietInstCmd=')

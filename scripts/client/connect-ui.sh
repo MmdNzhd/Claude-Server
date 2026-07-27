@@ -145,14 +145,14 @@ ui_project_table() {
         i=$(( i + 1 ))
     done <<< "$raw"
     echo ""
-    printf '    \033[0;90ma add   e edit   d delete   c config   g git   u update   q quit\033[0m\n\n'
+    printf '    \033[0;90ma add   e edit   d delete   c config   u update   q quit\033[0m\n\n'
 }
 
 ui_session_box() {
     echo ""
     printf '    ============================================\n'
     printf '    \033[0;36mSession active -- keep this window open\033[0m\n'
-    printf '    \033[0;90mG = git mode   O = reopen editor   R = reconnect   Q or Enter = disconnect (closes editor)\033[0m\n'
+    printf '    \033[0;90mH = hygiene   O = reopen editor   R = reconnect   Q or Enter = disconnect (closes editor)\033[0m\n'
     while [ "$#" -gt 0 ]; do
         printf '    \033[0;33m%s\033[0m\n' "$1"
         shift

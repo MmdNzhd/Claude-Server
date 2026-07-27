@@ -50,7 +50,7 @@ if [ -f "$_update_script" ]; then
     fi
 fi
 
-CONNECT_VERSION='20260727.03'
+CONNECT_VERSION='20260727.21'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).
@@ -812,8 +812,7 @@ while [ "$exit_requested" -eq 0 ]; do
                     printf '    \033[0;90mIDE      : %s\033[0m\n' "$(get_editor_pref "$CFG_DIR")"
                     echo ""
                     printf '    \033[0;90m1  Change server username\033[0m\n'
-                    printf '    \033[0;90m2  Change IDE preference\033[0m\n'
-                    printf '    \033[0;90m3  Change git mode\033[0m\n\n'
+                    printf '    \033[0;90m2  Change IDE preference\033[0m\n\n'
                     if declare -F connect_prompt >/dev/null 2>&1; then cfg_choice="$(connect_prompt "    > " "MENU_CONFIG")"; else read -rp "    > " cfg_choice; fi
                     if declare -F connect_decision >/dev/null 2>&1; then connect_decision config_choice "$cfg_choice"; fi
                     case "$cfg_choice" in
@@ -832,13 +831,11 @@ while [ "$exit_requested" -eq 0 ]; do
                             fi
                             ;;
                         2) configure_editor_pref "$CFG_DIR" ;;
-                        3) configure_git_mode ;;
                         *) printf '    \033[0;90mCancelled.\033[0m\n\n' ;;
                     esac
                     ;;
-                g) configure_git_mode ;;
                 q) exit_requested=1; break ;;
-                *) warn "Enter a number or a/e/d/c/g/u/q." ;;
+                *) warn "Enter a number or a/e/d/c/u/q." ;;
             esac
         fi
     done
@@ -1264,6 +1261,10 @@ while [ "$exit_requested" -eq 0 ]; do
                 ui_session_box
             fi
             ui_set_title "Claude Connect | $go_id | $(ui_git_mode_label "$(get_git_mode)")"
+            if declare -F write_connect_session_slot_marker >/dev/null 2>&1; then
+                _slot_m="${CLAUDE_CONNECT_UI_SLOT:-0}"
+                write_connect_session_slot_marker "$_slot_m" "${PORT:-0}" "$go_id" "$go_path" "$$"
+            fi
 
             while read -r -t 0 </dev/tty 2>/dev/null; do read -r -n 1 </dev/tty 2>/dev/null || true; done
 
@@ -1302,7 +1303,7 @@ while [ "$exit_requested" -eq 0 ]; do
                     _resolved=""
                     case "$_key_lower" in
                         r) _resolved="r" ;;
-                        g) _resolved="g" ;;
+                        h) _resolved="h" ;;
                         o) _resolved="o" ;;
                         q|$'\n'|$'\r') _resolved="q" ;;
                     esac
@@ -1346,8 +1347,16 @@ while [ "$exit_requested" -eq 0 ]; do
                 _action="r"
             fi
 
-            if [ "$_action" = "g" ]; then
-                configure_git_mode
+            if [ "$_action" = "h" ]; then
+                _uid_h=""
+                if declare -F sshx >/dev/null 2>&1; then
+                    _uid_h="$(sshx 'id -u' 2>/dev/null | tr -d '\r\n' | head -1)"
+                fi
+                if declare -F show_connect_hygiene_interactive >/dev/null 2>&1; then
+                    show_connect_hygiene_interactive "$_uid_h" "$go_path" "$go_id"
+                else
+                    printf '    \033[0;33mHygiene helper not loaded.\033[0m\n'
+                fi
                 continue
             fi
 
@@ -1430,6 +1439,9 @@ while [ "$exit_requested" -eq 0 ]; do
                 printf '    Disconnecting...\n'
                 if declare -F connect_log >/dev/null 2>&1; then
                     connect_log "SESSION: disconnect project=$go_id reason=user_quit" 'INFO'
+                fi
+                if declare -F clear_connect_session_slot_marker >/dev/null 2>&1; then
+                    clear_connect_session_slot_marker
                 fi
                 clear_session_mount "$go_id" "$EDITOR_CMD" "$ALIAS" "$go_path" 1 'user_quit'
                 stop_session_tunnel_cleanup 1

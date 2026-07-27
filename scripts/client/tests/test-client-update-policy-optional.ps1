@@ -41,7 +41,8 @@ Assert ($upd -notmatch 'function Test-UpdateDeferActive') 'Test-UpdateDeferActiv
 Assert ($upd.Contains('Test-UpdateForceRequired')) 'connect-update still uses Test-UpdateForceRequired'
 Assert ($upd.Contains('$forceApply = ($mode -eq ''force'') -and $forceReq')) 'UPDATE_FORCE gated on mode force AND force_min (forceReq)'
 Assert ($upd.Contains('UPDATE_OPTIONAL_SKIP reason=silent')) 'Quiet optional path logs UPDATE_OPTIONAL_SKIP'
-Assert ($upd.Contains('if ($script:Quiet)')) 'Quiet branch present before optional apply'
+Assert ($upd.Contains('$autoYes = ($env:CLAUDE_CONNECT_UPDATE_YES -eq ''1'')')) 'Quiet path defines autoYes from UPDATE_YES'
+Assert ($upd.Contains('if ($script:Quiet -and -not $autoYes)')) 'Quiet skip requires no UPDATE_YES'
 Assert ($upd.Contains('if (-not $forceApply)')) 'optional/Quiet path uses -not forceApply (no force without min)'
 
 # Hard-refuse: sepidz path / .70 on Smart
