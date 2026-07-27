@@ -504,6 +504,44 @@ function Get-ConnectExePromoteDirs {
     return $dirs
 }
 
+function Write-ConnectInstantLauncher {
+    # Same contract as publish/_setup-launch-body.ps1: VBS + thin cmd trampoline.
+    # Must run after versioned_apply / up-to-date sync so old "start powershell"
+    # Claude-Connect.cmd files cannot linger across updates.
+    param([string]$VerDir, [string]$SrcDir)
+    if (-not $VerDir -or -not $SrcDir) { return }
+    try {
+        New-Item -ItemType Directory -Force -Path $VerDir | Out-Null
+        $vbsPath = Join-Path $VerDir 'Claude-Connect.vbs'
+        $vbs = @(
+            "' Claude Connect - instant reopen (no cmd console)"
+            'Set sh = CreateObject("WScript.Shell")'
+            'Set fso = CreateObject("Scripting.FileSystemObject")'
+            'dir = fso.GetParentFolderName(WScript.ScriptFullName)'
+            'src = dir & "\src"'
+            'boot = src & "\connect-boot.ps1"'
+            'If Not fso.FileExists(boot) Then'
+            '  MsgBox "Missing connect-boot.ps1 in:" & vbCrLf & src, vbCritical, "Claude Connect"'
+            '  WScript.Quit 1'
+            'End If'
+            'sh.CurrentDirectory = src'
+            'sh.Run "powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File """ & boot & """", 1, False'
+        ) -join "`r`n"
+        [IO.File]::WriteAllText($vbsPath, $vbs + "`r`n", [Text.UTF8Encoding]::new($false))
+        $cmdPath = Join-Path $VerDir 'Claude-Connect.cmd'
+        $cmd = @(
+            '@echo off'
+            'REM Instant reopen - hand off to VBS (no lingering console).'
+            'start "" /MIN wscript.exe //B //Nologo "%~dp0Claude-Connect.vbs"'
+            'exit /b 0'
+        ) -join "`r`n"
+        [IO.File]::WriteAllText($cmdPath, $cmd + "`r`n", [Text.UTF8Encoding]::new($false))
+        Write-UpdateFileLog ("instant_launcher ok vbs={0}" -f $vbsPath)
+    } catch {
+        Write-UpdateFileLog ("instant_launcher_warn err=$($_.Exception.Message)") 'WARN'
+    }
+}
+
 function Sync-ConnectExeBesideClient {
     # After update: refresh Claude-Connect.exe beside the install folder, and place
     # Claude-Connect-{ver}.exe next to every launch/install dir we know (ScriptDir,
@@ -598,6 +636,14 @@ function Sync-ConnectExeBesideClient {
 function Complete-UpdateCheckHandoff {
     Close-UpdateProgressUi
     try { Sync-ConnectExeBesideClient } catch {}
+    # Refresh VBS trampoline on current VerDir even when already up to date
+    # (old start-powershell Claude-Connect.cmd must not linger).
+    try {
+        $vl = Get-ConnectVersionedLayout -Dir $ScriptDir
+        if ($vl -and $vl.Kind -eq 'versioned' -and $vl.VerDir -and $vl.SrcDir) {
+            Write-ConnectInstantLauncher -VerDir $vl.VerDir -SrcDir $vl.SrcDir
+        }
+    } catch {}
     # Surface versioned EXE handoff even on "up to date" (portable folders need this).
     try {
         $paths = @()
@@ -1718,6 +1764,7 @@ if ($versionedRoot -and (Split-Path -Leaf $versionedRoot) -eq 'Claude-Connect' -
         } catch {}
         Write-UpdateFileLog ("versioned_apply ok remote={0} src={1}" -f $remoteVer, $newSrc)
         Write-UpdateMsg ("  installed under: {0}" -f $newVerDir) 'DarkGray'
+        try { Write-ConnectInstantLauncher -VerDir $newVerDir -SrcDir $newSrc } catch {}
     } catch {
         Write-UpdateFileLog ("versioned_apply_fail err=$($_.Exception.Message)") 'ERROR'
         $swapOk = $false
