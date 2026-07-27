@@ -79,6 +79,7 @@ $suites = @(
     @{ Name = 'connect-bat-max-ps-starts'; Script = 'test-connect-bat-max-ps-starts.ps1' }
     @{ Name = 'client-update-policy-optional'; Script = 'test-client-update-policy-optional.ps1' }
     @{ Name = 'smartscreen-docs-contract'; Script = 'test-smartscreen-docs-contract.ps1' }
+    @{ Name = 'never-again-ship-gates'; Script = 'test-never-again-ship-gates.ps1' }
     @{ Name = 'exe-launch-slot-gate'; Script = 'test-exe-launch-slot-gate.ps1' }
     @{ Name = 'cursor-profile-db-tool'; Script = 'test-cursor-profile-db-tool.ps1' }
     @{ Name = 'chat-freeze-skip-paths'; Script = 'test-chat-freeze-skip-paths.ps1' }

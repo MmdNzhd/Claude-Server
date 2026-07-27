@@ -57,6 +57,7 @@ Assert ($dcb -match "checksums\.txt") 'deploy-client-bundle writes checksums.txt
 Assert ($dcb -match 'connect-ui\.ps1\|connect-diagnostic\.ps1\|editor-launch') 'deploy-client-bundle maps connect-diagnostic from CLIENT_DIR canon'
 Assert ($dcb -match 'scripts/client/connect-diagnostic\.ps1') 'deploy-client-bundle stages scripts/client/connect-diagnostic.ps1'
 Assert ($dcb -match 'STALE-SHADOW REPLACED') 'deploy-client-bundle fail-closed rejects STALE-SHADOW wrappers'
+Assert ($dcb -match '_verify_staged_client_bundle') 'deploy-client-bundle runs ship-gate verifier before promote'
 
 Assert ($dcb -match '_stage_repo_from_laptop; then') 'deploy-client-bundle prefers laptop staging before /opt'
 Assert ($dcb -match '_resolve_repo_fallback') 'deploy-client-bundle uses fallback only after laptop stage'

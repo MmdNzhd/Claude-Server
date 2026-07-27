@@ -340,6 +340,46 @@ fi
 chmod 644 "$BUNDLE_ROOT/checksums.txt"
 ok "checksums.txt ($(wc -l < "$BUNDLE_ROOT/checksums.txt") files)"
 
+# Hard ship-gates (2026-07-27): refuse to promote a staged bundle that would re-break
+# Mehrdad/fleet (diagnostic stub, dead 18998 sticky, AV AppLaunched heuristic EXE).
+_verify_staged_client_bundle() {
+    local root="$1" f
+    f="$root/connect-diagnostic.ps1"
+    [ -f "$f" ] || fail "ship-gate: connect-diagnostic.ps1 missing from staged bundle"
+    if grep -q 'STALE-SHADOW REPLACED' "$f" 2>/dev/null; then
+        fail "ship-gate: staged connect-diagnostic.ps1 is STALE-SHADOW wrapper (flat Desktop would look for parent canon)"
+    fi
+    grep -q 'Get-ConnectProblemVerdict' "$f" || fail "ship-gate: connect-diagnostic.ps1 missing Get-ConnectProblemVerdict"
+    [ "$(wc -c < "$f")" -ge 5000 ] || fail "ship-gate: connect-diagnostic.ps1 too small ($(wc -c < "$f") bytes) - likely stub"
+
+    f="$root/connect-ui.ps1"
+    [ -f "$f" ] || fail "ship-gate: connect-ui.ps1 missing"
+    if grep -q 'STALE-SHADOW REPLACED' "$f" 2>/dev/null; then
+        fail "ship-gate: staged connect-ui.ps1 is STALE-SHADOW wrapper"
+    fi
+    grep -q 'update_manual_relaunch\|Stop-Process -Id \$PID' "$f" \
+        || fail "ship-gate: connect-ui.ps1 missing hard exit after manual update (Press Enter regression)"
+
+    f="$root/cursor-proxy-sidecar.ps1"
+    [ -f "$f" ] || fail "ship-gate: cursor-proxy-sidecar.ps1 missing"
+    grep -q 'CURSOR_PROXY_CLEAR force reason=backend_down' "$f" \
+        || fail "ship-gate: sidecar missing backend_down force-clear (18998 blackhole regression)"
+    grep -q 'stopping_fronts' "$f" \
+        || fail "ship-gate: sidecar missing stop-fronts-when-backend-down"
+
+    f="$root/Claude-Connect.exe"
+    if [ -f "$f" ]; then
+        if grep -a -q 'ExecutionPolicy Bypass -WindowStyle Hidden' "$f" 2>/dev/null; then
+            fail "ship-gate: Claude-Connect.exe embeds powershell Bypass+Hidden AppLaunched (AV heuristic)"
+        fi
+    fi
+
+    f="$root/connect-version.txt"
+    [ -f "$f" ] || fail "ship-gate: connect-version.txt missing"
+    ok "ship-gates passed (diagnostic canon, proxy backend_down, update hard-exit, EXE heuristic)"
+}
+_verify_staged_client_bundle "$BUNDLE_ROOT"
+
 # Rename-swap: move live aside, promote stage, drop old (clients see old or new, never empty tree mid-rm).
 if [ -e "$BUNDLE_LIVE" ]; then
     mv "$BUNDLE_LIVE" "$OLD_BUNDLE" || fail "could not move live bundle aside"
@@ -352,6 +392,9 @@ mv "$BUNDLE_ROOT" "$BUNDLE_LIVE" || {
 }
 rm -rf "$OLD_BUNDLE"
 BUNDLE_ROOT="$BUNDLE_LIVE"
+
+# Re-check live share after swap (paranoia: catch partial promote).
+_verify_staged_client_bundle "$BUNDLE_ROOT"
 
 VER="$(tr -d '\r\n' < "$BUNDLE_ROOT/connect-version.txt")"
 echo ""
