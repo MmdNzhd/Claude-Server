@@ -76,6 +76,23 @@ $suites = @(
     @{ Name = 'multi-agent-boot-slots-live'; Script = 'test-multi-agent-boot-slots-live.ps1' }
     @{ Name = 'multi-agent-deferred-slot-live'; Script = 'test-multi-agent-deferred-slot-live.ps1' }
     @{ Name = 'multi-agent-promote-shared-dir-live'; Script = 'test-multi-agent-promote-shared-dir-live.ps1' }
+    # Domain hard-batch suites (~14 Assert each; multi-agent coverage raise 2026-07-27)
+    @{ Name = 'git-tunnel-hard-batch'; Script = 'test-git-tunnel-hard-batch.ps1' }
+    @{ Name = 'mac-connect-hard-batch'; Script = 'test-mac-connect-hard-batch.ps1' }
+    @{ Name = 'designer-connect-hard-batch'; Script = 'test-designer-connect-hard-batch.ps1' }
+    @{ Name = 'mount-active-hard-batch'; Script = 'test-mount-active-hard-batch.ps1' }
+    @{ Name = 'windows-mcp-hard-batch'; Script = 'test-windows-mcp-hard-batch.ps1' }
+    @{ Name = 'sidecar-xray-hard-batch'; Script = 'test-sidecar-xray-hard-batch.ps1' }
+    @{ Name = 'editor-auth-hard-batch'; Script = 'test-editor-auth-hard-batch.ps1' }
+    @{ Name = 'logging-runid-hard-batch'; Script = 'test-logging-runid-hard-batch.ps1' }
+    @{ Name = 'bat-preflight-heal-hard-batch'; Script = 'test-bat-preflight-heal-hard-batch.ps1' }
+    @{ Name = 'publish-iexpress-hard-batch'; Script = 'test-publish-iexpress-hard-batch.ps1' }
+    @{ Name = 'elevate-ssh-hard-batch'; Script = 'test-elevate-ssh-hard-batch.ps1' }
+    @{ Name = 'update-relaunch-hard-batch'; Script = 'test-update-relaunch-hard-batch.ps1' }
+    @{ Name = 'versioned-layout-extra-hard-batch'; Script = 'test-versioned-layout-extra-hard-batch.ps1' }
+    @{ Name = 'connect-ui-menu-hard-batch'; Script = 'test-connect-ui-menu-hard-batch.ps1' }
+    @{ Name = 'server-laptop-exec-hard-batch'; Script = 'test-server-laptop-exec-hard-batch.ps1' }
+    @{ Name = 'diagnostic-scorecard-hard-batch'; Script = 'test-diagnostic-scorecard-hard-batch.ps1' }
     @{ Name = 'hard-cmd-flash-fleet-push'; Script = 'test-hard-cmd-flash-fleet-push.ps1' }
     @{ Name = 'p0-connect-fixes'; Script = 'test-p0-connect-fixes.ps1' }
     @{ Name = 'windows-mcp-no-orphan-cmd'; Script = 'test-windows-mcp-no-orphan-cmd.ps1' }
