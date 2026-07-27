@@ -122,10 +122,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260727.02'
+$script:ConnectVersion = '20260727.03'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = '81895cfc-1940-453e-8af6-cd3a34da3d67'
+$script:ConnectBuildId = '8cbd99f8-29b2-4bc7-8e63-ff3e137d6d4f'
 $script:SshMsSamples = [System.Collections.Generic.List[int]]::new()
 $script:SshMsSampleStartUnix = 0
 $script:LastSshRollupUnix = 0

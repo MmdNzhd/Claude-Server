@@ -25,7 +25,10 @@ Assert ($side -match 'Remove-Item -LiteralPath \$lease') 'BootReap still drops s
 
 Assert ($side -match 'Detach-CursorProxySidecarJobProcess -Process \$pWd') 'Start-CursorProxySidecarWatchdog detaches Job into watchdog'
 Assert ($side -match 'CURSOR_PROXY_CLEAR force reason=18998_down_windows_open') 'Clear force path when 18998 down + windows open'
-Assert ($side -match '\$nOpen -gt 0 -and \$frontListening') 'CLEAR_SKIP only when windows open AND front listening'
+Assert ($side -match 'CURSOR_PROXY_CLEAR force reason=backend_down') 'Clear force path when backend -L down (never repair to 18998)'
+Assert ($side -match 'SIDECAR_ENSURE front_up backend_down stopping_fronts_clearing_settings') 'Ensure stops fronts when backend down'
+Assert ($side -match 'SIDECAR_START front_up backend_down stopping_fronts') 'Start refuses to pin settings without backend'
+Assert ($side -match '\$nOpen -gt 0 -and \$frontListening') 'CLEAR_SKIP gated on windows open AND front listening'
 
 Assert ($el -match 'Clear-CursorProxySettingsSidecar') 'editor-launch still routes clear through sidecar helper'
 Assert ($el -match 'action=repair_sidecar_only') 'editor-launch still logs repair_sidecar_only for open windows'

@@ -54,12 +54,12 @@ _stage_repo_from_laptop() {
         scripts/client/windows/connect.ps1
         scripts/client/windows/connect-rider.bat
         scripts/client/windows/connect-update.ps1
-        scripts/client/windows/connect-diagnostic.ps1
         scripts/client/windows/cursor-proxy-sidecar.ps1
         scripts/client/windows/connect-boot.ps1
         scripts/client/windows/connect-heal.ps1
         scripts/client/windows/connect-bootstrap.ps1
         scripts/client/connect-ui.ps1
+        scripts/client/connect-diagnostic.ps1
         scripts/client/editor-launch.ps1
         scripts/client/git-mode.ps1
         scripts/client/cursor-auth-laptop.ps1
@@ -177,7 +177,9 @@ win_files=(
 for name in "${win_files[@]}"; do
     src=""
     case "$name" in
-        connect-ui.ps1|editor-launch.ps1|git-mode.ps1|cursor-auth-laptop.ps1)
+        # Flat Desktop\Claude-Connect layout has no scripts/client/ parent — ship CANON
+        # bodies here. windows/*.ps1 shadows (STALE-SHADOW wrappers) are repo-dev only.
+        connect-ui.ps1|connect-diagnostic.ps1|editor-launch.ps1|git-mode.ps1|cursor-auth-laptop.ps1)
             src="$CLIENT_DIR/$name"
             ;;
         *)
@@ -197,6 +199,15 @@ for name in "${win_files[@]}"; do
         warn "skip missing: $name"
         continue
     fi
+    # Fail closed: never publish a repo-dev STALE-SHADOW wrapper into the flat client share.
+    # That made Desktop\Claude-Connect\connect-diagnostic.ps1 look for Desktop\connect-diagnostic.ps1.
+    case "$name" in
+        connect-ui.ps1|connect-diagnostic.ps1)
+            if grep -q 'STALE-SHADOW REPLACED' "$src" 2>/dev/null; then
+                fail "$name source is a STALE-SHADOW wrapper ($src) - refuse to publish (use scripts/client/$name canon)"
+            fi
+            ;;
+    esac
     install -m 644 "$src" "$BUNDLE_ROOT/$name"
     case "$name" in
         connect.bat|connect-rider.bat) ;;  # Windows batch needs CRLF

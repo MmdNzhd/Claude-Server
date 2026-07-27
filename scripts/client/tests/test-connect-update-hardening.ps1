@@ -53,6 +53,10 @@ Assert ($macConn -match "CLAUDE_CONNECT_UPDATE_DEPTH") 'mac connect.sh bounds up
 Assert ($dcb -match "STAGE_BUNDLE") 'deploy-client-bundle stages before swap'
 Assert ($dcb -match "BUNDLE_LIVE") 'deploy-client-bundle tracks live path'
 Assert ($dcb -match "checksums\.txt") 'deploy-client-bundle writes checksums.txt'
+# Flat share must ship CANON diagnostic/ui — not windows/ STALE-SHADOW wrappers
+Assert ($dcb -match 'connect-ui\.ps1\|connect-diagnostic\.ps1\|editor-launch') 'deploy-client-bundle maps connect-diagnostic from CLIENT_DIR canon'
+Assert ($dcb -match 'scripts/client/connect-diagnostic\.ps1') 'deploy-client-bundle stages scripts/client/connect-diagnostic.ps1'
+Assert ($dcb -match 'STALE-SHADOW REPLACED') 'deploy-client-bundle fail-closed rejects STALE-SHADOW wrappers'
 
 Assert ($dcb -match '_stage_repo_from_laptop; then') 'deploy-client-bundle prefers laptop staging before /opt'
 Assert ($dcb -match '_resolve_repo_fallback') 'deploy-client-bundle uses fallback only after laptop stage'

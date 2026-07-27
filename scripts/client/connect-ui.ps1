@@ -1273,7 +1273,9 @@ function Wait-ConnectExit {
     # Successful update relaunch already spawned a new Connect window. Must exit FAST:
     # Force log-sync over SSH can hang for tens of seconds and leaves the old UI stuck on
     # "Update applied - relaunching...". Skip blocking drain/Close-ConnectLog here.
-    $skipEnter = ($Code -eq 0) -and (
+    # Also skip Read-Host for ANY update_* reason (even non-zero) — Press Enter after a
+    # successful "Update applied" is always wrong UX.
+    $skipEnter = (
         $Reason -eq 'update_manual_relaunch' -or
         $Reason -eq 'update_relaunch'
     )
@@ -1555,7 +1557,11 @@ function Invoke-ConnectManualUpdate {
         }
         $null = Invoke-ConnectBatRelaunch -ScriptDir $scriptDir
         try { Close-ConnectRelaunchHostConsole } catch { }
-        try { [Environment]::Exit(0) } catch { Wait-ConnectExit -Reason 'update_manual_relaunch' -Code 0 }
+        # Never fall through to a stale in-memory Wait-ConnectExit that still has Read-Host
+        # (pre-skipEnter builds showed "Press Enter to close" after a successful update).
+        try { [Environment]::Exit(0) } catch { }
+        try { Stop-Process -Id $PID -Force -ErrorAction Stop } catch { }
+        exit 0
     } elseif ($exitCode -eq 0) {
         Write-Host '    Update check finished.' -ForegroundColor DarkGray
         Write-Host ''

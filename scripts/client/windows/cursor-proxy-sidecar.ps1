@@ -369,10 +369,12 @@ function Repair-CursorProxySettingsToSidecar {
 function Clear-CursorProxySettingsSidecar {
     # Remove sticky 18998 proxy when sidecar/backend is down so Cursor can talk direct
     # instead of hard-failing every agent turn on a dead loopback proxy.
-    # When server-profile Cursor windows are open AND 18998 is listening: CLEAR_SKIP +
-    # repair only (clearing a live sticky mid-session freezes chat).
-    # When windows are open AND 18998 is NOT listening: FORCE clear — leaving settings
-    # pointed at a dead front yields MCP ECONNREFUSED 127.0.0.1:18998 (worse than clear).
+    # When server-profile Cursor windows are open AND 18998 is listening AND backend is
+    # healthy: CLEAR_SKIP + repair only (clearing a live sticky mid-session freezes chat).
+    # When backend -L (19080/19180) is down: ALWAYS force-clear — never repair to 18998.
+    # A listening front with a dead backend blackholes agent traffic
+    # ("Failed to establish a socket connection to proxies: PROXY 127.0.0.1:18998").
+    # When windows are open AND 18998 is NOT listening: FORCE clear.
     $nOpen = 0
     try {
         if (Get-Command Get-CursorProfileProcesses -ErrorAction SilentlyContinue) {
@@ -383,7 +385,16 @@ function Clear-CursorProxySettingsSidecar {
     if (Get-Command Test-CursorProxySidecarListening -ErrorAction SilentlyContinue) {
         try { $frontListening = [bool](Test-CursorProxySidecarListening -Port 18998) } catch { $frontListening = $false }
     }
-    if ($nOpen -gt 0 -and $frontListening) {
+    $backendOk = $false
+    if (Get-Command Test-CursorProxyBackendOpen -ErrorAction SilentlyContinue) {
+        try { $backendOk = [bool](Test-CursorProxyBackendOpen) } catch { $backendOk = $false }
+    }
+    if (-not $backendOk) {
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("CURSOR_PROXY_CLEAR force reason=backend_down front_up={0} profile_count={1}" -f [int]$frontListening, $nOpen) 'WARN'
+        }
+        # fall through to remove sticky 18998 — do NOT repair
+    } elseif ($nOpen -gt 0 -and $frontListening) {
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
             Write-GitModeLog ("CURSOR_PROXY_CLEAR_SKIP: reason=windows_open action=repair_sidecar_only profile_count={0}" -f $nOpen) 'WARN'
         }
@@ -440,15 +451,26 @@ function Start-CursorProxySidecar {
     $a = Start-TcpPortRelay -ListenPort 18999 -BackendPort $socksBack -Name 'socks'
     $b = Start-TcpPortRelay -ListenPort 18998 -BackendPort $httpBack -Name 'http'
     try { Start-LegacyCursorProxyRelays | Out-Null } catch {}
-    $ok = ($a -and $b -and (Test-CursorProxySidecarListening -Port 18998))
+    $frontOk = ($a -and $b -and (Test-CursorProxySidecarListening -Port 18998))
+    $backendOk = $false
+    if ($frontOk) {
+        try { $backendOk = [bool](Test-CursorProxyBackendOpen) } catch { $backendOk = $false }
+    }
+    $ok = [bool]($frontOk -and $backendOk)
     if ($ok) {
         try { Repair-CursorProxySettingsToSidecar | Out-Null } catch {}
         try { Start-CursorProxySidecarWatchdog | Out-Null } catch {}
     } else {
-        # Never leave Cursor pointed at a dead 18998 front door.
+        # Never leave Cursor pointed at a dead/blackhole 18998 (front without backend).
+        if ($frontOk -and -not $backendOk) {
+            if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+                Write-GitModeLog 'SIDECAR_START front_up backend_down stopping_fronts' 'WARN'
+            }
+            try { Stop-CursorProxySidecarRelays | Out-Null } catch {}
+        }
         try { Clear-CursorProxySettingsSidecar | Out-Null } catch {}
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
-            Write-GitModeLog ("SIDECAR_START ok=0 socks={0} http={1}" -f [int]$a, [int]$b) 'WARN'
+            Write-GitModeLog ("SIDECAR_START ok=0 socks={0} http={1} backend={2}" -f [int]$a, [int]$b, [int]$backendOk) 'WARN'
         }
     }
     return $ok
@@ -534,8 +556,10 @@ function Ensure-CursorProxySidecar {
     $backendOk = Test-CursorProxyBackendOpen
     if (-not $backendOk) {
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
-            Write-GitModeLog 'SIDECAR_ENSURE front_up backend_down clearing_settings' 'WARN'
+            Write-GitModeLog 'SIDECAR_ENSURE front_up backend_down stopping_fronts_clearing_settings' 'WARN'
         }
+        # Stop listening fronts so Chromium/--proxy-server cannot blackhole into dead -L backends.
+        try { Stop-CursorProxySidecarRelays | Out-Null } catch {}
         try { Clear-CursorProxySettingsSidecar | Out-Null } catch {}
         return $false
     }
