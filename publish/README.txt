@@ -58,6 +58,30 @@ Option B (single EXE):
   connect.bat. The EXE is an **unsigned IExpress** package and may trip
   SmartScreen / Defender false positives on first run (see below).
   Do not share stale Claude-Connect-Setup.exe.old-* Desktop backups.
+  No other files are required beside the EXE.
+
+CONSOLE HIDE (no flash)
+-----------------------
+Connect hides helper cmd/PowerShell windows. Minimize (/MIN) is not used.
+
+After install, prefer:
+  Desktop\Claude-Connect\Claude-Connect.vbs
+
+Required hide helpers (must exist next to connect.bat):
+  connect-hide-relaunch.vbs   - true hide relaunch (WScript style 0)
+  connect-hide-console.ps1    - ShowWindow(SW_HIDE) belt
+
+Claude-Connect.cmd (auto-written) must call wscript directly — no "start",
+no /MIN. The only intended visible console is the Connect UI
+(connect-boot.ps1).
+
+If you still see a lasting "Claude Connect" cmd on the taskbar:
+  1. Confirm header version is current (v20260727.27+).
+  2. Confirm the two hide helpers exist in Desktop\Claude-Connect\.
+  3. Launch via Claude-Connect.vbs (not an old shortcut to /MIN bat).
+  4. Re-copy from the latest claude-publish ZIP/EXE, or press u to update.
+
+Details for developers: docs\client-connect.md (Windows console hide).
 
 SMARTSCREEN / DEFENDER FALSE POSITIVES
 --------------------------------------

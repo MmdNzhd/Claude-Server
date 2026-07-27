@@ -373,6 +373,30 @@ The client scripts handle these automatically without user intervention:
 | Mac admin password prompts | At most once per run (45s timeout); skip Remote Login cycle if already on |
 | Visible helper CMD / PowerShell flash on Connect start | BAT_INNER via `connect-hide-relaunch.vbs` (style 0); helper PS outer `-WindowStyle Hidden`; belt `connect-hide-console.ps1` |
 
+## Windows console hide (agents + ship)
+
+Full end-user / developer guide: [`docs/client-connect.md`](docs/client-connect.md#windows-console-hide-no-flash).
+
+**Short contract (do not regress):**
+
+```
+Explorer / Claude-Connect.vbs
+  -> connect-hide-relaunch.vbs  (WshShell.Run style 0, CLAUDE_CONNECT_BAT_INNER=1)
+  -> connect.bat INNER (hidden)
+       -> connect-hide-console.ps1 belt (SW_HIDE, fail-open)
+       -> helper powershell all -WindowStyle Hidden
+       -> start "" powershell ... connect-boot.ps1   # ONLY visible UI
+```
+
+| Must | Must not |
+|---|---|
+| Ship `connect-hide-relaunch.vbs` + `connect-hide-console.ps1` in ZIP, EXE SFX, and `/usr/local/share/claude-client` | Use `start /MIN` anywhere in bat / instant launcher / setup-launch |
+| Instant `Claude-Connect.cmd` = direct `wscript //B //Nologo …vbs` | Wrap wscript in `start` or pass `-WindowStyle Hidden` to wscript.exe |
+| Keep final Connect UI visible via `start` of `connect-boot.ps1` | Hide the final UI window |
+| Keep manifest.tsv + deploy-client-bundle.sh + publish.ps1 lists aligned | Drop hide helpers from heal/bootstrap copy lists |
+
+Prefer telling users to pin **`Claude-Connect.vbs`**. Edge cases (parens path, unicode `findstr` OUTDATED): see client-connect.md.
+
 ## Client Regression Tests
 
 Location: `scripts/client/tests/`
@@ -389,7 +413,10 @@ scripts\client\tests\run-all.bat
 | `test-connect-pipeline.ps1` | connect.ps1 invariants |
 | `test-git-mode-deep.ps1` | GIT_MODE client + server |
 | `test-editor-launch.ps1` | Editor CLI on PATH |
-| `test-harder-live-console-hide-storm.ps1` | LIVE: zero visible helper consoles (VBS/cmd/bat storms) |
+| `test-harder-live-console-hide-storm.ps1` | LIVE + static: zero visible helper consoles (OUTER/cmd/VBS storms, fallback, unicode) |
+| `test-harder-live-instant-launcher.ps1` | Instant `.cmd`/`.vbs` contract (no `/MIN`, direct wscript) |
+| `test-harder-live-bat-boot-handoff.ps1` | Bat → boot handoff / versioned layout |
+| `test-versioned-layout-hard-regressions.ps1` | Versioned Desktop\Claude-Connect layout |
 | `audit-local-connect.ps1` | Find stale connect.ps1 copies on laptop |
 
 Shared helpers: `tests/_paths.ps1`. Full guide: [`docs/client-connect.md`](docs/client-connect.md).
@@ -412,12 +439,23 @@ Outputs to `Desktop\claude-publish\`:
 | `Claude-Connect-VERSION.exe` (+ `Claude-Connect.exe` alias) | IExpress SFX | Smart cold install; also syncs `Desktop\Claude-Connect\` |
 | `claude-code-sepidz.zip` | `claude-code/` + `designer/` + READMEs | Sepidz IP `192.168.250.70`; frozen unless unfreeze |
 
+Publish also:
+
+- Syncs live install folder `Desktop\Claude-Connect\` to the new version (full script tree including hide helpers + instant launchers).
+- Deploys Smart auto-update bundle to `smart@192.168.210.240` → `/usr/local/share/claude-client` (unless skipped).
+- Clears unversioned `Desktop\Claude-Connect*.exe` from Desktop root (handoff stays under `claude-publish\`).
+
 **How to hand Smart to others (latest publish only):**
 
-1. Preferred low-friction: `Desktop\claude-publish\claude-code-client.zip` (extract `windows\` -> `Desktop\Claude-Connect\`, run `connect.bat`).
-2. Single-file: `Desktop\claude-publish\Claude-Connect-VERSION.exe` (or alias `Claude-Connect.exe`). One file is enough; hide helpers are inside the SFX.
-3. After install, prefer `Desktop\Claude-Connect\Claude-Connect.vbs` for zero Explorer cmd flash.
-4. Do **not** share stale `Claude-Connect-Setup.exe.old-*`, repo `scripts/client/windows/Claude-Connect.exe` build leftovers, or older dated EXEs.
+| Priority | Artifact | Notes |
+|---|---|---|
+| 1 (preferred) | `Desktop\claude-publish\claude-code-client.zip` | Extract `windows\` → `Desktop\Claude-Connect\`; run `Claude-Connect.vbs` or `connect.bat` |
+| 2 (single file) | `Desktop\claude-publish\Claude-Connect-VERSION.exe` | Alias `Claude-Connect.exe` in same folder; **one file is enough** (SFX has hide helpers) |
+| Daily use | `Desktop\Claude-Connect\Claude-Connect.vbs` | Zero Explorer cmd flash |
+
+Do **not** share: stale `Claude-Connect-Setup.exe.old-*`, repo `scripts/client/windows/Claude-Connect.exe` leftovers, older dated EXEs, or Sepidz packages to Smart users.
+
+After share, recipients on LAN get optional auto-update from the server bundle when they connect (`u` / update policy). Still ship the latest EXE/ZIP so first boot already has hide stack.
 
 **Client-only rule:** Published ZIPs must never contain `server/`, `deploy-mount-fix.sh`, or `deploy-server-mount-fix.*`. Server deploy runs from repo `scripts/client/deploy-server-mount-fix.bat` (admin, smart laptop).
 

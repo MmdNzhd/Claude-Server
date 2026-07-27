@@ -6,6 +6,8 @@ Developer and end-user guide for `connect.bat` / `connect.sh`.
 
 See also: [sshfs-performance.md](sshfs-performance.md) (GIT_MODE deep dive), [CLAUDE.md](../CLAUDE.md) (server admin).
 
+**Quick links:** [Windows console hide](#windows-console-hide-no-flash) · [Smart package / handoff](#windows-smart-package-layout) · [Auto-update policy](#client-auto-update-policy)
+
 ---
 
 
@@ -94,16 +96,71 @@ Publish: `publish\publish.bat` (or `-SmartOnly` / `-SepidzOnly`). Admin: `sudo c
 
 ## Windows console hide (no flash)
 
-Connect must not leave visible helper `cmd` / PowerShell windows (taskbar minimize is not enough).
+**Policy (v20260727.26+):** helper `cmd` / PowerShell windows must not be visible (taskbar or desktop). `start /MIN` is **forbidden** — minimized consoles still appear on the taskbar.
 
-| Piece | Role |
+### Why this exists
+
+Older Connect used `start /MIN` and helper `powershell` without outer `-WindowStyle Hidden`. Users saw flash/orphan consoles titled like `Claude Connect` even when the real UI later opened. True hide requires `WScript.Shell.Run` style **0** (hidden), not minimize.
+
+### Launch paths (best → fallback)
+
+| Path | What runs | Visible? |
+|---|---|---|
+| **Best** | `Desktop\Claude-Connect\Claude-Connect.vbs` → `connect-hide-relaunch.vbs` → hidden `connect.bat` INNER → `start` visible `connect-boot.ps1` UI | Only the Connect UI console |
+| Good | `Claude-Connect.cmd` = direct `wscript //B //Nologo …vbs` (written by `connect-update` / publish setup-launch) | Same as VBS |
+| OK | Double-click `connect.bat` (OUTER): self-relaunch via hide VBS, then INNER continues | Brief OUTER may flash under Explorer; INNER hidden |
+| Fallback | If `connect-hide-relaunch.vbs` missing: `Start-Process … -WindowStyle Hidden` + belt script | Still no `/MIN` |
+
+### Files and roles
+
+| File | Role |
 |---|---|
-| `windows/connect-hide-relaunch.vbs` | BAT_INNER relaunch via `WshShell.Run …, 0, False` (true hide); sets `CLAUDE_CONNECT_BAT_INNER=1` |
-| `windows/connect-hide-console.ps1` | Belt: `ShowWindow(SW_HIDE)` on the console HWND (fail-open) |
-| `windows/connect.bat` | Prefers VBS hide-relaunch; all helper `powershell` starts use outer `-WindowStyle Hidden`; final UI `start` of `connect-boot.ps1` stays visible |
-| Instant launcher | `Claude-Connect.cmd` = direct `wscript //B //Nologo …vbs` (no `start`, no `/MIN`) |
+| `windows/connect-hide-relaunch.vbs` | Sets `CLAUDE_CONNECT_BAT_INNER=1`, runs `cmd /c connect.bat` with `WshShell.Run …, 0, False` |
+| `windows/connect-hide-console.ps1` | Belt: `GetConsoleWindow` + `ShowWindow(SW_HIDE)`; swallows all errors (`2>nul` / fail-open) |
+| `windows/connect.bat` | OUTER → VBS relaunch; INNER calls hide-console belt; every helper `powershell` uses `-WindowStyle Hidden`; **final** UI is `start "" powershell … connect-boot.ps1` (visible on purpose) |
+| `windows/connect-boot.ps1` | Root stub also prefers hide-relaunch VBS when redirecting into a versioned `src\` tree |
+| `windows/connect-update.ps1` | Instant launcher rewrite; bat self-relaunch uses `Start-Process -WindowStyle Hidden` |
+| `publish/_setup-launch-body.ps1` | Same instant-launcher contract at publish time |
 
-After install, prefer **`Claude-Connect.vbs`** over `connect.bat` for zero Explorer cmd flash. Regression gate: `scripts/client/tests/test-harder-live-console-hide-storm.ps1`.
+### Ship / deploy lists (must stay in sync)
+
+Hide helpers must appear in **all** of:
+
+- `publish/publish.ps1` copy list + IExpress stage
+- `publish/client-bundle-manifest.tsv` (`win` rows)
+- `scripts/server/commands/deploy-client-bundle.sh` (laptop-exec stage paths + `win_files`)
+- Heal/bootstrap copy lists inside `connect.bat` / `connect-bootstrap.ps1` / `connect-heal.ps1`
+
+Never publish a Windows tree that has `connect.bat` but lacks the two hide helpers.
+
+### Known edge cases
+
+| Case | Behavior |
+|---|---|
+| Path with spaces | Supported; VBS/`Start-Process` must use one quoted argument string (array `ArgumentList` can mangle paths) |
+| Path with `()` parentheses | `connect.bat` preflight can break; **VBS path still hide-safe** — prefer `.vbs` / `.cmd` trampoline |
+| Unicode path (non-ASCII) | `findstr` OUTDATED guards in bat can fail (false OUTDATED); VBS/cmd trampoline still usable; prefer PowerShell version checks long-term |
+| Missing hide-console.ps1 | Fail-open; INNER must still not leave a titled visible helper |
+| Throwing hide-console.ps1 | Fail-open (`2>nul`); boot must continue |
+| Do **not** pass `-WindowStyle Hidden` to `wscript.exe` itself | Can suppress child `WshShell.Run` windows incorrectly on some hosts |
+
+### Verify after install / share
+
+1. Header shows current version (e.g. `v20260727.27`).
+2. Folder contains `connect-hide-relaunch.vbs` + `connect-hide-console.ps1`.
+3. `Claude-Connect.cmd` has **no** `start` and **no** `/MIN`; calls `wscript` directly.
+4. Launch via `.vbs`: no lasting helper `cmd` titled `Claude Connect` on the taskbar (only the UI window).
+5. Regression: `powershell -File scripts\client\tests\test-harder-live-console-hide-storm.ps1` (wired in `run-all.ps1` as `harder-live-console-hide-storm`).
+
+### What to give others (Smart)
+
+| Give | Path | Extra files needed? |
+|---|---|---|
+| ZIP (lowest SmartScreen friction) | `Desktop\claude-publish\claude-code-client.zip` | No — extract `windows\` → `Desktop\Claude-Connect\` |
+| Single EXE | `Desktop\claude-publish\Claude-Connect-VERSION.exe` (alias `Claude-Connect.exe`) | **No** — SFX includes hide helpers |
+| Daily shortcut | `Desktop\Claude-Connect\Claude-Connect.vbs` | Already next to `connect.bat` after install |
+
+Always hand the **latest** publish after `publish\publish.bat` (or `-SmartOnly`). Do not share stale `Claude-Connect-Setup.exe.old-*` or an older dated EXE. Sepidz uses a different ZIP/EXE (frozen; different IP) — never mix.
 
 ## Single project per session
 
