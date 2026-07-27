@@ -122,6 +122,8 @@ $suites = @(
     @{ Name = 'never-again-ship-gates'; Script = 'test-never-again-ship-gates.ps1' }
     @{ Name = 'harder-adversarial'; Script = 'test-harder-adversarial.ps1' }
     @{ Name = 'versioned-layout'; Script = 'test-versioned-layout.ps1' }
+    @{ Name = 'boot-flat-migrate-live'; Script = 'test-boot-flat-migrate-live.ps1' }
+    @{ Name = 'flat-update-creates-verdir-live'; Script = 'test-flat-update-creates-verdir-live.ps1' }
     @{ Name = 'versioned-layout-deep-live'; Script = 'test-versioned-layout-deep-live.ps1' }
     @{ Name = 'versioned-layout-hard-regressions'; Script = 'test-versioned-layout-hard-regressions.ps1' }
     @{ Name = 'versioned-layout-harder-adversarial'; Script = 'test-versioned-layout-harder-adversarial.ps1' }

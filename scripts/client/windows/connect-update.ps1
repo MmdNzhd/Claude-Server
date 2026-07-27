@@ -87,12 +87,34 @@ function ConvertTo-ConnectVersionedLayout {
     $ver = (Get-Content -LiteralPath $vf -Raw -ErrorAction SilentlyContinue).Trim()
     if ($ver -notmatch '^\d{8}\.\d+$') { return $null }
     if (-not (Test-Path -LiteralPath (Join-Path $FlatRoot 'connect.ps1'))) { return $null }
-    # Already versioned?
+    # Already versioned? Still sweep leftover flat files at Root (hybrid Desktop mess).
     if (Test-Path -LiteralPath (Join-Path $FlatRoot 'current.txt')) {
         $cv = (Get-Content -LiteralPath (Join-Path $FlatRoot 'current.txt') -Raw -ErrorAction SilentlyContinue).Trim()
-        $src = Join-Path (Join-Path $FlatRoot $cv) 'src'
-        if ($cv -and (Test-Path -LiteralPath (Join-Path $src 'connect.ps1'))) {
-            return @{ Kind = 'versioned'; Root = $FlatRoot; VerDir = (Join-Path $FlatRoot $cv); SrcDir = $src; Ver = $cv }
+        $verDirExisting = Join-Path $FlatRoot $cv
+        $src = Join-Path $verDirExisting 'src'
+        if ($cv -match '^\d{8}\.\d+$' -and (Test-Path -LiteralPath (Join-Path $src 'connect.ps1'))) {
+            try {
+                $destExeExisting = Join-Path $verDirExisting ("Claude-Connect-{0}.exe" -f $cv)
+                Get-ChildItem -LiteralPath $FlatRoot -File -ErrorAction SilentlyContinue | ForEach-Object {
+                    if ($_.Name -eq 'current.txt') { return }
+                    if ($_.Name -match '^(?i)Claude-Connect(-[\d.]+)?\.exe$') {
+                        if (-not (Test-Path -LiteralPath $destExeExisting)) {
+                            try { Move-Item -LiteralPath $_.FullName -Destination $destExeExisting -Force } catch {
+                                try { Copy-Item -LiteralPath $_.FullName -Destination $destExeExisting -Force } catch { }
+                            }
+                        } else {
+                            # Prefer versioned EXE inside VerDir; drop stale root aliases.
+                            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                        }
+                        return
+                    }
+                    Move-Item -LiteralPath $_.FullName -Destination (Join-Path $src $_.Name) -Force -ErrorAction SilentlyContinue
+                }
+                Write-UpdateFileLog ("flat_hybrid_swept ver={0} src={1}" -f $cv, $src)
+            } catch {
+                Write-UpdateFileLog ("flat_hybrid_sweep_warn err=$($_.Exception.Message)") 'WARN'
+            }
+            return @{ Kind = 'versioned'; Root = $FlatRoot; VerDir = $verDirExisting; SrcDir = $src; Ver = $cv }
         }
     }
     $verDir = Join-Path $FlatRoot $ver
@@ -1627,10 +1649,36 @@ $swapOk = $true
 $winNew = Join-Path $NewRoot 'windows'
 $winBak = Join-Path $BakRoot 'windows'
 $script:VersionedApplyDone = $false
+# Prefer Claude-Connect\{remoteVer}\src for BOTH already-versioned AND flat Desktop roots.
+# Old clients used inplace swap on flat roots — folders never appeared for Mehrdad-class installs.
 $verLayoutApply = Get-ConnectVersionedLayout -Dir $ScriptDir
-if ($verLayoutApply -and $verLayoutApply.Kind -eq 'versioned' -and $remoteVer -match '^\d{8}\.\d+$') {
+$versionedRoot = $null
+$priorVerDir = $null
+if ($verLayoutApply) {
+    $versionedRoot = $verLayoutApply.Root
+    if ($verLayoutApply.Kind -eq 'versioned') { $priorVerDir = $verLayoutApply.VerDir }
+    if ($verLayoutApply.Kind -eq 'flat' -and $remoteVer -match '^\d{8}\.\d+$') {
+        try {
+            $migratedApply = ConvertTo-ConnectVersionedLayout -FlatRoot $verLayoutApply.Root
+            if ($migratedApply -and $migratedApply.SrcDir) {
+                $ScriptDir = $migratedApply.SrcDir
+                $windowsDir = $ScriptDir
+                $priorVerDir = $migratedApply.VerDir
+            }
+        } catch {}
+        $re = Get-ConnectVersionedLayout -Dir $ScriptDir
+        if ($re) {
+            $versionedRoot = $re.Root
+            if ($re.Kind -eq 'versioned') { $priorVerDir = $re.VerDir }
+        }
+        # Migrate may fail (locked root scripts) — still force-create {remoteVer}\src under Root.
+        if (-not $versionedRoot) { $versionedRoot = $verLayoutApply.Root }
+        Write-UpdateFileLog ("versioned_apply_from_flat root={0}" -f $versionedRoot)
+    }
+}
+if ($versionedRoot -and (Split-Path -Leaf $versionedRoot) -eq 'Claude-Connect' -and $remoteVer -match '^\d{8}\.\d+$') {
     # New version folder under Claude-Connect\{remoteVer}\src (keep old versions; prune to 3).
-    $newVerDir = Join-Path $verLayoutApply.Root $remoteVer
+    $newVerDir = Join-Path $versionedRoot $remoteVer
     $newSrc = Join-Path $newVerDir 'src'
     try {
         New-Item -ItemType Directory -Force -Path $newSrc | Out-Null
@@ -1641,21 +1689,23 @@ if ($verLayoutApply -and $verLayoutApply.Kind -eq 'versioned' -and $remoteVer -m
         $exeSrc = $null
         foreach ($c in @(
             (Join-Path $winNew 'Claude-Connect.exe'),
-            (Join-Path $verLayoutApply.VerDir ("Claude-Connect-{0}.exe" -f $verLayoutApply.Ver)),
-            (Join-Path $verLayoutApply.VerDir 'Claude-Connect.exe')
+            $(if ($priorVerDir) { Join-Path $priorVerDir ("Claude-Connect-{0}.exe" -f (Split-Path -Leaf $priorVerDir)) } else { $null }),
+            $(if ($priorVerDir) { Join-Path $priorVerDir 'Claude-Connect.exe' } else { $null }),
+            (Join-Path $versionedRoot 'Claude-Connect.exe'),
+            (Join-Path $versionedRoot ("Claude-Connect-{0}.exe" -f $remoteVer))
         )) {
-            if (Test-Path -LiteralPath $c) { $exeSrc = $c; break }
+            if ($c -and (Test-Path -LiteralPath $c)) { $exeSrc = $c; break }
         }
         if ($exeSrc) {
             [void](Copy-ExeAtomicSwap -Source $exeSrc -Destination $destExe)
         }
-        Set-Content -LiteralPath (Join-Path $verLayoutApply.Root 'current.txt') -Value $remoteVer -Encoding ASCII -NoNewline
-        Invoke-PruneConnectVersionDirs -Root $verLayoutApply.Root -Keep 3
+        Set-Content -LiteralPath (Join-Path $versionedRoot 'current.txt') -Value $remoteVer -Encoding ASCII -NoNewline
+        Invoke-PruneConnectVersionDirs -Root $versionedRoot -Keep 3
         $ScriptDir = $newSrc
         $windowsDir = $newSrc
         $script:VersionedApplyDone = $true
         $env:CLAUDE_CONNECT_INSTALL_DIR = $newSrc
-        $env:CLAUDE_CONNECT_ROOT = $verLayoutApply.Root
+        $env:CLAUDE_CONNECT_ROOT = $versionedRoot
         $env:CLAUDE_CONNECT_VER_DIR = $newVerDir
         $env:CLAUDE_CONNECT_LAUNCH_DIR = $newVerDir
         try {
