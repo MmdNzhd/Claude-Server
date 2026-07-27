@@ -58,6 +58,7 @@ _stage_repo_from_laptop() {
         scripts/client/windows/connect-boot.ps1
         scripts/client/windows/connect-heal.ps1
         scripts/client/windows/connect-bootstrap.ps1
+        scripts/client/windows/connect-preflight.ps1
         scripts/client/connect-ui.ps1
         scripts/client/connect-diagnostic.ps1
         scripts/client/editor-launch.ps1
