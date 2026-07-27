@@ -561,14 +561,17 @@ function Sync-ConnectExeBesideClient {
                 } catch {}
             }
             if ($verLabel -match '^\d{8}\.\d+$') {
-                # Never drop Claude-Connect-NEW.exe into an OLD {ver}\ folder
-                # (last-launch-dir / running EXE parent still list prior VerDirs).
-                if ($isVerDir) {
-                    $dirLeaf = Split-Path -Leaf $dir
-                    if ($dirLeaf -ne $verLabel) {
-                        Write-UpdateFileLog ("exe_versioned_skip foreign_verdir want={0} dir={1}" -f $verLabel, $dir)
-                        continue
-                    }
+                # Never drop Claude-Connect-NEW.exe into an OLD {ver}\ folder.
+                # Match by folder name even when src was pruned (isVerDir=false) —
+                # running old EXE / stale last-launch-dir still list prior VerDirs.
+                $dirLeaf = Split-Path -Leaf $dir
+                if ($dirLeaf -match '^\d{8}\.\d+$' -and $dirLeaf -ne $verLabel) {
+                    Write-UpdateFileLog ("exe_versioned_skip foreign_verdir want={0} dir={1}" -f $verLabel, $dir)
+                    continue
+                }
+                if ($isVerDir -and $dirLeaf -ne $verLabel) {
+                    Write-UpdateFileLog ("exe_versioned_skip foreign_verdir want={0} dir={1}" -f $verLabel, $dir)
+                    continue
                 }
                 $verExe = Join-Path $dir ("Claude-Connect-{0}.exe" -f $verLabel)
                 $okVer = Copy-ExeAtomicSwap -Source $exe -Destination $verExe
