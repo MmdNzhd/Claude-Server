@@ -3,55 +3,65 @@ Claude Code Server - Client Package (Smart)
 
 Site: Smart
 Server IP (baked into connect scripts): 192.168.210.240
-Current connect scripts: v20260727.21
+Current connect scripts: v20260727.27
 
 WINDOWS
 -------
 
 HOW TO GIVE TO OTHERS (Windows)
 -------------------------------
-**Folder / ZIP is primary** for end users (lowest SmartScreen friction).
+Always give the **latest** publish under Desktop\claude-publish\ (after publish.bat).
 
-1. Run publish\publish.bat on your PC (builds packages; server deploy is optional/admin).
-2. Preferred: give users the extracted folder â€” copy `windows\` contents to
-   Desktop\Claude-Connect\ (or hand the ZIP and extract there).
-3. User double-clicks Desktop\Claude-Connect\connect.bat.
-4. Optional fallback: Desktop\Claude-Connect.exe (unsigned IExpress SFX) â€” see
-   SmartScreen notes below. Do NOT ship EXE-only as the only handoff.
+1. Run publish\publish.bat (or -SmartOnly) on your PC.
+2. Preferred (lowest SmartScreen friction): hand
+     Desktop\claude-publish\claude-code-client.zip
+   Extract windows\ to Desktop\Claude-Connect\ (or give the extracted folder).
+3. Single-file handoff: hand
+     Desktop\claude-publish\Claude-Connect-VERSION.exe
+   (alias Claude-Connect.exe in the same folder). One file is enough.
+4. User daily launch: Desktop\Claude-Connect\Claude-Connect.vbs
+   (or connect.bat). Prefer .vbs for zero Explorer cmd flash.
 
-Option A (folder / ZIP â€” primary):
+Option A (folder / ZIP - primary):
 1. Copy the extracted folder (claude-code-client) or its windows\ tree to
    Desktop\Claude-Connect\.
-2. Required files (all must be in the same folder):
+2. Required files (same folder; hide helpers are mandatory):
      connect.bat
+     connect-hide-relaunch.vbs
+     connect-hide-console.ps1
+     connect-boot.ps1
+     connect-update.ps1
      connect.ps1
      connect-ui.ps1
      editor-launch.ps1
      git-mode.ps1
      cursor-auth-laptop.ps1
      connect-diagnostic.ps1
+     connect-version.txt
      connect-rider.bat   (optional - Cursor-only shortcut)
-3. Double-click connect.bat.
+3. Double-click Claude-Connect.vbs (preferred) or connect.bat.
 4. First run: enter server username, add/select project path, enter server
    password once to install the SSH key.
 5. Every run after: type a project number (empty Enter does nothing),
    optionally set git mode (g) or IDE (c), Cursor or VS Code opens via Remote SSH.
 
    Header must show:
-     claude-server  |  192.168.210.240  |  v20260727.21
+     claude-server  |  192.168.210.240  |  v20260727.27
 
    Project menu must include:  g git
 
    connect-rider.bat - same as connect.bat but skips the editor menu (Cursor).
 
-Option B (single EXE â€” optional fallback): Desktop\Claude-Connect.exe
+Option B (single EXE):
+  Desktop\claude-publish\Claude-Connect-VERSION.exe
   Double-click once. Installs into Desktop\Claude-Connect and launches
   connect.bat. The EXE is an **unsigned IExpress** package and may trip
   SmartScreen / Defender false positives on first run (see below).
+  Do not share stale Claude-Connect-Setup.exe.old-* Desktop backups.
 
 SMARTSCREEN / DEFENDER FALSE POSITIVES
 --------------------------------------
-FALSE POSITIVE NOTE: brand-new unsigned IExpress hashes (e.g. Claude-Connect-20260726.25.exe)
+FALSE POSITIVE NOTE: brand-new unsigned IExpress hashes (e.g. Claude-Connect-20260727.27.exe)
 often get quarantined or deleted by Defender cloud until reputation builds. Prefer folder/ZIP
 (connect.bat). If an EXE was removed: restore from quarantine OR re-copy the folder package;
 Unblock the file; scoped exclusion only for Desktop\Claude-Connect. Never turn Defender off.
@@ -82,7 +92,7 @@ MAC
 3. Same flow as Windows (project table, git banner, session keys).
 
    Header must show:
-     claude-server  |  192.168.210.240  |  v20260727.21
+     claude-server  |  192.168.210.240  |  v20260727.27
 
    After disconnect: 10s countdown, default M = project menu.
 
@@ -114,7 +124,7 @@ ONE CONNECT PER PC (important)
 
 SINGLE PROJECT (important)
 --------------------------
-  Only ONE project is mounted per session. Requires connect scripts v20260727.21+
+  Only ONE project is mounted per session. Requires connect scripts v20260727.27+
   and server-side mount fix (admin deploys from repo - not included in this ZIP).
 
 SESSION KEYS
@@ -136,7 +146,7 @@ If selecting a project shows "Join-Path ChildPath" prompt:
   - connect.bat blocks outdated folders automatically
 
 If connect.bat says OUTDATED:
-  - Missing connect-ui.ps1 or version is not v20260727.21
+  - Missing connect-ui.ps1 or version is not v20260727.27
 
 Do NOT use old folders from previous ZIP dates or stale Desktop copies.
 Do NOT mix this Smart package with a Sepidz ZIP (different server IP).
@@ -165,7 +175,7 @@ TWO CURSOR PROFILES (no conflict)
 
 CURSOR AUTH: server golden tokens + profile machineid; use [Claude Server] window only.
 
-LOGS (durable on laptop + synced to server, v20260727.21+)
+LOGS (durable on laptop + synced to server, v20260727.27+)
 ------------------------------------------------------------
   Connect keeps a durable local day log on your laptop AND syncs it to the
   server account:

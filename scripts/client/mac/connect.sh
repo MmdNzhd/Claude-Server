@@ -50,7 +50,7 @@ if [ -f "$_update_script" ]; then
     fi
 fi
 
-CONNECT_VERSION='20260727.26'
+CONNECT_VERSION='20260727.27'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).

@@ -23,10 +23,15 @@ Optional: Server Ã¢â€â‚¬Ã¢â€â‚¬SSHFSÃ¢â€â‚¬Ã¢
 scripts/
   client/
     mac/connect.sh                # Mac launcher (bash, runs in Terminal)
+    windows/connect.bat           # Windows double-click entry (hide-relaunch + boot handoff)
     windows/connect.ps1           # Windows launcher (PowerShell; elevate-when-needed for sshd/firewall)
+    windows/connect-hide-relaunch.vbs  # BAT_INNER true-hide (WshShell.Run style 0; no /MIN)
+    windows/connect-hide-console.ps1   # ShowWindow(SW_HIDE) belt after INNER relaunch
+    windows/connect-boot.ps1      # Boot stub / versioned layout repair
+    windows/connect-update.ps1    # Client auto-update + instant Claude-Connect.cmd/.vbs
     connect-ui.sh / connect-ui.ps1 # Shared connect UI + server-only logging
     editor-launch.ps1 / .sh       # Shared VS Code/Cursor launch (dot-sourced by connect)
- windows-mcp-laptop.ps1 # Windows-MCP ensure (dot-sourced by connect.ps1)
+    windows-mcp-laptop.ps1        # Windows-MCP ensure (dot-sourced by connect.ps1)
     git-mode.ps1 / git-mode.sh    # Shared GIT_MODE helpers + Mac SSH diag upload
     tests/                        # Client regression tests (run-all.bat)
     users/designer/               # Designer-only (noVNC, no editor) Ã¢â‚¬â€ separate product
@@ -281,18 +286,23 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | Both EXIT and SIGTERM traps | mac:444-445 | `kill <pid>` won't trigger EXIT alone |
 | `[Console]::Key` + `KeyChar` checks | win:610,728,784 | Physical key check so R/Q/C/X work under Persian/Arabic keyboard layouts |
 | `[Uri]::EscapeDataString` for Gateway URL | win:695 | PS5.1+PS7 safe; avoids `System.Web` dependency |
-| `$script:ConnectVersion = '20260727.21'` | win connect.ps1 | Must match connect.bat guard |
-| `@(Choose-Project -Mounts $mounts)[-1]` | win connect.ps1 | Prevents pipeline leak Ã¢â€ â€™ Join-Path ChildPath prompt |
+| `$script:ConnectVersion = '20260727.27'` | win connect.ps1 | Must match connect.bat guard + connect-version.txt |
+| `CONNECT_VERSION='20260727.27'` | mac connect.sh | Must match published client version |
+| No `start /MIN` in connect.bat / instant launcher | win bat + connect-update + publish setup-launch | Minimize still taskbar-visible; use hide-relaunch VBS style 0 |
+| `connect-hide-relaunch.vbs` + `connect-hide-console.ps1` shipped | win + deploy-client-bundle + manifest.tsv | BAT_INNER true-hide; belt ShowWindow(SW_HIDE); fail-open |
+| Helper `powershell` in connect.bat uses outer `-WindowStyle Hidden` | windows/connect.bat | Prevents helper console flashes; final UI `start` of connect-boot stays visible |
+| Instant launcher `Claude-Connect.cmd` = direct `wscript //B //Nologo …vbs` | connect-update / publish | No `start`, no `/MIN` |
+| Prefer `Claude-Connect.vbs` after install | Desktop\Claude-Connect | Zero Explorer cmd flash vs connect.bat |
+| `@(Choose-Project -Mounts $mounts)[-1]` | win connect.ps1 | Prevents pipeline leak -> Join-Path ChildPath prompt |
 | `@(Resolve-EditorChoice -CfgDir $CfgDir)[-1]` | win connect.ps1 | Same pipeline-safe capture |
 | `return ,($obj)` in Choose-Project | win connect.ps1 | Unary comma suppresses pipeline output |
 | `[System.IO.Path]::Combine` in editor-launch | editor-launch.ps1 | Do not use Join-Path for editor.conf paths |
 | connect.bat guards | windows/connect.bat | Requires git-mode.ps1, Path.Combine, @(Choose-Project, version |
 | Dot-source git-mode.ps1 / git-mode.sh | all Windows/Mac launchers | GIT_MODE must not be duplicated in forks |
 | Push GIT_MODE to ~/.claude-connect.conf | connect.ps1/sh | Server claude-mount reads hide vs server |
-| `CONNECT_VERSION='20260727.21'` | mac connect.sh | Must match published client version |
 | Dot-source `connect-ui.ps1` / source `connect-ui.sh` | all launchers | UI tables, header, session box |
 | Elevate only when sshd/firewall/authorized_keys repair needs admin | win | Main UI stays unelevated; `-AdminFix` / `Invoke-LaptopAdminOps` elevates on demand; `Ensure-LaptopSshReady` still used mid-session |
-| Publish client package **12 files** | publish.ps1 | +connect-ui, editor-launch.sh (mac) |
+| Publish/ship lists include hide helpers | publish.ps1 + client-bundle-manifest.tsv + deploy-client-bundle.sh | Do not drop hide VBS/PS1 from ZIP or auto-update |
 | `CONNECT_PORT_BASE=20000` | mac connect.sh | Port formula base; guard: `base < PORT Ã¢â€°Â¤ 65535` |
 | `exit_requested` menu loop + M/C/X | mac connect.sh | Post-disconnect menu parity with Windows |
 | `clear_session_mount` on disconnect | mac via git-mode.sh | Close editor + down + clear ACTIVE_MOUNT |
@@ -361,6 +371,7 @@ The client scripts handle these automatically without user intervention:
 | Guard syntax error locking tools | Wrap fail-opens; fix guard; never point hooks at raw guard without wrap |
 | Project hooks refilled | `laptop-exec-setup` must write empty project hooks only; re-empty `~/mounts/*/.cursor/hooks.json` |
 | Mac admin password prompts | At most once per run (45s timeout); skip Remote Login cycle if already on |
+| Visible helper CMD / PowerShell flash on Connect start | BAT_INNER via `connect-hide-relaunch.vbs` (style 0); helper PS outer `-WindowStyle Hidden`; belt `connect-hide-console.ps1` |
 
 ## Client Regression Tests
 
@@ -378,6 +389,7 @@ scripts\client\tests\run-all.bat
 | `test-connect-pipeline.ps1` | connect.ps1 invariants |
 | `test-git-mode-deep.ps1` | GIT_MODE client + server |
 | `test-editor-launch.ps1` | Editor CLI on PATH |
+| `test-harder-live-console-hide-storm.ps1` | LIVE: zero visible helper consoles (VBS/cmd/bat storms) |
 | `audit-local-connect.ps1` | Find stale connect.ps1 copies on laptop |
 
 Shared helpers: `tests/_paths.ps1`. Full guide: [`docs/client-connect.md`](docs/client-connect.md).
@@ -390,12 +402,22 @@ Run on **smart's Windows laptop** to build distributable packages:
 publish\publish.bat
 ```
 
+(`-SmartOnly` / `-SepidzOnly` supported. Default bumps `connect-version.txt` unless `-SkipVersionBump`.)
+
 Outputs to `Desktop\claude-publish\`:
 
 | Package | Contents | Notes |
 |---|---|---|
 | `claude-code-client.zip` | `windows/` + `mac/` + `README.txt` | Smart IP `192.168.210.240`; client only - **no `server/`** |
-| `claude-code-sepidz.zip` | `claude-code/` + `designer/` + READMEs | Sepidz IP `192.168.250.70`; scripts IP-patched; README from `README-sepidz.txt` |
+| `Claude-Connect-VERSION.exe` (+ `Claude-Connect.exe` alias) | IExpress SFX | Smart cold install; also syncs `Desktop\Claude-Connect\` |
+| `claude-code-sepidz.zip` | `claude-code/` + `designer/` + READMEs | Sepidz IP `192.168.250.70`; frozen unless unfreeze |
+
+**How to hand Smart to others (latest publish only):**
+
+1. Preferred low-friction: `Desktop\claude-publish\claude-code-client.zip` (extract `windows\` -> `Desktop\Claude-Connect\`, run `connect.bat`).
+2. Single-file: `Desktop\claude-publish\Claude-Connect-VERSION.exe` (or alias `Claude-Connect.exe`). One file is enough; hide helpers are inside the SFX.
+3. After install, prefer `Desktop\Claude-Connect\Claude-Connect.vbs` for zero Explorer cmd flash.
+4. Do **not** share stale `Claude-Connect-Setup.exe.old-*`, repo `scripts/client/windows/Claude-Connect.exe` build leftovers, or older dated EXEs.
 
 **Client-only rule:** Published ZIPs must never contain `server/`, `deploy-mount-fix.sh`, or `deploy-server-mount-fix.*`. Server deploy runs from repo `scripts/client/deploy-server-mount-fix.bat` (admin, smart laptop).
 
