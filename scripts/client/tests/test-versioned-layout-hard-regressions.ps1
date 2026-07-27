@@ -44,7 +44,7 @@ Assert ($updSrc -match '-Value \$newVerDir') 'versioned_apply writes newVerDir i
 $syncFn = Get-FunctionSource -Content $updSrc -Name 'Sync-ConnectExeBesideClient'
 Assert ($null -ne $syncFn) 'extracted Sync-ConnectExeBesideClient'
 Assert ($syncFn -match 'foreign_verdir') 'Sync function body has foreign_verdir skip'
-Assert ($syncFn -match 'if \(\$isVerDir\)') 'Sync treats VerDir specially'
+    Assert ($syncFn -match 'if \(\$isVerDir(\)| -and)') 'Sync treats VerDir specially'
 Assert ($syncFn -match 'if \(-not \$isVerDir\)') 'bare Claude-Connect.exe promote only when NOT VerDir'
 
 $instantFn = Get-FunctionSource -Content $launchSrc -Name 'Write-ConnectInstantLauncher'

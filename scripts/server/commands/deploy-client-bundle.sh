@@ -50,6 +50,8 @@ _stage_repo_from_laptop() {
     }
     local paths=(
         scripts/client/windows/connect.bat
+        scripts/client/windows/connect-hide-relaunch.vbs
+        scripts/client/windows/connect-hide-console.ps1
         scripts/client/windows/connect-version.txt
         scripts/client/windows/connect.ps1
         scripts/client/windows/connect-rider.bat
@@ -177,6 +179,8 @@ BUNDLE_ROOT="$STAGE_BUNDLE"
 
 win_files=(
     connect.bat
+    connect-hide-relaunch.vbs
+    connect-hide-console.ps1
     connect-boot.ps1
     connect-heal.ps1
     connect-bootstrap.ps1
@@ -231,7 +235,7 @@ for name in "${win_files[@]}"; do
     esac
     install -m 644 "$src" "$BUNDLE_ROOT/$name"
     case "$name" in
-        connect.bat|connect-rider.bat) ;;  # Windows batch needs CRLF
+        connect.bat|connect-rider.bat|connect-hide-relaunch.vbs) ;;  # Windows batch/VBS need CRLF
         Claude-Connect.exe) ;;  # binary SFX
         *) _strip_crlf "$BUNDLE_ROOT/$name" ;;
     esac

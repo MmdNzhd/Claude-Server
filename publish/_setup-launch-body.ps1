@@ -210,8 +210,8 @@ function Write-ConnectInstantLauncher {
         $cmdPath = Join-Path $VerDir 'Claude-Connect.cmd'
         $cmd = @(
             '@echo off'
-            'REM Instant reopen — hand off to VBS (no lingering console).'
-            'start "" /MIN wscript.exe //B //Nologo "%~dp0Claude-Connect.vbs"'
+            'REM Instant reopen - hand off to VBS (hidden; no minimized taskbar console).'
+            'wscript.exe //B //Nologo "%~dp0Claude-Connect.vbs"'
             'exit /b 0'
         ) -join "`r`n"
         [IO.File]::WriteAllText($cmdPath, $cmd + "`r`n", [Text.UTF8Encoding]::new($false))

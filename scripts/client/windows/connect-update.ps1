@@ -531,8 +531,8 @@ function Write-ConnectInstantLauncher {
         $cmdPath = Join-Path $VerDir 'Claude-Connect.cmd'
         $cmd = @(
             '@echo off'
-            'REM Instant reopen - hand off to VBS (no lingering console).'
-            'start "" /MIN wscript.exe //B //Nologo "%~dp0Claude-Connect.vbs"'
+            'REM Instant reopen - hand off to VBS (hidden; no minimized taskbar console).'
+            'wscript.exe //B //Nologo "%~dp0Claude-Connect.vbs"'
             'exit /b 0'
         ) -join "`r`n"
         [IO.File]::WriteAllText($cmdPath, $cmd + "`r`n", [Text.UTF8Encoding]::new($false))
@@ -1949,7 +1949,7 @@ Write-UpdateFileLog ("bat_relaunch_attempt via=caller depth=$depth dir=$ScriptDi
                     $env:CLAUDE_CONNECT_UPDATE_DEPTH = [string]$relaunchDepth
                     $env:CLAUDE_CONNECT_RUN_ID = $relaunchRunId
                     $env:CLAUDE_CONNECT_IS_RELAUNCH = '1'
-                    Start-Process -FilePath $bat -WorkingDirectory $ScriptDir | Out-Null
+                    Start-Process -FilePath $bat -WorkingDirectory $ScriptDir -WindowStyle Hidden | Out-Null
                     Write-UpdateFileLog ("bat_relaunch_from_update_self depth={0} run_id={1}" -f $relaunchDepth, $relaunchRunId)
                 } finally {
                     if ($null -eq $prevDepth) { Remove-Item Env:CLAUDE_CONNECT_UPDATE_DEPTH -ErrorAction SilentlyContinue }

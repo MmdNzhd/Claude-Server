@@ -32,7 +32,11 @@ if not exist "%SRC%\connect.bat" (
   pause
   exit /b 1
 )
-start "" /MIN cmd /d /c ""%SRC%\connect.bat" %*"
+if exist "%SRC%\connect-hide-relaunch.vbs" (
+  wscript.exe //B //Nologo "%SRC%\connect-hide-relaunch.vbs" %*
+) else (
+  powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%SRC%\connect.bat' -WorkingDirectory '%SRC%' -WindowStyle Hidden"
+)
 exit /b 0
 "@
     try {

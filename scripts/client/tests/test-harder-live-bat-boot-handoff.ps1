@@ -33,12 +33,13 @@ $innerBlock = if ($innerStart -ge 0) {
 Write-Host ''
 Write-Host '--- Static asserts (6) ---' -ForegroundColor Cyan
 
-# 1) BAT_INNER minimize relaunch pattern
+# 1) BAT_INNER VBS style-0 hide relaunch (no /MIN taskbar console)
 Assert (
-    $innerBlock -match 'start "" /MIN cmd /d /c' -and
-    $innerBlock -match 'set "CLAUDE_CONNECT_BAT_INNER=1"' -and
-    $innerBlock -match 'exit /b 0'
-) 'BAT_INNER outer relaunches once minimized then exit /b 0'
+    $innerBlock -match 'connect-hide-relaunch\.vbs' -and
+    $innerBlock -match 'wscript\.exe //B //Nologo' -and
+    $innerBlock -match 'exit /b 0' -and
+    $innerBlock -notmatch '/MIN'
+) 'BAT_INNER outer uses VBS style-0 hide relaunch then exit /b 0'
 
 # 2) Inner path cannot re-enter outer relaunch loop
 Assert (($bat -split 'CLAUDE_CONNECT_BAT_INNER').Count -le 3) 'BAT_INNER token bounded (guard + set only)'
@@ -277,8 +278,13 @@ exit 0
     foreach ($pp in $parProcs) {
         if ($pp -and -not $pp.HasExited) { $null = $pp.WaitForExit(20000) }
     }
-    Start-Sleep -Milliseconds 400
+    # Mutex reclaim can lag briefly after stub connect.ps1 exits; poll before asserting.
     $freeEnd = Get-FreeConnectSlotCount
+    $reclaimDeadline = [datetime]::UtcNow.AddSeconds(20)
+    while ($freeEnd -lt ($free0 - 1) -and [datetime]::UtcNow -lt $reclaimDeadline) {
+        Start-Sleep -Milliseconds 500
+        $freeEnd = Get-FreeConnectSlotCount
+    }
     Note ("probe free slots after release = $freeEnd / 10")
     Assert ($freeEnd -ge ($free0 - 1)) ("LIVE parallel: slots returned after exit (before=$free0 after=$freeEnd)")
 

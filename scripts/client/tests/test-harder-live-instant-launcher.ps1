@@ -77,6 +77,8 @@ Start-Sleep -Milliseconds 600
     $cmdText = Get-Content -LiteralPath $cmd -Raw
     $vbsText = Get-Content -LiteralPath $vbs -Raw
     Assert ($cmdText -match 'wscript\.exe //B //Nologo') 'cmd hands off to wscript //B //Nologo'
+    Assert ($cmdText -notmatch 'start\s+') 'cmd trampoline must not use start (direct wscript only)'
+    Assert ($cmdText -notmatch '/MIN') 'cmd trampoline must not use /MIN'
     Assert ($vbsText -match 'sh\.Run') 'VBS uses WScript.Shell.Run for connect-boot'
 
     Note 'LIVE cmd /c trampoline exit code'

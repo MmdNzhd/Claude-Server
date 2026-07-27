@@ -102,6 +102,7 @@ $suites = @(
     @{ Name = 'harder-live-exe-atomic-swap'; Script = 'test-harder-live-exe-atomic-swap.ps1' }
     @{ Name = 'harder-live-hygiene-race'; Script = 'test-harder-live-hygiene-race.ps1' }
     @{ Name = 'harder-live-instant-launcher'; Script = 'test-harder-live-instant-launcher.ps1' }
+    @{ Name = 'harder-live-console-hide-storm'; Script = 'test-harder-live-console-hide-storm.ps1' }
     @{ Name = 'harder-live-log-flush'; Script = 'test-harder-live-log-flush.ps1' }
     @{ Name = 'harder-live-mount-active'; Script = 'test-harder-live-mount-active.ps1' }
     @{ Name = 'harder-live-orphan-tunnel'; Script = 'test-harder-live-orphan-tunnel.ps1' }

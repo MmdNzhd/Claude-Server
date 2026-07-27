@@ -43,12 +43,14 @@ $innerBlock = if ($innerStart -ge 0) {
 Write-Host ''
 Write-Host '--- HARD batch asserts (14) ---' -ForegroundColor Cyan
 
-# 1) CLAUDE_CONNECT_BAT_INNER: one minimized relaunch, outer exits
+# 1) CLAUDE_CONNECT_BAT_INNER: VBS style-0 (or Hidden Start-Process fallback); never /MIN
 Assert (
-    $innerBlock -match 'start "" /MIN cmd /d /c' -and
-    $innerBlock -match 'set "CLAUDE_CONNECT_BAT_INNER=1"' -and
-    $innerBlock -match 'exit /b 0'
-) 'BAT_INNER outer relaunches once minimized then exit /b 0'
+    $innerBlock -match 'connect-hide-relaunch\.vbs' -and
+    $innerBlock -match 'wscript\.exe //B //Nologo' -and
+    $innerBlock -match 'exit /b 0' -and
+    $innerBlock -notmatch '/MIN'
+) 'BAT_INNER outer uses VBS style-0 hide relaunch then exit /b 0'
+Assert ($bat -match 'connect-hide-console\.ps1') 'BAT_INNER belt calls connect-hide-console.ps1'
 
 # 2) Inner path cannot re-enter outer relaunch loop
 Assert (($bat -split 'CLAUDE_CONNECT_BAT_INNER').Count -le 3) 'BAT_INNER token bounded (guard + set only)'

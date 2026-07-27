@@ -24,6 +24,8 @@ $RelaunchMarker = Join-Path $env:TEMP 'claude-connect-relaunch.dir'
 
 $Essential = @(
     'connect.bat',
+    'connect-hide-relaunch.vbs',
+    'connect-hide-console.ps1',
     'connect-boot.ps1',
     'connect-heal.ps1',
     'connect-bootstrap.ps1',

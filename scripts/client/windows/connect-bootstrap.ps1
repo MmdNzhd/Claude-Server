@@ -69,6 +69,8 @@ function Write-PreflightHandoff {
 
 $PullNames = @(
     'connect.bat',
+    'connect-hide-relaunch.vbs',
+    'connect-hide-console.ps1',
     'connect-boot.ps1',
     'connect-bootstrap.ps1',
     'connect-heal.ps1',
