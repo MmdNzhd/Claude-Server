@@ -53,6 +53,11 @@ Assert ($macConn -match "CLAUDE_CONNECT_UPDATE_DEPTH") 'mac connect.sh bounds up
 Assert ($dcb -match "STAGE_BUNDLE") 'deploy-client-bundle stages before swap'
 Assert ($dcb -match "BUNDLE_LIVE") 'deploy-client-bundle tracks live path'
 Assert ($dcb -match "checksums\.txt") 'deploy-client-bundle writes checksums.txt'
+
+Assert ($dcb -match '_stage_repo_from_laptop; then') 'deploy-client-bundle prefers laptop staging before /opt'
+Assert ($dcb -match '_resolve_repo_fallback') 'deploy-client-bundle uses fallback only after laptop stage'
+Assert ($dcb -notmatch '(?m)^_resolve_repo \|\| _stage_repo_from_laptop') 'deploy-client-bundle does not prefer /opt over laptop'
+Assert ($dcb -match 'BUNDLE_SOURCE_KIND') 'deploy-client-bundle records laptop vs server-fallback source'
 Assert ($dcb -notmatch '(?m)^rm -rf "\$BUNDLE_ROOT"$') 'deploy-client-bundle does not rm -rf live root'
 
 Assert ($upd -match "VERIFY_OK") 'update-server tracks verify result'

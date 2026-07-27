@@ -1,54 +1,53 @@
-# Windows-MCP + laptop-exec (ops)
+# Windows-MCP ops (progressive disclosure)
 
-Companion to `SKILL.md`. Keep `laptop-exec` forever (Mac + git + content `rg` fallback).
+Loaded from [SKILL.md](SKILL.md) when needed. Routing/failover lives in SKILL.md.
 
-**Priority (measured 2026-07-26):** Read/Grep → **mount first**; Write → **windows-mcp
-FileSystem first**; Glob/UI/Shell → windows-mcp when listed; git → laptop-exec only.
-See skill priority table + parallel caps.
+## Contents
 
-## Official product model
+- Product model / install
+- Interactive session (UI)
+- FAIL-FAST + failover notes
+- Server helper paths
+- Fully qualified MCP tool names
+
+## Product model
 
 - Local Cursor on Windows: often `stdio` via `uvx windows-mcp serve`.
-- Our Remote-SSH agents (Linux): `streamable-http` on laptop
-  `127.0.0.1:18765` (not `8000` — Hyper-V/WSL often reserves `7916-8015`),
-  forwarded to a **per-user** server port `127.0.0.1:28000+(UID-1000)` (never a
-  shared literal like the old `18000` — that port is bound server-wide in one
-  netns, so a fixed value only ever works for the first user who claims it),
-  Cursor MCP URL + Bearer.
+- Remote-SSH agents (Linux): laptop `streamable-http` on `127.0.0.1:18765`
+  (avoid `8000` — Hyper-V/WSL often reserves `7916-8015`), forwarded to
+  per-user `127.0.0.1:28000+(UID-1000)`, Cursor MCP URL + Bearer.
 
-Docs: https://github.com/CursorTouch/Windows-MCP  
-Install on laptop (interactive user session):
+Docs: https://github.com/CursorTouch/Windows-MCP
 
 ```text
 windows-mcp install --transport streamable-http --host 127.0.0.1 --port 18765
 ```
 
 Creates task `windows-mcp-server` + `~\.windows-mcp\start-server.cmd` (AtLogOn).
-Auth in `~/.windows-mcp/config.toml` (`auth_key`; optional `auth.key` mirror).
+Auth: `~/.windows-mcp/config.toml` (`auth_key`).
 
-## Session rule
+## Interactive session (UI)
 
-UI tools (Screenshot, Click, Type, Snapshot) need an **interactive** Windows
-session (same session as explorer). Process started only via SSH Session 0 may
-serve HTTP/FS but fail screen grab / some PowerShell. Prefer official `install`
-or user-started `start-server.cmd` on the desktop.
+Screenshot/Click/Type/Snapshot need the same interactive Windows session as
+explorer. Prefer official install or user-started `start-server.cmd`.
 
-## FAIL-FAST (agents)
+## FAIL-FAST + failover
 
-`~/.config/windows-mcp/env` existing only means hybrid is *configured*, not that
-Cursor can call tools.
+1. Tools not listed → MCP down; use mount + `laptop-exec`.
+2. One `ECONNREFUSED` / fetch failed / not connected → MCP down for session;
+   continue mount + LE; never retry that same call (circuit open).
+3. Mount EPERM/STALE/EIO → MCP then LE — keep working.
+4. `user-filesystem` ≠ windows-mcp.
+5. FileSystem: `mode=` (`read`/`write`/`list`/`search`/…), never `action=`.
+6. Relative FileSystem paths → Desktop; always absolute under project root.
+7. Tell user once if needed: `connect.bat`, start-server, Reload Window.
 
-1. If `windows-mcp` / `user-windows-mcp` tools are **not listed** → treat as down;
-   use **mount** for FS, **laptop-exec** for git/rg/fallback (do not poll in a loop).
-2. If **one** call fails with `ECONNREFUSED`, fetch failed, or not connected →
-   mark down for the session; use **mount + laptop-exec**; **never** retry that
-   same MCP call. Mount Read/Write remain allowed.
-3. `user-filesystem` is a different MCP (narrow allowlist) — not a substitute.
-4. FileSystem tool requires `mode=` (`read`/`write`/`list`/`search`/…). Do not pass `action=`.
-5. Relative FileSystem paths resolve to the user **Desktop** — always use absolute
-   Windows paths under the project root.
-6. Tell the user once: `connect.bat`, laptop `~\.windows-mcp\start-server.cmd`,
-   Reload Window.
+## Fully qualified MCP names
+
+Prefer qualified names in prompts/docs:
+
+- `user-windows-mcp` FileSystem (`mode=read|write|list|search`)
+- `user-windows-mcp` PowerShell (`Select-String` for content Grep failover)
 
 ## Server helpers
 
@@ -56,17 +55,6 @@ Cursor can call tools.
 |------|------|
 | Auth env | `~/.config/windows-mcp/env` (mode 600) |
 | Forward CLI | `~/.local/bin/windows-mcp-forward` |
-| Cursor MCP | `~/.cursor/mcp.json` → `http://127.0.0.1:PORT/mcp` (PORT = `WINDOWS_MCP_FORWARD_PORT` in the env file, per-UID, default `28000+(UID-1000)`) |
+| Cursor MCP | `~/.cursor/mcp.json` → per-UID `WINDOWS_MCP_FORWARD_PORT` |
 
-After connect: ensure forward is up if MCP tools fail to connect. Watchdog
-restarts a dead forward every ~30s while the tunnel is UP; connect mid-session
-maintain re-syncs every ~3 minutes.
-
-## Skill vs MCP vs CLI (why hybrid)
-
-- **Skill** = routing SOP (this file + SKILL.md) including parallel caps.
-- **MCP** = windows-mcp tools (FS/UI/shell with schema) — best Write/Glob/UI.
-- **Mount** = fastest Read/Grep under load when ALLOW.
-- **CLI** = `laptop-exec` (mux-safe SSH; required for git/Mac/fallback).
-
-Do not collapse to MCP-only or LE-only.
+Watchdog restarts a dead forward ~30s while tunnel UP; connect maintain ~3 min.

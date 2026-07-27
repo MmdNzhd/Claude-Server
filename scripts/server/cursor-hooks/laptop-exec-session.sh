@@ -62,15 +62,15 @@ cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)
 pid="$(_extract_pid "$roots"$'\n'"$cwd"$'\n'"${PWD:-}" 2>/dev/null || true)"
 user="${USER:-smart}"
 
-base='PRIORITY (2026-07-26): READ/GREP=mount first (~16-32 parallel) then MCP (FileSystem / Select-String ~8-12 / ~4-8) then LE ≤4. WRITE/EDIT=MCP FileSystem first (~8-10) then mount (~10) then LE ≤4. Glob=MCP search/list ~8-12 then mount. git=LE only ≤4. UI=MCP only. Never laptop-exec rg -i/-l/-n/--glob.'
+base='PRIORITY+FAILOVER (2026-07-26): Prefer 1st path; if down/error use 2nd then 3rd same turn. READ/GREP=mount→MCP→LE (~16-32). WRITE=MCP→mount→LE (~8-10). Glob=MCP→mount. git=LE only. One MCP hard fail=>MCP down; continue mount+LE. Never laptop-exec rg -i/-l/-n/--glob.'
 
 if _windows_hybrid_ready; then
-  hybrid='Windows hybrid: READ/GREP=>mount first (~16-32) then windows-mcp if listed (~8-12 / Select-String ~4-8). WRITE/EDIT=>MCP FileSystem first (~8-10) then mount (~10). Glob=>MCP search/list. FAIL-FAST one MCP error=>MCP down; use mount+LE. user-filesystem≠windows-mcp.'
+  hybrid='READ/GREP=>mount then MCP if listed then LE. WRITE=>MCP if listed then mount then LE. git=>laptop-exec. Failover if path down.'
 else
   hybrid='READ/GREP=>mount then MCP if listed then LE. WRITE/EDIT=>MCP if listed then mount then LE. git=>laptop-exec.'
 fi
 
-multi='MULTI-AGENT: Task spawn allowed. Paste: READ/GREP=mount (~16-32) then MCP (~8-12) then LE≤4; WRITE=MCP (~8-10) then mount (~10) then LE≤4; Glob=MCP then mount; git=LE only; no rg -i/-l/-n/--glob; one MCP fail=>MCP down. Children do not inherit. Tunnel DOWN => stop; user connect.bat/sh.'
+multi='MULTI-AGENT: paste PRIORITY+FAILOVER: prefer 1st; if down use 2nd/3rd. READ=mount→MCP→LE; WRITE=MCP→mount→LE; Glob=MCP; git=LE. Children do not inherit. Tunnel DOWN=>stop; connect.bat/sh.'
 
 if [[ -z "$pid" ]]; then
   _le_audit_log WARN SESSION_START "project=?" "cwd=$(_le_audit_trunc "${cwd:-${PWD:-}}" 200)" \
@@ -83,7 +83,7 @@ else
   _le_audit_log INFO SESSION_START "project=${pid}" "workspace=/home/${user}/mounts/${pid}" \
     "cwd=$(_le_audit_trunc "${cwd:-}" 200)" "$(_le_audit_session_fields)" \
     "slots_busy=$(_le_audit_slots_busy)/8" "hint=Hybrid: mount Read/Grep ~16-32; MCP FS ~8-12 write/read; LE <=4 (cap 8)."
-  examples="Examples: READ/GREP ~16-32x mount under /home/$USER/mounts/${pid}/ then MCP FileSystem/Select-String ~8-12/~4-8 | WRITE/EDIT ~8-10x MCP FileSystem then ~10x mount | Glob ~8-12x MCP search/list | fallback laptop-exec -p ${pid} | git: laptop-exec git -p ${pid} -- status."
+  examples="Examples: healthy READ=>Cursor Read /home/$USER/mounts/${pid}/REL; if mount fails=>MCP FileSystem read then LE | WRITE=>MCP then mount | Glob=>MCP search | git: laptop-exec git -p ${pid} -- status."
   if [[ -n "${rpath:-}" ]]; then
     examples="${examples} Project Windows root: ${rpath}"
   fi

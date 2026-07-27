@@ -91,14 +91,20 @@ _stage_repo_from_laptop() {
 }
 
 
-_resolve_repo() {
+# On-server copies (/opt, SSHFS mounts) are often STALE vs laptop disk (source of truth).
+# Only used when laptop-exec staging is unavailable.
+_resolve_repo_fallback() {
     local d
     for d in \
-        "$REPO_DIR" \
         "${CLAUDE_SERVER_REPO:-}" \
         "/home/smart/mounts/claude-code-server" \
+        "$REPO_DIR" \
         "/opt/claude-code-server"; do
         [ -n "$d" ] || continue
+        # Never treat the staging dir as a "fallback" - that is laptop-sourced only.
+        case "$d" in
+            /var/tmp/claude-code-server-staging) continue ;;
+        esac
         [ -f "$d/scripts/client/windows/connect.ps1" ] || continue
         [ -f "$d/scripts/client/windows/connect-version.txt" ] || continue
         REPO_DIR="$d"
@@ -108,7 +114,17 @@ _resolve_repo() {
     return 1
 }
 
-_resolve_repo || _stage_repo_from_laptop || fail "client scripts not found (mount repo or run connect on laptop)"
+# Prefer laptop staging ALWAYS when the tunnel is up. Falling back to /opt first was the
+# bug that kept publishing ancient connect-version.txt / git-mode.ps1 while laptop had fixes.
+BUNDLE_SOURCE_KIND=""
+if _stage_repo_from_laptop; then
+    BUNDLE_SOURCE_KIND="laptop"
+elif _resolve_repo_fallback; then
+    BUNDLE_SOURCE_KIND="server-fallback"
+    warn "laptop staging unavailable - using on-server tree $REPO_DIR (may be STALE)"
+else
+    fail "client scripts not found (start connect on laptop so laptop-exec can stage, or set CLAUDE_SERVER_REPO)"
+fi
 
 BUNDLE_ROOT="/usr/local/share/claude-client"
 WIN_SRC="$CLIENT_DIR/windows"
@@ -126,7 +142,7 @@ _strip_crlf() {
 
 echo ""
 echo -e "${BOLD}Deploy client bundle (laptop auto-update)${NC}"
-echo -e "  ${BOLD}source${NC}  $CLIENT_DIR"
+echo -e "  ${BOLD}source${NC}  $CLIENT_DIR  (${BUNDLE_SOURCE_KIND:-unknown})"
 echo -e "  ${BOLD}target${NC}  $BUNDLE_ROOT"
 echo ""
 
@@ -161,7 +177,7 @@ win_files=(
 for name in "${win_files[@]}"; do
     src=""
     case "$name" in
-        connect-ui.ps1|editor-launch.ps1|git-mode.ps1|cursor-auth-laptop.ps1|connect-diagnostic.ps1)
+        connect-ui.ps1|editor-launch.ps1|git-mode.ps1|cursor-auth-laptop.ps1)
             src="$CLIENT_DIR/$name"
             ;;
         *)
@@ -175,6 +191,9 @@ for name in "${win_files[@]}"; do
         warn "reusing live Claude-Connect.exe (no new EXE in source)"
     fi
     if [ ! -f "$src" ]; then
+        if [ "$name" = "Claude-Connect.exe" ]; then
+            fail "Claude-Connect.exe missing from source and live bundle - refuse to publish a stub-less client share"
+        fi
         warn "skip missing: $name"
         continue
     fi
@@ -273,7 +292,7 @@ ok "manifest.txt ($(wc -l < "$BUNDLE_ROOT/manifest.txt") files)"
 # SECURITY: do NOT merge developer authorized_keys into sepidz. That plus
 # NOPASSWD install-client-bundle allowed any laptop key to root-install.
 # Clients pull the bundle as their own REMOTE_USER (see connect-update.*).
-# server/ scripts are not needed for laptop auto-update apply paths — drop
+# server/ scripts are not needed for laptop auto-update apply paths - drop
 # them from the world-readable share (keep win/mac client files only).
 if [ -d "$BUNDLE_ROOT/server" ]; then
     rm -rf "$BUNDLE_ROOT/server"

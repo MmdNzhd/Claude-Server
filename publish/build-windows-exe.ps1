@@ -124,7 +124,12 @@ exit /b %EC%
     [void]$sb.AppendLine('FinishMessage=')
     [void]$sb.AppendLine(("TargetName={0}" -f $OutExe))
     [void]$sb.AppendLine(("FriendlyName={0}" -f $FriendlyName))
-    [void]$sb.AppendLine('AppLaunched=powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File setup-launch.ps1')
+    # IMPORTANT (AV regression): do NOT put "powershell -ExecutionPolicy Bypass -WindowStyle Hidden"
+    # on the IExpress AppLaunched line. That exact pattern is a classic Defender/SmartScreen
+    # heuristic for unsigned SFX droppers. Older builds that worked for users (Mehrdad etc.)
+    # launched via cmd -> setup-claude-connect.cmd; the .cmd then starts setup-launch.ps1.
+    # Keep that parent chain. Fast-exit + detached worker still live inside setup-launch.ps1.
+    [void]$sb.AppendLine('AppLaunched=cmd.exe /c setup-claude-connect.cmd')
     [void]$sb.AppendLine('PostInstallCmd=<None>')
     [void]$sb.AppendLine('AdminQuietInstCmd=')
     [void]$sb.AppendLine('UserQuietInstCmd=')

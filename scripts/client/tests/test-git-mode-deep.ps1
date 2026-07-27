@@ -210,9 +210,7 @@ Assert ($gitModeSh -match 'PUSH_CONF blocked') 'git-mode.sh blocks PushConf for 
 Assert ($gitModeSh -match 'LAPTOP_HOSTKEY_FP=%s') 'git-mode.sh pushes LAPTOP_HOSTKEY_FP'
 
 Assert ($gitModePs1 -match 'MOUNT_UP check_reuse|MOUNT_UP skip') 'git-mode.ps1 reuses or skips mount when check ok'
-Assert ($gitModePs1 -match "Get-GitMode\) -eq 'off'|Get-GitMode\) -ne 'off'|off_mode_apply") 'git-mode.ps1 still runs up when GIT_MODE=off'
-Assert ($gitModePs1 -match 'off_mode_apply')
- 'git-mode.ps1 applies off mode on healthy mount'
+Assert ($gitModePs1 -match 'off_mode_apply') 'git-mode.ps1 still runs up / applies off when GIT_MODE=off'
 Assert ($mount -match 'CLAUDE_TRUSTED_TUNNEL') 'claude-mount has trusted-tunnel fast path'
 $automount = Get-Content (Get-ServerFile 'server\claude-automount.sh') -Raw
 Assert ($automount -match 'VSCODE_IPC_HOOK_CLI') 'claude-automount skips IDE shell resolution'
@@ -228,15 +226,13 @@ Assert ($gitModePs1 -match 'known_hosts_claude_mount') 'git-mode.ps1 uses mount 
 Assert ($gitModePs1 -match 'known_hosts_claude_mount.*known_hosts_claude_tunnel|known_hosts_claude_tunnel.*known_hosts_claude_mount') 'Clear-ServerTunnelKnownHost resets mount and tunnel known_hosts'
 Assert ($gitModePs1 -match 'Host key verification failed.*Clear-ServerTunnelKnownHost|Clear-ServerTunnelKnownHost[\s\S]{0,800}Host key verification failed') 'probe retries after host-key clear'
 Assert ($gitModePs1 -match 'LastLaptopReverseSshError') 'git-mode.ps1 surfaces reverse SSH error detail'
-Assert ($gitModePs1 -match 'cmd /c exit 0') 'git-mode.ps1 uses Windows-safe reverse SSH probe'
+Assert ($gitModePs1 -match 'WindowStyle Hidden -Command exit') 'git-mode.ps1 uses hidden Windows reverse SSH probe'
 Assert ($gitModePs1 -match 'mac\\claude-mount\.sh') 'git-mode.ps1 finds claude-mount.sh in mac package folder'
 Assert ($mount -match 'cmd_check') 'claude-mount has check command'
 Assert ($gitModePs1 -match 'Initialize-SessionBgTunnel') 'git-mode.ps1 pre-warms background tunnel'
 Assert ($mount -match 'CLAUDE_TRUSTED_TUNNEL') 'claude-mount supports trusted tunnel skip'
 Assert ($mount -match '_hide_git_and_create_stubs') 'claude-mount has git hide with tunnel guard'
 Assert ($mount -match 'ControlMaster=no') 'claude-mount disables SSH mux to laptop'
-
-$gitSetup = Get-Content (Get-ServerFile 'server\claude-git-setup.sh') -Raw
 Assert ($mount -match 'EncodedCommand') 'claude-mount uses EncodedCommand for Windows git hide'
 
 $gitSetup = Get-Content (Get-ServerFile 'server\claude-git-setup.sh') -Raw
@@ -247,23 +243,41 @@ Assert ($laptopExec -match 'GIT_MODE="off"') 'laptop-exec defaults GIT_MODE to o
 Assert ($laptopExec -notmatch 'GIT_MODE="hide"; LAPTOP_OS') 'laptop-exec no hide pre-read default'
 Assert ($mount -match 'cannot restore \.git') 'claude-mount warns when off restore blocked by tunnel'
 Assert ($mount -match 'recover: off restore done') 'claude-mount recover-if-needed applies off restore'
-Assert ($gitModePs1 -match 'off_mode_apply')
- 'git-mode.ps1 recover applies off when mount ok'
+Assert ($gitModePs1 -match 'off_mode_apply') 'git-mode.ps1 recover applies off when mount ok'
 
-Write-Host ""
-if ($fail -eq 0) { Write-Host "All deep git-mode tests passed." -ForegroundColor Green; exit 0 }
-Write-Host "$fail test(s) failed." -ForegroundColor Red; exit 1
-
-$laptopExec = Get-Content (Get-ServerFile 'server\laptop-exec.sh') -Raw
-Assert ($laptopExec -match 'GIT_MODE="off"') 'laptop-exec defaults GIT_MODE to off'
-Assert ($laptopExec -notmatch 'GIT_MODE="hide"; LAPTOP_OS') 'laptop-exec no hide pre-read default'
-Assert ($mount -match 'cannot restore \.git') 'claude-mount warns when off restore blocked by tunnel'
-Assert ($mount -match 'recover: off restore done') 'claude-mount recover-if-needed applies off restore'
-Assert ($gitModePs1 -match 'off_mode_apply')
 $dle = Get-Content (Get-ServerFile 'server\commands\deploy-laptop-exec.sh') -Raw
 Assert ($dle -match 'CLIENT_BUNDLE/server/laptop-exec') 'deploy-laptop-exec prefers bundle over user home'
 Assert ($dle -match 'GIT_MODE="off".*fail') 'deploy-laptop-exec fails if GIT_MODE not off'
 Assert ($dle -match 'claude-mount.sh') 'deploy-laptop-exec deploys claude-mount'
 $dcb = Get-Content (Get-ServerFile 'server\commands\deploy-client-bundle.sh') -Raw
 Assert ($dcb -notmatch 'mac/connect-ui.sh') 'deploy-client-bundle uses scripts/client/connect-ui.sh'
- 'git-mode.ps1 recover applies off when mount ok'
+
+# --- Site policy: GIT_MODE hide/server permanently force-off ---
+Assert (Select-String -Path (Get-ServerFile 'server\claude-mount.sh') -Pattern 'CLAUDE_GIT_MODE_FORCE_OFF' -SimpleMatch -Quiet) 'claude-mount has CLAUDE_GIT_MODE_FORCE_OFF killswitch'
+$forceCount = @(Select-String -Path (Get-ServerFile 'server\claude-mount.sh') -Pattern 'CLAUDE_GIT_MODE_FORCE_OFF' -SimpleMatch).Count
+Assert ($forceCount -ge 2) ('claude-mount killswitch sites >=2 (got ' + $forceCount + ')')
+
+$gmPs1Force = Get-Content (Get-ClientFile 'git-mode.ps1') -Raw
+Assert ($gmPs1Force -match 'Site policy: GIT_MODE hide/server disabled') 'git-mode.ps1 documents force-off policy'
+Assert ($gmPs1Force -match "return 'off'") 'git-mode.ps1 Get-GitMode returns off'
+
+$gmShForce = Get-Content (Get-ClientFile 'git-mode.sh') -Raw
+Assert ($gmShForce -match 'Site policy: GIT_MODE hide/server disabled') 'git-mode.sh documents force-off policy'
+Assert ($gmShForce -match 'echo off') 'git-mode.sh get_git_mode echoes off'
+
+# Runtime: even if git.conf says hide, Get-GitMode must return off and rewrite conf
+$_cfg = Join-Path $env:TEMP ('gitmode-force-' + [guid]::NewGuid().ToString('n'))
+New-Item -ItemType Directory -Force -Path $_cfg | Out-Null
+Set-Content (Join-Path $_cfg 'git.conf') -Value 'hide' -Encoding ASCII
+$CfgDir = $_cfg
+. (Get-ClientFile 'git-mode.ps1')
+$_mode = Get-GitMode
+$_after = (Get-Content (Join-Path $_cfg 'git.conf') -Raw).Trim()
+Assert ($_mode -eq 'off') ('Get-GitMode force-off runtime (got ' + $_mode + ')')
+Assert ($_after -eq 'off') ('git.conf rewritten to off (got ' + $_after + ')')
+Remove-Item -Recurse -Force $_cfg -ErrorAction SilentlyContinue
+Assert $true 'GIT_MODE force-off killswitch + client policy'
+
+Write-Host ""
+if ($fail -eq 0) { Write-Host "All deep git-mode tests passed." -ForegroundColor Green; exit 0 }
+Write-Host "$fail test(s) failed." -ForegroundColor Red; exit 1

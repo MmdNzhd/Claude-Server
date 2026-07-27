@@ -2,11 +2,14 @@
 # Requires: $CfgDir, functions SshX, Test-Tunnel, Warn; $LaptopUser, $Port, $CM at call time
 
 function Get-GitMode {
-    $gitConf = [System.IO.Path]::Combine($CfgDir, 'git.conf')
-    if (-not (Test-Path $gitConf)) { return 'off' }
-    $saved = (Get-Content $gitConf -Raw -ErrorAction SilentlyContinue).Trim().ToLower()
-    if ($saved -match '^(server|on|yes|1|slow)$') { return 'server' }
-    if ($saved -match '^(hide|fast)$') { return 'hide' }
+    # Site policy: GIT_MODE hide/server disabled. Always OFF (no .git rename).
+    try {
+        $gitConf = [System.IO.Path]::Combine($CfgDir, 'git.conf')
+        if ($CfgDir) {
+            if (-not (Test-Path $CfgDir)) { New-Item -ItemType Directory -Force -Path $CfgDir | Out-Null }
+            Set-Content -Path $gitConf -Value 'off' -Encoding ASCII -ErrorAction SilentlyContinue | Out-Null
+        }
+    } catch { }
     return 'off'
 }
 
@@ -924,7 +927,7 @@ function Test-TunnelPortAuthOwned {
     }
     $kh = '$HOME/.ssh/known_hosts_claude_acquire'
     $lu = ($LaptopUser -replace "'", "'\''")
-    $out = (SshX "touch $kh 2>/dev/null; chmod 600 $kh 2>/dev/null; timeout 6 ssh -o BatchMode=yes -o ConnectTimeout=3 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$kh -i ~/.ssh/claude_laptop -p $TargetPort ${lu}@127.0.0.1 cmd /c exit 0 2>&1") -join "`n"
+    $out = (SshX "touch $kh 2>/dev/null; chmod 600 $kh 2>/dev/null; timeout 6 ssh -o BatchMode=yes -o ConnectTimeout=3 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$kh -i ~/.ssh/claude_laptop -p $TargetPort ${lu}@127.0.0.1 powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command exit 2>&1") -join "`n"
     $ok = ($LASTEXITCODE -eq 0)
     $script:TunnelAuthOwnedCache[$TargetPort] = @{ Owned = $ok; At = (Get-Date) }
     if (-not $ok) {
@@ -2446,7 +2449,7 @@ function Invoke-LaptopReverseSshProbe {
     $kh = '$HOME/.ssh/known_hosts_claude_mount'
     # Batch touch+chmod+probe into one SSH (was 2 round-trips ~1.2s).
     for ($attempt = 1; $attempt -le 2; $attempt++) {
-        $out = (SshX "touch $kh 2>/dev/null; chmod 600 $kh 2>/dev/null; timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$kh -i ~/.ssh/claude_laptop -p $Port ${LaptopUser}@127.0.0.1 cmd /c exit 0 2>&1") -join "`n"
+        $out = (SshX "touch $kh 2>/dev/null; chmod 600 $kh 2>/dev/null; timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$kh -i ~/.ssh/claude_laptop -p $Port ${LaptopUser}@127.0.0.1 powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command exit 2>&1") -join "`n"
         if ($LASTEXITCODE -eq 0) {
             $probeMs = [int]((Get-Date) - $probeBegin).TotalMilliseconds
             Write-GitModeLog "LAPTOP_SSH: probe end ok=1 ms=$probeMs attempt=$attempt" 'DEBUG'
@@ -3495,45 +3498,15 @@ function Configure-GitMode {
     Write-Host ''
     Write-Host '    Git on server (SSHFS)' -ForegroundColor White
     Write-Host ''
-    $cur = Get-GitMode
-    $curLabel = Get-GitModeLabel -Mode $cur
-    $curDesc = switch ($cur) {
-        'server' { 'full git over SSHFS' }
-        'hide'   { '.git hidden on laptop' }
-        default  { 'no .git rename (use laptop-exec git)' }
-    }
-    Write-Host "    Current: $curLabel ($curDesc)" -ForegroundColor DarkGray
-    Write-Host ''
-    Write-Host '    1  OFF  - no .git rename [default]' -ForegroundColor DarkGray
-    Write-Host '    2  HIDE - hide .git on laptop (faster SSHFS)' -ForegroundColor DarkGray
-    Write-Host '    3  SLOW - full .git visible on SSHFS mount' -ForegroundColor DarkGray
-    Write-Host ''
-    $choice = if (Get-Command Read-ConnectPrompt -ErrorAction SilentlyContinue) {
-        (Read-ConnectPrompt '    >' -Tag 'GIT_MODE').Trim().ToLower()
-    } else { (Read-Host '    >').Trim().ToLower() }
-    Write-GitModeLog "INTERACTIVE: git_mode_choice=$choice" 'INFO'
-    switch ($choice) {
-        { $_ -in '1', 'off', '' } {
-            Set-Content -Path ([System.IO.Path]::Combine($CfgDir, 'git.conf')) -Value 'off' -Encoding ASCII | Out-Null
-            Write-GitModeLog 'DECISION: git_mode=off' 'INFO'
-        }
-        { $_ -in '2', 'hide', 'fast' } {
-            Set-Content -Path ([System.IO.Path]::Combine($CfgDir, 'git.conf')) -Value 'hide' -Encoding ASCII | Out-Null
-            Write-GitModeLog 'DECISION: git_mode=hide' 'INFO'
-        }
-        { $_ -in '3', 'on', 'server', 'slow' } {
-            Set-Content -Path ([System.IO.Path]::Combine($CfgDir, 'git.conf')) -Value 'server' -Encoding ASCII | Out-Null
-            Write-GitModeLog 'DECISION: git_mode=server' 'INFO'
-        }
-        default { Write-GitModeLog "DECISION: git_mode_invalid=$choice" 'WARN'; Warn 'Invalid choice.'; return }
-    }
+    Write-Host '    HIDE/SLOW are disabled site-wide. Forced OFF (no .git rename).' -ForegroundColor Yellow
+    Set-Content -Path ([System.IO.Path]::Combine($CfgDir, 'git.conf')) -Value 'off' -Encoding ASCII | Out-Null
+    Write-GitModeLog 'DECISION: git_mode=off (forced; hide/server disabled)' 'INFO'
     if ($Port) {
         $am = if ($script:ActiveProjectId) { $script:ActiveProjectId } else { '' }
         Push-ServerConnectConf -ActiveMount $am
     }
     Write-Host ''
-    $savedLabel = Get-GitModeLabel
-    Write-Host "    Saved: git $savedLabel." -ForegroundColor Green
+    Write-Host '    Saved: git OFF.' -ForegroundColor Green
     if ($script:ActiveProjectId) {
         Push-ServerConnectConf -ActiveMount $script:ActiveProjectId
         Remount-ProjectGit -ProjectId $script:ActiveProjectId | Out-Null
@@ -3542,3 +3515,4 @@ function Configure-GitMode {
     }
     Write-Host ''
 }
+

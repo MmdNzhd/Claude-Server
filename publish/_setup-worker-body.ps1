@@ -89,6 +89,16 @@ try {
     }
 
     $env:CLAUDE_CONNECT_FROM_EXE = '1'
+    # Clear Mark-of-the-Web on install folder only (helps Defender/SmartScreen FP on unsigned SFX).
+    # Never disables Defender / real-time protection.
+    try {
+        Get-ChildItem -LiteralPath $Dest -File -ErrorAction SilentlyContinue | ForEach-Object {
+            try { Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue } catch { }
+        }
+        Log 'unblock_motw ok'
+    } catch {
+        Log ("unblock_motw_warn $($_.Exception.Message)")
+    }
     $env:CLAUDE_CONNECT_UPDATE_UI = '1'
     Log 'update check begin (detached worker; WinForms progress UI only if a download is needed)'
     $updEc = 0

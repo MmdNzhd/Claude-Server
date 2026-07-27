@@ -46,6 +46,15 @@ Assert ($hay -match '(?i)never.*disable.*(Defender|SmartScreen)|do not disable D
 # Optional pointer in build script
 Assert ($build -match '(?i)client-connect\.md|SmartScreen|false.?positive') 'build-windows-exe.ps1 comments point at FP docs'
 
+# AV regression guard (Mehrdad): IExpress AppLaunched must NOT be hidden Bypass PowerShell.
+# That parent-line pattern was fine historically via cmd -> setup-claude-connect.cmd.
+Assert ($build -match "(?m)^\s*\[void\]\`$sb\.AppendLine\('AppLaunched=cmd\.exe /c setup-claude-connect\.cmd'\)") `
+    'AppLaunched uses cmd.exe /c setup-claude-connect.cmd (pre-regression path)'
+Assert (-not ($build -match "(?i)AppLaunched=powershell\.exe.*ExecutionPolicy\s+Bypass.*WindowStyle\s+Hidden")) `
+    'AppLaunched is not powershell Bypass+Hidden (Defender dropper heuristic)'
+Assert (-not ($build -match "(?i)AppendLine\('AppLaunched=powershell")) `
+    'AppLaunched AppendLine is not raw powershell.exe'
+
 Write-Host ""
 if ($Fail -eq 0) {
     Write-Host ("All {0} contracts passed." -f $Pass) -ForegroundColor Green

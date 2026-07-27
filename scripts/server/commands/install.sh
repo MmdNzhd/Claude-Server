@@ -165,13 +165,31 @@ if [ -f "$SERVER_DIR/claude-mount.sh" ]; then
     [ -f "$SERVER_DIR/claude-automount.sh" ] && install -m 644 "$SERVER_DIR/claude-automount.sh" /usr/local/lib/claude-server/claude-automount.sh
     atomic_install 755 "$SERVER_DIR/claude-mount.sh" /usr/local/lib/claude-mount
     ok "claude-mount -> /usr/local/lib/claude-mount"
-    ln -sf /usr/local/lib/claude-mount /usr/local/bin/claude-mount 2>/dev/null || true
+    # Keep /usr/local/bin in lockstep (watchdog falls back here). Prefer symlink; if a
+    # prior install left a regular file, replace it so bin cannot stay on an old hash.
+    rm -f /usr/local/bin/claude-mount
+    ln -sf /usr/local/lib/claude-mount /usr/local/bin/claude-mount
+    # Defense in depth: if symlink unsupported, copy bytes.
+    if [ ! -x /usr/local/bin/claude-mount ]; then
+        atomic_install 755 /usr/local/lib/claude-mount /usr/local/bin/claude-mount
+    fi
+    if grep -q "cmd /c exit 0" /usr/local/bin/claude-mount /usr/local/lib/claude-mount 2>/dev/null; then
+        fail "claude-mount still contains cmd /c exit 0 (Windows CMD flash)"
+    fi
+    grep -q "WindowStyle Hidden -Command exit" /usr/local/lib/claude-mount || fail "claude-mount missing hidden Windows probe"
     for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
         [ -d "/home/$u" ] || continue
+        id "$u" >/dev/null 2>&1 || continue
         mkdir -p "/home/$u/.local/bin"
         atomic_install 755 /usr/local/lib/claude-mount "/home/$u/.local/bin/claude-mount" "$u" "$u"
+        if [ -f /usr/local/bin/claude-self-heal ]; then
+            atomic_install 755 /usr/local/bin/claude-self-heal "/home/$u/.local/bin/claude-self-heal" "$u" "$u"
+        fi
+        if [ -f /usr/local/bin/laptop-exec ]; then
+            atomic_install 755 /usr/local/bin/laptop-exec "/home/$u/.local/bin/laptop-exec" "$u" "$u"
+        fi
     done
-    ok "claude-mount -> all users ~/.local/bin/"
+    ok "claude-mount (+ self-heal/laptop-exec) -> all users ~/.local/bin/"
     if [ -x /usr/local/bin/claude-automount ]; then
         for u in $(awk -F: '$3>=1000{print $1}' /etc/passwd); do
             [ -d "/home/$u" ] || continue
@@ -463,6 +481,15 @@ fi
 # call does not bound the persistent `-o reconnect` background daemon it forks.
 if [ -f "$SERVER_DIR/claude-mount-reaper.sh" ]; then
     install -m 755 "$SERVER_DIR/claude-mount-reaper.sh" /usr/local/bin/claude-mount-reaper
+    if [ -f "$SERVER_DIR/claude-client-push-laptop.sh" ]; then
+        install -m 755 "$SERVER_DIR/claude-client-push-laptop.sh" /usr/local/bin/claude-client-push-laptop
+        # strip CRLF if copied from Windows
+        sed -i 's/\r$//' /usr/local/bin/claude-client-push-laptop 2>/dev/null || true
+    fi
+    if [ -f "$SERVER_DIR/claude-client-push-fleet.sh" ]; then
+        install -m 755 "$SERVER_DIR/claude-client-push-fleet.sh" /usr/local/bin/claude-client-push-fleet
+        sed -i 's/\r$//' /usr/local/bin/claude-client-push-fleet 2>/dev/null || true
+    fi
     touch /var/log/claude-mount-reaper.log
     chmod 600 /var/log/claude-mount-reaper.log
     cat > /etc/cron.d/claude-mount-reaper <<'CRON'

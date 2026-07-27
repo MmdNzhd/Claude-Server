@@ -1,59 +1,46 @@
 ---
 description: >-
-  Measured hybrid: READ/GREP mount-first (~16-32 parallel); WRITE MCP-first
-  (~8-10); Glob MCP search; git LE only; max fan-out per path; LE ≤4 (cap 8)
-
+  Priority+failover I/O on ~/mounts: Read/Grep mount→MCP→LE; Write
+  MCP→mount→LE; Glob MCP→mount; git LE. Use next path same turn if 1st
+  fails (EPERM/STALE/ECONNREFUSED). Parallel mount~16-32 MCP~8-12 LE≤4
 alwaysApply: true
 ---
 
 # Laptop Exec — hybrid routing
 
-`~/mounts/` is optional SSHFS (may be STALE for **git** truth). Mount Cursor tools
-are ALLOWED. Prefer the table (measured 2026-07-26 load + multi-round).
+`~/mounts/` may be STALE for **git** truth. Mount Cursor tools are ALLOWED.
 
-## Priority by action (source of truth — measured 2026-07-26)
+**Priority + failover:** use column 1st when healthy; if unavailable/errors,
+use 2nd then 3rd in the **same turn**. Never stuck on a dead path.
 
-| Action | 1st | 2nd | 3rd | Parallel (same turn) |
-|--------|-----|-----|-----|----------------------|
-| **Read** | Cursor Read on `/mounts/` | windows-mcp `FileSystem` (abs) | `laptop-exec read` | mount **~16–32**; MCP **~8–12**; LE **≤4** |
-| **Grep (content)** | Cursor Grep on `/mounts/` | MCP PowerShell `Select-String` | `laptop-exec rg` | mount **~16–32**; Select-String **~4–8**; LE **≤4** |
-| **Glob / filename** | windows-mcp `FileSystem` search/list | Cursor Glob / mount `ls` | `laptop-exec run` | MCP **~8–12**; mount **~16** |
-| **Write / Edit / StrReplace / Delete** | windows-mcp `FileSystem` write | Cursor on `/mounts/` | `laptop-exec write` | MCP **~8–10**; mount **~10**; LE **≤4** |
-| **git** | `laptop-exec git` **only** | — | — | ≤4 LE |
-| **Shell build/test** | windows-mcp `PowerShell` | `laptop-exec run` | mount Shell OK | MCP free / LE ≤4 |
+## Priority by action (measured 2026-07-26)
+
+| Action | 1st | 2nd (if 1st fails) | 3rd | Parallel |
+|--------|-----|--------------------|-----|----------|
+| **Read** | Cursor Read on `/mounts/` | windows-mcp `FileSystem` `mode=read` | `laptop-exec read` | mount ~16–32; MCP ~8–12; LE ≤4 |
+| **Grep (content)** | Cursor Grep on `/mounts/` | MCP `Select-String` | `laptop-exec rg` | mount ~16–32; SS ~4–8; LE ≤4 |
+| **Glob / filename** | windows-mcp FileSystem search/list | Cursor Glob / mount `ls` | `laptop-exec run` | MCP ~8–12; mount ~16 |
+| **Write / Edit / …** | windows-mcp FileSystem `mode=write` | Cursor on `/mounts/` | `laptop-exec write` | MCP ~8–10; mount ~10; LE ≤4 |
+| **git** | `laptop-exec git` only | — | — | ≤4 LE |
+| **Shell build/test** | windows-mcp PowerShell | `laptop-exec run` | mount Shell OK | MCP free / LE ≤4 |
 | **UI / Screenshot** | windows-mcp only | — | — | MCP free |
 
-**Notes:** FileSystem search ≠ content Grep (use Select-String). MCP relative → Desktop (use absolute under project root). MCP Read throughput plateaus ~28 rps — prefer ≤~12 parallel MCP reads. Mount Read scales under ×64 in benches.
+**Failover:** mount STALE/EPERM → MCP → LE. MCP not listed / one hard fail → mount + LE (MCP down for session; never retry same call). Tunnel DOWN → user `connect.bat`/`connect.sh`.
 
-Evidence (approx): cold Read mount≪MCP≪LE; Write MCP≪mount≪LE; paired load Read mount first 20/20.
+**Notes:** FileSystem search ≠ content Grep. MCP relative → Desktop (use absolute project root). Healthy default: Read/Grep on mount; Write/Glob on MCP.
 
-## Parallel (maximize)
+## Parallel
 
-Fan out independent ops in one turn to the caps above. Never serial-drip. LE hard cap 8 slots (prefer ≤4). Mount/MCP have no mux cap.
+Fan out independent ops to the caps above. LE hard cap 8 (prefer ≤4).
 
-## Hooks allow / deny
+## Hooks
 
-| Tool on `/mounts/` | Hook |
-|---|---|
-| Read / Write / Edit / StrReplace / Delete / EditNotebook / Shell / **Grep** / **Glob** | **ALLOW** |
-| Task | **ALLOW** (child must paste priority block) |
-
-Project `hooks.json` must stay `{"version":1,"hooks":{}}`.
-
-## FAIL-FAST (windows-mcp)
-
-- **Ready** = tools listed (`windows-mcp` / `user-windows-mcp` with `FileSystem`/`PowerShell`).
-- One MCP failure (`ECONNREFUSED`, fetch failed, not connected) → MCP **down for this session** → use mount + `laptop-exec`. Never retry the same MCP call.
-- `user-filesystem` ≠ windows-mcp. FileSystem uses `mode=` (not `action=`).
+Read/Grep/Glob/Write/Edit/Shell on `/mounts/` = **ALLOW**. Task = ALLOW (paste PRIORITY+FAILOVER block). Project `hooks.json` = `{"version":1,"hooks":{}}`.
 
 ## Paths
 
-- Mount / Cursor tools: `/home/$USER/mounts/PROJECT/REL`
-- windows-mcp: absolute Windows under project root (`LAPTOP_REMOTE_PATH` / `rpath|REMOTE_PATH` + REL)
-- `laptop-exec`: repo-relative + `-p PROJECT` (never `/home/.../mounts/...`)
-- `laptop-exec rg`: **no** `-i`/`-l`/`-n`/`--glob` (rejected)
+- Mount: `/home/$USER/mounts/PROJECT/REL`
+- MCP: absolute Windows (`LAPTOP_REMOTE_PATH` / `rpath` + REL)
+- LE: `-p PROJECT` + repo-relative. `rg`: no `-i`/`-l`/`-n`/`--glob`
 
-## Mux / sudo
-
-`laptop-exec` shares 8 SSH slots — prefer ≤4 parallel. Mount/MCP have no that cap.
 Sudo: `sudo-from-laptop --smart|--sepidz -- …` — never ask for a password.

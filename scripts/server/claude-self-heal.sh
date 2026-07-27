@@ -70,11 +70,11 @@ _tunnel_auth_owned() {
     [ -f "$HOME/.ssh/claude_laptop" ] || return 1
     os_lc="$(printf '%s' "${LAPTOP_OS:-}" | tr '[:upper:]' '[:lower:]' | tr -d '\r\n ')"
     case "$os_lc" in
-        win|windows) remote_cmd="cmd /c exit 0" ;;
+        win|windows) remote_cmd="powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command exit" ;;
         mac|darwin) remote_cmd="true" ;;
         *)
             # Prefer Windows probe when unknown — Smart fleet is mostly Windows; mac still accepts true.
-            remote_cmd="cmd /c exit 0"
+            remote_cmd="powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command exit"
             ;;
     esac
     local kh="$HOME/.ssh/known_hosts_claude_selfheal"

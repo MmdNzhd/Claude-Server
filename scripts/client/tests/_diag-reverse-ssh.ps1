@@ -27,7 +27,7 @@ Write-Host "administrators_authorized_keys: $(if ($adminHit) { 'FOUND' } else { 
 Write-Host "user authorized_keys:           $(if ($userHit) { 'FOUND' } else { 'MISSING' })"
 Write-Host ''
 Write-Host 'Server reverse SSH (known_hosts_claude_mount):' -ForegroundColor Cyan
-$cmd = "touch `$HOME/.ssh/known_hosts_claude_mount 2>/dev/null; chmod 600 `$HOME/.ssh/known_hosts_claude_mount 2>/dev/null; ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=`$HOME/.ssh/known_hosts_claude_mount -i ~/.ssh/claude_laptop -p $port ${lu}@127.0.0.1 cmd /c exit 0 2>&1"
+$cmd = "touch `$HOME/.ssh/known_hosts_claude_mount 2>/dev/null; chmod 600 `$HOME/.ssh/known_hosts_claude_mount 2>/dev/null; ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=`$HOME/.ssh/known_hosts_claude_mount -i ~/.ssh/claude_laptop -p $port ${lu}@127.0.0.1 powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command exit 2>&1"
 $out = ssh -n -o BatchMode=yes -o ConnectTimeout=15 claude-server $cmd
 $out | Select-Object -Last 8 | ForEach-Object { Write-Host $_ }
 Write-Host "exit=$LASTEXITCODE"

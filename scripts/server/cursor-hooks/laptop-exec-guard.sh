@@ -355,9 +355,9 @@ _remap_hint() {
       ;;
     Task)
       if [[ "$hybrid" -eq 1 ]]; then
-        printf 'NEXT: Task spawn allowed; child MUST paste: READ/GREP=mount (~16-32) then MCP (~8-12/Select-String ~4-8) then LE≤4; WRITE=MCP (~8-10) then mount (~10) then LE; Glob=MCP then mount; git=LE; one MCP fail=>mount+LE; -p ID; no rg -i/-l/--glob.'
+        printf 'NEXT: Task spawn allowed; child MUST paste: PRIORITY+FAILOVER READ=mount→MCP→LE; WRITE=MCP→mount→LE; Glob=MCP; git=LE -p ID; if 1st down use next; no rg -i/-l/--glob.'
       else
-        printf 'NEXT: Task spawn allowed; paste READ/GREP=mount|MCP|LE; WRITE=MCP|mount|LE; git=laptop-exec -p ID; no rg -i/-l/--glob.'
+        printf 'NEXT: Task spawn allowed; paste READ=mount→MCP→LE; WRITE=MCP→mount→LE; git=laptop-exec -p ID; failover if path down; no rg -i/-l/--glob.'
       fi
       ;;
     *)
@@ -432,7 +432,7 @@ case "$event" in
             "project=$(_guess_project_id Task 2>/dev/null || echo '?')" \
             "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8" \
             "hint=Child does NOT inherit SSH-first. Prompt MUST paste laptop-exec block. Prefer ≤4 parallel (hard cap 8 slots)."
-          _allow_msg "Task spawn OK. Paste: READ/GREP=mount (~16-32) then MCP (~8-12) then LE≤4; WRITE=MCP (~8-10) then mount (~10); Glob=MCP; git=LE; no rg -i/-l/--glob."
+          _allow_msg "Task spawn OK. Paste: PRIORITY+FAILOVER READ=mount→MCP→LE; WRITE=MCP→mount→LE; Glob=MCP; git=LE; if 1st down use next; no rg -i/-l/--glob."
         fi
         if _tool_targets_mounts "$tool"; then
           hint=$(_remap_hint "$tool")

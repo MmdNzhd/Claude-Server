@@ -219,8 +219,24 @@ function Test-WindowsMcpListening {
             Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1', '0.0.0.0') })
         return ($c.Count -gt 0)
     } catch {
-        $ns = cmd /c "netstat -ano | findstr `"LISTENING`" | findstr `":$port`"" 2>$null
-        return [bool]$ns
+        # Avoid cmd.exe flash: parse netstat via hidden process + redirected stdout.
+        try {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = (Join-Path $env:SystemRoot 'System32\netstat.exe')
+            $psi.Arguments = '-ano'
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.CreateNoWindow = $true
+            $proc = [Diagnostics.Process]::Start($psi)
+            $out = $proc.StandardOutput.ReadToEnd()
+            [void]$proc.WaitForExit(5000)
+            $needle = ':' + $port
+            foreach ($line in ($out -split "`r?`n")) {
+                if ($line -match 'LISTENING' -and $line -like "*$needle*") { return $true }
+            }
+            return $false
+        } catch { return $false }
     }
 }
 

@@ -223,10 +223,10 @@ Then: one capable Worker + Verifier still required for accuracy.
 ## Mounts / laptop-exec
 
 Every Worker/Verifier Task prompt on `~/mounts/` projects must paste the
-PRIORITY block from `laptop-exec` skill (Read/Grep mount-first ~16–32;
-Write MCP-first ~8–10; Glob MCP; git LE only; no `rg -i/--glob`; LE ≤4,
-hard 8). Coordinator may fan out mount/MCP work; prefer ≤4 parallel Tasks
-that use laptop-exec.
+PRIORITY+FAILOVER block from `laptop-exec` skill (Read/Grep mount→MCP→LE
+~16–32; Write MCP→mount→LE ~8–10; Glob MCP; git LE only; if 1st path down
+use next same turn; no `rg -i/--glob`; LE ≤4, hard 8). Coordinator may fan
+out mount/MCP work; prefer ≤4 parallel Tasks that use laptop-exec.
 
 ---
 

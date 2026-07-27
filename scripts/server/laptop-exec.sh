@@ -79,12 +79,12 @@ _le_remote_kill_win_job() {
     if command -v timeout >/dev/null 2>&1; then
         timeout -k 2 --foreground 10 ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" \
             "${LAPTOP_USER}@127.0.0.1" \
-            "powershell -NoProfile -Command \"${remote_ps}\"" \
+            "powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command \"${remote_ps}\"" \
             >/dev/null 2>&1 || true
     else
         ssh -n "${opts[@]}" -i "$KEY" -p "$TUNNEL_PORT" \
             "${LAPTOP_USER}@127.0.0.1" \
-            "powershell -NoProfile -Command \"${remote_ps}\"" \
+            "powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command \"${remote_ps}\"" \
             >/dev/null 2>&1 || true
     fi
     _LE_WIN_JOB_ID=""
@@ -463,7 +463,7 @@ _ensure_remote_parent_dir() {
     [ "$dir" = "$file" ] && return 0
     if [ "$LAPTOP_OS" = "mac" ]; then _run_in_project "$rpath" mkdir -p "$dir"; return; fi
     local win_path="${rpath//\//\\}" win_dir="${dir//\//\\}"
-    _laptop_ssh "cmd /c \"if not exist ${win_path}\\${win_dir} mkdir ${win_path}\\${win_dir}\""
+    _laptop_ssh "powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command \"New-Item -ItemType Directory -Force -Path '${win_path}\\${win_dir}' | Out-Null\""
 }
 
 _normalize_arg() { printf '%s' "${1//\\//}"; }
@@ -475,7 +475,7 @@ _detect_git_dir() {
         if _run_in_project "$rpath" test -d .git 2>/dev/null; then echo .git; return; fi
         echo none; return
     fi
-    out=$(_laptop_ssh "cmd /c \"if exist ${win_path}\\.git.server-session\\HEAD (echo .git.server-session) else if exist ${win_path}\\.git\\HEAD (echo .git) else (echo none)\"" 2>/dev/null | tr -d '\r' | head -1)
+    out=$(_laptop_ssh "powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command \"if (Test-Path -LiteralPath '${win_path}\\.git.server-session\\HEAD') { '.git.server-session' } elseif (Test-Path -LiteralPath '${win_path}\\.git\\HEAD') { '.git' } else { 'none' }\"" 2>/dev/null | tr -d '\r' | head -1)
     printf '%s' "$out"
 }
 
@@ -511,7 +511,7 @@ _run_in_project() {
         local cmd=""; printf -v cmd '%q ' "$@"
         _laptop_ssh "bash -lc 'cd $(printf '%q' "$rpath") && $cmd'"; return
     fi
-    # Windows: avoid cmd /c nested-quote breakage for | & <> () and paths.
+    # Windows: avoid nested-quote breakage for | & <> () and paths (no cmd.exe).
     # Encode a PowerShell Set-Location + argv splat as -EncodedCommand.
     # Outer -Command embeds LE_JOB_ID in the visible command line so abort can taskkill orphans.
     local enc
@@ -537,7 +537,7 @@ sys.stdout.write(base64.b64encode(ps.encode("utf-16-le")).decode("ascii"))
 PY
 )"
     # \$env so bash does not expand; LE_JOB_ID stays visible on Windows command line for abort kill.
-    _laptop_ssh "powershell -NoProfile -Command \"\$env:LE_JOB_ID='${_LE_WIN_JOB_ID}'; powershell -NoProfile -EncodedCommand ${enc}\""
+    _laptop_ssh "powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command \"\$env:LE_JOB_ID='${_LE_WIN_JOB_ID}'; powershell -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${enc}\""
     _LE_WIN_JOB_ID=""
 }
 
@@ -581,7 +581,7 @@ _require_session() {
 }
 
 _tunnel_up() {
-    if [ "$LAPTOP_OS" = "mac" ]; then _laptop_ssh true >/dev/null 2>&1; else _laptop_ssh cmd /c exit 0 >/dev/null 2>&1; fi
+    if [ "$LAPTOP_OS" = "mac" ]; then _laptop_ssh true >/dev/null 2>&1; else _laptop_ssh "powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command exit" >/dev/null 2>&1; fi
 }
 
 _resolve_project() {

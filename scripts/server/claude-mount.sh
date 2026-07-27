@@ -57,6 +57,10 @@ _load_global() {
         off|no|none|0|disabled|"") GIT_MODE="off" ;;
         *) GIT_MODE="off" ;;
     esac
+    # Killswitch: hide/server disabled site-wide. Always no .git rename.
+    if [ "${CLAUDE_GIT_MODE_FORCE_OFF:-1}" != "0" ]; then
+        GIT_MODE="off"
+    fi
     case "${LAPTOP_OS,,}" in
         mac|darwin|osx) LAPTOP_OS="mac" ;;
         *) LAPTOP_OS="windows" ;;
@@ -103,7 +107,8 @@ _win_ps_encode() {
         b64=$(printf '%s' "$ps_cmd" | iconv -f UTF-8 -t UTF-16LE 2>/dev/null | base64 -w 0 2>/dev/null)
     fi
     [ -n "$b64" ] || return 1
-    _laptop_ssh "powershell -NoProfile -EncodedCommand ${b64}" 2>/dev/null || true
+    # WindowStyle Hidden: avoid flashing a console on the Windows laptop (sshd remote exec).
+    _laptop_ssh "powershell -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${b64}" 2>/dev/null || true
 }
 
 # _win_ps - runs a PowerShell snippet on a Windows laptop via reverse tunnel.
@@ -270,8 +275,8 @@ _win_hide_git_and_create_stubs() {
     local safe="${rpath//\'/\'\'}"
     local ps_out=""
     # Single-line PS (no trailing \\) - backslashes break powershell -Command over SSH.
-    local hide_try='$n=0; $ok=$false; $err=""; if (-not (Test-Path $p/.git) -and -not (Test-Path $p/.git.server-session)) { Write-Output "GIT_HIDE:skip"; exit }; if (Test-Path $p/.git -PathType Leaf) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git -PathType Container) -and (Test-Path $p/.git.server-session)) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git -PathType Container) -and -not (Test-Path $p/.git.server-session)) { while ($n -lt 2) { $n++; try { cmd /c "attrib -R `"$p\.git`" /S /D" 2>$null | Out-Null; Rename-Item $p/.git .git.server-session -Force -ErrorAction Stop; Write-Output "GIT_HIDE:hidden"; $ok=$true; break } catch { $err=$_.Exception.Message; if ($n -lt 2) { Get-Process git -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500 } } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } elseif (Test-Path $p/.git.server-session) { Write-Output "GIT_HIDE:already" } else { Write-Output "GIT_HIDE:skip" }'
-    local restore_try='if (Test-Path $p/.git.server-session) { if ((Test-Path $p/.git -PathType Container) -and (Test-Path $p/.git/HEAD)) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git) -and -not (Test-Path $p/.git -PathType Leaf)) { Write-Output "GIT_HIDE:skip" } else { $n=0; $ok=$false; $err=""; while ($n -lt 2) { $n++; try { if (Test-Path $p/.git -PathType Leaf) { Remove-Item $p/.git -Force -ErrorAction SilentlyContinue }; if (Test-Path $p/.git) { Write-Output "GIT_HIDE:skip"; $ok=$true; break }; cmd /c "attrib -R `"$p\.git.server-session`" /S /D" 2>$null | Out-Null; Rename-Item $p/.git.server-session .git -Force -ErrorAction Stop; Write-Output "GIT_HIDE:restored"; $ok=$true; break } catch { $err=$_.Exception.Message; if ($n -lt 2) { Get-Process git -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500 } } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } } elseif (Test-Path $p/.git) { Write-Output "GIT_HIDE:visible" } else { Write-Output "GIT_HIDE:skip" }'
+    local hide_try='$n=0; $ok=$false; $err=""; if (-not (Test-Path $p/.git) -and -not (Test-Path $p/.git.server-session)) { Write-Output "GIT_HIDE:skip"; exit }; if (Test-Path $p/.git -PathType Leaf) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git -PathType Container) -and (Test-Path $p/.git.server-session)) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git -PathType Container) -and -not (Test-Path $p/.git.server-session)) { while ($n -lt 2) { $n++; try { Get-ChildItem -LiteralPath "$p\.git" -Recurse -Force -EA SilentlyContinue | ForEach-Object { try { $_.Attributes = $_.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly) } catch {} }; Rename-Item $p/.git .git.server-session -Force -ErrorAction Stop; Write-Output "GIT_HIDE:hidden"; $ok=$true; break } catch { $err=$_.Exception.Message; if ($n -lt 2) { Get-Process git -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500 } } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } elseif (Test-Path $p/.git.server-session) { Write-Output "GIT_HIDE:already" } else { Write-Output "GIT_HIDE:skip" }'
+    local restore_try='if (Test-Path $p/.git.server-session) { if ((Test-Path $p/.git -PathType Container) -and (Test-Path $p/.git/HEAD)) { Write-Output "GIT_HIDE:skip" } elseif ((Test-Path $p/.git) -and -not (Test-Path $p/.git -PathType Leaf)) { Write-Output "GIT_HIDE:skip" } else { $n=0; $ok=$false; $err=""; while ($n -lt 2) { $n++; try { if (Test-Path $p/.git -PathType Leaf) { Remove-Item $p/.git -Force -ErrorAction SilentlyContinue }; if (Test-Path $p/.git) { Write-Output "GIT_HIDE:skip"; $ok=$true; break }; Get-ChildItem -LiteralPath "$p\.git.server-session" -Recurse -Force -EA SilentlyContinue | ForEach-Object { try { $_.Attributes = $_.Attributes -band (-bnot [IO.FileAttributes]::ReadOnly) } catch {} }; Rename-Item $p/.git.server-session .git -Force -ErrorAction Stop; Write-Output "GIT_HIDE:restored"; $ok=$true; break } catch { $err=$_.Exception.Message; if ($n -lt 2) { Get-Process git -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500 } } }; if (-not $ok) { Write-Output ("GIT_HIDE:fail:" + $err) } } } elseif (Test-Path $p/.git) { Write-Output "GIT_HIDE:visible" } else { Write-Output "GIT_HIDE:skip" }'
     local stub_ps='; if ($hasGit) { New-Item -ItemType Directory -Force -Path $p/.claude/rules,$p/.claude/commands | Out-Null; if (-not (Test-Path $p/.mcp.json) -or (Get-Item $p/.mcp.json).Length -eq 0) { Set-Content -Path $p/.mcp.json -Value "{}" -Encoding utf8 } }'
     local ps_prefix ps_cmd
     ps_prefix="\$p='${safe}'; \$hasGit=(Test-Path \$p/.git) -or (Test-Path \$p/.git.server-session); "
@@ -464,7 +469,7 @@ _tunnel_auth_ok() {
     local rcmd=true
     case "${LAPTOP_OS,,}" in
         mac|darwin|osx) rcmd=true ;;
-        *) rcmd='cmd /c exit 0' ;;
+        *) rcmd='powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command exit' ;;
     esac
     ssh -n -o BatchMode=yes -o ConnectTimeout=5 \
         -o ServerAliveInterval=5 -o ServerAliveCountMax=3 \
@@ -597,6 +602,9 @@ _do_mount() {
             hide|fast) GIT_MODE="hide" ;;
             off|no|none|0|disabled) GIT_MODE="off" ;;
         esac
+    fi
+    if [ "${CLAUDE_GIT_MODE_FORCE_OFF:-1}" != "0" ]; then
+        GIT_MODE="off"
     fi
 
     lpath="${lpath//\\//}"

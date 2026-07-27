@@ -88,6 +88,16 @@ try {
     if (-not (Test-Path -LiteralPath $workerSrc)) { throw "setup-worker.ps1 missing in package: $workerSrc" }
     Copy-Item -LiteralPath $workerSrc -Destination $workerDest -Force
 
+    # Clear MOTW on install folder (unsigned IExpress FP helper; never disables Defender).
+    try {
+        Get-ChildItem -LiteralPath $Dest -File -ErrorAction SilentlyContinue | ForEach-Object {
+            try { Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue } catch { }
+        }
+        Log 'unblock_motw ok'
+    } catch {
+        Log ("unblock_motw_warn $($_.Exception.Message)")
+    }
+
     if ($env:CLAUDE_CONNECT_SETUP_NO_LAUNCH -eq '1') {
         Log 'setup skip reason=NO_LAUNCH=1 files-only'
         exit 0

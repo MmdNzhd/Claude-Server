@@ -8,15 +8,12 @@ fi
 GIT_CONF="$CFG_DIR/git.conf"
 
 get_git_mode() {
-    local saved="off"
-    if [ -f "$GIT_CONF" ]; then
-        saved="$(tr '[:upper:]' '[:lower:]' < "$GIT_CONF" | tr -d '[:space:]')"
+    # Site policy: GIT_MODE hide/server disabled. Always OFF.
+    if [ -n "${GIT_CONF:-}" ]; then
+        mkdir -p "$(dirname "$GIT_CONF")" 2>/dev/null || true
+        printf 'off\n' > "$GIT_CONF" 2>/dev/null || true
     fi
-    case "$saved" in
-        server|on|yes|1|slow) echo server ;;
-        hide|fast) echo hide ;;
-        *) echo off ;;
-    esac
+    echo off
 }
 
 get_active_mount_id() {
@@ -2474,31 +2471,13 @@ EOF
 }
 
 configure_git_mode() {
-    local cur choice cur_label saved_label
-    cur="$(get_git_mode)"
-    cur_label="$(get_git_mode_label "$cur")"
     echo ""
     printf '    \033[1;37mGit on server (SSHFS)\033[0m\n\n'
-    case "$cur" in
-        server) printf '    \033[0;90mCurrent: %s (full git over SSHFS)\033[0m\n\n' "$cur_label" ;;
-        hide)   printf '    \033[0;90mCurrent: %s (.git hidden on laptop)\033[0m\n\n' "$cur_label" ;;
-        *)      printf '    \033[0;90mCurrent: %s (no .git rename; use laptop-exec git)\033[0m\n\n' "$cur_label" ;;
-    esac
-    printf '    \033[0;90m1  OFF  - no .git rename [default]\033[0m\n'
-    printf '    \033[0;90m2  HIDE - hide .git on laptop (faster SSHFS)\033[0m\n'
-    printf '    \033[0;90m3  SLOW - full .git on SSHFS mount\033[0m\n\n'
-    read -rp "    > " choice
-    choice="$(printf '%s' "$choice" | tr '[:upper:]' '[:lower:]')"
-    case "$choice" in
-        1|off|"") printf 'off\n' > "$GIT_CONF" ;;
-        2|hide|fast) printf 'hide\n' > "$GIT_CONF" ;;
-        3|on|server|slow) printf 'server\n' > "$GIT_CONF" ;;
-        *) warn "Invalid choice."; return ;;
-    esac
+    printf '    \033[0;33mHIDE/SLOW disabled site-wide. Forced OFF (no .git rename).\033[0m\n'
+    printf 'off\n' > "$GIT_CONF"
     push_server_connect_conf
     echo ""
-    saved_label="$(get_git_mode_label "$(get_git_mode)")"
-    printf '    \033[0;32mSaved: git %s.\033[0m\n' "$saved_label"
+    printf '    \033[0;32mSaved: git OFF.\033[0m\n'
     if [ -n "${ACTIVE_PROJECT_ID:-}" ]; then
         ACTIVE_MOUNT_ID="$ACTIVE_PROJECT_ID"
         push_server_connect_conf
@@ -2508,6 +2487,7 @@ configure_git_mode() {
     fi
     echo ""
 }
+
 
 show_mount_git_warn() {
     local out="$1" line

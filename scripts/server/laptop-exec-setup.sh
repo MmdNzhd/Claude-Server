@@ -129,27 +129,53 @@ _ensure_project_hooks() {
     # Also do not install guard copies under mounts (STALE SSHFS confusion).
     printf '%s\n' '{"version":1,"hooks":{}}' > "$lpath/.cursor/hooks.json"
     chmod 644 "$lpath/.cursor/hooks.json" 2>/dev/null || true
+    # Neutralize leftover project-local hook scripts (not referenced by empty hooks.json).
+    if [ -d "$lpath/.cursor/hooks" ]; then
+        local stub hf
+        stub='#!/usr/bin/env bash
+# DEPRECATED stub — project hooks.json is empty on purpose.
+# Active hooks live in ~/.cursor/hooks (user-level wrap). Do not wire this path.
+exit 0
+'
+        for hf in laptop-exec-guard.sh laptop-exec-guard-wrap.sh laptop-exec-session.sh laptop-exec-audit-log.sh laptop-exec-shell-scan.py; do
+            [ -e "$lpath/.cursor/hooks/$hf" ] || continue
+            printf '%s\n' "$stub" > "$lpath/.cursor/hooks/$hf" 2>/dev/null || true
+            chmod 755 "$lpath/.cursor/hooks/$hf" 2>/dev/null || true
+        done
+    fi
 }
 
 _ensure_cursor_git_off() {
     # GIT_MODE=off|hide: Cursor must not probe SSHFS .git (Failed to execute git).
+    # Also keep editors clean on Reload Window: SSHFS can briefly return EPERM while
+    # Cursor flushes dirty tabs ("Failed to save … NoPermissions") — scary but
+    # usually harmless. Auto-save after 1s means Reload rarely has anything to flush.
     # Keep this in User settings only - never write workspace .vscode (pollutes laptop repos).
     local conf="$HOME/.claude-connect.conf" mode="off"
     if [ -f "$conf" ]; then
         mode="$(grep -iE '^GIT_MODE=' "$conf" 2>/dev/null | tail -1 | cut -d= -f2- | tr '[:upper:]' '[:lower:]' | tr -d '\r\n ')"
     fi
+    # Auto-save applies even when GIT_MODE=server (SSHFS EPERM is unrelated to git).
+    local _apply_git_off=1
     case "${mode:-off}" in
-        server|on|yes|1|slow) return 0 ;;
+        server|on|yes|1|slow) _apply_git_off=0 ;;
     esac
-    python3 - <<'PY' 2>/dev/null || true
+    APPLY_GIT_OFF="$_apply_git_off" python3 - <<'PY' 2>/dev/null || true
 import json, os
 home = os.path.expanduser("~")
+apply_git_off = os.environ.get("APPLY_GIT_OFF", "1") == "1"
 want = {
-    "git.enabled": False,
-    "git.autoRepositoryDetection": False,
-    "git.detectSubmodules": False,
-    "git.repositoryScanMaxDepth": 0,
+    # Flush edits quickly so Reload Window does not hit SSHFS mid-teardown (EPERM popup).
+    "files.autoSave": "afterDelay",
+    "files.autoSaveDelay": 1000,
 }
+if apply_git_off:
+    want.update({
+        "git.enabled": False,
+        "git.autoRepositoryDetection": False,
+        "git.detectSubmodules": False,
+        "git.repositoryScanMaxDepth": 0,
+    })
 for rel in (
     ".cursor-server/data/User/settings.json",
     ".vscode-server/data/User/settings.json",
@@ -168,7 +194,8 @@ for rel in (
     except (OSError, json.JSONDecodeError):
         data = {}
     data.update(want)
-    data.pop("git.path", None)
+    if apply_git_off:
+        data.pop("git.path", None)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
         f.write("\n")

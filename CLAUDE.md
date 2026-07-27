@@ -9,7 +9,7 @@
 SSH reverse tunnel: client laptop Ã¢â€ â€™ server, port = `20000 + (server_UID - 1000) * 10 + slot` (10-port non-overlapping block per user, slot 0-9; see `Get-TunnelPortUserBase` / `tunnel_port_user_base`).
 **Source of truth = laptop disk.** Optional SSHFS under `~/mounts/<ID>/` is for Cursor UI only and may be STALE or NOT_MOUNTED.
 
-**Agents:** Read/Grep mount-first (~16–32 parallel) then windows-mcp then LE; Write MCP FileSystem-first (~8–10) then mount (~10) then LE; Glob MCP search/list; `laptop-exec` for git + fallback. Connect UI `sshx()` / `SshX()` open one-shot SSH (no mux). `laptop-exec` uses a shared SSH ControlMaster through the same reverse tunnel.
+**Agents:** priority+failover — Read/Grep mount→MCP→LE (~16–32); Write MCP→mount→LE (~8–10); Glob MCP search/list; git `laptop-exec` only. If 1st path fails, use next same turn. Connect UI `sshx()` / `SshX()` open one-shot SSH (no mux). `laptop-exec` uses a shared SSH ControlMaster through the same reverse tunnel.
 
 ```
 Laptop Ã¢â€â‚¬Ã¢â€â‚¬SSHÃ¢â€â‚¬Ã¢â€â‚¬Ã¢â€“Â¶ Server (port 22) + reverse tunnel (20000+UID)
@@ -202,25 +202,28 @@ Verified against live `laptop-exec` / hooks. Numbers below are exact.
 
 ```
 [Cursor agent on Linux]
-  Read/Grep: mount first (~16-32) then windows-mcp then laptop-exec
-  WRITE/EDIT: MCP FileSystem first (~8-10) then mount (~10) then LE
-  Glob: MCP search/list then mount; git: laptop-exec only | Task paste PRIORITY
+  Read/Grep: mount → windows-mcp → laptop-exec (~16-32 / ~8-12 / ≤4)
+  WRITE/EDIT: MCP FileSystem → mount → LE (~8-10 / ~10 / ≤4)
+  Glob: MCP search/list → mount; git: laptop-exec only | Task paste PRIORITY+FAILOVER
        |
 [mount / windows-mcp / laptop-exec] → laptop disk
 Optional SSHFS ~/mounts/<ID>/ = UI + allowed FS (may be STALE for git)
 ```
 
+**Failover:** if 1st path errors/unavailable, use 2nd then 3rd in the **same turn**.
+One MCP hard fail (`ECONNREFUSED` / not listed) → MCP down for session; continue mount + LE.
+
 Session: `~/.claude-connect.conf`. Cache: `~/.cache/laptop-exec/` (8 `slot-*.lock`, `cm-%C`).
 
 ### Hard rules (summary)
 
-1. Hooks **ALLOW** Read/Grep/Glob/Write/Edit/EditNotebook/StrReplace/Delete/Shell on `/mounts/`. Read/Grep prefer mount (~16–32 parallel) then MCP; WRITE/EDIT prefer MCP FileSystem (~8–10) then mount (~10); Glob prefer MCP search/list (~8–12).
+1. Hooks **ALLOW** Read/Grep/Glob/Write/Edit/EditNotebook/StrReplace/Delete/Shell on `/mounts/`. Read/Grep prefer mount (~16–32 parallel) then MCP; WRITE/EDIT prefer MCP FileSystem (~8–10) then mount (~10); Glob prefer MCP search/list (~8–12). Failover same turn if preferred path is down.
 2. First I/O: table in skill + rule `laptop-exec` (measured 2026-07-26). **git** always `laptop-exec git`. Content Grep via MCP is Select-String (FileSystem search ≠ content).
 3. `rg` is **not** ripgrep: `-i`/`-l`/`-n`/`--glob` rejected (old hangs pinned mux slots for hours).
 4. Mux: **8** slots; prefer ≤4 LE parallel; mount/MCP fan-out to caps above; `session slots full` → wait; no raw SSH storms.
-5. Tunnel DOWN Ã¢â€ â€™ user `connect.bat`/`connect.sh`. STALE mount + UP tunnel Ã¢â€ â€™ still laptop-exec.
+5. Tunnel DOWN Ã¢â€ â€™ user `connect.bat`/`connect.sh`. STALE mount + UP tunnel Ã¢â€ â€™ MCP then laptop-exec (do not stall).
 6. Sudo: `sudo-from-laptop --smart|--sepidz` Ã¢â‚¬â€ never ask for a password.
-7. Every Task prompt must paste the SSH-first block from the `laptop-exec` skill.
+7. Every Task prompt must paste the PRIORITY+FAILOVER block from the `laptop-exec` skill.
 
 Project hooks must be exactly `{"version":1,"hooks":{}}`. User hooks use `laptop-exec-guard-wrap.sh` (fail-open). `preToolUse` matcher has **no** Shell (Shell only in `beforeShellExecution`).
 

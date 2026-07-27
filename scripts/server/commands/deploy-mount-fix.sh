@@ -98,7 +98,15 @@ fi
 
 atomic_install 755 "$MOUNT_SRC" /usr/local/lib/claude-mount
 ok "claude-mount -> /usr/local/lib/claude-mount"
-ln -sf /usr/local/lib/claude-mount /usr/local/bin/claude-mount 2>/dev/null || true
+rm -f /usr/local/bin/claude-mount
+ln -sf /usr/local/lib/claude-mount /usr/local/bin/claude-mount
+if [ ! -x /usr/local/bin/claude-mount ]; then
+    atomic_install 755 /usr/local/lib/claude-mount /usr/local/bin/claude-mount
+fi
+if grep -q "cmd /c exit 0" /usr/local/bin/claude-mount /usr/local/lib/claude-mount 2>/dev/null; then
+    fail "claude-mount still contains cmd /c exit 0 (Windows CMD flash)"
+fi
+grep -q "WindowStyle Hidden -Command exit" /usr/local/lib/claude-mount || fail "claude-mount missing hidden Windows probe"
 
 if [ -f "$WATCH_SRC" ]; then
     atomic_install 755 "$WATCH_SRC" /usr/local/bin/claude-watchdog
@@ -129,6 +137,12 @@ for home in /home/*/; do
     id "$u" >/dev/null 2>&1 || continue
     mkdir -p "$home/.local/bin"
     atomic_install 755 /usr/local/lib/claude-mount "$home/.local/bin/claude-mount" "$u" "$u"
+    if [ -f /usr/local/bin/claude-self-heal ]; then
+        atomic_install 755 /usr/local/bin/claude-self-heal "$home/.local/bin/claude-self-heal" "$u" "$u"
+    fi
+    if [ -f /usr/local/bin/laptop-exec ]; then
+        atomic_install 755 /usr/local/bin/laptop-exec "$home/.local/bin/laptop-exec" "$u" "$u"
+    fi
     atomic_install 755 /usr/local/bin/claude-automount "$home/.local/bin/claude-automount" "$u" "$u"
     _patch_bashrc "$home/.bashrc"
     ok "$u ~/.local/bin/claude-mount + claude-automount"
