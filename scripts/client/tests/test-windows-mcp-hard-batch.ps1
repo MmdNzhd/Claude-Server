@@ -62,6 +62,12 @@ Assert ($directFn -match 'CreateNoWindow\s*=\s*\$true' -and $directFn -match 'Pr
 
 Assert ($startFn -match 'Stop-WindowsMcpOrphanCmdWrappers' -and $startFn -match 'Start-WindowsMcpProcessDirect') `
     'Start-WindowsMcpIfNeeded uses direct start and orphan reaper'
+Assert (-not [regex]::IsMatch($startFn, '(?m)^\s*try\s*\{\s*schtasks\s+/Run')) `
+    'Start-WindowsMcpIfNeeded has no schtasks /Run (visible cmd)'
+Assert ($mcp -match 'Write-WindowsMcpHiddenLogonLauncher') `
+    'Hidden logon VBS launcher helper is shipped'
+Assert ($mcp -match 'start-server-hidden\.vbs') `
+    'Hidden logon trampoline uses start-server-hidden.vbs'
 
 Assert ($worker -match 'Unblock-File' -and $worker -match 'Get-ChildItem' -and $worker -match 'unblock_motw') `
     'setup-worker clears MOTW via Unblock-File on installed files'
