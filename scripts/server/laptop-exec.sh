@@ -1000,6 +1000,9 @@ _cmd_test() {
     _check "rg no-fallthrough" bash -c 'out=$(laptop-exec rg -p claude-code-server "[unterminated" scripts/server/ 2>&1); echo "$out" | grep -qi "git grep failed"'
     _check dotnet laptop-exec run -- dotnet --version
     _check "multiplex warm read" bash -c 'laptop-exec read CLAUDE.md >/dev/null && laptop-exec read CLAUDE.md >/dev/null'
+    _check "read reject abs mounts" bash -c 'out=$(laptop-exec read /home/smart/mounts/claude-code-server/CLAUDE.md 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -qi "mount path\|relative\|NEXT"'
+    _check "git -p after args DIE" bash -c 'out=$(laptop-exec git status -p claude-code-server 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -qi "BEFORE\|NEXT"'
+    _check "unknown verb NEXT" bash -c 'out=$(laptop-exec rpath 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -qi "invent\|unknown command"'
     echo "----"; echo "pass=$pass fail=$fail"; [ "$fail" -eq 0 ]
 }
 

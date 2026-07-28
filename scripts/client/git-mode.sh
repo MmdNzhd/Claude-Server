@@ -224,7 +224,7 @@ push_remote_file_if_changed() {
     # atomically into place so a running process never reads a torn file.
     scp -o BatchMode=yes -o ConnectTimeout=20 -q "$src" "$ALIAS:${scp_dest}.new" 2>/dev/null || return 1
     case "$scp_dest" in
-        */laptop-exec|*/laptop-exec-setup|*/laptop-exec-guard.sh|*/laptop-exec-guard-wrap.sh|*/laptop-exec-shell-scan.py|*/laptop-exec-session.sh|*/claude-self-heal|*/claude-automount)
+        */laptop-exec|*/laptop-exec-setup|*/laptop-exec-guard.sh|*/laptop-exec-guard-wrap.sh|*/laptop-exec-shell-scan.py|*/laptop-exec-audit-log.sh|*/laptop-exec-session.sh|*/claude-self-heal|*/claude-automount)
             sshx "chmod +x ${rpath}.new && mv -f ${rpath}.new $rpath" >/dev/null 2>&1 || true ;;
         *)
             sshx "mv -f ${rpath}.new $rpath" >/dev/null 2>&1 || true ;;
@@ -235,6 +235,10 @@ push_remote_file_if_changed() {
 push_laptop_exec_bundle() {
     local server_dir="$1"
     [ -n "$server_dir" ] || return 0
+    if [ ! -f "$server_dir/laptop-exec.sh" ]; then
+        echo "  warn  LE push skipped: no laptop-exec.sh under $server_dir (mount-only; run: sudo claude-server deploy-laptop-exec)" >&2
+        return 0
+    fi
     push_remote_file_if_changed "$server_dir/laptop-exec.sh" '~/.local/bin/laptop-exec' || true
     push_remote_file_if_changed "$server_dir/laptop-exec-setup.sh" '~/.local/bin/laptop-exec-setup' || true
     push_remote_file_if_changed "$server_dir/claude-self-heal.sh" '~/.local/bin/claude-self-heal' || true
@@ -244,10 +248,10 @@ push_laptop_exec_bundle() {
     push_remote_file_if_changed "$server_dir/cursor-hooks/laptop-exec-guard.sh" '~/.cursor/hooks/laptop-exec-guard.sh' || true
     push_remote_file_if_changed "$server_dir/cursor-hooks/laptop-exec-guard-wrap.sh" '~/.cursor/hooks/laptop-exec-guard-wrap.sh' || true
     push_remote_file_if_changed "$server_dir/cursor-hooks/laptop-exec-shell-scan.py" '~/.cursor/hooks/laptop-exec-shell-scan.py' || true
-    push_remote_file_if_changed "$server_dir/cursor-hooks/laptop-exec-session.sh" '~/.cursor/hooks/laptop-exec-session.sh' || true
+    push_remote_file_if_changed "$server_dir/cursor-hooks/laptop-exec-audit-log.sh" '~/.cursor/hooks/laptop-exec-audit-log.sh' || true
     push_remote_file_if_changed "$server_dir/cursor-hooks/laptop-exec-session.sh" '~/.cursor/hooks/laptop-exec-session.sh' || true
     # chmod + CRLF strip (safe for Mac and Windows-origin bundles)
-    sshx "chmod +x \$HOME/.local/bin/laptop-exec \$HOME/.local/bin/laptop-exec-setup \$HOME/.local/bin/claude-self-heal \$HOME/.local/bin/claude-automount 2>/dev/null; sed -i 's/\r\$//' \$HOME/.local/bin/laptop-exec \$HOME/.local/bin/laptop-exec-setup \$HOME/.local/bin/claude-self-heal \$HOME/.local/bin/claude-automount \$HOME/.local/bin/claude-mount 2>/dev/null; true" >/dev/null 2>&1 || true
+    sshx "chmod +x \$HOME/.local/bin/laptop-exec \$HOME/.local/bin/laptop-exec-setup \$HOME/.local/bin/claude-self-heal \$HOME/.local/bin/claude-automount \$HOME/.cursor/hooks/laptop-exec-*.sh 2>/dev/null; sed -i 's/\r\$//' \$HOME/.local/bin/laptop-exec \$HOME/.local/bin/laptop-exec-setup \$HOME/.local/bin/claude-self-heal \$HOME/.local/bin/claude-automount \$HOME/.local/bin/claude-mount \$HOME/.cursor/hooks/laptop-exec-*.sh \$HOME/.cursor/hooks/laptop-exec-shell-scan.py 2>/dev/null; true" >/dev/null 2>&1 || true
     sshx '$HOME/.local/bin/laptop-exec-setup --user 2>/dev/null; /usr/local/bin/laptop-exec-setup --user 2>/dev/null; true' >/dev/null 2>&1 || true
     # Self-heal for Mac and Windows laptop sessions (server-side)
     sshx '$HOME/.local/bin/claude-self-heal --quiet 2>/dev/null; /usr/local/bin/claude-self-heal --quiet 2>/dev/null; true' >/dev/null 2>&1 || true

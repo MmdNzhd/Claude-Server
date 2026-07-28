@@ -173,9 +173,14 @@ if [ -x /usr/local/bin/laptop-exec ]; then
     grep -q 'mount-status' /usr/local/bin/laptop-exec && ok "laptop-exec: mount-status/write/health" || fail "laptop-exec: outdated (run: sudo claude-server deploy-laptop-exec)"
     grep -q 'ControlPersist' /usr/local/bin/laptop-exec && ok "laptop-exec: multiplex SSH (fast)" || warn "laptop-exec: old (no ControlPersist)"
     grep -q 'git grep' /usr/local/bin/laptop-exec && ok "laptop-exec: git-grep search (accurate)" || warn "laptop-exec: old rg (findstr)"
-    grep -qE 'Windows-MCP first|Parallel MCP' /usr/local/lib/claude-server/cursor-rules/laptop-exec.mdc 2>/dev/null && ok "cursor rule: Windows-MCP first" || warn "cursor rule outdated"
-    grep -q '\-w' /usr/local/lib/claude-server/cursor-rules/laptop-exec.mdc 2>/dev/null && ok "cursor rule: -w workspace" || warn "cursor rule: missing -w flag docs"
-    grep -q 'Read|Write' /usr/local/lib/claude-server/cursor-hooks/laptop-exec-guard.sh 2>/dev/null && ok "cursor hook: blocks Read/Write on /mounts/" || warn "cursor hook outdated"
+    grep -qE 'HARD RULE|Healthy mount|HARD:' /usr/local/lib/claude-server/cursor-rules/laptop-exec.mdc 2>/dev/null && ok "cursor rule: mount-first HARD" || warn "cursor rule outdated (no HARD RULE)"
+    grep -q '_read_next' /usr/local/bin/laptop-exec && ok "laptop-exec: DIE helpers (_read_next)" || fail "laptop-exec: missing DIE helpers (deploy-laptop-exec)"
+    grep -q '_reject_abs_or_mount_path' /usr/local/bin/laptop-exec && ok "laptop-exec: abs/mount path reject" || warn "laptop-exec: missing abs-path reject"
+    grep -q 'HEALTHY MOUNT' /usr/local/lib/claude-server/cursor-hooks/laptop-exec-session.sh 2>/dev/null && ok "session hook: HEALTHY MOUNT paste" || fail "session hook missing HEALTHY MOUNT"
+    grep -q 'HEALTHY MOUNT' /usr/local/lib/claude-server/cursor-hooks/laptop-exec-guard.sh 2>/dev/null && ok "guard: HEALTHY MOUNT Task paste" || fail "guard missing HEALTHY MOUNT"
+    grep -q 'HARD RULE' /usr/local/lib/claude-server/skills/laptop-exec/SKILL.md 2>/dev/null && ok "skill: HARD RULE" || fail "skill missing HARD RULE"
+    # Mount tools are ALLOWED; hook remaps/audits — do not claim "blocks Read/Write".
+    grep -q 'beforeShellExecution\|HOOK_SHELL' /usr/local/lib/claude-server/cursor-hooks/laptop-exec-guard.sh 2>/dev/null && ok "cursor hook: Shell audit path present" || warn "cursor hook outdated"
     [ -x /usr/local/bin/laptop-exec-setup ] && ok "laptop-exec-setup: installed" || warn "laptop-exec-setup missing"
     [ -x /usr/local/lib/claude-server/tests/test-laptop-exec.sh ] && ok "test-laptop-exec.sh: installed" || warn "test-laptop-exec.sh missing"
 fi
@@ -265,13 +270,28 @@ PY
         $has_cursor && ok "Cursor auth in state.vscdb" || fail "Cursor auth missing (run: sudo claude-server sync-cursor-auth $u)"
         $has_cursor_machine && ok "Cursor machineId matches golden" || warn "Cursor machineId mismatch (run: sudo claude-server sync-cursor-auth $u)"
     fi
-    has_le=false; has_le_rule=false; has_le_hook=false
+    has_le=false; has_le_rule=false; has_le_hook=false; has_le_sess=false
     _user_readable "$h/.local/bin/laptop-exec" && has_le=true
     _user_readable "$h/.cursor/rules/laptop-exec.mdc" && has_le_rule=true
     _user_readable "$h/.cursor/hooks/laptop-exec-guard.sh" && has_le_hook=true
+    _user_readable "$h/.cursor/hooks/laptop-exec-session.sh" && has_le_sess=true
     $has_le && ok "laptop-exec CLI" || warn "laptop-exec missing (~/.local/bin)"
     $has_le_rule && ok "laptop-exec rule" || warn "laptop-exec.mdc missing"
     $has_le_hook && ok "laptop-exec hook" || warn "laptop-exec-guard.sh missing"
+    if $has_le_sess; then
+        if _user_grep "$h/.cursor/hooks/laptop-exec-session.sh" 'HEALTHY MOUNT'; then
+            ok "session HEALTHY MOUNT"
+        else
+            fail "session hook stale (no HEALTHY MOUNT; run: sudo claude-server deploy-laptop-exec)"
+        fi
+    else
+        warn "laptop-exec-session.sh missing"
+    fi
+    if $has_le && _user_grep "$h/.local/bin/laptop-exec" '_reject_abs_or_mount_path'; then
+        ok "laptop-exec abs-path DIE"
+    elif $has_le; then
+        warn "laptop-exec CLI stale (no abs-path DIE)"
+    fi
     if _user_readable "$h/.cursor/skills/figma-use/SKILL.md"; then
         ok "figma-use skill (~/.cursor/skills/figma-use/SKILL.md)"
     else

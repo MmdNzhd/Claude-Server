@@ -214,6 +214,22 @@ if [ -f "$SERVER_DIR/claude-git-setup.sh" ]; then
     ok "claude-git-setup -> all users ~/.local/bin/"
 fi
 if [ -f "$SERVER_DIR/laptop-exec.sh" ]; then
+    # Refuse stale UX tree (same gates as deploy-laptop-exec).
+    grep -q '_read_next' "$SERVER_DIR/laptop-exec.sh"         || fail "laptop-exec.sh missing _read_next — update repo / run deploy-laptop-exec from laptop SoT"
+    if [ -f "$SERVER_DIR/cursor-hooks/laptop-exec-session.sh" ]; then
+        grep -q 'HEALTHY MOUNT' "$SERVER_DIR/cursor-hooks/laptop-exec-session.sh"             || fail "session hook missing HEALTHY MOUNT — refuse to ship stale hooks"
+    fi
+    if [ -f "$SERVER_DIR/skills/laptop-exec/SKILL.md" ]; then
+        grep -q 'HARD RULE' "$SERVER_DIR/skills/laptop-exec/SKILL.md"             || fail "SKILL.md missing HARD RULE — refuse to ship stale skill"
+    fi
+    if [ -f "$SERVER_DIR/cursor-hooks/laptop-exec-guard.sh" ]; then
+        grep -q 'HEALTHY MOUNT' "$SERVER_DIR/cursor-hooks/laptop-exec-guard.sh"             || fail "guard missing HEALTHY MOUNT — refuse to ship stale guard"
+    fi
+    # Strip CRLF that Windows MCP may have injected into shells
+    for _crf in "$SERVER_DIR/laptop-exec.sh"                 "$SERVER_DIR/cursor-hooks/laptop-exec-session.sh"                 "$SERVER_DIR/cursor-hooks/laptop-exec-guard.sh"                 "$SERVER_DIR/cursor-hooks/laptop-exec-guard-wrap.sh"                 "$SERVER_DIR/cursor-hooks/laptop-exec-audit-log.sh"; do
+        [ -f "$_crf" ] || continue
+        sed -i 's/\r$//' "$_crf" 2>/dev/null || true
+    done
     install -m 755 "$SERVER_DIR/laptop-exec.sh" /usr/local/bin/laptop-exec
     if [ -f "$SERVER_DIR/windows-mcp-forward.sh" ]; then
         install -m 755 "$SERVER_DIR/windows-mcp-forward.sh" /usr/local/bin/windows-mcp-forward
@@ -269,8 +285,17 @@ if [ -f "$SERVER_DIR/laptop-exec.sh" ]; then
             chown "$u:$u" "/home/$u/.cursor/rules/laptop-exec.mdc"
             chown "$u:$u" "/home/$u/.cursor/rules" 2>/dev/null || true
         fi
+        if [ -d "$SERVER_DIR/cursor-hooks" ]; then
+            mkdir -p "/home/$u/.cursor/hooks"
+            for _hf in laptop-exec-audit-log.sh laptop-exec-guard.sh laptop-exec-guard-wrap.sh laptop-exec-shell-scan.py laptop-exec-session.sh; do
+                [ -f "$SERVER_DIR/cursor-hooks/$_hf" ] || continue
+                install -m 755 "$SERVER_DIR/cursor-hooks/$_hf" "/home/$u/.cursor/hooks/$_hf"
+                chown "$u:$u" "/home/$u/.cursor/hooks/$_hf"
+            done
+            chown "$u:$u" "/home/$u/.cursor/hooks" 2>/dev/null || true
+        fi
     done
-    ok "laptop-exec + skill + rule -> all users ~/.local/bin/ + ~/.cursor/"
+    ok "laptop-exec + skill + rule + hooks -> all users ~/.local/bin/ + ~/.cursor/"
     install -m 755 "$SERVER_DIR/laptop-exec.sh" /usr/local/lib/claude-server/laptop-exec.sh 2>/dev/null || true
     if [ -f "$SERVER_DIR/tests/test-laptop-exec.sh" ]; then
         mkdir -p /usr/local/lib/claude-server/tests

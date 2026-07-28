@@ -3808,6 +3808,7 @@ function Push-LaptopExecBundleIfChanged {
         @{ Local = 'cursor-hooks/laptop-exec-guard.sh'; Remote = '~/.cursor/hooks/laptop-exec-guard.sh'; Exec = $true },
         @{ Local = 'cursor-hooks/laptop-exec-guard-wrap.sh'; Remote = '~/.cursor/hooks/laptop-exec-guard-wrap.sh'; Exec = $true },
         @{ Local = 'cursor-hooks/laptop-exec-shell-scan.py'; Remote = '~/.cursor/hooks/laptop-exec-shell-scan.py'; Exec = $true },
+        @{ Local = 'cursor-hooks/laptop-exec-audit-log.sh'; Remote = '~/.cursor/hooks/laptop-exec-audit-log.sh'; Exec = $true },
         @{ Local = 'cursor-hooks/laptop-exec-session.sh'; Remote = '~/.cursor/hooks/laptop-exec-session.sh'; Exec = $true }
     )
     foreach ($p in $pairs) {
@@ -3815,7 +3816,7 @@ function Push-LaptopExecBundleIfChanged {
         Push-RemoteUserFileIfChanged -LocalSrc $src -RemotePath $p.Remote -Alias $Alias -Executable:$p.Exec
     }
     # Windows scp can leave CRLF - strip on server for Win+Mac users alike
-    SshX "sed -i 's/\r$//' ~/.local/bin/laptop-exec ~/.local/bin/laptop-exec-setup ~/.local/bin/claude-self-heal ~/.local/bin/claude-automount ~/.local/bin/claude-mount 2>/dev/null; chmod +x ~/.local/bin/laptop-exec ~/.local/bin/laptop-exec-setup ~/.local/bin/claude-self-heal ~/.local/bin/claude-automount 2>/dev/null; true" 2>$null | Out-Null
+    SshX "sed -i 's/\r$//' ~/.local/bin/laptop-exec ~/.local/bin/laptop-exec-setup ~/.local/bin/claude-self-heal ~/.local/bin/claude-automount ~/.local/bin/claude-mount ~/.cursor/hooks/laptop-exec-*.sh ~/.cursor/hooks/laptop-exec-shell-scan.py 2>/dev/null; chmod +x ~/.local/bin/laptop-exec ~/.local/bin/laptop-exec-setup ~/.local/bin/claude-self-heal ~/.local/bin/claude-automount ~/.cursor/hooks/laptop-exec-*.sh 2>/dev/null; true" 2>$null | Out-Null
     if (Test-Path ([System.IO.Path]::Combine($ServerDir, 'laptop-exec-setup.sh'))) {
         SshX '$HOME/.local/bin/laptop-exec-setup --user 2>/dev/null; /usr/local/bin/laptop-exec-setup --user 2>/dev/null; true' 2>$null | Out-Null
     }
