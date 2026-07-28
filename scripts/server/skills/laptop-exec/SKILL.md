@@ -47,12 +47,33 @@ Ops / install / ports → [reference-windows-mcp.md](reference-windows-mcp.md)
 **Not:** “MCP tools are listed → always FileSystem read.”  
 **Not:** “Shell → laptop-exec read/rg while mount works.”
 
+## Parallel fan-out (speed)
+
+Fan out independent ops in the **same turn**. Prefer the 1st healthy path;
+if it fails, failover to 2nd then 3rd in that same turn — do not serialize hops.
+
+| Path | Cap |
+|------|-----|
+| mount Read / Grep | ~16-32 |
+| MCP FileSystem / PowerShell | ~8–12 |
+| LE (`laptop-exec`) | LE ≤4 (hard max 8) |
+| Task subagents | ≤4 |
+
+Same-turn failover: mount STALE/EPERM → MCP → LE; one MCP hard fail → mount + LE (MCP down for session).
+
+## Shell strategy
+
+Prefer Cursor **Grep** / **Read** on mount for content. If Shell is needed:
+mount Shell or MCP PowerShell. Use `laptop-exec run` for builds/tests.
+Never `laptop-exec read` / `rg` while the mount is healthy.
+
 ## Footguns (DIE with NEXT)
 
 | Bad | Instead |
 |-----|---------|
 | `laptop-exec read /home/$USER/mounts/P/file` | Cursor **Read** on that path, or `read -p P file` (relative) |
 | `laptop-exec git status -p P` | `laptop-exec git -p P -- status` (`-p` **before** subcommand) |
+| `git log -p` wrongly DIE | Allow; use `laptop-exec git -p P -- log -p` or `--patch`; never `git status -p P` |
 | MCP `FileSystem` write of `*.sh` then `bash -n` fails `$'\r'` | Prefer LF; LE `write` auto-strips CR for `.sh`/`.py`; never ship CRLF hooks |
 | Invented verbs (`rpath`, `pathspec`) | Real verbs: `status|health|list|read|write|rg|git|run|test` |
 
@@ -146,6 +167,15 @@ PRIORITY+FAILOVER: 1st path then 2nd/3rd same turn if down. Healthy mount: NEVER
 ```
 
 ## Anti-patterns
+
+Speed / fan-out:
+
+- Serial Read of N known files → N parallel Reads
+- LE read loop while mount LIVE → Cursor Read parallel
+- One mega-Shell grepping everything → parallel Grep / one python
+- Waiting for independent tool A before starting B
+
+Routing:
 
 | Don’t | Do |
 |-------|-----|

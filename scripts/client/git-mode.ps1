@@ -3453,6 +3453,22 @@ function Push-ServerConnectConf {
     # $preferAm we pass in, the remote script will still refuse to clobber a live other mount.
     $clearFlag = if ($ClearActiveMount) { '1' } else { '0' }
     $sessionPort = Get-SessionTunnelPort
+    # Never push TUNNEL_PORT empty/0 (NO_PORT / legacy 20000+UID fallback).
+    if (-not $sessionPort -or [int]$sessionPort -le 0) {
+        if (-not $script:ServerUidStr) {
+            try {
+                $script:ServerUidStr = ((SshX 'id -u' 2>$null) -join '').Trim() -replace '\D', ''
+            } catch { $script:ServerUidStr = '' }
+        }
+        if ($script:ServerUidStr -and (Get-Command Get-TunnelPortUserBase -ErrorAction SilentlyContinue)) {
+            $slotFb = 0
+            if ($null -ne $script:TunnelSlot -and "$($script:TunnelSlot)" -match '^\d+$') {
+                $slotFb = [int]$script:TunnelSlot
+            }
+            $sessionPort = [int](Get-TunnelPortUserBase -UidStr $script:ServerUidStr) + $slotFb
+            Write-GitModeLog ("PUSH_CONF port_from_formula uid={0} slot={1} port={2}" -f $script:ServerUidStr, $slotFb, $sessionPort) 'INFO'
+        }
+    }
     if ($Port -and $script:Port -and ([int]$Port -ne [int]$script:Port)) {
         Write-GitModeLog ("PORT_SHADOW_DETECT bare={0} script={1} using={2}" -f $Port, $script:Port, $sessionPort) 'WARN'
     }
@@ -3586,13 +3602,13 @@ else
   SLOT_OUT=`$SLOT
   PUBLISH_PORT=`$PORT
 fi
-# Never wipe TUNNEL_PORT (empty PORT_OUT -> laptop-exec fell back to legacy 20000+UID=21002).
-if [ -z "`$PORT_OUT" ] && [ -n "`$CUR_PORT" ]; then
+# Never wipe TUNNEL_PORT (empty/0 PORT_OUT -> laptop-exec NO_PORT / legacy 20000+UID).
+if { [ -z "`$PORT_OUT" ] || [ "`$PORT_OUT" = "0" ]; } && [ -n "`$CUR_PORT" ] && [ "`$CUR_PORT" != "0" ]; then
   PORT_OUT=`$CUR_PORT
   SLOT_OUT=`$CUR_SLOT
   printf 'PUSH_CONF port_empty_recovered server=%s\n' "`$CUR_PORT"
 fi
-if [ -z "`$PORT_OUT" ]; then
+if [ -z "`$PORT_OUT" ] || [ "`$PORT_OUT" = "0" ]; then
   printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s am_only=%s publish_port=ABORT_EMPTY\n' "`$CLEAR" "`$PREFER" "`$AM" "`$AM_ONLY"
   exit 0
 fi

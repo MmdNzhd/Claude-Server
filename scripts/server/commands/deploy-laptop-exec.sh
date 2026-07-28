@@ -182,6 +182,12 @@ for _hf in laptop-exec-audit-log.sh laptop-exec-guard.sh laptop-exec-guard-wrap.
 done
 _sync_golden_file "tests/test-laptop-exec.sh" 755 \
     "$REPO_ROOT/scripts/server/tests/test-laptop-exec.sh"
+_sync_golden_file "tests/test-tunnel-port-heal-hard.sh" 755 \
+    "$REPO_ROOT/scripts/server/tests/test-tunnel-port-heal-hard.sh"
+_sync_golden_file "tests/test-session-mount-class-hard.sh" 755 \
+    "$REPO_ROOT/scripts/server/tests/test-session-mount-class-hard.sh"
+_sync_golden_file "tests/test-routing-deny-hard.sh" 755 \
+    "$REPO_ROOT/scripts/server/tests/test-routing-deny-hard.sh"
 
 # Refresh anything still missing markers from laptop SoT.
 _sync_from_laptop "laptop-exec.sh" 755 || true
@@ -191,6 +197,9 @@ _sync_from_laptop "skills/laptop-exec/SKILL.md" 644 || true
 _sync_from_laptop "cursor-hooks/laptop-exec-session.sh" 755 || true
 _sync_from_laptop "cursor-hooks/laptop-exec-guard.sh" 755 || true
 _sync_from_laptop "tests/test-laptop-exec.sh" 755 || true
+_sync_from_laptop "tests/test-tunnel-port-heal-hard.sh" 755 || true
+_sync_from_laptop "tests/test-session-mount-class-hard.sh" 755 || true
+_sync_from_laptop "tests/test-routing-deny-hard.sh" 755 || true
 
 [ -f "$SERVER_DIR/laptop-exec.sh" ] || fail "missing $SERVER_DIR/laptop-exec.sh"
 grep -q 'GIT_MODE="off"' "$SERVER_DIR/laptop-exec.sh" || fail "laptop-exec.sh missing GIT_MODE=off (run deploy-client-bundle first?)"
@@ -273,6 +282,36 @@ if [ -f "$SERVER_DIR/tests/test-laptop-exec.sh" ]; then
     else
         install -m 755 "$SERVER_DIR/tests/test-laptop-exec.sh" "$dst"
         ok "tests/test-laptop-exec.sh"
+    fi
+fi
+if [ -f "$SERVER_DIR/tests/test-tunnel-port-heal-hard.sh" ]; then
+    dst="/usr/local/lib/claude-server/tests/test-tunnel-port-heal-hard.sh"
+    _strip_crlf "$SERVER_DIR/tests/test-tunnel-port-heal-hard.sh"
+    if _same_path "$SERVER_DIR/tests/test-tunnel-port-heal-hard.sh" "$dst"; then
+        ok "tests/test-tunnel-port-heal-hard.sh (in place)"
+    else
+        install -m 755 "$SERVER_DIR/tests/test-tunnel-port-heal-hard.sh" "$dst"
+        ok "tests/test-tunnel-port-heal-hard.sh"
+    fi
+fi
+if [ -f "$SERVER_DIR/tests/test-session-mount-class-hard.sh" ]; then
+    dst="/usr/local/lib/claude-server/tests/test-session-mount-class-hard.sh"
+    _strip_crlf "$SERVER_DIR/tests/test-session-mount-class-hard.sh"
+    if _same_path "$SERVER_DIR/tests/test-session-mount-class-hard.sh" "$dst"; then
+        ok "tests/test-session-mount-class-hard.sh (in place)"
+    else
+        install -m 755 "$SERVER_DIR/tests/test-session-mount-class-hard.sh" "$dst"
+        ok "tests/test-session-mount-class-hard.sh"
+    fi
+fi
+if [ -f "$SERVER_DIR/tests/test-routing-deny-hard.sh" ]; then
+    dst="/usr/local/lib/claude-server/tests/test-routing-deny-hard.sh"
+    _strip_crlf "$SERVER_DIR/tests/test-routing-deny-hard.sh"
+    if _same_path "$SERVER_DIR/tests/test-routing-deny-hard.sh" "$dst"; then
+        ok "tests/test-routing-deny-hard.sh (in place)"
+    else
+        install -m 755 "$SERVER_DIR/tests/test-routing-deny-hard.sh" "$dst"
+        ok "tests/test-routing-deny-hard.sh"
     fi
 fi
 

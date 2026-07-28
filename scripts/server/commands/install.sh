@@ -297,11 +297,17 @@ if [ -f "$SERVER_DIR/laptop-exec.sh" ]; then
     done
     ok "laptop-exec + skill + rule + hooks -> all users ~/.local/bin/ + ~/.cursor/"
     install -m 755 "$SERVER_DIR/laptop-exec.sh" /usr/local/lib/claude-server/laptop-exec.sh 2>/dev/null || true
-    if [ -f "$SERVER_DIR/tests/test-laptop-exec.sh" ]; then
-        mkdir -p /usr/local/lib/claude-server/tests
-        install -m 755 "$SERVER_DIR/tests/test-laptop-exec.sh" /usr/local/lib/claude-server/tests/test-laptop-exec.sh
-        ok "test-laptop-exec.sh -> /usr/local/lib/claude-server/tests/"
-    fi
+    # Hard tests also ship via deploy-laptop-exec (Sync Rule parity).
+    mkdir -p /usr/local/lib/claude-server/tests
+    for _tf in test-laptop-exec.sh \
+               test-tunnel-port-heal-hard.sh \
+               test-session-mount-class-hard.sh \
+               test-routing-deny-hard.sh; do
+        if [ -f "$SERVER_DIR/tests/$_tf" ]; then
+            install -m 755 "$SERVER_DIR/tests/$_tf" "/usr/local/lib/claude-server/tests/$_tf"
+            ok "$_tf -> /usr/local/lib/claude-server/tests/"
+        fi
+    done
 fi
 if [ -f "$SERVER_DIR/laptop-exec-setup.sh" ]; then
     install -m 755 "$SERVER_DIR/laptop-exec-setup.sh" /usr/local/bin/laptop-exec-setup

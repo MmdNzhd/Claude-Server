@@ -142,12 +142,139 @@ _cmd_has_non_mount_abs() {
   return 1
 }
 
+_guard_mount_class() {
+  # Probe like session: not in /proc => NOT_LIVE; in /proc but ls I/O fail => STALE; else MOUNTED.
+  # Also emit NOT_MOUNTED when path empty (mapped near shell deny allow-path).
+  local mp="$1" out="" rc=0
+  [[ -n "$mp" ]] || { printf 'NOT_MOUNTED'; return; }
+  if ! grep -F " ${mp} " /proc/mounts >/dev/null 2>&1; then
+    printf 'NOT_LIVE'
+    return
+  fi
+  out=$(timeout 2 ls "$mp" 2>&1) || rc=$?
+  if [[ "$rc" -ne 0 ]] || [[ "$out" == *"Input/output error"* ]] || [[ "$out" == *"Transport endpoint"* ]]; then
+    printf 'STALE'
+    return
+  fi
+  printf 'MOUNTED'
+}
+
+# Resolve project id for LE routing: -p/--project in cmd, else cwd /mounts/ID, else ACTIVE_MOUNT.
+_shell_le_project_id() {
+  local cmd="$1" cwd="$2" pid="" conf="${HOME}/.claude-connect.conf" am=""
+  if [[ "$cmd" =~ (^|[[:space:];|&])laptop-exec([[:space:]]+[^;|&]*) ]]; then
+    local le_tail="${BASH_REMATCH[2]:-}"
+    if [[ "$le_tail" =~ (^|[[:space:]])-p[[:space:]]+([^[:space:]]+) ]]; then
+      printf '%s' "${BASH_REMATCH[2]}"
+      return 0
+    fi
+    if [[ "$le_tail" =~ (^|[[:space:]])--project(=|[[:space:]]+)([^[:space:]]+) ]]; then
+      printf '%s' "${BASH_REMATCH[3]}"
+      return 0
+    fi
+  fi
+  if [[ "$cwd" =~ /mounts/([^/[:space:]]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  if [[ -f "$conf" ]]; then
+    am=$(grep -E '^(ACTIVE_MOUNT|active_mount)=' "$conf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d '\r' || true)
+    [[ -n "$am" ]] && { printf '%s' "$am"; return 0; }
+  fi
+  return 1
+}
+
+# True when command invokes laptop-exec with verb read or rg (not git/run/write/status/...).
+_cmd_is_le_read_or_rg() {
+  local cmd="$1" scan="" line="" rest="" tok="" skip_next=0 first=""
+  # Strip shell comments to reduce false positives on "laptop-exec read" in notes.
+  cmd="${cmd%%#*}"
+  [[ "$cmd" == *"laptop-exec"* ]] || return 1
+  scan="$(_shell_scan_text "$cmd" 2>/dev/null || printf '%s' "$cmd")"
+  # Split into simple-command segments so "echo laptop-exec read" does not match.
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    rest="$line"
+    # Drop leading env assignments (FOO=1 BAR=2 laptop-exec ...).
+    while [[ "$rest" =~ ^[[:space:]]*[[:alnum:]_]+=[^[:space:]]+[[:space:]]+(.*)$ ]]; do
+      rest="${BASH_REMATCH[1]}"
+    done
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    [[ -z "$rest" ]] && continue
+    first="${rest%%[[:space:]]*}"
+    case "$first" in
+      laptop-exec|*/laptop-exec) ;;
+      *) continue ;;
+    esac
+    # Token walk after the laptop-exec command token.
+    skip_next=0
+    # shellcheck disable=SC2086
+    set -- $rest
+    shift || true  # drop laptop-exec
+    for tok in "$@"; do
+      if [[ "$skip_next" -eq 1 ]]; then
+        skip_next=0
+        continue
+      fi
+      case "$tok" in
+        -p|--project)
+          skip_next=1
+          continue
+          ;;
+        --project=*)
+          continue
+          ;;
+        -*)
+          continue
+          ;;
+        read|rg)
+          return 0
+          ;;
+        git|run|write|status|health|list|test|help|mount-status)
+          break
+          ;;
+        *)
+          break
+          ;;
+      esac
+    done
+  done < <(printf '%s\n' "$scan" | sed -E 's/&&|\|\||[;|&]/\n/g')
+  return 1
+}
+
 _shell_should_block() {
   local cmd="$1" cwd="$2"
-  # Permanent policy (2026-07-26): Shell on /mounts/ is ALLOWED for all users/projects
-  # (direct writes via cat/sed/redirects, and other shell). Read/Grep/Glob tools still
-  # denied in preToolUse. Keep helper for audit compatibility; always return "do not block".
-  return 1
+  local pid="" mp="" mclass=""
+  # Kill-switch: LAPTOP_EXEC_DENY_OFF=1 or LAPTOP_EXEC_ALLOW_LE_READ=1 → do not block.
+  if [[ "${LAPTOP_EXEC_DENY_OFF:-}" == "1" ]] || [[ "${LAPTOP_EXEC_ALLOW_LE_READ:-}" == "1" ]]; then
+    return 1
+  fi
+  # Conditional deny: laptop-exec read|rg only when mount class is MOUNTED.
+  # Allow LE read/rg on STALE / NOT_LIVE / NOT_MOUNTED. Fail-open on parse errors.
+  _cmd_is_le_read_or_rg "$cmd" || return 1
+  pid=$(_shell_le_project_id "$cmd" "$cwd" 2>/dev/null) || true
+  [[ -n "$pid" ]] || return 1
+  mp="${HOME}/mounts/${pid}"
+  mclass=$(_guard_mount_class "$mp" 2>/dev/null) || mclass="NOT_LIVE"
+  case "$mclass" in
+    MOUNTED)
+      _LE_ROUTING_DENY_PID="$pid"
+      _LE_ROUTING_DENY_CLASS="MOUNTED"
+      _LE_ROUTING_DENY_MP="$mp"
+      _le_audit_log WARN ROUTING_DENY \
+        "project=${pid}" "mount_class=MOUNTED" "mount=$(_le_audit_trunc "$mp" 200)" \
+        "cmd=$(_le_audit_trunc "$cmd" 400)" \
+        "$(_le_audit_session_fields)" "slots_busy=?" \
+        "hint=LE_READ_DENIED NEXT use Cursor Read/Grep on mount; LE read/rg only when STALE/NOT_LIVE"
+      return 0
+      ;;
+    STALE|NOT_LIVE|NOT_MOUNTED)
+      return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 # File targets only - NOT working_directory (that is cwd for Shell and would false-deny echo).
@@ -407,8 +534,8 @@ case "$event" in
     if _shell_should_block "$cmd" "$cwd"; then
       hint=$(_remap_hint Shell)
       _deny \
-        "SSH-first BLOCKED shell on /mounts/ (expected). Do NOT retry the same shell. $hint" \
-        "$(_deny_user_msg Shell)"
+        "ROUTING_DENY LE_READ_DENIED: laptop-exec read/rg blocked while mount MOUNTED (project=${_LE_ROUTING_DENY_PID:-?}). Do NOT retry LE read/rg. NEXT: use Cursor Read/Grep on ${_LE_ROUTING_DENY_MP:-/mounts/<project>}; LE read/rg only when STALE/NOT_LIVE. $hint" \
+        "LE_READ_DENIED: prefer Cursor Read/Grep on mount; LE read/rg only when STALE/NOT_LIVE."
     fi
     # Skip slots_busy flock scan on the hot Shell path (~8 lock probes = multi-agent tax).
     if [[ "$cmd" == *"laptop-exec"* ]]; then

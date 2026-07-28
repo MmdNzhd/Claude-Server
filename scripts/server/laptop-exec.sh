@@ -51,11 +51,11 @@ _die() {
 # Shared NEXT hints (agents map Cursor tool APIs onto laptop-exec — steer them back).
 _RG_FORBIDDEN='-i/-l/-n/-A/-B/-C/-m/-g/--glob/--type/--max-count/--pathspec'
 _rg_next() {
-    printf 'NEXT: if mount healthy use Cursor Grep on /home/%s/mounts/%s/ (preferred). Else: laptop-exec rg [-p ID] PATTERN [pathspec...] — NO %s; use pathspecs like src/ or '\''*.cs'\'' and regex |[]()+?.' \
+    printf 'NEXT: mount MOUNTED → Cursor Grep on /home/%s/mounts/%s/ first (not LE rg). Else: laptop-exec rg [-p ID] PATTERN [pathspec...] — NO --glob/-A/--type (also NO %s); pathspecs like src/ or '\''*.cs'\''.' \
         "${USER:-USER}" "${PROJECT_ID:-PROJECT}" "$_RG_FORBIDDEN"
 }
 _read_next() {
-    printf 'NEXT: if mount healthy use Cursor Read /home/%s/mounts/%s/REL (supports offset/limit). laptop-exec read = ONE relative file only — no --offset/--limit, no multi-file, no line numbers.' \
+    printf 'NEXT: mount MOUNTED → Cursor Read /home/%s/mounts/%s/REL with offset/limit. Else: laptop-exec read [-p ID] REL — ONE relative file only (no --offset/--limit, no multi-file).' \
         "${USER:-USER}" "${PROJECT_ID:-PROJECT}"
 }
 
@@ -216,6 +216,63 @@ _load_global() {
         fi
         TUNNEL_PORT=$_fallback
         unset _uid _deprecated _fallback _tp_stamp _tp_now _tp_prev _tp_live
+    else
+        # Legacy heal: conf still has deprecated 20000+UID (e.g. Smart 21002)
+        # while formula port (20000+(UID-1000)*10) is the live tunnel. Only
+        # rewrite when TUNNEL_PORT equals legacy exactly AND formula is TCP-live
+        # — never clobber arbitrary wrong ports or rewrite to a dead formula.
+        _uid=$(id -u)
+        _legacy=$((20000 + _uid))
+        if [ "$_uid" -ge 1000 ] 2>/dev/null; then
+            _formula=$((20000 + (_uid - 1000) * 10))
+        else
+            _formula=20020
+        fi
+        if [ "$TUNNEL_PORT" = "$_legacy" ] && [ "$_legacy" != "$_formula" ]; then
+            _tp_live=0
+            if timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/${_formula}" 2>/dev/null; then
+                _tp_live=1
+            fi
+            _tp_stamp="${HOME:-/tmp}/.cache/laptop-exec/tunnel-port-legacy.stamp"
+            _tp_now=$(date +%s 2>/dev/null || echo 0)
+            _tp_prev=0
+            [ -f "$_tp_stamp" ] && _tp_prev=$(cat "$_tp_stamp" 2>/dev/null || echo 0)
+            if [ "$_tp_live" -eq 1 ]; then
+                if [ -f "$CONNECT_CONF" ]; then
+                    grep -vE '^(TUNNEL_PORT|PORT)=' "$CONNECT_CONF" > "${CONNECT_CONF}.tpnew" 2>/dev/null || true
+                    printf 'TUNNEL_PORT=%s\n' "$_formula" >> "${CONNECT_CONF}.tpnew" 2>/dev/null || true
+                    mv -f "${CONNECT_CONF}.tpnew" "$CONNECT_CONF" 2>/dev/null || true
+                    chmod 600 "$CONNECT_CONF" 2>/dev/null || true
+                fi
+                TUNNEL_PORT=$_formula
+                if [ -z "${_LE_TUNNEL_LEGACY_WARNED:-}" ] || [ $((_tp_now - _tp_prev)) -ge 60 ]; then
+                    echo "info: TUNNEL_PORT legacy healed to ${_formula} (was deprecated ${_legacy}; formula live)" >&2
+                    if declare -F _le_audit_log >/dev/null 2>&1; then
+                        _le_audit_log INFO TUNNEL_PORT_LEGACY_HEALED \
+                            "port=${_formula}" "deprecated=${_legacy}" \
+                            "hint=conf had legacy 20000+UID; formula was live — rewritten"
+                    fi
+                    mkdir -p "$(dirname "$_tp_stamp")" 2>/dev/null || true
+                    printf '%s' "$_tp_now" > "$_tp_stamp" 2>/dev/null || true
+                    _LE_TUNNEL_LEGACY_WARNED=1
+                fi
+            else
+                # Formula not listening — do not rewrite (avoid false heal).
+                if [ -z "${_LE_TUNNEL_LEGACY_WARNED:-}" ] || [ $((_tp_now - _tp_prev)) -ge 60 ]; then
+                    echo "warn: TUNNEL_PORT_LEGACY_STALE port=${_legacy} formula=${_formula} not live (reconnect connect.bat/sh)" >&2
+                    if declare -F _le_audit_log >/dev/null 2>&1; then
+                        _le_audit_log WARN TUNNEL_PORT_LEGACY_STALE \
+                            "port=${_legacy}" "formula=${_formula}" \
+                            "hint=legacy port in conf but formula not listening — not rewritten"
+                    fi
+                    mkdir -p "$(dirname "$_tp_stamp")" 2>/dev/null || true
+                    printf '%s' "$_tp_now" > "$_tp_stamp" 2>/dev/null || true
+                    _LE_TUNNEL_LEGACY_WARNED=1
+                fi
+            fi
+            unset _tp_live _tp_stamp _tp_now _tp_prev
+        fi
+        unset _uid _legacy _formula
     fi
     case "${GIT_MODE,,}" in
         server|on|yes|1|slow) GIT_MODE="server" ;;
@@ -755,11 +812,11 @@ _reject_abs_or_mount_path() {
     local op="$1" p="$2"
     case "$p" in
         /home/*/mounts/*|~/mounts/*|/mnt/*)
-            _die "$op: Linux mount path not valid on laptop ($p). NEXT: use repo-relative with -p PROJECT (e.g. README.md), or Cursor Read/Grep on /mounts/."
+            _die "$op: Linux mount path not valid on laptop ($p). NEXT: use repo-relative with -p PROJECT (e.g. laptop-exec read -p PROJECT README.md). For /mounts/ use Cursor Read/Grep, not LE."
             ;;
     esac
     if [[ "$p" == /* || "$p" == [A-Za-z]:* || "$p" == \\\\* ]]; then
-        _die "$op: absolute path not supported ($p). NEXT: repo-relative only with -p PROJECT."
+        _die "$op: absolute path not supported ($p). NEXT: repo-relative only — laptop-exec <verb> -p PROJECT REL (never absolute/Windows paths)."
     fi
 }
 
@@ -831,12 +888,26 @@ _cmd_git() {
     _parse_project_flag "$@"; _strip_leading_dd
     [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec git [-p PROJECT] -- <args...>  ( -p BEFORE subcommand )"
     # Agents often put -p AFTER git args: `git status -p ID` → git unknown switch p.
-    local _i _tok
+    # Allow -p/--patch after log|show|diff (git patch); still DIE for misplaced LE -p/--project.
+    local _i _tok _patch_ctx=0
     for ((_i = 0; _i < ${#REMAINING[@]}; _i++)); do
         _tok="${REMAINING[_i]}"
-        if [ "$_tok" = "-p" ] || [ "$_tok" = "--project" ]; then
-            _die "git: -p/--project must come BEFORE the git subcommand (got: laptop-exec git ${REMAINING[*]}). NEXT: laptop-exec git -p PROJECT -- status"
-        fi
+        case "$_tok" in
+            log|show|diff) _patch_ctx=1 ;;
+            --project)
+                _die "git: -p/--project must come BEFORE the git subcommand (got: laptop-exec git ${REMAINING[*]}). NEXT: laptop-exec git -p PROJECT -- <subcommand> (LE -p before subcommand; git log|show|diff -p OK)"
+                ;;
+            -p)
+                if [ "$_patch_ctx" -ne 1 ]; then
+                    _die "git: -p/--project must come BEFORE the git subcommand (got: laptop-exec git ${REMAINING[*]}). NEXT: laptop-exec git -p PROJECT -- <subcommand> (LE -p before subcommand; git log|show|diff -p OK)"
+                fi
+                ;;
+            --patch)
+                if [ "$_patch_ctx" -ne 1 ]; then
+                    _die "git: -p/--project must come BEFORE the git subcommand (got: laptop-exec git ${REMAINING[*]}). NEXT: laptop-exec git -p PROJECT -- <subcommand> (LE -p before subcommand; git log|show|diff -p OK)"
+                fi
+                ;;
+        esac
     done
     _require_session; _resolve_project
     local _t="${LAPTOP_EXEC_GIT_TIMEOUT:-300}"
@@ -1125,10 +1196,10 @@ main() {
                     rg) _cmd_rg "$@" ;;
                     test) _cmd_test "$@" ;;
                     -h|--help|help) _usage ;;
-                    *) _die "unknown command '$cmd' (not a laptop-exec verb). NEXT: status|health|list|read|write|rg|git|run|test — see --help. Do not invent rpath/pathspec." ;;
+                    *) _die "unknown command '$cmd' (not a laptop-exec verb). NEXT: real verbs: status|health|list|read|write|rg|git|run|test|path|count|help — see --help. Do not invent rpath/pathspec/ls." ;;
                 esac
             else
-                _die "unknown command '$cmd' (not a laptop-exec verb). NEXT: status|health|list|read|write|rg|git|run|test — see --help. Do not invent rpath/pathspec."
+                _die "unknown command '$cmd' (not a laptop-exec verb). NEXT: real verbs: status|health|list|read|write|rg|git|run|test|path|count|help — see --help. Do not invent rpath/pathspec/ls."
             fi
             ;;
     esac

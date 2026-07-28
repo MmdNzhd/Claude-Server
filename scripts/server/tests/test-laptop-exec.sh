@@ -21,6 +21,14 @@ grep -q 'must come BEFORE' "$LE" && pass "git -p order DIE" || fail "git -p orde
 grep -q '_LE_TUNNEL_WARNED' "$LE" && pass "TUNNEL rate-limit" || fail "TUNNEL rate-limit"
 grep -q 'stripped CRLF' "$LE" && pass "write CRLF strip" || fail "write CRLF strip"
 
+# HT-S.1 static: _cmd_git must allow -p/--patch after log|show|diff (fails until GREEN)
+_cmd_git_body=$(sed -n '/^_cmd_git()/,/^_rg_is_regex()/p' "$LE")
+if echo "$_cmd_git_body" | grep -qE 'log\|show\|diff'; then
+  pass "git patch allow log|show|diff"
+else
+  fail "git patch allow log|show|diff (HT-S: _cmd_git must allow -p after log|show|diff)"
+fi
+
 grep -q 'HEALTHY MOUNT' "$SESSION" && pass "session HEALTHY MOUNT" || fail "session HEALTHY MOUNT"
 grep -q 'HEALTHY MOUNT' "$GUARD" && pass "guard HEALTHY MOUNT" || fail "guard HEALTHY MOUNT"
 grep -q 'HARD RULE' "$SKILL" && pass "skill HARD RULE" || fail "skill HARD RULE"
@@ -42,8 +50,16 @@ done
 if command -v laptop-exec >/dev/null 2>&1 && laptop-exec status >/dev/null 2>&1; then
   out=$(laptop-exec read /home/smart/mounts/claude-code-server/README.md 2>&1 || true)
   echo "$out" | grep -qi 'mount path\|relative\|NEXT' && pass "live DIE abs mount" || fail "live DIE abs mount: $out"
+  # HT-S.2: misplaced LE -p after git subcommand must still DIE
   out=$(laptop-exec git status -p claude-code-server 2>&1 || true)
   echo "$out" | grep -qi 'BEFORE\|NEXT' && pass "live DIE git -p order" || fail "live DIE git -p order: $out"
+  # HT-S.1: git log -p must NOT be rejected as LE project -p (RED until GREEN)
+  out=$(laptop-exec -p claude-code-server git -- log -p -1 --oneline 2>&1 || true)
+  if echo "$out" | grep -q 'must come BEFORE'; then
+    fail "git log -p wrongly rejected"
+  else
+    pass "live git log -p allowed"
+  fi
 else
   echo "  skip live DIE (tunnel down)"
 fi

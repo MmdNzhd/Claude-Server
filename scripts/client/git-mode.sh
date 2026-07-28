@@ -111,6 +111,29 @@ push_server_connect_conf() {
     fi
     lu="${LAPTOP_USER:-}"
     port="${PORT:-}"
+    # Never push empty TUNNEL_PORT (hamed Mac NO_PORT). Prefer session PORT, else local CFG,
+    # else formula 20000+(UID-1000)*10+slot when SERVER_UID_STR is known.
+    if [ -z "$port" ] || [ "$port" = "0" ]; then
+        if [ -f "${CFG:-}" ]; then
+            port="$(grep -E '^TUNNEL_PORT=' "$CFG" 2>/dev/null | tail -1 | cut -d= -f2- | tr -dc '0-9')"
+        fi
+    fi
+    if [ -z "$port" ] || [ "$port" = "0" ]; then
+        if [ -z "${SERVER_UID_STR:-}" ]; then
+            SERVER_UID_STR="$(sshx 'id -u' 2>/dev/null | tr -d '\r' | grep -E '^[0-9]+$' | head -1 | tr -dc '0-9')"
+        fi
+        _uid_fb="${SERVER_UID_STR:-}"
+        _slot_fb="${TUNNEL_SLOT:-0}"
+        case "$_slot_fb" in ''|*[!0-9]*) _slot_fb=0 ;; esac
+        if [ -n "$_uid_fb" ] && declare -F tunnel_port_user_base >/dev/null 2>&1; then
+            _base_fb="$(tunnel_port_user_base "$_uid_fb")"
+            port=$(( _base_fb + _slot_fb ))
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "PUSH_CONF port_from_formula uid=$_uid_fb slot=$_slot_fb port=$port" 'INFO'
+            fi
+        fi
+        unset _uid_fb _slot_fb _base_fb
+    fi
     dedupe_key="${lu}|${port}|${mode}|${prefer}|${clear_flag}"
     now_ts="$(date +%s 2>/dev/null || printf '0')"
     if [ -n "${_LAST_PUSH_CONF_KEY:-}" ] && [ "$_LAST_PUSH_CONF_KEY" = "$dedupe_key" ] \
@@ -136,16 +159,33 @@ SLOT='${TUNNEL_SLOT:-}'
 MODE='$mode'
 OS='$os'
 HK='${LAPTOP_HOSTKEY_FP:-}'
+CUR_AM=\$(grep -E '^ACTIVE_MOUNT=' "\$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
+CUR_PORT=\$(grep -E '^TUNNEL_PORT=' "\$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
+CUR_SLOT=\$(grep -E '^TUNNEL_SLOT=' "\$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
 if [ "\$CLEAR" = "1" ]; then
   AM=
 elif [ -n "\$PREFER" ]; then
   AM=\$PREFER
 else
-  AM=\$(grep -E '^ACTIVE_MOUNT=' "\$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
+  AM=\$CUR_AM
 fi
-printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nPORT=%s\nTUNNEL_SLOT=%s\nGIT_MODE=%s\nLAPTOP_OS=%s\nACTIVE_MOUNT=%s\nLAPTOP_HOSTKEY_FP=%s\n' "\$LU" "\$PORT" "\$PORT" "\$SLOT" "\$MODE" "\$OS" "\$AM" "\$HK" > "\$HOME/.claude-connect.conf"
+PORT_OUT=\$PORT
+SLOT_OUT=\$SLOT
+# Never wipe TUNNEL_PORT (empty -> laptop-exec NO_PORT / legacy 20000+UID).
+if [ -z "\$PORT_OUT" ] || [ "\$PORT_OUT" = "0" ]; then
+  if [ -n "\$CUR_PORT" ] && [ "\$CUR_PORT" != "0" ]; then
+    PORT_OUT=\$CUR_PORT
+    SLOT_OUT=\$CUR_SLOT
+    printf 'PUSH_CONF port_empty_recovered server=%s\n' "\$CUR_PORT"
+  fi
+fi
+if [ -z "\$PORT_OUT" ] || [ "\$PORT_OUT" = "0" ]; then
+  printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s publish_port=ABORT_EMPTY\n' "\$CLEAR" "\$PREFER" "\$AM"
+  exit 0
+fi
+printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nPORT=%s\nTUNNEL_SLOT=%s\nGIT_MODE=%s\nLAPTOP_OS=%s\nACTIVE_MOUNT=%s\nLAPTOP_HOSTKEY_FP=%s\n' "\$LU" "\$PORT_OUT" "\$PORT_OUT" "\$SLOT_OUT" "\$MODE" "\$OS" "\$AM" "\$HK" > "\$HOME/.claude-connect.conf"
 chmod 600 "\$HOME/.claude-connect.conf" 2>/dev/null || true
-printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s\n' "\$CLEAR" "\$PREFER" "\$AM"
+printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s publish_port=%s\n' "\$CLEAR" "\$PREFER" "\$AM" "\$PORT_OUT"
 EOF
 )"
     b64="$(printf '%s' "$remote_body" | base64 | tr -d '\n')"
