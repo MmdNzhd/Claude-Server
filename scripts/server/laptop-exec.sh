@@ -765,9 +765,9 @@ _cmd_read() {
     if [ "${#REMAINING[@]}" -ne 1 ] || [ "$nfiles" -ne 1 ]; then
         _die "read: got ${#REMAINING[@]} args (need exactly 1 file). $(_read_next)"
     fi
-    _require_session; _resolve_project
     local file="${REMAINING[0]}"; file="${file//\\//}"
     _reject_abs_or_mount_path read "$file"
+    _require_session; _resolve_project
     if [ "$LAPTOP_OS" = "mac" ]; then _run_in_project "$REMOTE_PATH" cat "$file"
     else _run_in_project "$REMOTE_PATH" powershell -NoProfile -Command "[Console]::OutputEncoding=[Text.UTF8Encoding]::new(\$false); \$t=[IO.File]::ReadAllText((Resolve-Path -LiteralPath '${file//\'/''}').Path,[Text.UTF8Encoding]::new(\$false)); [Console]::Out.Write(\$t)"; fi
 }
@@ -775,9 +775,9 @@ _cmd_read() {
 _cmd_write() {
     _parse_project_flag "$@"; _strip_leading_dd
     [ "${#REMAINING[@]}" -eq 1 ] || _die "usage: laptop-exec write [-p PROJECT] <file>  (stdin)"
-    _require_session; _resolve_project
     local file="${REMAINING[0]}" tmp; file="${file//\\//}"
     _reject_abs_or_mount_path write "$file"
+    _require_session; _resolve_project
     tmp=$(mktemp); cat >"$tmp" || _die "write: no stdin"
     # MCP / Windows editors often inject CR; strip for shell/python so bash -n works.
     case "$file" in
