@@ -173,24 +173,49 @@ _load_global() {
         else
             _fallback=20020
         fi
-        # Rate-limit: once per process + once per ~60s on disk (was 735×/day noise).
+        # If formula fallback is actually listening, heal conf (self-heal may have
+        # stripped TUNNEL_PORT while tunnel stayed up — amir 735× WARN day).
+        _tp_live=0
+        if timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/${_fallback}" 2>/dev/null; then
+            _tp_live=1
+        fi
         _tp_stamp="${HOME:-/tmp}/.cache/laptop-exec/tunnel-port-missing.stamp"
         _tp_now=$(date +%s 2>/dev/null || echo 0)
         _tp_prev=0
         [ -f "$_tp_stamp" ] && _tp_prev=$(cat "$_tp_stamp" 2>/dev/null || echo 0)
-        if [ -z "${_LE_TUNNEL_WARNED:-}" ] || [ $((_tp_now - _tp_prev)) -ge 60 ]; then
-            echo "warn: TUNNEL_PORT_MISSING fallback=${_fallback} deprecated_would_be=${_deprecated} (reconnect connect.bat/sh)" >&2
-            if declare -F _le_audit_log >/dev/null 2>&1; then
-                _le_audit_log WARN TUNNEL_PORT_MISSING \
-                    "fallback=${_fallback}" "deprecated_would_be=${_deprecated}" \
-                    "hint=reconnect connect.bat/sh"
+        if [ "$_tp_live" -eq 1 ]; then
+            if [ -f "$CONNECT_CONF" ]; then
+                grep -vE '^(TUNNEL_PORT|PORT)=' "$CONNECT_CONF" > "${CONNECT_CONF}.tpnew" 2>/dev/null || true
+                printf 'TUNNEL_PORT=%s\n' "$_fallback" >> "${CONNECT_CONF}.tpnew" 2>/dev/null || true
+                mv -f "${CONNECT_CONF}.tpnew" "$CONNECT_CONF" 2>/dev/null || true
+                chmod 600 "$CONNECT_CONF" 2>/dev/null || true
             fi
-            mkdir -p "$(dirname "$_tp_stamp")" 2>/dev/null || true
-            printf '%s' "$_tp_now" > "$_tp_stamp" 2>/dev/null || true
-            _LE_TUNNEL_WARNED=1
+            if [ -z "${_LE_TUNNEL_WARNED:-}" ] || [ $((_tp_now - _tp_prev)) -ge 60 ]; then
+                echo "info: TUNNEL_PORT healed to ${_fallback} (was missing in conf; tunnel live)" >&2
+                if declare -F _le_audit_log >/dev/null 2>&1; then
+                    _le_audit_log INFO TUNNEL_PORT_HEALED \
+                        "port=${_fallback}" "deprecated_would_be=${_deprecated}" \
+                        "hint=conf lacked TUNNEL_PORT; fallback was live — rewritten"
+                fi
+                mkdir -p "$(dirname "$_tp_stamp")" 2>/dev/null || true
+                printf '%s' "$_tp_now" > "$_tp_stamp" 2>/dev/null || true
+                _LE_TUNNEL_WARNED=1
+            fi
+        else
+            if [ -z "${_LE_TUNNEL_WARNED:-}" ] || [ $((_tp_now - _tp_prev)) -ge 60 ]; then
+                echo "warn: TUNNEL_PORT_MISSING fallback=${_fallback} deprecated_would_be=${_deprecated} (reconnect connect.bat/sh)" >&2
+                if declare -F _le_audit_log >/dev/null 2>&1; then
+                    _le_audit_log WARN TUNNEL_PORT_MISSING \
+                        "fallback=${_fallback}" "deprecated_would_be=${_deprecated}" \
+                        "hint=reconnect connect.bat/sh"
+                fi
+                mkdir -p "$(dirname "$_tp_stamp")" 2>/dev/null || true
+                printf '%s' "$_tp_now" > "$_tp_stamp" 2>/dev/null || true
+                _LE_TUNNEL_WARNED=1
+            fi
         fi
         TUNNEL_PORT=$_fallback
-        unset _uid _deprecated _fallback _tp_stamp _tp_now _tp_prev
+        unset _uid _deprecated _fallback _tp_stamp _tp_now _tp_prev _tp_live
     fi
     case "${GIT_MODE,,}" in
         server|on|yes|1|slow) GIT_MODE="server" ;;
@@ -1031,6 +1056,8 @@ EOF
 }
 
 main() {
+    # Capture raw argv BEFORE any _die (early flag parse used to leave argv=error msg).
+    _LE_LAST_ARGV=$(_le_audit_trunc "$*" 350)
     # Accept global -p/-w BEFORE subcommand (agents often write: laptop-exec -p ID read REL)
     local global_args=()
     while [ $# -gt 0 ]; do

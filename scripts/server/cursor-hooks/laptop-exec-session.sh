@@ -80,15 +80,37 @@ if [[ -z "$pid" ]]; then
   jq -n --arg ctx "$ctx" '{additional_context:$ctx}'
 else
   rpath="$(_remote_path_for "$pid" || true)"
-  _le_audit_log INFO SESSION_START "project=${pid}" "workspace=/home/${user}/mounts/${pid}" \
-    "cwd=$(_le_audit_trunc "${cwd:-}" 200)" "$(_le_audit_session_fields)" \
-    "slots_busy=$(_le_audit_slots_busy)/8" "hint=Hybrid: mount Read/Grep ~16-32; MCP FS ~8-12 write/read; LE <=4 (cap 8). Never LE read/rg when mount healthy."
-  examples="Examples: healthy READ=>Cursor Read /home/$USER/mounts/${pid}/REL (NOT laptop-exec read); GREP=>Cursor Grep; if mount fails=>MCP then LE | WRITE=>MCP then mount | Glob=>MCP search | git: laptop-exec git -p ${pid} -- status."
+  ws="/home/${user}/mounts/${pid}"
+  # ACTIVE_MOUNT may differ from workspace project (single-project SSHFS).
+  am=""
+  if [[ -f "${HOME}/.claude-connect.conf" ]]; then
+    am=$(grep -E '^(ACTIVE_MOUNT|active_mount)=' "${HOME}/.claude-connect.conf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d '\r')
+  fi
+  # Prefer /proc/mounts (mountpoint -q hangs on frozen SSHFS).
+  mount_live=0
+  if grep -F " ${ws} " /proc/mounts >/dev/null 2>&1; then
+    mount_live=1
+  fi
+  if [[ "$mount_live" -eq 1 ]]; then
+    _le_audit_log INFO SESSION_START "project=${pid}" "workspace=${ws}" "mount=LIVE" \
+      "active_mount=${am:-?}" "cwd=$(_le_audit_trunc "${cwd:-}" 200)" "$(_le_audit_session_fields)" \
+      "slots_busy=$(_le_audit_slots_busy)/8" "hint=HEALTHY MOUNT live — Cursor Read/Grep; never LE read/rg first."
+    base_live="PRIORITY+FAILOVER (2026-07-28): Prefer 1st path; if down use 2nd/3rd same turn. HEALTHY MOUNT LIVE path=${ws}: NEVER laptop-exec read/rg — Cursor Read/Grep (~16-32). READ/GREP=mount→MCP→LE. WRITE=MCP→mount→LE. Glob=MCP→mount. git=LE -p ${pid}. No rg ripgrep flags. LE read=one relative file."
+    examples="Examples: READ=>Cursor Read ${ws}/REL; GREP=>Cursor Grep; mount fail=>MCP then LE -p ${pid} | WRITE=>MCP | git: laptop-exec git -p ${pid} -- status."
+    if [[ -n "${am:-}" && "$am" != "$pid" ]]; then
+      examples="${examples} NOTE: ACTIVE_MOUNT=${am} (other project may also be configured); this workspace mount is LIVE."
+    fi
+  else
+    _le_audit_log WARN SESSION_START "project=${pid}" "workspace=${ws}" "mount=NOT_LIVE" \
+      "active_mount=${am:-?}" "cwd=$(_le_audit_trunc "${cwd:-}" 200)" "$(_le_audit_session_fields)" \
+      "slots_busy=$(_le_audit_slots_busy)/8" "hint=Do NOT Cursor Read ${ws} — use MCP then LE -p ${pid}."
+    base_live="PRIORITY+FAILOVER (2026-07-28): MOUNT NOT LIVE for ${pid} (ACTIVE_MOUNT=${am:-none}, path=${ws} not in /proc/mounts). Do NOT Cursor Read/Grep ${ws}. Use MCP FileSystem then laptop-exec -p ${pid}. WRITE=MCP→LE. git=LE -p ${pid}. Prefer reconnect/mount if you need SSHFS."
+    examples="Examples: READ=>MCP abs Windows path or laptop-exec read -p ${pid} REL | git: laptop-exec git -p ${pid} -- status | to mount: connect and select project ${pid}."
+  fi
   if [[ -n "${rpath:-}" ]]; then
     examples="${examples} Project Windows root: ${rpath}"
   fi
-  ctx="$base $hybrid Project=${pid}. ${examples} $multi"
-  ws="/home/${user}/mounts/${pid}"
+  ctx="$base_live $hybrid Project=${pid}. ${examples} $multi"
   if [[ -n "${rpath:-}" ]]; then
     jq -n --arg ctx "$ctx" --arg pid "$pid" --arg ws "$ws" --arg rpath "$rpath" \
       '{additional_context:$ctx, env:{LAPTOP_EXEC_WORKSPACE:$ws, LAPTOP_EXEC_PROJECT:$pid, LAPTOP_REMOTE_PATH:$rpath}}'

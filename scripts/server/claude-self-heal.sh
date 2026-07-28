@@ -66,14 +66,18 @@ _clear_unowned_tunnel_port() {
     local reason="${1:-unowned}" old="${TUNNEL_PORT:-}"
     [ -n "$old" ] || return 0
     # Never fuser-kill — may be another laptop's live reverse tunnel.
+    # NOTE: stripping TUNNEL_PORT while agents keep running causes TUNNEL_PORT_MISSING
+    # storms (amir 735×/day). laptop-exec will heal-write if formula fallback is live.
     if [ -f "$CONNECT_CONF" ]; then
         grep -vE '^(TUNNEL_PORT|PORT|TUNNEL_SLOT)=' "$CONNECT_CONF" > "$CONNECT_CONF.tmp" 2>/dev/null \
             && mv "$CONNECT_CONF.tmp" "$CONNECT_CONF" \
             || true
+        printf '# cleared TUNNEL_PORT=%s at %s (%s); LE may heal if tunnel live\n' \
+            "$old" "$(date -Is 2>/dev/null || date)" "$reason" >> "$CONNECT_CONF" 2>/dev/null || true
         chmod 600 "$CONNECT_CONF" 2>/dev/null || true
     fi
     TUNNEL_PORT=""
-    _audit "cleared unowned TUNNEL_PORT=$old ($reason) — server will reacquire if owned block live"
+    _audit "cleared unowned TUNNEL_PORT=$old ($reason) — LE heal-writes if fallback TCP live"
 }
 
 # Auth-primary ownership (never clear on head-1 hostkey alone).
