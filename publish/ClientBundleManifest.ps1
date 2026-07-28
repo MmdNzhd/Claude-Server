@@ -67,6 +67,21 @@ function Set-RepoConnectVersion {
     # keep LF for mac shell
     $sh2 = $sh2 -replace "`r`n", "`n" -replace "`r", "`n"
     [System.IO.File]::WriteAllBytes($macSh, [System.Text.UTF8Encoding]::new($false).GetBytes($sh2))
+
+    # Keep client-update-policy.json "latest" in lockstep with ConnectVersion.
+    # If latest lags and someone hot-patches policy on the live share after deploy,
+    # checksums.txt still has the old hash → client "Update checksum failed" (live 2026-07-28).
+    $policyPath = Join-Path $ProjectRoot 'scripts\server\client-update-policy.json'
+    if (Test-Path -LiteralPath $policyPath) {
+        $pol = Get-Content -LiteralPath $policyPath -Raw
+        $pol2 = [regex]::Replace($pol, '("latest"\s*:\s*")[^"]*(")', "`${1}$Version`${2}")
+        if ($pol2 -eq $pol -and $pol -notmatch [regex]::Escape('"latest"') ) {
+            throw "client-update-policy.json missing latest field"
+        }
+        if ($pol2 -ne $pol) {
+            [System.IO.File]::WriteAllText($policyPath, $pol2.TrimEnd() + "`n", [System.Text.UTF8Encoding]::new($false))
+        }
+    }
 }
 
 function Build-ClientBundleStageFromRepo {

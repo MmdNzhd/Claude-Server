@@ -30,7 +30,7 @@ $authSrc = Get-Content -LiteralPath $authPath -Raw
 . $elPath
 
 Write-Host ''
-Write-Host '=== Editor + auth hard batch (14 asserts) ===' -ForegroundColor Cyan
+Write-Host '=== Editor + auth hard batch (19 asserts) ===' -ForegroundColor Cyan
 Write-Host ''
 
 # 1) Isolated server profile dirs differ by site (Smart vs Sepidz)
@@ -127,15 +127,55 @@ Assert (
     ($tpl -match '\$\{rootName\}') -and ($tpl -match '\$\{dirty\}') -and ($tpl -match '\[Claude Server Smart\]')
 ) 'Get-CursorServerWindowTitleTemplate preserves ${rootName} and site tag literals'
 
-# 14) on_folder detection delegates to anchored title matcher (contract wiring)
+# 14) on_folder detection requires title-matched VISIBLE window (not cmdline+any visible)
 Assert (
-    ($elSrc -match 'function Test-CursorWindowTitleMatchesProject') -and
-    ($elSrc -match 'Test-CursorWindowTitleMatchesProject -Title \$title -RootName \$rootName')
-) 'Test-RemoteEditorOnCorrectFolder uses Test-CursorWindowTitleMatchesProject for title match'
+    ($elSrc -match 'function Test-CursorVisibleWindowMatchesProject') -and
+    ($elSrc -match 'Test-CursorVisibleWindowMatchesProject -ProcessId') -and
+    ($elSrc -notmatch 'if \(\$visibleWins\.Count -gt 0\) \{ return \$true \}')
+) 'on_folder requires Test-CursorVisibleWindowMatchesProject (no cmdline+any-visible shortcut)'
+
+# 15) Confirm-RemoteEditorLaunchVisible is project-scoped (no any-MainWindowHandle return)
+$confirmFn = Get-FunctionSource -Content $elSrc -Name 'Confirm-RemoteEditorLaunchVisible'
+Assert (
+    ($confirmFn -match 'Test-RemoteEditorOnCorrectFolder') -and
+    ($confirmFn -match 'Project-scoped only') -and
+    ($confirmFn -notmatch 'if \(\$wp\.MainWindowHandle -ne \[IntPtr\]::Zero\) \{ return \$true \}')
+) 'Confirm-RemoteEditorLaunchVisible is project-scoped only'
+
+# 16) Preparing-tunnel: skip sidecar thrash when tunnel has no proxy legs
+$gmSrc = Get-Content -LiteralPath (Get-ClientFile 'git-mode.ps1') -Raw
+Assert (
+    ($gmSrc -match 'skip_sidecar reason=no_tunnel_proxy_legs') -and
+    ($gmSrc -match 'PROXY_FALLBACK mode=server_direct reason=no_tunnel_proxy_legs')
+) 'Complete-CursorProxyAfterTunnel skips sidecar when no tunnel proxy legs'
+
+# 17) Skip must NOT use Get-SocksProxyPort defaults / adopt_backends (always 19080) — that defeated skip (P0)
+$completeFn = Get-FunctionSource -Content $gmSrc -Name 'Complete-CursorProxyAfterTunnel'
+Assert (
+    ($completeFn -match 'sessionHasLegs') -and
+    ($completeFn -match 'SessionTunnelProxyLegs') -and
+    ($completeFn -notmatch 'adopt_backends') -and
+    ($completeFn -notmatch 'elseif \(Get-Command Get-SocksProxyPort')
+) 'Complete skip uses session legs only (no adopt_backends / Get-SocksProxyPort fallback)'
+
+# 18) WindowOpenWhenOnFolder is title-matched for cursor (no cmdline+any-MainWindowHandle first)
+$winOpenFn = Get-FunctionSource -Content $elSrc -Name 'Test-RemoteEditorWindowOpenWhenOnFolder'
+Assert (
+    ($winOpenFn -match 'Project-scoped only') -and
+    ($winOpenFn -match 'Test-CursorWindowTitleMatchesProject') -and
+    ($winOpenFn -match 'Get-CursorMainProfileProcesses') -and
+    ($winOpenFn -match "if \(\`$EditorCmd -eq 'cursor'\)")
+) 'WindowOpenWhenOnFolder requires title-matched visible window for cursor'
+
+# 19) Post-auth Ensure gated (2nd thrash after AUTH in live a8a37c2a418d)
+Assert (
+    ($winSrc -match 'SIDECAR_ENSURE skip reason=no_tunnel_proxy_legs') -and
+    ($winSrc -match 'SessionTunnelProxyLegs -eq \$false')
+) 'connect.ps1 skips post-auth Ensure-CursorProxySidecar when no tunnel proxy legs'
 
 Write-Host ''
 if ($fail -eq 0) {
-    Write-Host 'All editor-auth hard-batch tests passed (14 asserts).' -ForegroundColor Green
+    Write-Host 'All editor-auth hard-batch tests passed (19 asserts).' -ForegroundColor Green
     exit 0
 }
 Write-Host "$fail test(s) failed." -ForegroundColor Red

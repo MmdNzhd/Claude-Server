@@ -35,22 +35,10 @@ printf '[%s] [INFO] [%s] BOOTSTRAP: connect.sh start here=%s\n' \
 chmod 600 "$_bootstrap_log_file" 2>/dev/null || true
 
 _update_script="$(cd "$(dirname "$0")" && pwd)/connect-update.sh"
-if [ -f "$_update_script" ]; then
-    bash "$_update_script"
-    _urc=$?
-    if [ "$_urc" -eq 2 ]; then
-        _upd_depth="${CLAUDE_CONNECT_UPDATE_DEPTH:-0}"
-        if [ "$_upd_depth" -ge 2 ]; then
-            printf '  [X] Update relaunch limit reached - continuing with current files.\n'
-  if declare -F connect_log >/dev/null 2>&1; then connect_log 'FAIL UPDATE_RELAUNCH_LIMIT: depth>=3 continuing with current files' 'ERROR'; fi
-        else
-            export CLAUDE_CONNECT_UPDATE_DEPTH=$((_upd_depth + 1))
-            exec bash "$0" "$@"
-        fi
-    fi
-fi
+# Manual-only updates: skip auto-update on start (user presses u in the menu).
+# connect-update.sh remains available for invoke_connect_manual_update.
 
-CONNECT_VERSION='20260727.31'
+CONNECT_VERSION='20260727.36'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).
@@ -578,15 +566,8 @@ if ! warn_foreign_server_session; then
     exit 1
 fi
 
-# Re-run client auto-update now that SSH to the server works (early update often
-# fails with BatchMode before keys/alias are ready - Mac stays stuck on old version).
-if [ -f "$_update_script" ]; then
-    bash "$_update_script"
-    _urc=$?
-    if [ "$_urc" -eq 2 ]; then
-        exec bash "$0" "$@"
-    fi
-fi
+# Manual-only updates: do not re-run connect-update after SSH is ready.
+# User presses u in the menu (invoke_connect_manual_update).
 
 step "Server setup"
 if ! initialize_server_session "$_script_dir"; then

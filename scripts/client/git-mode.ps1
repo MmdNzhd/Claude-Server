@@ -1714,6 +1714,42 @@ function Complete-CursorProxyAfterTunnel {
     # "Failed to establish a socket connection to proxies: PROXY 127.0.0.1:18998".
     # Last resort when all proxies fail: clear dead 18998 so laptop chat can recover
     # while remote Machine settings use server NIC (server_direct).
+    #
+    # Fast path (live Preparing-tunnel 14929ms / 15022ms, 2026-07-28): when THIS tunnel
+    # has no -L proxy legs (xray closed), Ensure-CursorProxySidecar starts sticky fronts
+    # against dead backends and flaps ~10s. NEVER "adopt" orphan 19080/19180 listeners via
+    # Get-SocksProxyPort defaults — that defeated skip on reuse when SessionTunnelProxyLegs
+    # was unset (Bugbot 2026-07-28). Only session-claimed legs may start the sidecar.
+    $sessionSocks = 0
+    $sessionHttp = 0
+    if ($script:SocksProxyPort) { try { $sessionSocks = [int]$script:SocksProxyPort } catch { $sessionSocks = 0 } }
+    if ($script:HttpProxyPort) { try { $sessionHttp = [int]$script:HttpProxyPort } catch { $sessionHttp = 0 } }
+    # Explicit false (xray_closed / reuse no -L) wins even if stale SocksProxyPort remains.
+    if ($script:SessionTunnelProxyLegs -eq $false) {
+        Write-GitModeLog 'Complete-CursorProxyAfterTunnel skip_sidecar reason=no_tunnel_proxy_legs' 'INFO'
+        $frontHttp = Get-CursorHttpFrontPort
+        if ($frontHttp -gt 0 -and (Test-LocalPortOpen -PortNum $frontHttp)) {
+            if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
+                try { [void](Clear-CursorProxySettingsSidecar) } catch {}
+            }
+        }
+        Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=no_tunnel_proxy_legs' 'INFO'
+        Write-GitModeLog 'CURSOR_PROXY_MODE mode=server_direct' 'INFO'
+        return
+    }
+    $sessionHasLegs = ($script:SessionTunnelProxyLegs -eq $true) -or ($sessionSocks -gt 0) -or ($sessionHttp -gt 0)
+    if (-not $sessionHasLegs) {
+        Write-GitModeLog 'Complete-CursorProxyAfterTunnel skip_sidecar reason=no_tunnel_proxy_legs' 'INFO'
+        $frontHttp = Get-CursorHttpFrontPort
+        if ($frontHttp -gt 0 -and (Test-LocalPortOpen -PortNum $frontHttp)) {
+            if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
+                try { [void](Clear-CursorProxySettingsSidecar) } catch {}
+            }
+        }
+        Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=no_tunnel_proxy_legs' 'INFO'
+        Write-GitModeLog 'CURSOR_PROXY_MODE mode=server_direct' 'INFO'
+        return
+    }
     if (Get-Command Ensure-CursorProxySidecar -ErrorAction SilentlyContinue) {
         try { [void](Ensure-CursorProxySidecar) } catch {
             if (Get-Command Start-CursorProxySidecar -ErrorAction SilentlyContinue) {
@@ -1985,6 +2021,8 @@ function Test-RemoteXraySocksOpen {
 
 function Set-SocksProxyPortOnReuse {
     # Keep prior Socks/Http ports on failure so concurrent Launch cannot race into CLEAR.
+    # Always set SessionTunnelProxyLegs so Complete-CursorProxyAfterTunnel never falls into
+    # "unset flag + orphan listener" thrash on the common reuse path (Bugbot 2026-07-28).
     param(
         [Parameter(Mandatory)][int]$TunnelPid,
         [Parameter(Mandatory)][string]$Alias,
@@ -2001,16 +2039,32 @@ function Set-SocksProxyPortOnReuse {
         $cmd = [string]$cim.CommandLine
         $fwdPat = "-L\s+127\.0\.0\.1:${socksCandidate}:127\.0\.0\.1:${xrayPort}"
         $httpFwdPat = "-L\s+127\.0\.0\.1:${httpCandidate}:127\.0\.0\.1:${xrayHttpPort}"
-        if ($cmd -notmatch $fwdPat) { return }
-        if ($cmd -notmatch $httpFwdPat) { return }
-        if (-not (Test-LocalPortOpen -PortNum $socksCandidate)) { return }
-        if (-not (Test-LocalPortOpen -PortNum $httpCandidate)) { return }
-        if (-not (Test-RemoteXraySocksOpen -Alias $Alias -SshCfgPath $SshCfgPath)) { return }
-        if (-not (Test-RemoteXraySocksOpen -Alias $Alias -SshCfgPath $SshCfgPath -RemotePort $xrayHttpPort)) { return }
+        if ($cmd -notmatch $fwdPat -or $cmd -notmatch $httpFwdPat) {
+            $script:SessionTunnelProxyLegs = $false
+            return
+        }
+        if (-not (Test-LocalPortOpen -PortNum $socksCandidate)) {
+            $script:SessionTunnelProxyLegs = $false
+            return
+        }
+        if (-not (Test-LocalPortOpen -PortNum $httpCandidate)) {
+            $script:SessionTunnelProxyLegs = $false
+            return
+        }
+        if (-not (Test-RemoteXraySocksOpen -Alias $Alias -SshCfgPath $SshCfgPath)) {
+            $script:SessionTunnelProxyLegs = $false
+            return
+        }
+        if (-not (Test-RemoteXraySocksOpen -Alias $Alias -SshCfgPath $SshCfgPath -RemotePort $xrayHttpPort)) {
+            $script:SessionTunnelProxyLegs = $false
+            return
+        }
         $script:SocksProxyPort = $socksCandidate
         $script:HttpProxyPort = $httpCandidate
+        $script:SessionTunnelProxyLegs = $true
         Write-GitModeLog "ENSURE_TUNNEL reuse_proxy ok local=$socksCandidate remote=$xrayPort http_local=$httpCandidate http_remote=$xrayHttpPort" 'INFO'
     } catch {
+        $script:SessionTunnelProxyLegs = $false
         if ($prevSocks) { $script:SocksProxyPort = $prevSocks }
         if ($prevHttp) { $script:HttpProxyPort = $prevHttp }
     }
@@ -3174,12 +3228,19 @@ function Ensure-SessionTunnel {
         Write-GitModeLog "ENSURE_TUNNEL remote_xray_socks=closed port=$($script:XrayServerSocksPort) skipping_proxy_leg" 'INFO'
         Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=xray_closed' 'WARN'
         Write-GitModeLog 'CURSOR_PROXY_MODE mode=server_direct' 'INFO'
+        # Clear session legs so Complete-CursorProxyAfterTunnel can skip sidecar thrash.
+        # Do NOT leave stale $script:SocksProxyPort from an earlier pick in this process.
+        $script:SocksProxyPort = $null
+        $script:HttpProxyPort = $null
+        $script:SessionTunnelProxyLegs = $false
     } elseif (-not $isOwner) {
         if ((Test-LocalPortOpen -PortNum $socksCandidate) -and (Test-LocalPortOpen -PortNum (Get-HttpProxyPort))) {
             $script:SocksProxyPort = $socksCandidate
             $script:HttpProxyPort = Get-HttpProxyPort
+            $script:SessionTunnelProxyLegs = $true
             Write-GitModeLog "ENSURE_TUNNEL proxy_adopt non_owner local=$socksCandidate" 'INFO'
         } else {
+            $script:SessionTunnelProxyLegs = $false
             Write-GitModeLog "ENSURE_TUNNEL proxy_skip reason=non_owner_no_listener" 'INFO'
         }
     } elseif (-not (Test-LocalPortFree -PortNum $socksCandidate)) {
@@ -3187,24 +3248,28 @@ function Ensure-SessionTunnel {
             $script:SocksProxyPort = $socksCandidate
             $httpCandidate = Get-HttpProxyPort
             if (Test-LocalPortOpen -PortNum $httpCandidate) { $script:HttpProxyPort = $httpCandidate }
+            $script:SessionTunnelProxyLegs = $true
             Write-GitModeLog "ENSURE_TUNNEL proxy_adopt busy_healthy local=$socksCandidate" 'INFO'
         } else {
             Clear-LegacyDynamicSocksTunnels -ProtectPid 0 -SocksPort $socksCandidate | Out-Null
             if (Test-LocalPortFree -PortNum $socksCandidate) {
                 $sshArgs += @('-L', "127.0.0.1:${socksCandidate}:127.0.0.1:$($script:XrayServerSocksPort)")
                 $script:SocksProxyPort = $socksCandidate
+                $script:SessionTunnelProxyLegs = $true
                 Write-GitModeLog "ENSURE_TUNNEL proxy_leg=-L local=$socksCandidate remote=$($script:XrayServerSocksPort) after_legacy_cleanup" 'INFO'
                 $sshArgsList = New-Object 'System.Collections.Generic.List[string]'
                 if ($null -ne $sshArgs) { [void]$sshArgsList.AddRange([string[]]@($sshArgs)) }
                 Add-TunnelHttpProxyLeg -SshArgs $sshArgsList -Alias $Alias -SshCfgPath $SshCfgPath
                 $sshArgs = $sshArgsList.ToArray()
             } else {
+                $script:SessionTunnelProxyLegs = $false
                 Write-GitModeLog "ENSURE_TUNNEL socks_port_busy port=$socksCandidate skipping_proxy_leg" 'WARN'
             }
         }
     } else {
         $sshArgs += @('-L', "127.0.0.1:${socksCandidate}:127.0.0.1:$($script:XrayServerSocksPort)")
         $script:SocksProxyPort = $socksCandidate
+        $script:SessionTunnelProxyLegs = $true
         Write-GitModeLog "ENSURE_TUNNEL proxy_leg=-L local=$socksCandidate remote=$($script:XrayServerSocksPort)" 'INFO'
         $sshArgsList = New-Object 'System.Collections.Generic.List[string]'
         if ($null -ne $sshArgs) { [void]$sshArgsList.AddRange([string[]]@($sshArgs)) }

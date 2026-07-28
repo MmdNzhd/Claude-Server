@@ -134,13 +134,15 @@ Write-Host ("OK  Smart bundle v{0} deployed. EXE unchanged ({1})." -f $newVer, $
 Write-Host '    Laptop update NOT run - launch Connect Update yourself to pull it.' -ForegroundColor DarkGray
 Write-Host ''
 
-$cleanupScript = Join-Path $ProjectRoot 'scripts\client\tests\Clear-ConnectTestTemp.ps1'
-if (Test-Path -LiteralPath $cleanupScript) {
-    try {
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $cleanupScript
-    } catch {
-        Write-Host ("  WARN: Clear-ConnectTestTemp failed (non-fatal): {0}" -f $_) -ForegroundColor Yellow
-    }
-}
+# TEMP: Clear-ConnectTestTemp disabled — was spawning a flood of cmd/powershell
+# windows on this laptop (CCR / nested -File). Re-enable when that is fixed.
+# $cleanupScript = Join-Path $ProjectRoot 'scripts\client\tests\Clear-ConnectTestTemp.ps1'
+# if (Test-Path -LiteralPath $cleanupScript) {
+#     try {
+#         & powershell -NoProfile -ExecutionPolicy Bypass -File $cleanupScript
+#     } catch {
+#         Write-Host ("  WARN: Clear-ConnectTestTemp failed (non-fatal): {0}" -f $_) -ForegroundColor Yellow
+#     }
+# }
 
 exit 0

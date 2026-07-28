@@ -122,7 +122,7 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260727.31'
+$script:ConnectVersion = '20260727.36'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
 $script:ConnectBuildId = 'b332a4c2-1666-45bc-bf2a-8112de9599b3'
@@ -2782,10 +2782,20 @@ $script:WindowsMcpEnsured = $false
             $didLaunch = $false
             $launchOk = $false
             # Heal sticky proxy front door before Cursor uses settings http.proxy=18998.
-            if (Get-Command Ensure-CursorProxySidecar -ErrorAction SilentlyContinue) {
+            # Skip when THIS tunnel has no -L legs (xray_closed): Ensure starts fronts against
+            # dead 19080/19180 and burns ~8s after auth (live a8a37c2a418d 2026-07-28).
+            $mayEnsureSidecar = $true
+            if ($script:SessionTunnelProxyLegs -eq $false) {
+                $mayEnsureSidecar = $false
+            } elseif (-not $script:SocksProxyPort -and -not $script:HttpProxyPort -and $script:SessionTunnelProxyLegs -ne $true) {
+                $mayEnsureSidecar = $false
+            }
+            if (-not $mayEnsureSidecar) {
+                Write-ConnectLog 'SIDECAR_ENSURE skip reason=no_tunnel_proxy_legs' 'INFO'
+            } elseif (Get-Command Ensure-CursorProxySidecar -ErrorAction SilentlyContinue) {
                 try { [void](Ensure-CursorProxySidecar) } catch {}
             }
-            if ($null -ne $script:LastProxyHealthOk -and -not $script:LastProxyHealthOk -and $script:SocksProxyPort) {
+            if ($mayEnsureSidecar -and $null -ne $script:LastProxyHealthOk -and -not $script:LastProxyHealthOk -and $script:SocksProxyPort) {
                 # One more sidecar+health attempt after mount work (tunnel -L may have lagged).
                 if (Get-Command Start-CursorProxySidecar -ErrorAction SilentlyContinue) {
                     try { [void](Start-CursorProxySidecar) } catch {}
@@ -2794,7 +2804,7 @@ $script:WindowsMcpEnsured = $false
                     try { [void](Test-ProxyHealth) } catch {}
                 }
             }
-            if ($null -ne $script:LastProxyHealthOk -and -not $script:LastProxyHealthOk -and $script:SocksProxyPort) {
+            if ($mayEnsureSidecar -and $null -ne $script:LastProxyHealthOk -and -not $script:LastProxyHealthOk -and $script:SocksProxyPort) {
                 # Console decluttered on user request (2026-07-24): this fires on a large
                 # fraction of sessions (xray probe timing, see bug 3/4) and was pure noise by
                 # then - full detail stays in the day log for diagnosis.
@@ -2877,11 +2887,13 @@ $script:WindowsMcpEnsured = $false
             } elseif ($onCorrectFolder) {
                 # Title/cmd match can false-positive (shared profile, stale title). If we cannot
                 # confirm a visible window on this folder, open for real instead of skipping.
-                $visibleOk = $true
+                $visibleOk = $false
                 if (Get-Command Confirm-RemoteEditorLaunchVisible -ErrorAction SilentlyContinue) {
                     try {
                         $visibleOk = [bool](Confirm-RemoteEditorLaunchVisible -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)
                     } catch { $visibleOk = $false }
+                } else {
+                    Write-ConnectLog 'EDITOR_LAUNCH_CONFIRM_MISSING fail_closed launching' 'WARN'
                 }
                 if (-not $visibleOk) {
                     Write-ConnectLog 'EDITOR_LAUNCH_SKIP_OVERRIDE reason=known_on_folder_not_visible launching' 'WARN'

@@ -84,6 +84,8 @@ $suites = @(
     @{ Name = 'windows-mcp-hard-batch'; Script = 'test-windows-mcp-hard-batch.ps1' }
     @{ Name = 'sidecar-xray-hard-batch'; Script = 'test-sidecar-xray-hard-batch.ps1' }
     @{ Name = 'editor-auth-hard-batch'; Script = 'test-editor-auth-hard-batch.ps1' }
+    @{ Name = 'tunnel-proxy-skip-hard'; Script = 'test-tunnel-proxy-skip-hard.ps1' }
+    @{ Name = 'tunnel-proxy-skip-harder'; Script = 'test-tunnel-proxy-skip-harder.ps1' }
     @{ Name = 'logging-runid-hard-batch'; Script = 'test-logging-runid-hard-batch.ps1' }
     @{ Name = 'bat-preflight-heal-hard-batch'; Script = 'test-bat-preflight-heal-hard-batch.ps1' }
     @{ Name = 'publish-iexpress-hard-batch'; Script = 'test-publish-iexpress-hard-batch.ps1' }

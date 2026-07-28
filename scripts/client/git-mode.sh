@@ -1357,6 +1357,27 @@ get_cursor_proxy_mode() {
 complete_cursor_proxy_after_tunnel() {
     # Win Complete-CursorProxyAfterTunnel parity: heal sidecar, health-check,
     # clear dead 18998 on failure, log PROXY_FALLBACK / CURSOR_PROXY_MODE.
+    #
+    # Fast path (Win P0 2026-07-28): when THIS tunnel has no -L proxy legs
+    # (xray closed), do not start sticky fronts against dead backends.
+    # Skip predicate uses SESSION vars only — socks_proxy_port/http_proxy_port
+    # always return 19080/19180 and would defeat the skip.
+    # Never adopt orphan fixed-port listeners (Bugbot residual 2026-07-28).
+    local session_socks="${SOCKS_PROXY_PORT:-}"
+    local session_http="${HTTP_PROXY_PORT:-}"
+    if [ -z "$session_socks" ] && [ -z "$session_http" ]; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log 'complete_cursor_proxy_after_tunnel skip_sidecar reason=no_tunnel_proxy_legs' 'INFO'
+        local front_h_clear
+        front_h_clear="$(cursor_http_front_port)"
+        if [ -n "$front_h_clear" ] && test_local_port_open "$front_h_clear"; then
+            if declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
+                clear_cursor_proxy_settings || true
+            fi
+        fi
+        declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=no_tunnel_proxy_legs' 'INFO'
+        declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_MODE mode=server_direct' 'INFO'
+        return 0
+    fi
     local health_ok=0 front_h front_up=0 mode
     if declare -F start_cursor_proxy_sidecar >/dev/null 2>&1; then
         start_cursor_proxy_sidecar || true

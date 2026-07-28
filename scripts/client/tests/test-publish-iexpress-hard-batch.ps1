@@ -55,9 +55,11 @@ Assert ($launch -match 'Remove-Item Env:CLAUDE_CONNECT_SHOW_INSTALL_NOTICE' -and
 Assert ($launch -match 'if \(\$complete -and -not \$didInstall\)' -and $launch -match 'setup ok fast_path direct_boot') `
     'fast_path boots connect-boot directly when src already complete'
 
-# 10) Worker preboot update auto-applies (UPDATE_YES)
-Assert ($worker -match 'CLAUDE_CONNECT_UPDATE_YES\s*=\s*''1''') `
-    'worker preboot update sets CLAUDE_CONNECT_UPDATE_YES=1'
+# 10) Worker never auto-updates (manual menu u only)
+Assert ($worker -match 'preboot update skipped reason=manual_only') `
+    'worker skips preboot update (manual_only)'
+Assert ($worker -notmatch 'CLAUDE_CONNECT_UPDATE_YES\s*=\s*''1''') `
+    'worker does not set CLAUDE_CONNECT_UPDATE_YES=1'
 
 # 11) Unblock-File MOTW on installed scripts (launch + worker)
 Assert ($launch -match 'Unblock-File' -and $worker -match 'Unblock-File') `

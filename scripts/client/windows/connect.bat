@@ -147,13 +147,14 @@ exit
 
 :AFTER_HEAL_RELAUNCH
 
-REM Sepidz frozen bat package: never block on server auto-update SSH.
-set "SKIP_CLIENT_UPDATE=0"
+REM Manual-only updates: never Quiet-auto-update on bat start.
+REM User presses u in the Connect menu when they want an update.
+set "SKIP_CLIENT_UPDATE=1"
 echo.%HERE%| find /I "claude-code-sepidz" >nul && set "SKIP_CLIENT_UPDATE=1"
 echo.%HERE%| find /I "Claude-Connect-Sepidz" >nul && set "SKIP_CLIENT_UPDATE=1"
 if "!SKIP_CLIENT_UPDATE!"=="1" (
     echo.
-    echo   Sepidz package: skipping client auto-update.
+    echo   Skipping auto-update (manual only: press u in menu).
     echo.
     goto AFTER_CLIENT_UPDATE
 )

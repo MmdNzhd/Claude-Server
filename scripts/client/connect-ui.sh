@@ -401,83 +401,10 @@ connect_log() {
 
 
 invoke_connect_silent_update_check() {
-    declare -F connect_log >/dev/null 2>&1 || return 0
-
-    if declare -F tunnel_up >/dev/null 2>&1; then
-        if ! tunnel_up; then
-            connect_log "UPDATE_SILENT skip reason=tunnel_down" 'DEBUG'
-            return 0
-        fi
-    fi
-
-    local cfg_dir="$HOME/.config/claude-connect"
-    local state_file="$cfg_dir/.last-update-check"
-    local now last_check age_sec age_min script_dir update_sh exit_code result pending level
-
-    now="$(date +%s)"
-    last_check=0
-    if [ -f "$state_file" ]; then
-        last_check="$(tr -dc '0-9' < "$state_file" | head -c 20)"
-        [ -n "$last_check" ] || last_check=0
-    fi
-
-    age_sec=$(( now - last_check ))
-    age_min=$(( age_sec / 60 ))
-    if [ "$last_check" -gt 0 ] && [ "$age_sec" -lt 1800 ]; then
-        connect_log "UPDATE_SILENT skip reason=throttle age_min=$age_min" 'DEBUG'
-        return 0
-    fi
-
-    script_dir="${CONNECT_SCRIPT_DIR:-${SCRIPT_DIR:-}}"
-    if [ -z "$script_dir" ]; then
-        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    fi
-
-    update_sh="$script_dir/connect-update.sh"
-    if [ ! -f "$update_sh" ] && [ -f "$script_dir/mac/connect-update.sh" ]; then
-        update_sh="$script_dir/mac/connect-update.sh"
-    fi
-    if [ ! -f "$update_sh" ] && [ -f "$(dirname "$script_dir")/mac/connect-update.sh" ]; then
-        update_sh="$(dirname "$script_dir")/mac/connect-update.sh"
-    fi
-    exit_code=1
-    result='fail'
-    pending=0
-    level='ERROR'
-
-    if [ ! -f "$update_sh" ]; then
-        connect_log "UPDATE_SILENT age_min=$age_min result=fail exit=1 pending_restart=0 reason=no_script path=$update_sh" 'ERROR'
-        return 0
-    fi
-
-    set +e
-    CLAUDE_CONNECT_UPDATE_QUIET=1 bash "$update_sh"
-    exit_code=$?
-    case "$exit_code" in
-        0) result='ok'; level='INFO' ;;
-        1) result='fail'; level='ERROR' ;;
-        2)
-            result='applied'
-            pending=1
-            level='WARN'
-            CONNECT_UPDATE_PENDING_RESTART=1
-            export CONNECT_UPDATE_PENDING_RESTART
-            ;;
-        *) result='fail'; level='ERROR' ;;
-    esac
-
-    if [ "$exit_code" -eq 2 ]; then
-        connect_log "UPDATE_SILENT pending_restart=1 age_min=$age_min result=$result exit=$exit_code note=restart_connect_after_session" "$level"
-    else
-        connect_log "UPDATE_SILENT age_min=$age_min result=$result exit=$exit_code pending_restart=$pending" "$level"
-    fi
-
-    if [ "$exit_code" -eq 0 ] || [ "$exit_code" -eq 2 ]; then
-        mkdir -p "$cfg_dir" 2>/dev/null || true
-        if ! printf '%s' "$now" > "$state_file" 2>/dev/null; then
-            connect_log "UPDATE_SILENT stamp_fail" 'ERROR'
-        fi
-    fi
+    # Manual-only policy: never Quiet-check / auto-apply mid-session.
+    # Updates run only when the user presses u (invoke_connect_manual_update).
+    declare -F connect_log >/dev/null 2>&1 && connect_log "UPDATE_SILENT skip reason=manual_only" 'DEBUG'
+    return 0
 }
 
 # User-triggered update from project menu (u). Visible check; clears throttle/defer.

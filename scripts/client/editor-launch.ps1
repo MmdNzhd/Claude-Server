@@ -895,33 +895,15 @@ function Confirm-RemoteEditorLaunchVisible {
         [Parameter(Mandatory)][string]$RemotePath,
         [int]$WaitMs = 500
     )
-    # Check immediately first - the caller only reaches this function after Launch-RemoteEditor
-    # already positively confirmed on_folder via its own poll loop moments earlier, so the
-    # common case is already-true and the flat WaitMs sleep below was pure dead time on top of
-    # that. Only sleep-and-retry (preserving the original WaitMs budget as a safety net for the
-    # genuine elevated-launch window-visibility race) when the immediate check comes up empty.
+    # Project-scoped only. Never treat "any Cursor MainWindowHandle on the profile" as
+    # confirmation - that false-positive skipped Launch-RemoteEditor (known_on_folder) while
+    # the user only had Agents / another project / personal Cursor visible (live 2026-07-28).
     if (Get-Command Clear-CursorProcessCache -ErrorAction SilentlyContinue) { Clear-CursorProcessCache }
     if (Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath) { return $true }
-    if (Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath) { return $true }
     if ($WaitMs -gt 0) {
         Start-Sleep -Milliseconds $WaitMs
         if (Get-Command Clear-CursorProcessCache -ErrorAction SilentlyContinue) { Clear-CursorProcessCache }
         if (Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath) { return $true }
-        if (Test-RemoteEditorWindowOpen -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath) { return $true }
-    }
-    $profileProcs = @(Get-EditorProfileProcessesForLaunch -EditorCmd $EditorCmd -ForceRefresh)
-    if ($profileProcs.Count -eq 0) { return $false }
-    $mainProcs = if ($EditorCmd -eq 'cursor') {
-        @(Get-CursorMainProfileProcesses)
-    } else {
-        @($profileProcs | Where-Object { $_.CommandLine -and ($_.CommandLine -notmatch '--type=') })
-    }
-    if ($mainProcs.Count -eq 0) { return $false }
-    foreach ($p in $mainProcs) {
-        try {
-            $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
-            if ($wp.MainWindowHandle -ne [IntPtr]::Zero) { return $true }
-        } catch {}
     }
     return $false
 }
@@ -1461,12 +1443,56 @@ function Test-RemoteEditorWindowOpen {
     return (Test-RemoteEditorWindowOpenWhenOnFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)
 }
 
+function Test-CursorVisibleWindowMatchesProject {
+    # True only when a VISIBLE top-level window title matches THIS project root.
+    # Cmdline folder-uri alone is not enough (shared profile PID keeps stale URIs while
+    # showing Agents / another project - live known_on_folder false skip 2026-07-28).
+    param(
+        [Parameter(Mandatory)][int]$ProcessId,
+        [Parameter(Mandatory)][string]$RootName,
+        [string]$TitleTag = (Get-CursorWindowTitleTag),
+        [string]$AliasNeedleEscaped = ''
+    )
+    if (-not $RootName) { return $false }
+    $wins = @()
+    try {
+        $wins = @(Get-ProcessTopLevelWindows -ProcessId $ProcessId | Where-Object { $_.Visible -and $_.Title })
+    } catch { return $false }
+    foreach ($win in $wins) {
+        if (Test-CursorWindowTitleMatchesProject -Title $win.Title -RootName $RootName -TitleTag $TitleTag -AliasNeedleEscaped $AliasNeedleEscaped) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Test-RemoteEditorWindowOpenWhenOnFolder {
     param(
         [Parameter(Mandatory)][string]$EditorCmd,
         [Parameter(Mandatory)][string]$Alias,
         [Parameter(Mandatory)][string]$RemotePath
     )
+    # Project-scoped only. Never treat cmdline+any-MainWindowHandle as open (shared profile
+    # PID keeps stale folder-uri while another window is Z-top - deep-review 2026-07-28).
+    if ($EditorCmd -eq 'cursor') {
+        $rootName = ($RemotePath.TrimEnd('/') -split '/')[-1]
+        $titleTag = Get-CursorWindowTitleTag
+        $aliasOnlyNeedle = [regex]::Escape($Alias)
+        foreach ($p in @(Get-CursorMainProfileProcesses)) {
+            $wins = @()
+            try {
+                $wins = @(Get-ProcessTopLevelWindows -ProcessId $p.ProcessId | Where-Object { $_.Visible -and $_.Title })
+            } catch { $wins = @() }
+            foreach ($win in $wins) {
+                if (-not (Test-CursorWindowTitleMatchesProject -Title $win.Title -RootName $rootName -TitleTag $titleTag -AliasNeedleEscaped $aliasOnlyNeedle)) {
+                    continue
+                }
+                Request-CursorWindowForegroundOnce -RemotePath $RemotePath -Hwnd $win.Hwnd
+                return $true
+            }
+        }
+        return $false
+    }
     foreach ($p in @(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)) {
         try {
             $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
@@ -1475,17 +1501,6 @@ function Test-RemoteEditorWindowOpenWhenOnFolder {
                 return $true
             }
         } catch {}
-    }
-    if ($EditorCmd -eq 'cursor') {
-        foreach ($p in @(Get-CursorMainProfileProcesses)) {
-            try {
-                $wp = [System.Diagnostics.Process]::GetProcessById($p.ProcessId)
-                if ($wp.MainWindowHandle -ne [IntPtr]::Zero) {
-                    Request-CursorWindowForegroundOnce -RemotePath $RemotePath -Hwnd $wp.MainWindowHandle
-                    return $true
-                }
-            } catch {}
-        }
     }
     return $false
 }
@@ -1597,19 +1612,17 @@ function Test-RemoteEditorOnCorrectFolder {
     $aliasOnlyNeedle = [regex]::Escape($Alias)
     foreach ($p in @(Get-CursorMainProfileProcesses)) {
         $cmd = $p.CommandLine
-        $visibleWins = @()
-        try { $visibleWins = @(Get-ProcessTopLevelWindows -ProcessId $p.ProcessId | Where-Object { $_.Visible -and $_.Title }) } catch { $visibleWins = @() }
+        # Cmdline may still name an old folder-uri while the only visible window is Agents
+        # or another project (one shared profile PID). Require a title-matched VISIBLE window.
         if ($cmd) {
-            if (Test-PathNeedleBoundaryMatch -CommandLine $cmd -NeedleEscaped $uriNeedle) {
+            $cmdClaimsFolder = $false
+            if (Test-PathNeedleBoundaryMatch -CommandLine $cmd -NeedleEscaped $uriNeedle) { $cmdClaimsFolder = $true }
+            elseif ($cmd -match $aliasNeedle -and (Test-PathNeedleBoundaryMatch -CommandLine $cmd -NeedleEscaped $pathNeedle)) { $cmdClaimsFolder = $true }
+            if ($cmdClaimsFolder) {
                 if (-not (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath)) {
-                    # Cmdline match alone is not enough (stale / headless). Need a visible window.
-                    if ($visibleWins.Count -gt 0) { return $true }
-                }
-                continue
-            }
-            if ($cmd -match $aliasNeedle -and (Test-PathNeedleBoundaryMatch -CommandLine $cmd -NeedleEscaped $pathNeedle)) {
-                if (-not (Test-CursorWindowShowsAgentHome -ProcessId $p.ProcessId -RemotePath $RemotePath)) {
-                    if ($visibleWins.Count -gt 0) { return $true }
+                    if (Test-CursorVisibleWindowMatchesProject -ProcessId $p.ProcessId -RootName $rootName -TitleTag $titleTag -AliasNeedleEscaped $aliasOnlyNeedle) {
+                        return $true
+                    }
                 }
                 continue
             }
@@ -1622,15 +1635,8 @@ function Test-RemoteEditorOnCorrectFolder {
             # different project hosted in the very same process. Enumerate every top-level
             # window actually owned by the PID and apply the exact same title-match rule to
             # each one. Require Visible so we do not skip launch for a zombie/invisible title.
-            foreach ($win in $visibleWins) {
-                $title = $win.Title
-                # Accept either our custom "[Claude Server <Site>] <root>" title template or Cursor's
-                # own default Remote-SSH title "... [SSH: <alias>] - Cursor". Match the root ONLY at the
-                # template-anchored position (never anywhere in the title) so project "smart" does not
-                # match the "Smart" in the site tag, nor "smartdesk"/prefix siblings.
-                if (Test-CursorWindowTitleMatchesProject -Title $title -RootName $rootName -TitleTag $titleTag -AliasNeedleEscaped $aliasOnlyNeedle) {
-                    return $true
-                }
+            if (Test-CursorVisibleWindowMatchesProject -ProcessId $p.ProcessId -RootName $rootName -TitleTag $titleTag -AliasNeedleEscaped $aliasOnlyNeedle) {
+                return $true
             }
         }
     }

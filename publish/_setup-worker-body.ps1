@@ -2,7 +2,7 @@
 # setup-worker.ps1 - detached background worker spawned by setup-launch.ps1.
 #
 # 1) Optional relocate cleanup
-# 2) Pre-boot update (progress UI when download needed; UPDATE_YES auto-applies)
+# 2) Pre-boot update DISABLED — updates are menu-only (press u). Never auto-apply.
 # 3) Boot Connect UI from versioned src dir (no install MessageBox / no confirm)
 
 $ErrorActionPreference = 'Stop'
@@ -197,42 +197,11 @@ try {
         Log ("unblock_motw_warn $($_.Exception.Message)")
     }
 
-    # Pre-boot update only on first install/repair. Fast-path launches boot from setup-launch
-    # directly (no worker). If worker still runs with FAST_PATH, skip network wait.
+    # Manual-only updates: never run connect-update from EXE worker.
+    # User presses u in the Connect menu when they want an update.
+    Log 'preboot update skipped reason=manual_only'
     if ($env:CLAUDE_CONNECT_SETUP_NO_UPDATE -eq '1' -or $env:CLAUDE_CONNECT_FAST_PATH -eq '1') {
-        Log 'preboot update skipped reason=fast_path_or_NO_UPDATE'
-    } else {
-        $destBefore = $Dest
-        $env:CLAUDE_CONNECT_UPDATE_UI = '1'
-        $env:CLAUDE_CONNECT_UPDATE_YES = '1'
-        Log 'preboot update begin (progress UI if download needed; UPDATE_YES=1)'
-        $updProc = Start-Process -FilePath 'powershell.exe' -WorkingDirectory $Dest -ArgumentList @(
-            '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
-            '-File', "`"$upd`"",
-            '-ScriptDir', "`"$Dest`"",
-            '-Quiet'
-        ) -PassThru -WindowStyle Hidden
-        if (-not $updProc) { throw 'Start-Process connect-update.ps1 returned null' }
-        Wait-Process -Id $updProc.Id
-        $updEc = 0
-        try { $updEc = [int]$updProc.ExitCode } catch { $updEc = 0 }
-        Log ("UPDATE_EXIT exit={0}" -f $updEc)
-
-        # versioned_apply may move scripts to a newer {ver}\src — re-resolve carefully.
-        # Never fall back to Claude-Connect\ root (no connect-boot there).
-        $resolved = Resolve-ConnectWorkerDest
-        if (Test-ConnectBootPresent -Dir $resolved) {
-            $Dest = $resolved
-        } elseif (Test-ConnectBootPresent -Dir $destBefore) {
-            $Dest = $destBefore
-            Log ("post_update keep_prior_dest reason=resolve_miss exit={0}" -f $updEc)
-        } else {
-            throw 'Install files missing after update (connect-boot.ps1). Folder may have been deleted mid-update — open a fresh Claude-Connect-*.exe from Desktop\claude-publish.'
-        }
-        $env:CLAUDE_CONNECT_INSTALL_DIR = $Dest
-        $upd = Join-Path $Dest 'connect-update.ps1'
-        $boot = Join-Path $Dest 'connect-boot.ps1'
-        Log ("post_update dest={0}" -f $Dest)
+        Log 'preboot update note=also_fast_path_or_NO_UPDATE'
     }
 
     $boot = Join-Path $Dest 'connect-boot.ps1'
@@ -243,7 +212,7 @@ try {
     if (Test-ConnectUiOpen) {
         Log 'worker skip boot reason=ui_already_open'
     } else {
-        Log 'connect-boot start begin (after_preboot_update=1)'
+        Log 'connect-boot start begin (after_preboot_update=0 manual_only=1)'
         # Quote -File: ArgumentList array does not auto-quote paths with spaces.
         $p = Start-Process -FilePath 'powershell.exe' -WorkingDirectory $Dest -ArgumentList @(
             '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',

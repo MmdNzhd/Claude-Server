@@ -1397,96 +1397,10 @@ function Invoke-ConnectBatRelaunch {
 }
 
 function Invoke-ConnectSilentUpdateCheck {
-    if (-not (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue)) { return }
-
-    if (Get-Command Test-TunnelUp -ErrorAction SilentlyContinue) {
-        try {
-            if (-not (Test-TunnelUp)) {
-                Write-ConnectLog 'UPDATE_SILENT skip reason=tunnel_down' 'DEBUG'
-                return
-            }
-        } catch {
-            Write-ConnectLog "UPDATE_SILENT skip reason=tunnel_check_error error=$($_.Exception.Message)" 'DEBUG'
-            return
-        }
-    }
-
-    $cfgDir = Join-Path $env:USERPROFILE '.config\claude-connect'
-    $stateFile = Join-Path $cfgDir '.last-update-check'
-    $now = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-
-    $lastCheck = 0
-    if (Test-Path -LiteralPath $stateFile) {
-        try {
-            $raw = (Get-Content -LiteralPath $stateFile -Raw -ErrorAction Stop).Trim()
-            if ($raw -match '^\d+$') { $lastCheck = [int]$raw }
-        } catch { }
-    }
-
-    $ageSec = if ($lastCheck -gt 0) { $now - $lastCheck } else { [int]::MaxValue }
-    $ageMin = if ($ageSec -ge 0 -and $ageSec -lt [int]::MaxValue) { [int][Math]::Floor($ageSec / 60.0) } else { 0 }
-
-    if ($lastCheck -gt 0 -and $ageSec -lt 1800) {
-        Write-ConnectLog "UPDATE_SILENT skip reason=throttle age_min=$ageMin" 'DEBUG'
-        return
-    }
-
-    $scriptDir = $null
-    if ($script:ConnectScriptDir) { $scriptDir = $script:ConnectScriptDir }
-    elseif ($PSScriptRoot) { $scriptDir = $PSScriptRoot }
-    if (-not $scriptDir) { $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
-
-    $updateScript = Join-Path $scriptDir 'connect-update.ps1'
-    $exitCode = 1
-    $result = 'fail'
-    $pendingRestart = 0
-    $level = 'ERROR'
-
-    if (-not (Test-Path -LiteralPath $updateScript)) {
-        Write-ConnectLog "UPDATE_SILENT age_min=$ageMin result=fail exit=1 pending_restart=0 reason=no_script path=$updateScript" 'ERROR'
-        return
-    }
-
-    try {
-        & $updateScript -ScriptDir $scriptDir -Quiet
-        if ($null -ne $LASTEXITCODE) { $exitCode = [int]$LASTEXITCODE } else { $exitCode = 0 }
-
-        switch ($exitCode) {
-            0 { $result = 'ok'; $level = 'INFO' }
-            1 { $result = 'fail'; $level = 'ERROR' }
-            2 {
-                $result = 'applied'
-                $pendingRestart = 1
-                $level = 'WARN'
-                $script:ConnectUpdatePendingRestart = $true
-            }
-            default { $result = 'fail'; $level = 'ERROR' }
-        }
-
-        if ($exitCode -eq 2) {
-            Write-ConnectLog "UPDATE_SILENT pending_restart=1 age_min=$ageMin result=$result exit=$exitCode note=relaunch_after_mutex_release" $level
-        } else {
-            Write-ConnectLog "UPDATE_SILENT age_min=$ageMin result=$result exit=$exitCode pending_restart=$pendingRestart" $level
-        }
-
-        if ($exitCode -eq 0 -or $exitCode -eq 2) {
-            try {
-                $null = New-Item -ItemType Directory -Force -Path $cfgDir
-                [System.IO.File]::WriteAllText($stateFile, [string]$now, [System.Text.UTF8Encoding]::new($false))
-            } catch {
-                Write-ConnectLog "UPDATE_SILENT stamp_fail error=$($_.Exception.Message)" 'ERROR'
-            }
-        }
-
-        if ($exitCode -eq 2) {
-            if (Get-Command Exit-ConnectSingleInstance -ErrorAction SilentlyContinue) {
-                Exit-ConnectSingleInstance
-            }
-            $null = Invoke-ConnectBatRelaunch -ScriptDir $scriptDir
-            Wait-ConnectExit -Reason 'update_relaunch' -Code 0
-        }
-    } catch {
-        Write-ConnectLog "UPDATE_SILENT age_min=$ageMin result=fail exit=1 pending_restart=0 error=$($_.Exception.Message)" 'ERROR'
+    # Manual-only policy: never Quiet-check / auto-apply mid-session.
+    # Updates run only when the user presses u (Invoke-ConnectManualUpdate).
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog 'UPDATE_SILENT skip reason=manual_only' 'DEBUG'
     }
 }
 
