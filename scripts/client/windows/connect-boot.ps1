@@ -8,6 +8,9 @@
 # run a new EXE.
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
+$_connectEnvRepair = Join-Path $here 'connect-env-repair.ps1'
+if (Test-Path -LiteralPath $_connectEnvRepair) { . $_connectEnvRepair }
+$_connectEnvRepair = $null
 $maxUi = 10
 
 function Write-ConnectRootRedirectStub {

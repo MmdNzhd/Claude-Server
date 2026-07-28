@@ -6,6 +6,14 @@
 # 3) Boot Connect UI from versioned src dir (no install MessageBox / no confirm)
 
 $ErrorActionPreference = 'Stop'
+
+$_connectEnvRepair = Join-Path $PSScriptRoot 'connect-env-repair.ps1'
+if (-not (Test-Path -LiteralPath $_connectEnvRepair)) {
+    $_connectEnvRepair = Join-Path (Split-Path $PSScriptRoot -Parent) 'connect-env-repair.ps1'
+}
+if (Test-Path -LiteralPath $_connectEnvRepair) { . $_connectEnvRepair }
+$_connectEnvRepair = $null
+
 $Log = Join-Path $env:TEMP 'claude-connect-setup.log'
 
 function Log([string]$m) {

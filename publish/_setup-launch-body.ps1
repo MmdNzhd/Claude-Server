@@ -14,6 +14,28 @@
 
 $ErrorActionPreference = 'Stop'
 
+$_connectEnvRepair = Join-Path $PSScriptRoot 'connect-env-repair.ps1'
+if (Test-Path -LiteralPath $_connectEnvRepair) {
+    . $_connectEnvRepair
+} else {
+    try {
+        $fp = [Environment]::GetFolderPath('UserProfile')
+        if ($fp -and ($fp -notmatch '~') -and (Test-Path -LiteralPath $fp)) {
+            if (-not $env:USERPROFILE -or ($env:USERPROFILE -match '~')) { $env:USERPROFILE = $fp }
+            $ll = Join-Path $fp 'AppData\Local'
+            if ((Test-Path -LiteralPath $ll) -and (-not $env:LOCALAPPDATA -or ($env:LOCALAPPDATA -match '~'))) {
+                $env:LOCALAPPDATA = $ll
+            }
+        }
+        $t = if ($env:LOCALAPPDATA -and ($env:LOCALAPPDATA -notmatch '~')) { Join-Path $env:LOCALAPPDATA 'Temp' } else { Join-Path $env:SystemRoot 'Temp' }
+        if ($t -notmatch '~') {
+            if (-not (Test-Path -LiteralPath $t)) { New-Item -ItemType Directory -Force -Path $t -EA SilentlyContinue | Out-Null }
+            if (Test-Path -LiteralPath $t) { $env:TEMP = $t; $env:TMP = $t }
+        }
+    } catch {}
+}
+$_connectEnvRepair = $null
+
 $Src = $PSScriptRoot
 $Log = Join-Path $env:TEMP 'claude-connect-setup.log'
 $FallbackRoot = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'

@@ -449,21 +449,31 @@ function Get-CursorAuthTempRoot {
     # Prefer a resolvable long path; broken 8.3 TEMP shorts (C:\Users\XXXX~1.YYY) can make Remove-Item
     # throw a terminating error that connect.ps1 trap surfaces as Unexpected error on disconnect.
     $candidates = New-Object System.Collections.Generic.List[string]
-    try { $p = [System.IO.Path]::GetTempPath(); if ($p) { [void]$candidates.Add($p) } } catch {}
-    if ($env:TEMP) { [void]$candidates.Add($env:TEMP) }
-    if ($env:TMP) { [void]$candidates.Add($env:TMP) }
-    if ($env:LOCALAPPDATA) { [void]$candidates.Add((Join-Path $env:LOCALAPPDATA 'Temp')) }
+    if ($env:LOCALAPPDATA -and ($env:LOCALAPPDATA -notmatch '~')) {
+        [void]$candidates.Add((Join-Path $env:LOCALAPPDATA 'Temp'))
+    }
+    if ($env:USERPROFILE -and ($env:USERPROFILE -notmatch '~')) {
+        [void]$candidates.Add((Join-Path $env:USERPROFILE 'AppData\Local\Temp'))
+    }
+    try {
+        $p = [System.IO.Path]::GetTempPath()
+        if ($p -and ($p -notmatch '~')) { [void]$candidates.Add($p) }
+    } catch {}
+    if ($env:TEMP -and ($env:TEMP -notmatch '~')) { [void]$candidates.Add($env:TEMP) }
+    if ($env:TMP -and ($env:TMP -notmatch '~')) { [void]$candidates.Add($env:TMP) }
     [void]$candidates.Add((Join-Path $env:SystemRoot 'Temp'))
     foreach ($cand in $candidates) {
-        if (-not $cand) { continue }
+        if (-not $cand -or ($cand -match '~')) { continue }
         try {
             if (-not (Test-Path -LiteralPath $cand)) {
                 New-Item -ItemType Directory -Force -Path $cand -ErrorAction Stop | Out-Null
             }
             $full = (Get-Item -LiteralPath $cand -ErrorAction Stop).FullName
-            if ($full) { return $full }
+            if ($full -and ($full -notmatch '~')) { return $full }
         } catch { continue }
     }
+    $fallback = Join-Path $env:SystemRoot 'Temp'
+    if (Test-Path -LiteralPath $fallback) { return $fallback }
     return [System.IO.Path]::GetTempPath()
 }
 

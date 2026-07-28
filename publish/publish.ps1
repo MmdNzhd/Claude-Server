@@ -56,6 +56,7 @@ $ClientFiles = @(
     @{ Src = "scripts\client\windows\connect-bootstrap.ps1"; Dst = "windows\connect-bootstrap.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\windows\connect-version.txt"; Dst = "windows\connect-version.txt"; PatchIp = $false }
     @{ Src = "scripts\client\windows\connect-update.ps1"; Dst = "windows\connect-update.ps1"; PatchIp = $false }
+    @{ Src = "scripts\client\windows\connect-env-repair.ps1"; Dst = "windows\connect-env-repair.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\windows\cursor-proxy-sidecar.ps1"; Dst = "windows\cursor-proxy-sidecar.ps1"; PatchIp = $false }
     @{ Src = "scripts\client\windows\connect.ps1";       Dst = "windows\connect.ps1";       PatchIp = $true  }
     @{ Src = "scripts\client\windows\connect-rider.bat"; Dst = "windows\connect-rider.bat"; PatchIp = $false }

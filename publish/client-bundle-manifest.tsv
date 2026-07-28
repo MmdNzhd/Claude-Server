@@ -15,6 +15,7 @@ win	connect-version.txt	scripts/client/windows/connect-version.txt
 win	connect.ps1	scripts/client/windows/connect.ps1
 win	connect-rider.bat	scripts/client/windows/connect-rider.bat
 win	connect-update.ps1	scripts/client/windows/connect-update.ps1
+win	connect-env-repair.ps1	scripts/client/windows/connect-env-repair.ps1
 win	cursor-proxy-sidecar.ps1	scripts/client/windows/cursor-proxy-sidecar.ps1
 win	connect-ui.ps1	scripts/client/connect-ui.ps1
 win	connect-diagnostic.ps1	scripts/client/connect-diagnostic.ps1

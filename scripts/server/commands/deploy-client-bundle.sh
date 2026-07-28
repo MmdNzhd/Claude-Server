@@ -56,6 +56,7 @@ _stage_repo_from_laptop() {
         scripts/client/windows/connect.ps1
         scripts/client/windows/connect-rider.bat
         scripts/client/windows/connect-update.ps1
+        scripts/client/windows/connect-env-repair.ps1
         scripts/client/windows/cursor-proxy-sidecar.ps1
         scripts/client/windows/connect-boot.ps1
         scripts/client/windows/connect-heal.ps1
@@ -189,6 +190,7 @@ win_files=(
     connect.ps1
     connect-rider.bat
     connect-update.ps1
+    connect-env-repair.ps1
     cursor-proxy-sidecar.ps1
     connect-ui.ps1
     connect-diagnostic.ps1

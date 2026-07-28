@@ -25,12 +25,12 @@ Assert ($win -match "Preparing laptop SSH \(admin prompt if needed\)") 'Win show
 Assert ($win -match "(?s)'a'\s*\{\s*Write-ConnectDecision 'project_menu' 'add_empty'[\s\S]{0,600}?Ensure-ServerSessionReady[\s\S]{0,200}?Add-Project") 'Win empty a: Ensure then Add'
 Assert ($win -notmatch '(?s)if \(\$mounts\.Count -eq 0\) \{\s*if \(\$hiddenCount[\s\S]{0,200}?Ensure-ServerSessionReady\s*\$null = \(\$added = Add-Project\)') 'Win empty path no longer auto-Add without menu'
 Assert ($win -match "'u'\s*\{[\s\S]{0,120}?Invoke-ConnectManualUpdate") 'Win project menu has u -> Invoke-ConnectManualUpdate'
-Assert ($win -match 'a/e/d/c/g/u/q') 'Win help text includes u'
+Assert ($win -match 'a/e/d/c/u/q') 'Win help text includes u'
 
 Assert ($ui -match 'function Invoke-ConnectManualUpdate') 'connect-ui.ps1 defines Invoke-ConnectManualUpdate'
 Assert ($ui -match 'UPDATE_MANUAL') 'manual update logs UPDATE_MANUAL'
 Assert ($ui -match "a add   u update   q quit") 'empty Write-ProjectTable footer has a/u/q'
-Assert ($ui -match "a add   e edit   d delete   c config   g git   u update   q quit") 'full footer includes u update'
+Assert ($ui -match "a add   e edit   d delete   c config   u update   q quit") 'full footer includes u update'
 Assert ($ui -match 'update-check-miss\.txt') 'manual update clears miss cache'
 $manual = [regex]::Match($ui, '(?s)function Invoke-ConnectManualUpdate\s*\{.*?\r?\n\}').Value
 if ($manual.Length -lt 100) {
@@ -55,7 +55,7 @@ Assert ($fastIdx -ge 0 -and $drainIdx -gt $fastIdx) 'update relaunch local sessi
 Assert ($mac -match 'MENU_PROJECT_EMPTY') 'Mac empty menu prompt tag'
 Assert ($mac -match 'invoke_connect_manual_update') 'Mac calls invoke_connect_manual_update'
 Assert ($mac -match 'EMPTY_MENU: add_after_prompt') 'Mac empty Add is after prompt'
-Assert ($mac -match 'a/e/d/c/g/u/q') 'Mac help includes u'
+Assert ($mac -match 'a/e/d/c/u/q') 'Mac help includes u'
 Assert ($uiSh -match 'invoke_connect_manual_update\(\)') 'connect-ui.sh defines invoke_connect_manual_update'
 Assert ($uiSh -match 'a add   u update   q quit') 'Mac empty footer a/u/q'
 Assert ($uiSh -match 'u update') 'Mac full footer includes u update'

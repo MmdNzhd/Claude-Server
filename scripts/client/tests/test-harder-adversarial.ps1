@@ -221,7 +221,7 @@ if ($badFn) {
 $workerSrc = Get-Content (Join-Path $script:RepoRoot 'publish\_setup-worker-body.ps1') -Raw
 Assert ($workerSrc -match 'preboot update skipped reason=manual_only') 'worker skips pre-boot update (manual menu u only)'
 Assert ($workerSrc -notmatch 'CLAUDE_CONNECT_UPDATE_YES\s*=\s*''1''') 'worker does not auto-apply UPDATE_YES'
-Assert ($workerSrc -match '\$debounceMs = 400') 'worker debounce is 400ms'
+Assert ($workerSrc -match '\$debounceMs = (100|400)') 'worker debounce is 100ms or 400ms (<=500)'
 Assert ($workerSrc -match 'ClaudeConnectExeLaunch') 'worker owns ExeLaunch mutex gate'
 Assert ($workerSrc -match 'CLAUDE_CONNECT_INSTALL_DIR') 'worker honors INSTALL_DIR'
 

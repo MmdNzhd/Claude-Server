@@ -137,7 +137,7 @@ fi
 FILES=()
 for f in \
     connect.bat connect-boot.ps1 connect-bootstrap.ps1 connect-heal.ps1 \
-    connect.ps1 connect-update.ps1 cursor-proxy-sidecar.ps1 \
+    connect.ps1 connect-update.ps1 connect-env-repair.ps1 cursor-proxy-sidecar.ps1 \
     connect-ui.ps1 connect-diagnostic.ps1 editor-launch.ps1 git-mode.ps1 \
     cursor-auth-laptop.ps1 connect-version.txt connect-rider.bat \
     windows-mcp-laptop.ps1

@@ -13,6 +13,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $Here = $Here.TrimEnd('\', '/')
+$_connectEnvRepair = Join-Path $(if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }) 'connect-env-repair.ps1'
+if (Test-Path -LiteralPath $_connectEnvRepair) { . $_connectEnvRepair }
+$_connectEnvRepair = $null
 $PowerShellExe = Join-Path $PSHOME 'powershell.exe'
 $PreflightHandoff = Join-Path $env:TEMP 'claude-connect-preflight.ok'
 

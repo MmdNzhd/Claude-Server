@@ -81,6 +81,33 @@ fi
 
 [ -f /usr/local/lib/claude-server/cursor-mcp-template.json ] && ok "cursor-mcp-template.json: installed" || warn "cursor-mcp-template.json: missing"
 
+# Shared xray egress (fleet Cursor region / MCP). One dead binary = everyone blocked.
+echo ""
+echo -e "${BOLD}Xray (shared Cursor egress)${NC}"
+if systemctl is-active --quiet xray 2>/dev/null; then
+    ok "xray.service: active"
+else
+    fail "xray.service: not active (Cursor region / MCP egress down for all users)"
+fi
+_xray_bin="/home/smart/.local/bin/xray"
+if [ -x "$_xray_bin" ]; then
+    if "$_xray_bin" version >/dev/null 2>&1; then
+        ok "xray binary: runs (version ok)"
+    else
+        fail "xray binary: corrupt or SEGV (replace /home/smart/.local/bin/xray)"
+    fi
+else
+    warn "xray binary missing at $_xray_bin"
+fi
+_xray_ports=0
+ss -tln 2>/dev/null | grep -qE '127\.0\.0\.1:10808\b' && _xray_ports=$((_xray_ports+1))
+ss -tln 2>/dev/null | grep -qE '127\.0\.0\.1:10809\b' && _xray_ports=$((_xray_ports+1))
+if [ "$_xray_ports" -eq 2 ]; then
+    ok "xray listen: 127.0.0.1:10808 + 10809"
+else
+    fail "xray listen: expected 10808+10809 on 127.0.0.1 (got ${_xray_ports}/2)"
+fi
+
 [ -f /usr/local/lib/claude-mount ] && ok "claude-mount: installed" || warn "claude-mount: missing"
 if [ -f /usr/local/lib/claude-mount ]; then
     grep -q 'GIT_MODE' /usr/local/lib/claude-mount && ok "claude-mount: GIT_MODE support" || warn "claude-mount: outdated (no GIT_MODE - run claude-server install)"
