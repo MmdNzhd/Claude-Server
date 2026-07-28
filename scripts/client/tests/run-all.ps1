@@ -103,7 +103,12 @@ $suites = @(
     @{ Name = 'harder-live-hygiene-race'; Script = 'test-harder-live-hygiene-race.ps1' }
     @{ Name = 'harder-live-instant-launcher'; Script = 'test-harder-live-instant-launcher.ps1' }
     @{ Name = 'harder-live-console-hide-storm'; Script = 'test-harder-live-console-hide-storm.ps1' }
-    @{ Name = 'harder-live-windows-mcp-storm'; Script = 'test-harder-live-windows-mcp-storm.ps1' }
+    # Slow windows-mcp LIVE suites (storm/chaos/brutal): many minutes; stall publish\deploy.bat.
+    # Run directly (e.g. powershell -File test-brutal-live-windows-mcp-abuse.ps1) when editing
+    # windows-mcp-laptop.ps1. Deploy gate also lists them in $SkipDeployScripts.
+    # @{ Name = 'harder-live-windows-mcp-storm'; Script = 'test-harder-live-windows-mcp-storm.ps1' }
+    # @{ Name = 'hardest-live-windows-mcp-chaos'; Script = 'test-hardest-live-windows-mcp-chaos.ps1' }
+    # @{ Name = 'brutal-live-windows-mcp-abuse'; Script = 'test-brutal-live-windows-mcp-abuse.ps1' }
     @{ Name = 'harder-live-log-flush'; Script = 'test-harder-live-log-flush.ps1' }
     @{ Name = 'harder-live-mount-active'; Script = 'test-harder-live-mount-active.ps1' }
     @{ Name = 'harder-live-orphan-tunnel'; Script = 'test-harder-live-orphan-tunnel.ps1' }

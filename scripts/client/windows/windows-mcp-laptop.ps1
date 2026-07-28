@@ -1,4 +1,4 @@
-# windows-mcp-laptop.ps1 - Ensure Windows-MCP on the laptop during connect.
+﻿# windows-mcp-laptop.ps1 - Ensure Windows-MCP on the laptop during connect.
 # Dot-sourced by windows/connect.ps1 only (not Mac / not designer).
 # Fail-soft + background: never block/abort connect UI.
 #
@@ -468,12 +468,17 @@ function Ensure-WindowsMcpAuth {
     Write-WindowsMcpHost '      -> generating windows-mcp auth...'
     Write-WindowsMcpEnsureLog 'generating auth'
     $script:WindowsMcpAuthRotated = $true
+    $prevEapAuth = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
-        # CLI may exit 1 after save (UnicodeEncodeError on cp1252) — key still written to config.toml.
+        # CLI may exit 1 after save (UnicodeEncodeError on cp1252) - key still written to config.toml.
+        # Native stderr under caller Stop must not abort before we re-read auth/toml.
         $lport = Get-WindowsMcpLocalPort
         & $WmExe auth --transport streamable-http --host 127.0.0.1 --port $lport --force 2>&1 | Out-Null
     } catch {
         Write-WindowsMcpEnsureLog ("auth_failed {0}" -f $_.Exception.Message) 'WARN'
+    } finally {
+        $ErrorActionPreference = $prevEapAuth
     }
     if (Test-Path -LiteralPath $authPath) {
         $k = ((Get-Content -LiteralPath $authPath -Raw -ErrorAction SilentlyContinue) + '').Trim()
@@ -525,9 +530,17 @@ Set sh = CreateObject("WScript.Shell")
 ' style 0 = hidden (not minimized); False = do not wait
 sh.Run """$fpQ"" $argQ", 0, False
 "@
-    Set-Content -LiteralPath $vbs -Value $vbsBody -Encoding ASCII
+    foreach ($p in @($vbs, $cmd)) {
+        try {
+            if (Test-Path -LiteralPath $p) {
+                $item = Get-Item -LiteralPath $p -Force
+                if ($item.IsReadOnly) { $item.IsReadOnly = $false }
+            }
+        } catch { }
+    }
+    Set-Content -LiteralPath $vbs -Value $vbsBody -Encoding ASCII -Force
     $cmdBody = "@echo off`r`nwscript.exe //B //Nologo `"%~dp0start-server-hidden.vbs`"`r`n"
-    Set-Content -LiteralPath $cmd -Value $cmdBody -Encoding ASCII
+    Set-Content -LiteralPath $cmd -Value $cmdBody -Encoding ASCII -Force
     Write-WindowsMcpEnsureLog ("hidden_logon_launcher port={0} via={1}" -f $lport, $via)
     return $true
 }
@@ -545,7 +558,7 @@ function Ensure-WindowsMcpTask {
     if (-not $needInstall) {
         if (Test-Path -LiteralPath $startCmd) {
             $raw = (Get-Content -LiteralPath $startCmd -Raw -ErrorAction SilentlyContinue) + ''
-            # Vendor cmd embeds --port; our hidden trampoline only calls wscript — port lives in VBS.
+            # Vendor cmd embeds --port; our hidden trampoline only calls wscript â€” port lives in VBS.
             $hasHidden = (Test-Path -LiteralPath $hideVbs) -and ($raw -match 'start-server-hidden\.vbs')
             $hasPort = ($raw -match [regex]::Escape("--port',$lport") -or $raw -match "--port['\s]+$lport")
             if (-not $hasHidden) {
@@ -556,9 +569,9 @@ function Ensure-WindowsMcpTask {
                     $needInstall = $true
                 }
             } else {
-                # Refresh VBS when port/exe drifted
+                # Refresh VBS when port/exe drifted or file is corrupt
                 $vbsRaw = (Get-Content -LiteralPath $hideVbs -Raw -ErrorAction SilentlyContinue) + ''
-                if ($vbsRaw -notmatch "--port\s+$lport") {
+                if ($vbsRaw -notmatch "--port\s+$lport" -or $vbsRaw -notmatch 'WScript\.Shell') {
                     [void](Write-WindowsMcpHiddenLogonLauncher -WmExe $WmExe)
                 }
             }
@@ -569,16 +582,23 @@ function Ensure-WindowsMcpTask {
     if ($needInstall) {
         Write-WindowsMcpHost ("      -> registering windows-mcp login task (port {0})..." -f $lport)
         Write-WindowsMcpEnsureLog ("registering scheduled task port={0}" -f $lport)
+        # Native install writes stderr; under caller's $ErrorActionPreference=Stop that
+        # becomes a terminating error â€” never abort before hidden-launcher rewrite.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         try {
             & $WmExe install --transport streamable-http --host 127.0.0.1 --port $lport --force 2>&1 | Out-Null
         } catch {
             Write-WindowsMcpEnsureLog ("install_task_failed {0}" -f $_.Exception.Message) 'WARN'
-            return $false
+        } finally {
+            $ErrorActionPreference = $prevEap
         }
     }
     # Always rewrite logon launcher to hidden VBS (idempotent; kills vendor cmd flash).
-    [void](Write-WindowsMcpHiddenLogonLauncher -WmExe $WmExe)
-    return [bool](Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue)
+    # Must run even when install failed or vendor rewrote start-server.cmd.
+    $hidOk = [bool](Write-WindowsMcpHiddenLogonLauncher -WmExe $WmExe)
+    $taskOk = [bool](Get-ScheduledTask -TaskName 'windows-mcp-server' -ErrorAction SilentlyContinue)
+    return ($hidOk -and $taskOk)
 }
 
 
@@ -651,7 +671,10 @@ function Stop-WindowsMcpOrphanCmdWrappers {
 function Restart-WindowsMcpServer {
     Write-WindowsMcpEnsureLog 'restarting_server_after_auth_rotate'
     # Stop logon-task instance if any; do not /Run it (visible cmd).
+    $prevEapRestart = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try { schtasks /End /TN 'windows-mcp-server' 2>&1 | Out-Null } catch { }
+    $ErrorActionPreference = $prevEapRestart
     Start-Sleep -Milliseconds 400
     $lport = Get-WindowsMcpLocalPort
     try {
@@ -749,7 +772,7 @@ function Sync-WindowsMcpAuthToServer {
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($py))
     # After writing env/mcp.json: start forward, then HTTP-probe through it.
     # WMCP_PROBE=200 means end-to-end OK; 000 means forward/laptop still broken
-    # (old bug: sync printed OK even when forward was dead — amir 2026-07-25).
+    # (old bug: sync printed OK even when forward was dead â€” amir 2026-07-25).
     $remote = "export WMCP_AUTH='$AuthKey' WMCP_LPORT='$lport'; echo $b64 | base64 -d | python3 -; " +
               'F="$HOME/.local/bin/windows-mcp-forward"; G=/usr/local/bin/windows-mcp-forward; ' +
               'FWD=""; if [ -x "$F" ]; then FWD="$F"; elif [ -x "$G" ]; then FWD="$G"; fi; ' +
@@ -876,7 +899,7 @@ function Ensure-WindowsMcp {
 function Maintain-WindowsMcpSession {
     # Lightweight mid-session heal: keep laptop listen + server forward alive.
     # Safe for live sessions (does not touch SSH tunnels / editor). Call every few minutes.
-    # Quiet on Connect UI — never print "starting windows-mcp..." on the session loop.
+    # Quiet on Connect UI â€” never print "starting windows-mcp..." on the session loop.
     $prevQuiet = $env:WINDOWS_MCP_ENSURE_QUIET
     $env:WINDOWS_MCP_ENSURE_QUIET = '1'
     try {
@@ -967,7 +990,7 @@ try {
             '-ModulePath', $ModulePath,
             '-SshAlias', $SshAlias
         )
-        # Inherit elevation from connect.ps1 (already RunAs at start) — do NOT use -Verb RunAs here
+        # Inherit elevation from connect.ps1 (already RunAs at start) â€” do NOT use -Verb RunAs here
         # (would pop a second UAC and break non-interactive background).
         $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList `
             -WindowStyle Hidden -PassThru -ErrorAction Stop

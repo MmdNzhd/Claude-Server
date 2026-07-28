@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # connect.sh - Claude Code launcher for Mac/Linux.
 # Usage:  bash connect.sh          (normal)
 #         bash connect.sh --setup  (reconfigure)
@@ -50,7 +50,7 @@ if [ -f "$_update_script" ]; then
     fi
 fi
 
-CONNECT_VERSION='20260727.28'
+CONNECT_VERSION='20260727.31'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).

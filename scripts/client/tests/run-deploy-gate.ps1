@@ -17,6 +17,16 @@ $CriticalScripts = @(
     'test-exe-promote-dirs-contract.ps1'
 )
 
+# windows-mcp LIVE storm/chaos/brutal suites take many minutes and stall
+# publish\deploy.bat / deploy-scripts-only. They are commented out in run-all.ps1
+# too; run the .ps1 files directly when changing windows-mcp-laptop.ps1.
+# Static windows-mcp-* batch/ports suites stay in the gate (fast).
+$SkipDeployScripts = @(
+    'test-harder-live-windows-mcp-storm.ps1'
+    'test-hardest-live-windows-mcp-chaos.ps1'
+    'test-brutal-live-windows-mcp-abuse.ps1'
+)
+
 function Get-SuitesFromRunAll {
     param([string]$Path)
 
@@ -35,6 +45,7 @@ function Get-SuitesFromRunAll {
         $name = $m.Groups[1].Value
         $script = $m.Groups[2].Value
         if ($script -match '-live\.ps1$') { continue }
+        if ($SkipDeployScripts -contains $script) { continue }
         if ($seen.ContainsKey($script)) { continue }
         $seen[$script] = $true
         $suites.Add(@{ Name = $name; Script = $script })
@@ -60,6 +71,7 @@ $failedNames = [System.Collections.Generic.List[string]]::new()
 Write-Host ''
 Write-Host "=== Deploy gate (non-live suites, $($suites.Count) total) ===" -ForegroundColor White
 Write-Host "Source: run-all.ps1 minus *-live.ps1, plus critical deploy scripts" -ForegroundColor DarkGray
+Write-Host "Skipped (slow): windows-mcp live storm/chaos/brutal - run .ps1 directly when needed" -ForegroundColor DarkGray
 Write-Host ''
 
 foreach ($suite in $suites) {
@@ -73,28 +85,31 @@ foreach ($suite in $suites) {
 
     Write-Host "--- $($suite.Name) ---" -ForegroundColor Cyan
     & powershell -NoProfile -ExecutionPolicy Bypass -File $path
-    if ($LASTEXITCODE -ne 0) {
+    $suiteExit = $LASTEXITCODE
+    if ($suiteExit -ne 0) {
         $fail++
         $failedNames.Add($suite.Name) | Out-Null
-        Write-Host "  FAIL ($($suite.Script) exit=$LASTEXITCODE)" -ForegroundColor Red
+        Write-Host ("  FAIL ({0} exit={1})" -f $suite.Script, $suiteExit) -ForegroundColor Red
     }
     else {
         $passed++
-        Write-Host "  PASS" -ForegroundColor Green
+        Write-Host '  PASS' -ForegroundColor Green
     }
     Write-Host ''
 }
 
 Write-Host '=== Deploy gate summary ===' -ForegroundColor White
 Write-Host "  Passed: $passed" -ForegroundColor Green
-Write-Host "  Failed: $fail" -ForegroundColor $(if ($fail -eq 0) { 'Green' } else { 'Red' })
-Write-Host "  Skipped live: *-live.ps1 (not run)" -ForegroundColor DarkGray
+$failColor = if ($fail -eq 0) { 'Green' } else { 'Red' }
+Write-Host "  Failed: $fail" -ForegroundColor $failColor
+Write-Host '  Skipped live: *-live.ps1 (not run)' -ForegroundColor DarkGray
+Write-Host '  Skipped slow MCP: storm / chaos / brutal (not run on deploy gate)' -ForegroundColor DarkGray
 
 if ($fail -gt 0) {
     Write-Host ''
     Write-Host 'Failed suites:' -ForegroundColor Red
     foreach ($n in $failedNames) {
-        Write-Host "  - $n" -ForegroundColor Red
+        Write-Host ("  - {0}" -f $n) -ForegroundColor Red
     }
     exit 1
 }

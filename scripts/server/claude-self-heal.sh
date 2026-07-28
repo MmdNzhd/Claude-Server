@@ -11,6 +11,11 @@ QUIET=0
 [ "${1:-}" = "--quiet" ] && QUIET=1
 
 _log() { [ "$QUIET" = "1" ] || echo "self-heal: $*" >&2; }
+_audit() {
+    # Always syslog — even under --quiet (TTY may stay silent).
+    logger -t claude-self-heal "$*" 2>/dev/null || true
+    _log "$*"
+}
 
 HOME="${HOME:-$(getent passwd "$(id -un)" | cut -d: -f6)}"
 [ -n "$HOME" ] && [ -d "$HOME" ] || exit 0
@@ -26,6 +31,20 @@ ACTIVE_MOUNT=""
 LAPTOP_USER=""
 LAPTOP_HOSTKEY_FP=""
 LAPTOP_OS=""
+
+# Shared reacquire/ownership helpers (auth-primary, ANY-fp match).
+_REACQUIRE_LIB=""
+for _REACQUIRE_LIB in \
+    /usr/local/lib/claude-server/claude-tunnel-reacquire.sh \
+    "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "$0")" 2>/dev/null)/claude-tunnel-reacquire.sh"
+do
+    if [ -f "$_REACQUIRE_LIB" ]; then
+        # shellcheck source=/dev/null
+        . "$_REACQUIRE_LIB"
+        break
+    fi
+done
+unset _REACQUIRE_LIB
 
 if [ -f "$CONNECT_CONF" ]; then
     while IFS='=' read -r k v || [ -n "$k" ]; do
@@ -54,71 +73,104 @@ _clear_unowned_tunnel_port() {
         chmod 600 "$CONNECT_CONF" 2>/dev/null || true
     fi
     TUNNEL_PORT=""
-    _log "cleared unowned TUNNEL_PORT=$old ($reason) — connect will reacquire"
+    _audit "cleared unowned TUNNEL_PORT=$old ($reason) — server will reacquire if owned block live"
 }
 
-_tunnel_hostkey_fp() {
-    local port="${1:-$TUNNEL_PORT}"
-    [ -n "$port" ] || return 1
-    timeout 4 ssh-keyscan -p "$port" -T 3 -t ed25519,rsa,ecdsa 127.0.0.1 2>/dev/null \
-        | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' | head -1
-}
-
-_tunnel_auth_owned() {
-    local port="${1:-$TUNNEL_PORT}" lu="${LAPTOP_USER:-}" remote_cmd="true" os_lc
-    [ -n "$port" ] && [ -n "$lu" ] || return 1
-    [ -f "$HOME/.ssh/claude_laptop" ] || return 1
-    os_lc="$(printf '%s' "${LAPTOP_OS:-}" | tr '[:upper:]' '[:lower:]' | tr -d '\r\n ')"
-    case "$os_lc" in
-        win|windows) remote_cmd="powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command exit" ;;
-        mac|darwin) remote_cmd="true" ;;
-        *)
-            # Prefer Windows probe when unknown — Smart fleet is mostly Windows; mac still accepts true.
-            remote_cmd="powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command exit"
-            ;;
-    esac
-    local kh="$HOME/.ssh/known_hosts_claude_selfheal"
-    touch "$kh" 2>/dev/null || true
-    chmod 600 "$kh" 2>/dev/null || true
-    timeout 6 ssh -o BatchMode=yes -o ConnectTimeout=3 -o IdentitiesOnly=yes \
-        -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$kh" \
-        -i "$HOME/.ssh/claude_laptop" -p "$port" "${lu}@127.0.0.1" $remote_cmd >/dev/null 2>&1
-}
-
-# Self-heal: poisoned TUNNEL_PORT pointing at another laptop (same Windows banner).
+# Auth-primary ownership (never clear on head-1 hostkey alone).
+# Hostkey match = pin equals ANY scanned FP.
 _heal_tunnel_ownership() {
     [ -n "${TUNNEL_PORT:-}" ] || return 0
-    if ! timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/${TUNNEL_PORT}" 2>/dev/null; then
-        return 0
-    fi
-    local hostkey_matched=0
-    if [ -n "${LAPTOP_HOSTKEY_FP:-}" ]; then
-        local fp
-        fp="$(_tunnel_hostkey_fp "$TUNNEL_PORT" || true)"
-        if [ -n "$fp" ] && [ "$fp" != "$LAPTOP_HOSTKEY_FP" ]; then
-            _clear_unowned_tunnel_port "hostkey_mismatch want=$LAPTOP_HOSTKEY_FP got=$fp"
+    if ! tunnel_port_tcp_open "$TUNNEL_PORT" 2>/dev/null; then
+        if ! timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/${TUNNEL_PORT}" 2>/dev/null; then
             return 0
         fi
-        if [ -n "$fp" ] && [ "$fp" = "$LAPTOP_HOSTKEY_FP" ]; then
-            hostkey_matched=1
+    fi
+
+    local auth_ok=0 pin_match=0 fps_nonempty=0 pin="${LAPTOP_HOSTKEY_FP:-}"
+
+    if declare -F tunnel_auth_owned >/dev/null 2>&1; then
+        if tunnel_auth_owned "$TUNNEL_PORT"; then
+            auth_ok=1
         fi
     fi
-    # Auth probe distinguishes peers when hostkey pin is missing. If hostkey already
-    # matched, never clear on auth probe failure (Windows `true` vs cmd footguns).
-    if [ "$hostkey_matched" -eq 1 ]; then
+
+    if [ -n "$pin" ] && declare -F tunnel_hostkey_matches_pin >/dev/null 2>&1; then
+        local fps
+        fps="$(tunnel_hostkey_fps "$TUNNEL_PORT" 2>/dev/null || true)"
+        [ -n "$(printf '%s' "$fps" | tr -d '[:space:]')" ] && fps_nonempty=1
+        if tunnel_hostkey_matches_pin "$TUNNEL_PORT" "$pin"; then
+            pin_match=1
+        fi
+    fi
+
+    # Auth OK → keep. Stale pin is informational only.
+    if [ "$auth_ok" -eq 1 ]; then
+        if [ -n "$pin" ] && [ "$fps_nonempty" -eq 1 ] && [ "$pin_match" -eq 0 ]; then
+            _audit "hostkey_pin_stale port=$TUNNEL_PORT want=$pin (auth OK — keeping)"
+        fi
         return 0
     fi
-    if [ -n "${LAPTOP_USER:-}" ] && [ -f "$HOME/.ssh/claude_laptop" ]; then
-        if ! _tunnel_auth_owned "$TUNNEL_PORT"; then
-            _clear_unowned_tunnel_port "auth_denied user=$LAPTOP_USER"
+
+    # Auth fail + any FP equals pin → keep (auth flake)
+    if [ "$pin_match" -eq 1 ]; then
+        return 0
+    fi
+
+    # Auth fail + pin set + keyscan empty → inconclusive
+    if [ -n "$pin" ] && [ "$fps_nonempty" -eq 0 ]; then
+        _audit "hostkey_probe_failed port=$TUNNEL_PORT (no clear)"
+        return 0
+    fi
+
+    # Auth fail + no pin → inconclusive (multi-laptop / missing pin)
+    if [ -z "$pin" ]; then
+        _audit "ownership_probe_inconclusive port=$TUNNEL_PORT auth_denied no_pin (no clear)"
+        return 0
+    fi
+
+    # Auth fail + ≥1 FP + none equals pin → clear after 2 concordant probes ~2s apart
+    if [ "$fps_nonempty" -eq 1 ] && [ "$pin_match" -eq 0 ]; then
+        sleep 2
+        local auth2=0 pin2=0
+        if declare -F tunnel_auth_owned >/dev/null 2>&1 && tunnel_auth_owned "$TUNNEL_PORT"; then
+            auth2=1
+        fi
+        if declare -F tunnel_hostkey_matches_pin >/dev/null 2>&1 && tunnel_hostkey_matches_pin "$TUNNEL_PORT" "$pin"; then
+            pin2=1
+        fi
+        if [ "$auth2" -eq 1 ] || [ "$pin2" -eq 1 ]; then
             return 0
         fi
+        _clear_unowned_tunnel_port "hostkey_mismatch want=$pin (auth_denied x2)"
+        return 0
     fi
 }
 
 _tunnel_up() {
-    [ -n "$TUNNEL_PORT" ] || return 1
+    if declare -F tunnel_up_effective >/dev/null 2>&1; then
+        tunnel_up_effective
+        return $?
+    fi
+    [ -n "${TUNNEL_PORT:-}" ] || return 1
     timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/$TUNNEL_PORT" 2>/dev/null
+}
+
+_reacquire_tunnel_port() {
+    if ! declare -F reacquire_tunnel_port_into_conf >/dev/null 2>&1; then
+        return 0
+    fi
+    if reacquire_tunnel_port_into_conf; then
+        # Reload TUNNEL_PORT from conf after rewrite
+        if [ -f "$CONNECT_CONF" ]; then
+            TUNNEL_PORT=""
+            while IFS='=' read -r k v || [ -n "$k" ]; do
+                v="${v#\"}"; v="${v%\"}"
+                v="$(printf '%s' "$v" | tr -d '\r')"
+                case "$k" in TUNNEL_PORT|PORT) TUNNEL_PORT="$v" ;; esac
+            done < "$CONNECT_CONF"
+        fi
+        _log "reacquired TUNNEL_PORT=$TUNNEL_PORT"
+    fi
 }
 
 _mount_bin() {
@@ -396,7 +448,7 @@ _heal_stale_mounts() {
         [ -d "$d" ] || continue
         mp="${d%/}"
         if grep -F " $mp " /proc/mounts >/dev/null 2>&1; then
-            _log "stale mount (tunnel down) -> umount $mp"
+            _audit "stale mount (tunnel down) -> umount $mp"
             pkill -u "$USER_NAME" -f "sshfs .*${mp}" 2>/dev/null || true
             timeout 5 fusermount -uz "$mp" 2>/dev/null || timeout 5 fusermount3 -uz "$mp" 2>/dev/null || timeout 5 umount -l "$mp" 2>/dev/null || true
         fi
@@ -449,7 +501,7 @@ _heal_remove_shim() {
 
 _heal_active_remount() {
     _tunnel_up || return 0
-    local mb id lpath conf
+    local mb id lpath conf up_out up_rc=0
     mb="$(_mount_bin)" || return 0
     id="${ACTIVE_MOUNT:-}"
     if [ -z "$id" ]; then
@@ -474,7 +526,10 @@ _heal_active_remount() {
     fi
     _log "tunnel up -> remount $id"
     "$mb" recover 2>/dev/null || true
-    "$mb" up "$id" 2>/dev/null || true
+    up_out="$("$mb" up "$id" 2>&1)" || up_rc=$?
+    if [ "$up_rc" -ne 0 ]; then
+        _audit "remount_fail id=$id rc=$up_rc detail=$(printf '%s' "$up_out" | tr '\n' ' ' | head -c 200)"
+    fi
     mkdir -p "$(dirname "$LAST_ACTIVE")" 2>/dev/null || true
     printf '%s\n' "$id" > "$LAST_ACTIVE" 2>/dev/null || true
 }
@@ -496,8 +551,10 @@ _heal_bashrc_timeout() {
 }
 
 # Run
+# Order: ownership → reacquire BEFORE stale (empty port must not mass-umount while block live)
 _heal_connect_conf
 _heal_tunnel_ownership
+_reacquire_tunnel_port
 _heal_laptop_exec_crlf
 _heal_missing_user_bins
 _heal_bin_crlf_all

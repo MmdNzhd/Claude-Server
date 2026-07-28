@@ -3,6 +3,7 @@
 # Edge cases covered:
 #   - frozen mounts (never use mountpoint -q; use /proc/mounts + timed ls)
 #   - tunnel DOWN → umount all + kill orphan sshfs
+#   - empty TUNNEL_PORT but owned UID-block port live → reacquire, NEVER tear-down
 #   - tunnel UP + ACTIVE_MOUNT missing -> infer (LAST_ACTIVE/mounted only) + remount
 #   - tunnel UP + active not mounted / zombie → remount
 # Run once per session from automount (background). One instance per user (lock).
@@ -16,18 +17,41 @@ LAST_ACTIVE="$HOME/.cache/claude-last-active-mount"
 CHECK_INTERVAL=30
 HANG_TIMEOUT=5
 HEAL_EVERY=10   # every N loops (~5 min) run quiet self-heal
+HEAL_TIMEOUT=45 # must exceed sshfs timeout 30
 _loop=0
+
+# Shared reacquire / tunnel_up_effective (empty-port + live block hazard)
+for _wd_lib in \
+    /usr/local/lib/claude-server/claude-tunnel-reacquire.sh
+do
+    if [ -f "$_wd_lib" ]; then
+        # shellcheck source=/dev/null
+        . "$_wd_lib"
+        break
+    fi
+done
+unset _wd_lib
+
+_wd_audit() {
+    logger -t claude-watchdog "$*" 2>/dev/null || true
+}
 
 _load_conf() {
     ACTIVE_MOUNT=""
     TUNNEL_PORT=""
+    LAPTOP_USER=""
+    LAPTOP_HOSTKEY_FP=""
+    LAPTOP_OS=""
     [ -f "$CONNECT_CONF" ] || return 0
     while IFS='=' read -r k v; do
         v="${v#\"}" v="${v%\"}"
         v="$(printf '%s' "$v" | tr -d '\r')"
         case "$k" in
             ACTIVE_MOUNT|active_mount) ACTIVE_MOUNT="$v" ;;
-            TUNNEL_PORT) TUNNEL_PORT="$v" ;;
+            TUNNEL_PORT|PORT) TUNNEL_PORT="$v" ;;
+            LAPTOP_USER) LAPTOP_USER="$v" ;;
+            LAPTOP_HOSTKEY_FP) LAPTOP_HOSTKEY_FP="$v" ;;
+            LAPTOP_OS) LAPTOP_OS="$v" ;;
         esac
     done < "$CONNECT_CONF"
 }
@@ -84,8 +108,18 @@ fi
 echo $$ > "$LOCK_FILE"
 trap 'rm -f "$LOCK_FILE"' EXIT
 
+# Prefer shared tunnel_up_effective; fallback TCP on conf port only.
 tunnel_up() {
     _load_conf
+    # Lightweight reacquire every empty-port loop (before tear-down decision)
+    if [ -z "${TUNNEL_PORT:-}" ] && declare -F reacquire_tunnel_port_into_conf >/dev/null 2>&1; then
+        reacquire_tunnel_port_into_conf 2>/dev/null || true
+        _load_conf
+    fi
+    if declare -F tunnel_up_effective >/dev/null 2>&1; then
+        tunnel_up_effective
+        return $?
+    fi
     [ -n "$TUNNEL_PORT" ] || return 1
     timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$TUNNEL_PORT" 2>/dev/null
 }
@@ -117,17 +151,16 @@ while true; do
     # Periodic quiet self-heal (covers buf finalize, empty ACTIVE_MOUNT, etc.)
     if [ $((_loop % HEAL_EVERY)) -eq 0 ]; then
         if [ -x /usr/local/bin/claude-self-heal ]; then
-            timeout 20 /usr/local/bin/claude-self-heal --quiet >/dev/null 2>&1 || true
+            timeout "$HEAL_TIMEOUT" /usr/local/bin/claude-self-heal --quiet >/dev/null 2>&1 || true
         elif [ -x "$HOME/.local/bin/claude-self-heal" ]; then
-            timeout 20 "$HOME/.local/bin/claude-self-heal" --quiet >/dev/null 2>&1 || true
+            timeout "$HEAL_TIMEOUT" "$HOME/.local/bin/claude-self-heal" --quiet >/dev/null 2>&1 || true
         fi
         _load_conf
     fi
 
     if ! tunnel_up; then
-        # Edge: tunnel down -> tear down every sshfs under mounts/ (incl. zombies).
-        # claude-mount down restores .git from .git.server-session when TCP still
-        # briefly reachable (ConnectTimeout-bounded); otherwise recover on reconnect.
+        # Tear-down ONLY when no owned block port is live (tunnel_up_effective false).
+        # Empty TUNNEL_PORT with live 20xxx in UID block must NOT reach here.
         if [ -x "$MOUNT_BIN" ]; then
             "$MOUNT_BIN" down 2>/dev/null || true
         fi
@@ -198,7 +231,12 @@ while true; do
 
     if [ "$need_remount" = "1" ]; then
         "$MOUNT_BIN" recover 2>/dev/null || true
-        "$MOUNT_BIN" up "$ACTIVE_MOUNT" 2>/dev/null || true
+        _up_out="$("$MOUNT_BIN" up "$ACTIVE_MOUNT" 2>&1)" || _up_rc=$?
+        _up_rc="${_up_rc:-0}"
+        if [ "$_up_rc" -ne 0 ]; then
+            _wd_audit "remount_fail id=$ACTIVE_MOUNT rc=$_up_rc detail=$(printf '%s' "$_up_out" | tr '\n' ' ' | head -c 200)"
+        fi
+        unset _up_out _up_rc
         mkdir -p "$(dirname "$LAST_ACTIVE")" 2>/dev/null || true
         printf '%s\n' "$ACTIVE_MOUNT" > "$LAST_ACTIVE" 2>/dev/null || true
     fi

@@ -28,13 +28,16 @@ ssh -o BatchMode=yes -o ConnectTimeout=15 %SERVER% "mkdir -p ~/%DEPLOY%"
 scp -o BatchMode=yes -o ConnectTimeout=30 -q "%REPO%\scripts\server\claude-mount.sh" "%SERVER%:~/%DEPLOY%/"
 scp -o BatchMode=yes -o ConnectTimeout=30 -q "%REPO%\scripts\server\claude-automount.sh" "%SERVER%:~/%DEPLOY%/"
 scp -o BatchMode=yes -o ConnectTimeout=30 -q "%REPO%\scripts\server\claude-watchdog.sh" "%SERVER%:~/%DEPLOY%/"
+scp -o BatchMode=yes -o ConnectTimeout=30 -q "%REPO%\scripts\server\claude-self-heal.sh" "%SERVER%:~/%DEPLOY%/"
+scp -o BatchMode=yes -o ConnectTimeout=30 -q "%REPO%\scripts\server\claude-mount-reaper.sh" "%SERVER%:~/%DEPLOY%/"
+scp -o BatchMode=yes -o ConnectTimeout=30 -q "%REPO%\scripts\server\claude-tunnel-reacquire.sh" "%SERVER%:~/%DEPLOY%/"
 scp -o BatchMode=yes -o ConnectTimeout=30 -q "%REPO%\scripts\server\commands\deploy-mount-fix.sh" "%SERVER%:~/%DEPLOY%/deploy-mount-fix.sh"
 echo   Upload ok.
 echo.
-echo   Enter your SERVER sudo password when prompted:
+echo   Running deploy via sudo-from-laptop (no interactive password)...
 echo.
 
-ssh -t -o ConnectTimeout=15 %SERVER% "chmod +x ~/%DEPLOY%/deploy-mount-fix.sh && sudo bash ~/%DEPLOY%/deploy-mount-fix.sh"
+ssh -o BatchMode=yes -o ConnectTimeout=30 %SERVER% "chmod +x ~/%DEPLOY%/deploy-mount-fix.sh && sudo-from-laptop --smart -- bash ~/%DEPLOY%/deploy-mount-fix.sh"
 echo.
 if errorlevel 1 (
     echo   [X] Deploy failed.

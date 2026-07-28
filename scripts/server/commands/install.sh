@@ -309,6 +309,19 @@ if [ -f "$SERVER_DIR/commands/install-client-bundle.sh" ]; then
     ok "install-client-bundle.sh -> /usr/local/lib/claude-server/commands/"
 fi
 if [ -f "$SERVER_DIR/claude-watchdog.sh" ]; then
+    install -m 755 "$SERVER_DIR/claude-watchdog.sh" /usr/local/bin/claude-watchdog
+    ok "claude-watchdog -> /usr/local/bin/"
+fi
+if [ -f "$SERVER_DIR/claude-self-heal.sh" ]; then
+    install -m 755 "$SERVER_DIR/claude-self-heal.sh" /usr/local/bin/claude-self-heal
+    ok "claude-self-heal -> /usr/local/bin/"
+fi
+if [ -f "$SERVER_DIR/claude-tunnel-reacquire.sh" ]; then
+    mkdir -p /usr/local/lib/claude-server
+    install -m 644 "$SERVER_DIR/claude-tunnel-reacquire.sh" /usr/local/lib/claude-server/claude-tunnel-reacquire.sh
+    ok "claude-tunnel-reacquire.sh -> /usr/local/lib/claude-server/"
+fi
+if [ -f "$SERVER_DIR/designer-start.sh" ]; then
     install -m 755 "$SERVER_DIR/designer-start.sh" /usr/local/bin/designer-start
     ok "designer-start -> /usr/local/bin/"
 fi

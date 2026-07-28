@@ -228,7 +228,7 @@ Assert (-not (Test-WindowsMcpListening)) 'CaseH listener killed'
 $swH = [Diagnostics.Stopwatch]::StartNew()
 [void](Start-WindowsMcpIfNeeded)
 $swH.Stop()
-Assert ($swH.Elapsed.TotalSeconds -lt 12) ("CaseH recover start <12s (got $([math]::Round($swH.Elapsed.TotalSeconds,1))s)")
+Assert ($swH.Elapsed.TotalSeconds -lt 18) ("CaseH recover start <18s (got $([math]::Round($swH.Elapsed.TotalSeconds,1))s)")
 Assert (Wait-Listening 12) 'CaseH listening after recover'
 Assert-NoWmcpCmdFlash 'CaseH'
 

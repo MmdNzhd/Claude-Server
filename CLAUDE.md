@@ -1,4 +1,4 @@
-﻿# Claude Code Server ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Project Rules
+# Claude Code Server ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Project Rules
 
 ## Language Rule
 
@@ -286,8 +286,8 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | Both EXIT and SIGTERM traps | mac:444-445 | `kill <pid>` won't trigger EXIT alone |
 | `[Console]::Key` + `KeyChar` checks | win:610,728,784 | Physical key check so R/Q/C/X work under Persian/Arabic keyboard layouts |
 | `[Uri]::EscapeDataString` for Gateway URL | win:695 | PS5.1+PS7 safe; avoids `System.Web` dependency |
-| `$script:ConnectVersion = '20260727.28'` | win connect.ps1 | Must match connect.bat guard + connect-version.txt |
-| `CONNECT_VERSION='20260727.28'` | mac connect.sh | Must match published client version |
+| `$script:ConnectVersion = '20260727.30'` | win connect.ps1 | Must match connect.bat guard + connect-version.txt |
+| `CONNECT_VERSION='20260727.30'` | mac connect.sh | Must match published client version |
 | No `start /MIN` in connect.bat / instant launcher | win bat + connect-update + publish setup-launch | Minimize still taskbar-visible; use hide-relaunch VBS style 0 |
 | `connect-hide-relaunch.vbs` + `connect-hide-console.ps1` shipped | win + deploy-client-bundle + manifest.tsv | BAT_INNER true-hide; belt ShowWindow(SW_HIDE); fail-open |
 | Helper `powershell` in connect.bat uses outer `-WindowStyle Hidden` | windows/connect.bat | Prevents helper console flashes; final UI `start` of connect-boot stays visible |

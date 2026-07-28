@@ -662,6 +662,35 @@ _do_mount() {
         sleep 1
     fi
 
+    # Quarantine nonempty unmounted leftovers (agent poison / partial trees).
+    # Laptop disk is SoT — only move server-side leftover dirs, never delete laptop files.
+    if [ -e "$lpath" ] && ! _in_proc_mounts "$lpath"; then
+        _qc=0
+        if [ -d "$lpath" ]; then
+            # Nonempty if anything other than . / ..
+            if find "$lpath" -mindepth 1 -maxdepth 1 2>/dev/null | head -1 | grep -q .; then
+                _qc=1
+            fi
+        else
+            _qc=1
+        fi
+        if [ "$_qc" -eq 1 ]; then
+            _qts="$(date -u +%Y%m%dT%H%M%SZ)"
+            _qid="$(basename "$lpath" | tr -cd 'A-Za-z0-9._-')"
+            [ -n "$_qid" ] || _qid="unknown"
+            _qdst="$(dirname "$lpath")/.leftover-${_qid}-${_qts}"
+            if mv "$lpath" "$_qdst" 2>/dev/null; then
+                logger -t claude-mount "quarantine leftover src=$lpath dst=$_qdst" 2>/dev/null || true
+                echo "quarantined leftover: $lpath -> $_qdst" >&2
+            else
+                echo "error: cannot quarantine nonempty mountpoint $lpath" >&2
+                _mount_restore_git_mode
+                return 1
+            fi
+        fi
+        unset _qc _qts _qid _qdst
+    fi
+
     # mkdir -p can fail with I/O error if lpath is under a stale parent mount
     if ! mkdir -p "$lpath" 2>/dev/null; then
         _do_unmount "$lpath"

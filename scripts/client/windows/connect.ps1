@@ -1,4 +1,4 @@
-﻿# connect.ps1 - Claude Code launcher for Windows.
+# connect.ps1 - Claude Code launcher for Windows.
 # connect.bat invariant: menu footer lives in connect-ui.ps1
 # Usage:  double-click connect.bat
 #         connect.bat -Setup   (reconfigure username)
@@ -122,10 +122,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260727.28'
+$script:ConnectVersion = '20260727.31'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = 'dad9bb13-060e-41bd-afa2-e51688147f1c'
+$script:ConnectBuildId = 'b332a4c2-1666-45bc-bf2a-8112de9599b3'
 $script:SshMsSamples = [System.Collections.Generic.List[int]]::new()
 $script:SshMsSampleStartUnix = 0
 $script:LastSshRollupUnix = 0

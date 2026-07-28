@@ -42,25 +42,31 @@ Write-Host "  Server: $Server" -ForegroundColor DarkGray
 Write-Host "  From:   $($files.Base)" -ForegroundColor DarkGray
 Write-Host ''
 
-ssh -o BatchMode=yes -o ConnectTimeout=15 $Server "mkdir -p ~/$DeployDir"
-foreach ($pair in @(
+$serverRoot = Join-Path $files.Base 'scripts\server'
+$uploads = @(
     @{ Local = $files.Mount; Name = 'claude-mount.sh' },
     @{ Local = $files.Auto;  Name = 'claude-automount.sh' },
-    @{ Local = $files.Fix;   Name = 'deploy-mount-fix.sh' }
-)) {
+    @{ Local = $files.Fix;   Name = 'deploy-mount-fix.sh' },
+    @{ Local = (Join-Path $serverRoot 'claude-watchdog.sh'); Name = 'claude-watchdog.sh' },
+    @{ Local = (Join-Path $serverRoot 'claude-self-heal.sh'); Name = 'claude-self-heal.sh' },
+    @{ Local = (Join-Path $serverRoot 'claude-mount-reaper.sh'); Name = 'claude-mount-reaper.sh' },
+    @{ Local = (Join-Path $serverRoot 'claude-tunnel-reacquire.sh'); Name = 'claude-tunnel-reacquire.sh' }
+)
+
+ssh -o BatchMode=yes -o ConnectTimeout=15 $Server "mkdir -p ~/$DeployDir"
+foreach ($pair in $uploads) {
+    if (-not (Test-Path -LiteralPath $pair.Local)) {
+        throw "Missing deploy source: $($pair.Local)"
+    }
     scp -o BatchMode=yes -o ConnectTimeout=30 -q $pair.Local "${Server}:~/$DeployDir/$($pair.Name)"
     Write-Host "    uploaded $($pair.Name)" -ForegroundColor Green
 }
-if ($files.Watch -and (Test-Path $files.Watch)) {
-    scp -o BatchMode=yes -o ConnectTimeout=30 -q $files.Watch "${Server}:~/$DeployDir/claude-watchdog.sh"
-    Write-Host '    uploaded claude-watchdog.sh' -ForegroundColor Green
-}
 
 Write-Host ''
-Write-Host '  Sudo required - enter server password when prompted:' -ForegroundColor Yellow
+Write-Host '  Running deploy via sudo-from-laptop...' -ForegroundColor Cyan
 Write-Host ''
 
-ssh -t -o ConnectTimeout=15 $Server "chmod +x ~/$DeployDir/deploy-mount-fix.sh && sudo bash ~/$DeployDir/deploy-mount-fix.sh"
+ssh -o BatchMode=yes -o ConnectTimeout=120 $Server "chmod +x ~/$DeployDir/deploy-mount-fix.sh && sudo-from-laptop --smart -- bash ~/$DeployDir/deploy-mount-fix.sh"
 $rc = $LASTEXITCODE
 Write-Host ''
 if ($rc -eq 0) { Write-Host '  All users updated.' -ForegroundColor Green }
