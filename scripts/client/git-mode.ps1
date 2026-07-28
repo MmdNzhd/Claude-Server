@@ -3716,7 +3716,29 @@ function Clear-SessionMount {
 
 function Resolve-ServerScriptDir {
     param([Parameter(Mandatory)][string]$ConnectScriptDir)
-    # Prefer package mac/ (published fresh claude-mount) over nested windows/server stale copies.
+    # Prefer FULL server tree (claude-mount + laptop-exec) over published mac/
+    # (mount-only). Otherwise Push-LaptopExecBundleIfChanged silently no-ops.
+    try {
+        $d = $ConnectScriptDir
+        for ($i = 0; $i -lt 8; $i++) {
+            $repoServer = [System.IO.Path]::Combine($d, 'scripts', 'server')
+            $mountOk = Test-Path ([System.IO.Path]::Combine($repoServer, 'claude-mount.sh'))
+            $leOk = Test-Path ([System.IO.Path]::Combine($repoServer, 'laptop-exec.sh'))
+            if ($mountOk -and $leOk) { return $repoServer }
+            $parent = Split-Path $d -Parent
+            if (-not $parent -or $parent -eq $d) { break }
+            $d = $parent
+        }
+    } catch { }
+    foreach ($rel in @('server', '..\server', '..\..\server')) {
+        try {
+            $d = [System.IO.Path]::GetFullPath((Join-Path $ConnectScriptDir $rel))
+            $mountOk = Test-Path ([System.IO.Path]::Combine($d, 'claude-mount.sh'))
+            $leOk = Test-Path ([System.IO.Path]::Combine($d, 'laptop-exec.sh'))
+            if ($mountOk -and $leOk) { return $d }
+        } catch { }
+    }
+    # Mount-only fallback (Desktop Claude-Connect\mac) — LE push may no-op.
     foreach ($rel in @('..\mac', 'mac', '..\..\mac')) {
         try {
             $d = [System.IO.Path]::GetFullPath((Join-Path $ConnectScriptDir $rel))
@@ -3733,15 +3755,8 @@ function Resolve-ServerScriptDir {
             $d = $parent
         }
     } catch { }
-    foreach ($rel in @('server', '..\server', '..\..\server')) {
-        try {
-            $d = [System.IO.Path]::GetFullPath((Join-Path $ConnectScriptDir $rel))
-            if (Test-Path ([System.IO.Path]::Combine($d, 'claude-mount.sh'))) { return $d }
-        } catch { }
-    }
     return $null
 }
-
 
 function Push-RemoteUserFileIfChanged {
     param(
@@ -3779,6 +3794,10 @@ function Push-LaptopExecBundleIfChanged {
         [Parameter(Mandatory)][string]$ServerDir,
         [Parameter(Mandatory)][string]$Alias
     )
+    if (-not (Test-Path ([System.IO.Path]::Combine($ServerDir, 'laptop-exec.sh')))) {
+        Write-Host "  warn  LE push skipped: no laptop-exec.sh under $ServerDir (mount-only dir; reconnect from repo or run sudo claude-server deploy-laptop-exec)" -ForegroundColor Yellow
+        return
+    }
     $pairs = @(
         @{ Local = 'laptop-exec.sh'; Remote = '~/.local/bin/laptop-exec'; Exec = $true },
         @{ Local = 'laptop-exec-setup.sh'; Remote = '~/.local/bin/laptop-exec-setup'; Exec = $true },

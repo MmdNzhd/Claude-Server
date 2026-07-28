@@ -173,14 +173,24 @@ _load_global() {
         else
             _fallback=20020
         fi
-        echo "warn: TUNNEL_PORT_MISSING fallback=${_fallback} deprecated_would_be=${_deprecated} (reconnect connect.bat/sh)" >&2
-        if declare -F _le_audit_log >/dev/null 2>&1; then
-            _le_audit_log WARN TUNNEL_PORT_MISSING \
-                "fallback=${_fallback}" "deprecated_would_be=${_deprecated}" \
-                "hint=reconnect connect.bat/sh"
+        # Rate-limit: once per process + once per ~60s on disk (was 735×/day noise).
+        _tp_stamp="${HOME:-/tmp}/.cache/laptop-exec/tunnel-port-missing.stamp"
+        _tp_now=$(date +%s 2>/dev/null || echo 0)
+        _tp_prev=0
+        [ -f "$_tp_stamp" ] && _tp_prev=$(cat "$_tp_stamp" 2>/dev/null || echo 0)
+        if [ -z "${_LE_TUNNEL_WARNED:-}" ] || [ $((_tp_now - _tp_prev)) -ge 60 ]; then
+            echo "warn: TUNNEL_PORT_MISSING fallback=${_fallback} deprecated_would_be=${_deprecated} (reconnect connect.bat/sh)" >&2
+            if declare -F _le_audit_log >/dev/null 2>&1; then
+                _le_audit_log WARN TUNNEL_PORT_MISSING \
+                    "fallback=${_fallback}" "deprecated_would_be=${_deprecated}" \
+                    "hint=reconnect connect.bat/sh"
+            fi
+            mkdir -p "$(dirname "$_tp_stamp")" 2>/dev/null || true
+            printf '%s' "$_tp_now" > "$_tp_stamp" 2>/dev/null || true
+            _LE_TUNNEL_WARNED=1
         fi
         TUNNEL_PORT=$_fallback
-        unset _uid _deprecated _fallback
+        unset _uid _deprecated _fallback _tp_stamp _tp_now _tp_prev
     fi
     case "${GIT_MODE,,}" in
         server|on|yes|1|slow) GIT_MODE="server" ;;
@@ -714,6 +724,20 @@ _cmd_count() {
     fi
 }
 
+
+# Reject Cursor-mount / abs paths that agents paste into LE by mistake.
+_reject_abs_or_mount_path() {
+    local op="$1" p="$2"
+    case "$p" in
+        /home/*/mounts/*|~/mounts/*|/mnt/*)
+            _die "$op: Linux mount path not valid on laptop ($p). NEXT: use repo-relative with -p PROJECT (e.g. README.md), or Cursor Read/Grep on /mounts/."
+            ;;
+    esac
+    if [[ "$p" == /* || "$p" == [A-Za-z]:* || "$p" == \\\\* ]]; then
+        _die "$op: absolute path not supported ($p). NEXT: repo-relative only with -p PROJECT."
+    fi
+}
+
 _cmd_read() {
     _parse_project_flag "$@"; _strip_leading_dd
     local tok cursorish=0 nfiles=0
@@ -743,6 +767,7 @@ _cmd_read() {
     fi
     _require_session; _resolve_project
     local file="${REMAINING[0]}"; file="${file//\\//}"
+    _reject_abs_or_mount_path read "$file"
     if [ "$LAPTOP_OS" = "mac" ]; then _run_in_project "$REMOTE_PATH" cat "$file"
     else _run_in_project "$REMOTE_PATH" powershell -NoProfile -Command "[Console]::OutputEncoding=[Text.UTF8Encoding]::new(\$false); \$t=[IO.File]::ReadAllText((Resolve-Path -LiteralPath '${file//\'/''}').Path,[Text.UTF8Encoding]::new(\$false)); [Console]::Out.Write(\$t)"; fi
 }
@@ -752,7 +777,17 @@ _cmd_write() {
     [ "${#REMAINING[@]}" -eq 1 ] || _die "usage: laptop-exec write [-p PROJECT] <file>  (stdin)"
     _require_session; _resolve_project
     local file="${REMAINING[0]}" tmp; file="${file//\\//}"
+    _reject_abs_or_mount_path write "$file"
     tmp=$(mktemp); cat >"$tmp" || _die "write: no stdin"
+    # MCP / Windows editors often inject CR; strip for shell/python so bash -n works.
+    case "$file" in
+        *.sh|*.bash|*.py|*.zsh)
+            if grep -q $'\r' "$tmp" 2>/dev/null; then
+                tr -d '\r' < "$tmp" > "${tmp}.nocr" && mv -f "${tmp}.nocr" "$tmp"
+                echo "warn: write stripped CRLF from $file (prefer LF for .sh/.py)" >&2
+            fi
+            ;;
+    esac
     _ensure_remote_parent_dir "$REMOTE_PATH" "$file"
     _laptop_scp_to "$tmp" "$REMOTE_PATH" "$file"
     rm -f "$tmp"
@@ -769,7 +804,15 @@ _cmd_run() {
 
 _cmd_git() {
     _parse_project_flag "$@"; _strip_leading_dd
-    [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec git [-p PROJECT] -- <args...>"
+    [ "${#REMAINING[@]}" -gt 0 ] || _die "usage: laptop-exec git [-p PROJECT] -- <args...>  ( -p BEFORE subcommand )"
+    # Agents often put -p AFTER git args: `git status -p ID` → git unknown switch p.
+    local _i _tok
+    for ((_i = 0; _i < ${#REMAINING[@]}; _i++)); do
+        _tok="${REMAINING[_i]}"
+        if [ "$_tok" = "-p" ] || [ "$_tok" = "--project" ]; then
+            _die "git: -p/--project must come BEFORE the git subcommand (got: laptop-exec git ${REMAINING[*]}). NEXT: laptop-exec git -p PROJECT -- status"
+        fi
+    done
     _require_session; _resolve_project
     local _t="${LAPTOP_EXEC_GIT_TIMEOUT:-300}"
     if [ "$_t" = "0" ]; then _git_invoke "$REMOTE_PATH" "${REMAINING[@]}"
@@ -1031,7 +1074,33 @@ main() {
         rg) _cmd_rg "$@" ;;
         test) _cmd_test "$@" ;;
         -h|--help|help) _usage ;;
-        *) _die "unknown command '$cmd' (try: laptop-exec --help)" ;;
+        *)
+            # Soft-trim trailing whitespace (HARD footgun: unknown command 'status ')
+            cmd_trim=$(printf '%s' "$cmd" | sed 's/[[:space:]]*$//')
+            if [ "$cmd_trim" != "$cmd" ] && [ -n "$cmd_trim" ]; then
+                cmd="$cmd_trim"
+                case "$cmd" in
+                    status) _cmd_status "$@" ;;
+                    health) _cmd_health "$@" ;;
+                    list)
+                        if [ "${1:-}" = "--full" ]; then shift; LIST_FAST=0 _cmd_list "$@"; else LIST_FAST=1 _cmd_list "$@"; fi ;;
+                    resolve) _parse_project_flag "$@"; _cmd_resolve "${REMAINING[@]}" ;;
+                    mount-status) _cmd_mount_status "$@" ;;
+                    path) _cmd_path "$@" ;;
+                    count) _cmd_count "$@" ;;
+                    read) _cmd_read "$@" ;;
+                    write) _cmd_write "$@" ;;
+                    run) _cmd_run "$@" ;;
+                    git) _cmd_git "$@" ;;
+                    rg) _cmd_rg "$@" ;;
+                    test) _cmd_test "$@" ;;
+                    -h|--help|help) _usage ;;
+                    *) _die "unknown command '$cmd' (not a laptop-exec verb). NEXT: status|health|list|read|write|rg|git|run|test — see --help. Do not invent rpath/pathspec." ;;
+                esac
+            else
+                _die "unknown command '$cmd' (not a laptop-exec verb). NEXT: status|health|list|read|write|rg|git|run|test — see --help. Do not invent rpath/pathspec."
+            fi
+            ;;
     esac
     _rc=$?
     set -e

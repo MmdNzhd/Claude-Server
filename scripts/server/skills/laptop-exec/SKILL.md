@@ -47,6 +47,15 @@ Ops / install / ports → [reference-windows-mcp.md](reference-windows-mcp.md)
 **Not:** “MCP tools are listed → always FileSystem read.”  
 **Not:** “Shell → laptop-exec read/rg while mount works.”
 
+## Footguns (DIE with NEXT)
+
+| Bad | Instead |
+|-----|---------|
+| `laptop-exec read /home/$USER/mounts/P/file` | Cursor **Read** on that path, or `read -p P file` (relative) |
+| `laptop-exec git status -p P` | `laptop-exec git -p P -- status` (`-p` **before** subcommand) |
+| MCP `FileSystem` write of `*.sh` then `bash -n` fails `$'\r'` | Prefer LF; LE `write` auto-strips CR for `.sh`/`.py`; never ship CRLF hooks |
+| Invented verbs (`rpath`, `pathspec`) | Real verbs: `status|health|list|read|write|rg|git|run|test` |
+
 ## Failover / circuit breaker
 
 | Symptom | Next path |

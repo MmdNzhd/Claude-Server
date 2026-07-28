@@ -28,6 +28,11 @@ _le_audit_trunc() {
 }
 
 _le_audit_slots_busy() {
+    # Fast path: flock probe of 8 slots is ~tens–hundreds ms under load; Shell hook skips.
+    if [ "${LAPTOP_EXEC_AUDIT_FAST:-0}" = "1" ]; then
+        printf '?'
+        return 0
+    fi
     local i n=0 fd cache="${HOME:-/tmp}/.cache/laptop-exec"
     for i in 0 1 2 3 4 5 6 7; do
         [ -e "$cache/slot-${i}.lock" ] || continue

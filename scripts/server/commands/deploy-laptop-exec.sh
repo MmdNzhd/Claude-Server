@@ -157,40 +157,31 @@ _sync_from_laptop() {
 }
 
 echo -e "${BOLD}Sync golden bundle${NC}"
-# laptop-exec stage is attempted inside _sync_golden_file first; then REPO mount,
-# then CLIENT_BUNDLE (last — often stale).
+# Order inside _sync_golden_file: laptop-exec stage (SoT) then REPO mount fallbacks.
+# Do NOT use $CLIENT_BUNDLE/server/ — deploy-client-bundle strips server/ from the share.
 _sync_golden_file "laptop-exec.sh" 755 \
-    "$REPO_ROOT/scripts/server/laptop-exec.sh" \
-    "$CLIENT_BUNDLE/server/laptop-exec.sh"
+    "$REPO_ROOT/scripts/server/laptop-exec.sh"
 _sync_golden_file "claude-mount.sh" 755 \
     "$REPO_ROOT/scripts/server/claude-mount.sh" \
-    "$CLIENT_BUNDLE/server/claude-mount.sh" \
     "$CLIENT_BUNDLE/mac/claude-mount.sh"
 _sync_golden_file "claude-git-setup.sh" 755 \
-    "$REPO_ROOT/scripts/server/claude-git-setup.sh" \
-    "$CLIENT_BUNDLE/server/claude-git-setup.sh"
+    "$REPO_ROOT/scripts/server/claude-git-setup.sh"
 _sync_golden_file "laptop-exec-setup.sh" 755 \
-    "$REPO_ROOT/scripts/server/laptop-exec-setup.sh" \
-    "$CLIENT_BUNDLE/server/laptop-exec-setup.sh"
+    "$REPO_ROOT/scripts/server/laptop-exec-setup.sh"
 _sync_golden_file "cursor-rules/laptop-exec.mdc" 644 \
-    "$REPO_ROOT/scripts/server/cursor-rules/laptop-exec.mdc" \
-    "$CLIENT_BUNDLE/server/cursor-rules/laptop-exec.mdc"
+    "$REPO_ROOT/scripts/server/cursor-rules/laptop-exec.mdc"
 _sync_golden_file "skills/laptop-exec/SKILL.md" 644 \
-    "$REPO_ROOT/scripts/server/skills/laptop-exec/SKILL.md" \
-    "$CLIENT_BUNDLE/server/skills/laptop-exec/SKILL.md"
+    "$REPO_ROOT/scripts/server/skills/laptop-exec/SKILL.md"
 _sync_golden_file "skills/laptop-exec/reference-windows-mcp.md" 644 \
-    "$REPO_ROOT/scripts/server/skills/laptop-exec/reference-windows-mcp.md" \
-    "$CLIENT_BUNDLE/server/skills/laptop-exec/reference-windows-mcp.md"
+    "$REPO_ROOT/scripts/server/skills/laptop-exec/reference-windows-mcp.md"
 for _hf in laptop-exec-audit-log.sh laptop-exec-guard.sh laptop-exec-guard-wrap.sh laptop-exec-shell-scan.py laptop-exec-session.sh; do
   _mode=755
   [[ "$_hf" == *.py ]] && _mode=644
   _sync_golden_file "cursor-hooks/$_hf" "$_mode" \
-      "$REPO_ROOT/scripts/server/cursor-hooks/$_hf" \
-      "$CLIENT_BUNDLE/server/cursor-hooks/$_hf"
+      "$REPO_ROOT/scripts/server/cursor-hooks/$_hf"
 done
 _sync_golden_file "tests/test-laptop-exec.sh" 755 \
-    "$REPO_ROOT/scripts/server/tests/test-laptop-exec.sh" \
-    "$CLIENT_BUNDLE/server/tests/test-laptop-exec.sh"
+    "$REPO_ROOT/scripts/server/tests/test-laptop-exec.sh"
 
 # Refresh anything still missing markers from laptop SoT.
 _sync_from_laptop "laptop-exec.sh" 755 || true

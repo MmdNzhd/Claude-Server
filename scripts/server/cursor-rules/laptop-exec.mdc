@@ -48,4 +48,7 @@ Read/Grep/Glob/Write/Edit/Shell on `/mounts/` = **ALLOW**. Task = ALLOW (paste P
 - MCP: absolute Windows (`LAPTOP_REMOTE_PATH` / `rpath` + REL)
 - LE: `-p PROJECT` + repo-relative. `rg`: no `-i`/`-l`/`-n`/`-A`/`-B`/`-C`/`-m`/`-g`/`--glob`/`--type`/`--max-count`. `read`: one file only (no `--offset`/`--limit`).
 
+
+**Footguns:** no Linux `/mounts/` paths in LE; `git -p ID` before subcommand; LE write strips CRLF on `.sh`/`.py`; do not invent verbs (`rpath`).
+
 Sudo: `sudo-from-laptop --smart|--sepidz -- …` — never ask for a password.

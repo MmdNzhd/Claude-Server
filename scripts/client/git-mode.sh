@@ -254,19 +254,32 @@ push_laptop_exec_bundle() {
 }
 
 resolve_server_script_dir() {
+    # Prefer full server tree (mount + laptop-exec) so LE hook push is not a no-op.
     local script_dir="$1" _rel _candidate d i
+    d="$script_dir"
+    i=0
+    while [ "$i" -lt 8 ] && [ -n "$d" ] && [ "$d" != "/" ]; do
+        _candidate="$d/scripts/server"
+        if [ -f "$_candidate/claude-mount.sh" ] && [ -f "$_candidate/laptop-exec.sh" ]; then
+            printf '%s' "$_candidate"
+            return 0
+        fi
+        d="$(dirname "$d")"
+        i=$((i + 1))
+    done
     _candidate="$script_dir/server"
-    if [ -f "$_candidate/laptop-exec.sh" ] || [ -f "$_candidate/claude-mount.sh" ]; then
+    if [ -f "$_candidate/claude-mount.sh" ] && [ -f "$_candidate/laptop-exec.sh" ]; then
         printf '%s' "$_candidate"
         return 0
     fi
     for _rel in "../server" "../../server" "../../../server"; do
         _candidate="$(cd "$script_dir/$_rel" 2>/dev/null && pwd)" || continue
-        if [ -f "$_candidate/claude-mount.sh" ]; then
+        if [ -f "$_candidate/claude-mount.sh" ] && [ -f "$_candidate/laptop-exec.sh" ]; then
             printf '%s' "$_candidate"
             return 0
         fi
     done
+    # Mount-only fallback
     d="$script_dir"
     i=0
     while [ "$i" -lt 8 ] && [ -n "$d" ] && [ "$d" != "/" ]; do

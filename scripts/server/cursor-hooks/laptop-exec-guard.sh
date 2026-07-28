@@ -6,6 +6,8 @@
 # false denies on every Read/Grep/Shell).
 # Fail OPEN on parse/runtime errors (non-zero exit without JSON looks like a mysterious reject).
 set -uo pipefail
+# Shell-hook hot path: skip 8-slot flock probes in audit breadcrumbs.
+: "${LAPTOP_EXEC_AUDIT_FAST:=1}"
 # Last-resort fail-open: never exit 2 from this script (Cursor treats 2 as deny).
 trap '_allow' ERR
 input=$(cat || true)
@@ -355,7 +357,7 @@ _remap_hint() {
       ;;
     Task)
       if [[ "$hybrid" -eq 1 ]]; then
-        printf 'NEXT: Task OK; child MUST paste: HEALTHY MOUNT=>Cursor Read/Grep only (never LE read/rg first); PRIORITY READ=mount→MCP→LE; WRITE=MCP→mount→LE; Glob=MCP; git=LE -p ID; no rg -i/-l/-n/-A/-B/-C/-m/--glob/--type/--max-count; LE read=one file.'
+        printf 'NEXT: Task OK; child MUST paste: HEALTHY MOUNT=>Cursor Read/Grep; READ=mount→MCP→LE; WRITE=MCP→mount→LE; Glob=MCP; git=LE -p ID before subcmd; LE≤4; LE read=one relative file; LF for .sh writes.'
       else
         printf 'NEXT: Task OK; paste HEALTHY MOUNT=>Cursor Read/Grep; READ=mount→MCP→LE; WRITE=MCP→mount→LE; git=LE -p ID; no rg ripgrep flags; LE read=one file.'
       fi
@@ -408,15 +410,16 @@ case "$event" in
         "SSH-first BLOCKED shell on /mounts/ (expected). Do NOT retry the same shell. $hint" \
         "$(_deny_user_msg Shell)"
     fi
+    # Skip slots_busy flock scan on the hot Shell path (~8 lock probes = multi-agent tax).
     if [[ "$cmd" == *"laptop-exec"* ]]; then
       _le_audit_log INFO HOOK_SHELL_LAPTOP_EXEC "cwd=$(_le_audit_trunc "$cwd" 200)" \
         "cmd=$(_le_audit_trunc "$cmd" 400)" "project=$(_guess_project_id Shell 2>/dev/null || echo '?')" \
-        "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8"
+        "$(_le_audit_session_fields)" "slots_busy=?"
     elif _touches_mounts "$cwd"; then
       _le_audit_log INFO HOOK_SHELL_ALLOW_ON_MOUNTS "reason=light_or_non_heavy" \
         "cwd=$(_le_audit_trunc "$cwd" 200)" "cmd=$(_le_audit_trunc "$cmd" 300)" \
         "project=$(_guess_project_id Shell 2>/dev/null || echo '?')" \
-        "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8"
+        "$(_le_audit_session_fields)" "slots_busy=?"
     fi
     _allow ;;
   preToolUse)
@@ -432,7 +435,7 @@ case "$event" in
             "project=$(_guess_project_id Task 2>/dev/null || echo '?')" \
             "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8" \
             "hint=Child does NOT inherit SSH-first. Prompt MUST paste laptop-exec block. Prefer ≤4 parallel (hard cap 8 slots)."
-          _allow_msg "Task spawn OK. Paste: HEALTHY MOUNT=>Cursor Read/Grep only (never LE read/rg first). PRIORITY+FAILOVER READ=mount→MCP→LE; WRITE=MCP→mount→LE; Glob=MCP; git=LE; if 1st down use next; no rg -i/-l/-n/-A/-B/-C/-m/--glob/--type/--max-count; LE read=one file (no --offset)."
+          _allow_msg "Task spawn OK. Paste: HEALTHY MOUNT=>Cursor Read/Grep only (never LE read/rg first). PRIORITY+FAILOVER READ=mount→MCP→LE; WRITE=MCP→mount→LE; Glob=MCP search/list (FileSystem search≠content Grep); git=LE -p ID before subcommand; parallel mount~16 MCP~8 LE≤4 (hard 8); if 1st down use next same turn; no rg -i/-l/-n/-A/-B/-C/-m/--glob/--type/--max-count; LE read=one relative file (no --offset/--limit); do not MCP-write .sh without LF (CRLF breaks bash)."
         fi
         if _tool_targets_mounts "$tool"; then
           hint=$(_remap_hint "$tool")
