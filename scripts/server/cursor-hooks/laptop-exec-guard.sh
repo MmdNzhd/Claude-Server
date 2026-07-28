@@ -329,14 +329,14 @@ _remap_hint() {
         printf 'NEXT (do not retry %s): mount Write/Edit or laptop-exec write%s REL <<EOF ... EOF' "$tool" "$pflag"
       fi
       ;;
-    Grep)
-      # Content: mount Grep first, then Select-String (MCP), then laptop-exec rg.
-      if [[ "$hybrid" -eq 1 ]]; then
-        printf 'NEXT (do not retry Grep): prefer Cursor Grep on /mounts/ (~16-32). Else MCP Select-String (~4-8). Else laptop-exec rg%s PATTERN [pathspec].' "$pflag"
-      else
-        printf 'NEXT (do not retry Grep): Cursor Grep on mounts or laptop-exec rg%s PATTERN [pathspec]' "$pflag"
-      fi
-      ;;
+      Grep)
+        # Content: mount Grep first, then Select-String (MCP), then laptop-exec rg.
+        if [[ "$hybrid" -eq 1 ]]; then
+          printf 'NEXT (do not retry Grep): prefer Cursor Grep on /mounts/ (~16-32). Else MCP Select-String (~4-8). Else laptop-exec rg%s PATTERN [pathspec] — no -i/-l/-n/-A/-B/-C/-m/--glob/--type/--max-count.' "$pflag"
+        else
+          printf 'NEXT (do not retry Grep): Cursor Grep on mounts or laptop-exec rg%s PATTERN [pathspec] (no ripgrep flags)' "$pflag"
+        fi
+        ;;
     Glob)
       if [[ "$hybrid" -eq 1 && -n "$rpath" ]]; then
         printf 'NEXT (do not retry Glob): windows-mcp FileSystem search/list under %s (prefer; ~8-12 parallel). Or Cursor Glob / mount ls. Not content Grep.' "$rpath"
@@ -348,16 +348,16 @@ _remap_hint() {
       ;;
     Shell)
       if [[ "$hybrid" -eq 1 ]]; then
-        printf 'NEXT (do not retry heavy shell on mounts): if windows-mcp PowerShell listed use once, else laptop-exec git|rg|run|read%s ...%s' "$pflag" "$ff"
+        printf 'NEXT: prefer Cursor Read/Grep on /mounts when healthy (not laptop-exec read/rg). Heavy build/test: windows-mcp PowerShell once, else laptop-exec run|git%s ...%s' "$pflag" "$ff"
       else
-        printf 'NEXT (do not retry heavy shell on mounts): laptop-exec git|rg|run|read%s ...' "$pflag"
+        printf 'NEXT: prefer Cursor Read/Grep on /mounts when healthy. Heavy work: laptop-exec run|git%s ...' "$pflag"
       fi
       ;;
     Task)
       if [[ "$hybrid" -eq 1 ]]; then
-        printf 'NEXT: Task spawn allowed; child MUST paste: PRIORITY+FAILOVER READ=mount→MCP→LE; WRITE=MCP→mount→LE; Glob=MCP; git=LE -p ID; if 1st down use next; no rg -i/-l/--glob.'
+        printf 'NEXT: Task OK; child MUST paste: HEALTHY MOUNT=>Cursor Read/Grep only (never LE read/rg first); PRIORITY READ=mount→MCP→LE; WRITE=MCP→mount→LE; Glob=MCP; git=LE -p ID; no rg -i/-l/-n/-A/-B/-C/-m/--glob/--type/--max-count; LE read=one file.'
       else
-        printf 'NEXT: Task spawn allowed; paste READ=mount→MCP→LE; WRITE=MCP→mount→LE; git=laptop-exec -p ID; failover if path down; no rg -i/-l/--glob.'
+        printf 'NEXT: Task OK; paste HEALTHY MOUNT=>Cursor Read/Grep; READ=mount→MCP→LE; WRITE=MCP→mount→LE; git=LE -p ID; no rg ripgrep flags; LE read=one file.'
       fi
       ;;
     *)
@@ -432,7 +432,7 @@ case "$event" in
             "project=$(_guess_project_id Task 2>/dev/null || echo '?')" \
             "$(_le_audit_session_fields)" "slots_busy=$(_le_audit_slots_busy)/8" \
             "hint=Child does NOT inherit SSH-first. Prompt MUST paste laptop-exec block. Prefer ≤4 parallel (hard cap 8 slots)."
-          _allow_msg "Task spawn OK. Paste: PRIORITY+FAILOVER READ=mount→MCP→LE; WRITE=MCP→mount→LE; Glob=MCP; git=LE; if 1st down use next; no rg -i/-l/--glob."
+          _allow_msg "Task spawn OK. Paste: HEALTHY MOUNT=>Cursor Read/Grep only (never LE read/rg first). PRIORITY+FAILOVER READ=mount→MCP→LE; WRITE=MCP→mount→LE; Glob=MCP; git=LE; if 1st down use next; no rg -i/-l/-n/-A/-B/-C/-m/--glob/--type/--max-count; LE read=one file (no --offset)."
         fi
         if _tool_targets_mounts "$tool"; then
           hint=$(_remap_hint "$tool")

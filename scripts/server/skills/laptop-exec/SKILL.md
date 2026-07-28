@@ -1,18 +1,21 @@
 ---
 name: laptop-exec
 description: >-
-  Routes file I/O between SSHFS mounts, windows-mcp, and laptop-exec with
-  priority chains and failover. Use when reading/writing under ~/mounts/,
-  calling user-windows-mcp FileSystem/PowerShell, running laptop-exec, git on
-  the laptop, Select-String, Glob on Remote SSH, or recovering from mount
-  EPERM/STALE or MCP ECONNREFUSED. Prefer mount for Read/Grep, MCP for
-  Write/Glob; if the preferred path fails, use the next in the same turn.
+  Priority+failover I/O for ~/mounts: healthy mount ⇒ Cursor Read/Grep
+  (never laptop-exec read/rg first); Write ⇒ windows-mcp then mount then LE;
+  git ⇒ laptop-exec only. Use when choosing mount vs MCP vs laptop-exec,
+  recovering from EPERM/STALE/ECONNREFUSED, or fixing bad LE CLI (no
+  --glob/-A/--offset). Prefer 1st path; if it fails, use next same turn.
 ---
 
 # Laptop Exec — priority + failover
 
-Three paths to the laptop disk. **Prefer the fastest healthy path; if it fails,
-use the next immediately — never stuck.**
+**HARD RULE:** If the SSHFS mount is healthy, **never** call `laptop-exec read`
+or `laptop-exec rg` first. Use Cursor **Read** / **Grep** on `/mounts/`.
+LE read/rg is **failover only** (~20–28× slower). LE is required for **git**.
+
+Three paths to the laptop disk. Prefer the fastest healthy path; if it fails,
+use the next immediately — never stuck.
 
 | Shortcut | Meaning |
 |----------|---------|
@@ -24,9 +27,8 @@ Ops / install / ports → [reference-windows-mcp.md](reference-windows-mcp.md)
 
 ## When to use
 
-- Any read/write/search under `~/mounts/<project>/`
-- Choosing between Cursor tools vs `user-windows-mcp` FileSystem
-- `laptop-exec` read/write/rg/git/run
+- Choosing between Cursor tools vs `user-windows-mcp` FileSystem vs LE failover
+- `laptop-exec` **git** / **run** (builds) / read-rg **only after** mount+MCP fail
 - Mount glitches (EPERM, STALE, EIO) or MCP down (not listed, ECONNREFUSED)
 
 ## Priority chains (measured 2026-07-26)
@@ -42,7 +44,8 @@ Ops / install / ports → [reference-windows-mcp.md](reference-windows-mcp.md)
 | **UI** | MCP only | — | — | — |
 
 **Healthy default:** Read/Grep → mount. Write/Glob → MCP.  
-**Not:** “MCP tools are listed → always FileSystem read.”
+**Not:** “MCP tools are listed → always FileSystem read.”  
+**Not:** “Shell → laptop-exec read/rg while mount works.”
 
 ## Failover / circuit breaker
 
@@ -53,14 +56,13 @@ Ops / install / ports → [reference-windows-mcp.md](reference-windows-mcp.md)
 | Mount + MCP both bad; tunnel UP | LE `-p PROJECT` |
 | Tunnel DOWN | Stop LE; tell user `connect.bat` / `connect.sh` |
 
-Pattern matches industry fallback chains: ordered degrade, trip on hard fail, keep serving.
-
 ## Examples
 
 **Read README (healthy mount):**
 
 ```text
 ✅ Read  /home/$USER/mounts/refactoreoldclub/README.md
+❌ laptop-exec read -p refactoreoldclub README.md   # only if mount failed
 ❌ first CallDynamicTool user-windows-mcp FileSystem mode=read
 ```
 
@@ -78,17 +80,13 @@ Pattern matches industry fallback chains: ordered degrade, trip on hard fail, ke
 ✅ if MCP down → Cursor Write on /mounts/... then LE write
 ```
 
-**Find `*.csproj`:**
-
-```text
-✅ FileSystem mode=search|list  (or Cursor Glob)
-```
-
 **Content search for `Foo`:**
 
 ```text
 ✅ Cursor Grep on mount  (FileSystem search ≠ content)
-✅ fallback Select-String → laptop-exec rg -p ID 'Foo|foo'
+✅ fallback Select-String → laptop-exec rg -p ID 'Foo|foo' src/
+❌ laptop-exec rg --glob '*.cs' Foo
+❌ laptop-exec rg -A 3 Foo
 ```
 
 ## Checklist (every I/O)
@@ -108,8 +106,8 @@ Pattern matches industry fallback chains: ordered degrade, trip on hard fail, ke
 
 ```bash
 laptop-exec status
-laptop-exec read  -p PROJECT REL
-laptop-exec rg    -p PROJECT 'pattern' [pathspec...]   # no -i/-l/-n/--glob
+laptop-exec read  -p PROJECT REL          # ONE file; no --offset/--limit
+laptop-exec rg    -p PROJECT 'pattern' [pathspec...]   # no ripgrep flags
 laptop-exec write -p PROJECT REL <<'EOF'
 ...
 EOF
@@ -117,31 +115,38 @@ laptop-exec git   -p PROJECT -- status
 laptop-exec run   -p PROJECT -- command...
 ```
 
-`rg` is **not** ripgrep: `-i`/`-l`/`-n`/`--glob` rejected.
+`rg` is **not** ripgrep: reject `-i/-l/-n/-A/-B/-C/-m/-g/--glob/--type/--max-count`
+(and invents like `--pathspec`). Use pathspecs + regex `|[]()+?`.
+
+`read` is **not** Cursor Read: one relative file only — no `--offset/--limit`,
+no multi-file, no positional line numbers.
 
 ## HARD STOP
 
 1. Mount Read/Grep/Write/Glob are **ALLOWED** by hooks — use them for Read/Grep when healthy.
-2. Denied tool → never retry; follow `NEXT:` (usually next chain hop).
-3. MCP FileSystem `mode=search` ≠ content Grep.
-4. `user-filesystem` ≠ `windows-mcp`. FileSystem uses `mode=` not `action=`.
-5. Task children need an explicit paste (below).
+2. Healthy mount ⇒ **do not** `laptop-exec read` / `laptop-exec rg`.
+3. Denied tool → never retry; follow `NEXT:` (usually next chain hop).
+4. MCP FileSystem `mode=search` ≠ content Grep.
+5. `user-filesystem` ≠ `windows-mcp`. FileSystem uses `mode=` not `action=`.
+6. Task children need an explicit paste (below).
 
 ## Multi-agent paste
 
 ```
-PRIORITY+FAILOVER: 1st path then 2nd/3rd same turn if down. READ/GREP=mount→MCP→LE. WRITE=MCP→mount→LE. Glob=MCP→mount. git=LE -p PROJECT. One MCP hard fail=>MCP down; continue mount+LE. Abs Windows for MCP. No rg -i/-l/-n/--glob. user-filesystem≠windows-mcp. mode= not action=. Parallel: mount Read ~16-32; MCP ~8-12; LE ≤4.
+PRIORITY+FAILOVER: 1st path then 2nd/3rd same turn if down. Healthy mount: NEVER laptop-exec read/rg — Cursor Read/Grep on /mounts. READ/GREP=mount→MCP→LE. WRITE=MCP→mount→LE. Glob=MCP→mount. git=LE -p PROJECT. One MCP hard fail=>MCP down; continue mount+LE. Abs Windows for MCP. No rg -i/-l/-n/-A/-B/-C/-m/-g/--glob/--type/--max-count. LE read=one file (no --offset/--limit). user-filesystem≠windows-mcp. mode= not action=. Parallel: mount Read ~16-32; MCP ~8-12; LE ≤4.
 ```
 
 ## Anti-patterns
 
 | Don’t | Do |
 |-------|-----|
+| `laptop-exec read/rg` while mount is fine | Cursor Read/Grep on `/mounts/` |
 | MCP FileSystem read first while mount is fine | mount Cursor Read |
 | Give up after one mount EPERM | failover MCP → LE |
 | Retry MCP after ECONNREFUSED | MCP down; mount + LE |
 | FileSystem search for content | Cursor Grep / Select-String |
-| `laptop-exec rg -i` / `--glob` | alternation in pattern; pathspecs |
+| `laptop-exec rg -i` / `--glob` / `-A` / `--type` | pathspecs; regex alternation; or Cursor Grep |
+| `laptop-exec read` with `--offset` / multi-file / `file 1 120` | Cursor Read on mount |
 | Omit `-p` | always `-p PROJECT` |
 | Desktop-relative MCP paths | absolute under project root |
 

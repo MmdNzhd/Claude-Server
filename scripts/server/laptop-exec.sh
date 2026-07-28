@@ -34,13 +34,29 @@ if ! declare -F _le_audit_log >/dev/null 2>&1; then
     _le_audit_session_fields() { printf 'tunnel_port=?'; }
 fi
 
+# Real CLI argv from main() — must not reuse $msg (agents need the failing command).
+_LE_LAST_ARGV=""
+
 _die() {
     local msg="$*"
+    local av="${_LE_LAST_ARGV:-}"
     _le_audit_log ERROR DIE "msg=$(_le_audit_trunc "$msg" 300)" \
         "project=${PROJECT_ID:-?}" "$(_le_audit_session_fields)" \
-        "slots_busy=$(_le_audit_slots_busy)/8" "argv=$(_le_audit_trunc "$*" 200)"
+        "slots_busy=$(_le_audit_slots_busy)/8" \
+        "argv=$(_le_audit_trunc "${av:-unknown}" 200)"
     echo "laptop-exec: $msg" >&2
     exit 1
+}
+
+# Shared NEXT hints (agents map Cursor tool APIs onto laptop-exec — steer them back).
+_RG_FORBIDDEN='-i/-l/-n/-A/-B/-C/-m/-g/--glob/--type/--max-count/--pathspec'
+_rg_next() {
+    printf 'NEXT: if mount healthy use Cursor Grep on /home/%s/mounts/%s/ (preferred). Else: laptop-exec rg [-p ID] PATTERN [pathspec...] — NO %s; use pathspecs like src/ or '\''*.cs'\'' and regex |[]()+?.' \
+        "${USER:-USER}" "${PROJECT_ID:-PROJECT}" "$_RG_FORBIDDEN"
+}
+_read_next() {
+    printf 'NEXT: if mount healthy use Cursor Read /home/%s/mounts/%s/REL (supports offset/limit). laptop-exec read = ONE relative file only — no --offset/--limit, no multi-file, no line numbers.' \
+        "${USER:-USER}" "${PROJECT_ID:-PROJECT}"
 }
 
 # Abort tracking: Cursor/tool cancel often SIGTERM this bash while timeout/ssh keep running
@@ -700,7 +716,31 @@ _cmd_count() {
 
 _cmd_read() {
     _parse_project_flag "$@"; _strip_leading_dd
-    [ "${#REMAINING[@]}" -eq 1 ] || _die "usage: laptop-exec read [-p PROJECT] [-w PATH] <file>"
+    local tok cursorish=0 nfiles=0
+    if [ "${#REMAINING[@]}" -eq 0 ]; then
+        _die "read: missing <file>. $(_read_next)"
+    fi
+    for tok in "${REMAINING[@]}"; do
+        case "$tok" in
+            --offset|--limit|--offset=*|--limit=*|--)
+                cursorish=1 ;;
+            -*)
+                cursorish=1 ;;
+            *)
+                if [[ "$tok" =~ ^[0-9]+$ ]]; then
+                    cursorish=1
+                else
+                    nfiles=$((nfiles + 1))
+                fi
+                ;;
+        esac
+    done
+    if [ "$cursorish" -eq 1 ]; then
+        _die "read: Cursor-Read-style args not supported (${REMAINING[*]}). $(_read_next)"
+    fi
+    if [ "${#REMAINING[@]}" -ne 1 ] || [ "$nfiles" -ne 1 ]; then
+        _die "read: got ${#REMAINING[@]} args (need exactly 1 file). $(_read_next)"
+    fi
     _require_session; _resolve_project
     local file="${REMAINING[0]}"; file="${file//\\//}"
     if [ "$LAPTOP_OS" = "mac" ]; then _run_in_project "$REMOTE_PATH" cat "$file"
@@ -808,17 +848,19 @@ _cmd_rg() {
             -w|--word-regexp|-H|--with-filename|-c|--count|-U|--multiline|--hidden|\
             --no-ignore|--json|-S|--smart-case|--heading|--no-heading|-o|--only-matching|\
             --files|-e|--regexp)
-                _le_audit_log ERROR RG_FLAG_REJECTED "flag=$a" "project=${PROJECT_ID:-?}" "hint=Never pass -i/-l/-n/--glob; use pathspecs / regex alternation."
-                _die "rg: flag '$a' not supported. Use: laptop-exec rg [-p ID] PATTERN [pathspec...]  (no -i/-l/-n/--glob; regex via |[]()+?; pathspecs like src/ or '*.ts')"
+                _le_audit_log ERROR RG_FLAG_REJECTED "flag=$a" "project=${PROJECT_ID:-?}" \
+                    "hint=No ${_RG_FORBIDDEN}; prefer Cursor Grep on /mounts/."
+                _die "rg: flag '$a' not supported. $(_rg_next)"
                 ;;
             -A|-B|-C|-g|--glob|--type|--type-add|--type-not|--type-not-add|-m|--max-count|\
-            --after-context|--before-context|--context|--iglob)
-                _le_audit_log ERROR RG_FLAG_REJECTED "flag=$a" "project=${PROJECT_ID:-?}" "hint=Use pathspecs not --glob."
-                _die "rg: flag '$a' not supported. Use: laptop-exec rg [-p ID] PATTERN [pathspec...]  (narrow with pathspecs, not --glob)"
+            --after-context|--before-context|--context|--iglob|--pathspec|--path-filter)
+                _le_audit_log ERROR RG_FLAG_REJECTED "flag=$a" "project=${PROJECT_ID:-?}" \
+                    "hint=No ${_RG_FORBIDDEN}; use pathspecs or Cursor Grep."
+                _die "rg: flag '$a' not supported. $(_rg_next)"
                 ;;
             -*)
                 _le_audit_log ERROR RG_FLAG_REJECTED "flag=$a" "project=${PROJECT_ID:-?}" "hint=Unknown rg flag."
-                _die "rg: unknown flag '$a'. Use: laptop-exec rg [-p ID] PATTERN [pathspec...]"
+                _die "rg: unknown flag '$a'. $(_rg_next)"
                 ;;
             *)
                 if [ -z "$pattern" ]; then
@@ -857,7 +899,7 @@ _cmd_rg() {
         [ "$rc" -eq 124 ] && return 124
         [ "$rc" -eq 255 ] && _die "rg: SSH/mux failed (exit 255) — session slots full or tunnel issue; wait and retry"
         # Git work tree exists: do NOT fall through to full-tree Select-String.
-        _die "rg: git grep failed (exit $rc). Fix pattern/pathspec; do not retry with -i/-l/--glob."
+        _die "rg: git grep failed (exit $rc). Fix pattern/pathspec; do not retry with ${_RG_FORBIDDEN}. $(_rg_next)"
     fi
     if [ "$LAPTOP_OS" = "mac" ]; then
         if command -v rg >/dev/null 2>&1; then
@@ -908,6 +950,9 @@ _cmd_test() {
     _check "rg git-accuracy" bash -c 'laptop-exec rg -p claude-code-server "ControlPersist" scripts/server/laptop-exec.sh | grep -q ControlPersist'
     _check "rg reject -i" bash -c 'out=$(laptop-exec rg -p claude-code-server -i foo 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -qi "not supported"'
     _check "rg reject --glob" bash -c 'out=$(laptop-exec rg -p claude-code-server --glob "*.ts" foo 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -qi "not supported"'
+    _check "rg reject --type" bash -c 'out=$(laptop-exec rg -p claude-code-server --type cs foo 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -qi "not supported\|Cursor Grep"'
+    _check "read reject --offset" bash -c 'out=$(laptop-exec read -p claude-code-server CLAUDE.md --offset 1 --limit 5 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -qi "Cursor Read\|Cursor-Read"'
+    _check "read reject multi-file" bash -c 'out=$(laptop-exec read -p claude-code-server CLAUDE.md README.md 2>&1); rc=$?; [ "$rc" -ne 0 ] && echo "$out" | grep -qi "exactly 1 file\|Cursor Read"'
     _check "rg dash pattern" bash -c 'laptop-exec rg -p claude-code-server -- "-o ControlMaster" scripts/server/laptop-exec.sh | grep -q ControlMaster'
     _check "rg no-fallthrough" bash -c 'out=$(laptop-exec rg -p claude-code-server "[unterminated" scripts/server/ 2>&1); echo "$out" | grep -qi "git grep failed"'
     _check dotnet laptop-exec run -- dotnet --version
@@ -931,7 +976,10 @@ Project selection (first match):
 
 Speed: shared ControlMaster + 8 session slots (capped for OpenSSH MaxSessions) + flock bring-up
 Search: git grep (tracked) -> PowerShell Select-String (excl. node_modules/.git/...)
-  rg flags -i/-l/--glob REJECTED. Dash patterns: rg -- -foo path
+  Healthy mount: prefer Cursor Read/Grep on /mounts — LE read/rg is failover only.
+  rg flags -i/-l/-n/-A/-B/-C/-m/-g/--glob/--type/--max-count REJECTED. Prefer Cursor Grep.
+  read: ONE file only (no --offset/--limit / multi-file / line nums — use Cursor Read).
+  Dash patterns: rg -- -foo path
   Timeouts: rg 90s, run 120s, git 300s, scp 120s (set LAPTOP_EXEC_*_TIMEOUT=0 to disable)
 EOF
 }
@@ -957,6 +1005,7 @@ main() {
     local _t0 _ms _rc=0 _argv
     _t0=$(date +%s%3N 2>/dev/null || date +%s)
     _argv=$(_le_audit_trunc "$cmd $*" 350)
+    _LE_LAST_ARGV="$_argv"
     # Resolve project early for log context when -p present in args
     case " $* " in
         *" -p "*|*" --project "*) ;;

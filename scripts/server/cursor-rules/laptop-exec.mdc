@@ -1,14 +1,19 @@
 ---
 description: >-
-  Priority+failover I/O on ~/mounts: Read/Grep mount→MCP→LE; Write
-  MCP→mount→LE; Glob MCP→mount; git LE. Use next path same turn if 1st
-  fails (EPERM/STALE/ECONNREFUSED). Parallel mount~16-32 MCP~8-12 LE≤4
+  Priority+failover on ~/mounts: healthy mount ⇒ Cursor Read/Grep (never LE
+  read/rg first); Write MCP→mount→LE; Glob MCP→mount; git LE. Failover same
+  turn. No rg -i/-l/-n/-A/-B/-C/-m/--glob/--type/--max-count. Parallel
+  mount~16-32 MCP~8-12 LE≤4
 alwaysApply: true
 ---
 
 # Laptop Exec — hybrid routing
 
 `~/mounts/` may be STALE for **git** truth. Mount Cursor tools are ALLOWED.
+
+**HARD:** Healthy mount ⇒ **Cursor Read/Grep only** — do **not** call
+`laptop-exec read` / `laptop-exec rg` first (LE is ~20–28× slower; failover only).
+git always uses `laptop-exec`.
 
 **Priority + failover:** use column 1st when healthy; if unavailable/errors,
 use 2nd then 3rd in the **same turn**. Never stuck on a dead path.
@@ -41,6 +46,6 @@ Read/Grep/Glob/Write/Edit/Shell on `/mounts/` = **ALLOW**. Task = ALLOW (paste P
 
 - Mount: `/home/$USER/mounts/PROJECT/REL`
 - MCP: absolute Windows (`LAPTOP_REMOTE_PATH` / `rpath` + REL)
-- LE: `-p PROJECT` + repo-relative. `rg`: no `-i`/`-l`/`-n`/`--glob`
+- LE: `-p PROJECT` + repo-relative. `rg`: no `-i`/`-l`/`-n`/`-A`/`-B`/`-C`/`-m`/`-g`/`--glob`/`--type`/`--max-count`. `read`: one file only (no `--offset`/`--limit`).
 
 Sudo: `sudo-from-laptop --smart|--sepidz -- …` — never ask for a password.

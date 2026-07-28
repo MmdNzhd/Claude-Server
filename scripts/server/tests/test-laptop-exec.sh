@@ -18,7 +18,7 @@ GUARD="${HOME}/.cursor/hooks/laptop-exec-guard.sh"
 if [ -x "$GUARD" ]; then
   out=$(printf '%s' '{"hook_event_name":"preToolUse","tool_name":"Task"}' | bash "$GUARD")
   echo "$out" | grep -Eq '"permission"[[:space:]]*:[[:space:]]*"allow"' || { echo "FAIL Task allow"; exit 1; }
-  echo "$out" | grep -qi 'SSH-first\|laptop-exec\|Child prompt' || { echo "FAIL Task agent_message"; exit 1; }
+  echo "$out" | grep -Eqi 'HEALTHY MOUNT|Cursor Read/Grep|PRIORITY\+FAILOVER|laptop-exec' || { echo "FAIL Task agent_message"; exit 1; }
   echo "PASS  Task allow + agent_message"
 fi
 

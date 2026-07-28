@@ -32,6 +32,8 @@ _sync_golden_file() {
     local found=""
     for src in "$@"; do
         [ -f "$src" ] || continue
+        # Never install a file onto itself (REPO missing → fallthrough to $SERVER_DIR dst).
+        [ "$(readlink -f "$src" 2>/dev/null || echo "$src")" = "$(readlink -f "$dst" 2>/dev/null || echo "$dst")" ] && continue
         install -m "$mode" "$src" "$dst"
         ok "$dst_rel <- $src"
         found=1
@@ -44,8 +46,10 @@ _dst_is_fresh() {
     local dst="$1" rel="$2"
     [ -f "$dst" ] || return 1
     case "$rel" in
-        laptop-exec.sh) grep -q 'ControlPersist' "$dst" && grep -q 'GIT_MODE="off"' "$dst" ;;
+        laptop-exec.sh) grep -q '_read_next' "$dst" && grep -q 'ControlPersist' "$dst" && grep -q 'GIT_MODE="off"' "$dst" ;;
         claude-mount.sh) grep -q 'GIT_MODE="off"' "$dst" ;;
+        cursor-hooks/laptop-exec-session.sh) grep -q 'HEALTHY MOUNT' "$dst" ;;
+        skills/laptop-exec/SKILL.md) grep -q 'HARD RULE' "$dst" ;;
         *) [ -s "$dst" ] ;;
     esac
 }
@@ -73,11 +77,10 @@ CLIENT_BUNDLE="/usr/local/share/claude-client"
 REPO_ROOT="/home/$STAGE_USER/mounts/claude-code-server"
 
 echo -e "${BOLD}Sync golden bundle${NC}"
-# Prefer client bundle / repo over per-user copies (user ~/.local/bin may be stale).
+# Prefer REPO_ROOT over CLIENT_BUNDLE (stale bundle must not pin old LE text).
 _sync_golden_file "laptop-exec.sh" 755 \
-    "$CLIENT_BUNDLE/server/laptop-exec.sh" \
     "$REPO_ROOT/scripts/server/laptop-exec.sh" \
-    "$SERVER_DIR/laptop-exec.sh" \
+    "$CLIENT_BUNDLE/server/laptop-exec.sh" \
     "/home/$STAGE_USER/.local/bin/laptop-exec"
 _sync_golden_file "claude-mount.sh" 755 \
     "$CLIENT_BUNDLE/server/claude-mount.sh" \
@@ -92,27 +95,29 @@ _sync_golden_file "laptop-exec-setup.sh" 755 \
     "$CLIENT_BUNDLE/server/laptop-exec-setup.sh" \
     "$REPO_ROOT/scripts/server/laptop-exec-setup.sh" \
     "$SERVER_DIR/laptop-exec-setup.sh"
+# Prefer REPO_ROOT over CLIENT_BUNDLE so stale auto-update bundles cannot
+# pin old session/skill/guard text (seen 2026-07-28: HEALTHY MOUNT paste missing).
 _sync_golden_file "cursor-rules/laptop-exec.mdc" 644 \
-    "$CLIENT_BUNDLE/server/cursor-rules/laptop-exec.mdc" \
     "$REPO_ROOT/scripts/server/cursor-rules/laptop-exec.mdc" \
+    "$CLIENT_BUNDLE/server/cursor-rules/laptop-exec.mdc" \
     "/home/$STAGE_USER/.cursor/rules/laptop-exec.mdc" \
     "$SERVER_DIR/cursor-rules/laptop-exec.mdc"
 _sync_golden_file "skills/laptop-exec/SKILL.md" 644 \
-    "$CLIENT_BUNDLE/server/skills/laptop-exec/SKILL.md" \
     "$REPO_ROOT/scripts/server/skills/laptop-exec/SKILL.md" \
+    "$CLIENT_BUNDLE/server/skills/laptop-exec/SKILL.md" \
     "/home/$STAGE_USER/.cursor/skills/laptop-exec/SKILL.md" \
     "$SERVER_DIR/skills/laptop-exec/SKILL.md"
 _sync_golden_file "skills/laptop-exec/reference-windows-mcp.md" 644 \
-    "$CLIENT_BUNDLE/server/skills/laptop-exec/reference-windows-mcp.md" \
     "$REPO_ROOT/scripts/server/skills/laptop-exec/reference-windows-mcp.md" \
+    "$CLIENT_BUNDLE/server/skills/laptop-exec/reference-windows-mcp.md" \
     "/home/$STAGE_USER/.cursor/skills/laptop-exec/reference-windows-mcp.md" \
     "$SERVER_DIR/skills/laptop-exec/reference-windows-mcp.md"
 for _hf in laptop-exec-audit-log.sh laptop-exec-guard.sh laptop-exec-guard-wrap.sh laptop-exec-shell-scan.py laptop-exec-session.sh; do
   _mode=755
   [[ "$_hf" == *.py ]] && _mode=644
   _sync_golden_file "cursor-hooks/$_hf" "$_mode" \
-      "$CLIENT_BUNDLE/server/cursor-hooks/$_hf" \
       "$REPO_ROOT/scripts/server/cursor-hooks/$_hf" \
+      "$CLIENT_BUNDLE/server/cursor-hooks/$_hf" \
       "/home/$STAGE_USER/.cursor/hooks/$_hf" \
       "$SERVER_DIR/cursor-hooks/$_hf"
 done
