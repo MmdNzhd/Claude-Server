@@ -195,11 +195,26 @@ _cmd_is_le_read_or_rg() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "${line//[[:space:]]/}" ]] && continue
     rest="$line"
-    # Drop leading env assignments (FOO=1 BAR=2 laptop-exec ...).
-    while [[ "$rest" =~ ^[[:space:]]*[[:alnum:]_]+=[^[:space:]]+[[:space:]]+(.*)$ ]]; do
-      rest="${BASH_REMATCH[1]}"
+    # Unwrap env/command wrappers + leading FOO=1 assignments so
+    # "env FOO=1 laptop-exec read" and "/usr/bin/env laptop-exec rg" still deny.
+    while :; do
+      rest="${rest#"${rest%%[![:space:]]*}"}"
+      [[ -z "$rest" ]] && break
+      if [[ "$rest" =~ ^[[:alnum:]_]+=[^[:space:]]+[[:space:]]+(.*)$ ]]; then
+        rest="${BASH_REMATCH[1]}"
+        continue
+      fi
+      first="${rest%%[[:space:]]*}"
+      case "$first" in
+        env|/bin/env|/usr/bin/env|command|builtin|nice|nohup|time)
+          rest="${rest#"$first"}"
+          continue
+          ;;
+        *)
+          break
+          ;;
+      esac
     done
-    rest="${rest#"${rest%%[![:space:]]*}"}"
     [[ -z "$rest" ]] && continue
     first="${rest%%[[:space:]]*}"
     case "$first" in
