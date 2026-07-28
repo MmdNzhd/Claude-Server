@@ -729,13 +729,15 @@ step "13 - install claude-server CLI"
 
 install -m 755 "$SERVER_DIR/claude-server" /usr/local/bin/claude-server
 
-mkdir -p /usr/local/lib/claude-server
+mkdir -p /usr/local/lib/claude-server /usr/local/lib/claude-server/commands
 for cmd_file in "$SERVER_DIR/commands/"*.sh; do
     [ -f "$cmd_file" ] || continue
+    # Flat (legacy claude-server COMMANDS_DIR) + commands/ (preferred since 2026-07-28)
     install -m 755 "$cmd_file" /usr/local/lib/claude-server/
+    install -m 755 "$cmd_file" "/usr/local/lib/claude-server/commands/$(basename "$cmd_file")"
 done
 ok "claude-server -> /usr/local/bin/claude-server"
-ok "commands -> /usr/local/lib/claude-server/"
+ok "commands -> /usr/local/lib/claude-server/ + commands/"
 
 # OAuth store: root-only dir + file (never leave token in world-readable /etc/environment 644).
 mkdir -p /etc/claude-code
