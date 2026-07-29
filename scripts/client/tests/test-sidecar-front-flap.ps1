@@ -26,7 +26,33 @@ Assert ($side -match 'Remove-Item -LiteralPath \$lease') 'BootReap still drops s
 Assert ($side -match 'Detach-CursorProxySidecarJobProcess -Process \$pWd') 'Start-CursorProxySidecarWatchdog detaches Job into watchdog'
 Assert ($side -match 'CURSOR_PROXY_CLEAR force reason=18998_down_windows_open') 'Clear force path when 18998 down + windows open'
 Assert ($side -match 'CURSOR_PROXY_CLEAR force reason=backend_down') 'Clear force path when backend -L down (never repair to 18998)'
+Assert ($side -match 'function Get-CursorProxySettingsPathsForClear') 'Clear enumerates personal + server profile settings paths'
+Assert ($side -match 'APPDATA.*Cursor\\User\\settings\.json|APPDATA.\\Cursor.User.settings') 'Clear scrubs personal %APPDATA%\Cursor sticky 18998'
+Assert ($side -match 'CURSOR_PROXY_CLEAR removed_18998_dead_proxy path=') 'Clear logs which settings path was scrubbed'
+
+# Mac parity: personal + force-clear on dead sticky
+$elSh = Get-Content (Join-Path $RepoRoot 'scripts\client\editor-launch.sh') -Raw
+$gmSh = Get-Content (Join-Path $RepoRoot 'scripts\client\git-mode.sh') -Raw
+$macSide = Get-Content (Join-Path $RepoRoot 'scripts\client\mac\cursor-proxy-sidecar.sh') -Raw
+Assert ($elSh -match 'cursor_proxy_settings_paths_for_clear') 'Mac editor-launch enumerates personal+profile settings paths'
+Assert ($elSh -match 'CURSOR_PROXY_CLEAR removed_18998_dead_proxy path=') 'Mac clear logs per-path scrub'
+Assert ($elSh -match 'Application Support/Cursor/User/settings.json') 'Mac clear includes personal Cursor settings'
+Assert ($elSh -match 'CURSOR_PROXY_CLEAR force reason=18998_down_or_unhealthy') 'Mac launch force-clears dead sticky with windows open'
+# Mac force-clear / heal live in editor-launch + sidecar + connect.sh boot — not git-mode drive-by.
+Assert ($elSh -match 'CURSOR_PROXY_CLEAR|clear_cursor_proxy_settings') 'Mac editor-launch clear path present'
+Assert ($gmSh -match 'complete_cursor_proxy_after_tunnel') 'Mac git-mode complete_cursor_proxy_after_tunnel present'
+Assert ($gmSh -match 'skip_sidecar reason=no_tunnel_proxy_legs|no_tunnel_proxy_legs') `
+    'Mac git-mode skips sidecar when no tunnel proxy legs'
+Assert ($gmSh -notmatch 'heal_cursor_proxy_sidecar_blackhole') `
+    'Mac git-mode must not drive-by heal_blackhole (connect.sh / sidecar own it)'
+$macConnect = Get-Content (Join-Path $RepoRoot 'scripts\client\mac\connect.sh') -Raw
+Assert ($macConnect -match 'heal_cursor_proxy_sidecar_blackhole') 'Mac connect.sh boot calls heal_blackhole'
+Assert ($macSide -match 'SIDECAR_HEAL_BLACKHOLE front_up backend_down') 'Mac sidecar HealBlackhole'
+Assert ($macSide -match 'heal_cursor_proxy_sidecar_blackhole') 'Mac sidecar defines heal_blackhole'
+
 Assert ($side -match 'SIDECAR_ENSURE front_up backend_down stopping_fronts_clearing_settings') 'Ensure stops fronts when backend down'
+Assert ($side -match 'SIDECAR_HEAL_BLACKHOLE front_up backend_down') 'HealBlackhole orphan front without backend'
+Assert ($side -match 'Clear-Sticky18998Settings') 'watchdog clears sticky settings on blackhole'
 Assert ($side -match 'SIDECAR_START front_up backend_down stopping_fronts') 'Start refuses to pin settings without backend'
 Assert ($side -match '\$nOpen -gt 0 -and \$frontListening') 'CLEAR_SKIP gated on windows open AND front listening'
 

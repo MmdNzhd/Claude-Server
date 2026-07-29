@@ -198,6 +198,14 @@ $suites = @(
     @{ Name = 'mount-bg-daylog-mutex-contention-live'; Script = 'test-mount-bg-daylog-mutex-contention-live.ps1' }
     @{ Name = 'tunnel-sync-down-debounce-returns-true'; Script = 'test-tunnel-sync-down-debounce-returns-true.ps1' }
     @{ Name = 'tunnel-no-proc-keepalive'; Script = 'test-tunnel-no-proc-keepalive.ps1' }
+    # Zombie-owner / reseed Gap suites (2026-07-29 plan Tasks 1-7)
+    @{ Name = 'reseed-canbindl-gate'; Script = 'test-reseed-canbindl-gate.ps1' }
+    @{ Name = 'wait-local-r-ownership'; Script = 'test-wait-local-r-ownership.ps1' }
+    @{ Name = 'stale-forward-wait-init'; Script = 'test-stale-forward-wait-init.ps1' }
+    @{ Name = 'proxy-owner-service-coupling'; Script = 'test-proxy-owner-service-coupling.ps1' }
+    @{ Name = 'local-tunnel-ssh-pids'; Script = 'test-local-tunnel-ssh-pids.ps1' }
+    @{ Name = 'incident-gap-replay-contract'; Script = 'test-incident-gap-replay-contract.ps1' }
+    @{ Name = 'incident-gap-replay-harness'; Script = 'test-incident-gap-replay-harness.ps1' }
 )
 
 $fail = 0

@@ -62,8 +62,12 @@ try {
     Assert ($left -notcontains '20260101.1') 'prune removed oldest .1'
     Assert ($left.Count -eq 3) 'prune left exactly 3 dirs'
 
-    # Fast-path complete check
+    # Fast-path complete check (Complete depends on Structural — extract both)
+    $fnStruct = Get-FunctionSource -Content $launch -Name 'Test-VersionSrcStructural'
+    Assert ($null -ne $fnStruct) 'extracted Test-VersionSrcStructural'
+    Invoke-Expression $fnStruct
     $fn2 = Get-FunctionSource -Content $launch -Name 'Test-VersionSrcComplete'
+    Assert ($null -ne $fn2) 'extracted Test-VersionSrcComplete'
     Invoke-Expression $fn2
     $src = Join-Path $root 'src-test'
     New-Item -ItemType Directory -Force -Path $src | Out-Null
@@ -73,7 +77,9 @@ try {
     }
     Set-Content (Join-Path $src 'connect-version.txt') -Value '20260101.15' -NoNewline
     Assert (Test-VersionSrcComplete -SrcDir $src -Version '20260101.15') 'complete src => true'
-    Assert (-not (Test-VersionSrcComplete -SrcDir $src -Version '20260101.99')) 'wrong version => false'
+    # Stamp may lag folder leaf (leaf_wins): Complete is structural + stamp present, not stamp==Version.
+    Assert (Test-VersionSrcComplete -SrcDir $src -Version '20260101.99') 'stamp mismatch still structural-complete'
+    Assert (-not (Test-VersionSrcStructural -SrcDir (Join-Path $root 'missing-src'))) 'missing src => structural false'
 } finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }

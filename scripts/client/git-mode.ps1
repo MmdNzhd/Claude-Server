@@ -118,6 +118,16 @@ $script:LastTunnelExitLoggedPid = $null
 $script:TunnelForwardProbeIntervalSec = 45
 $script:TunnelSoftFailBudget = 4
 $script:TunnelBannerDeferCount = 0
+# Owner/service coupling: release empty lease after backends-down + xray-expected.
+# Locked by test-proxy-owner-service-coupling (S3 SERVICE_DEAD_SEC=60).
+if (-not $script:ServiceDeadSec) { $script:ServiceDeadSec = 60 }
+$script:ProxyOwnerServiceDeadSince = $null
+$script:SessionEverHadProxyLegs = $false
+$script:CursorProxyHealthNow = $null
+# Sync no_proc keep-alive time-box (Task 5). Locked by test-tunnel-no-proc-keepalive (S3=120).
+if (-not $script:NoProcZombieSec) { $script:NoProcZombieSec = 120 }
+$script:NoProcKeepAliveSince = $null
+$script:NoProcZombieNow = $null
 
 function Clear-TunnelBannerCache {
     # WS4: CLAUDE_TUNNEL_BANNER_OK (sent to the server in Invoke-MountProject) is only ever
@@ -475,6 +485,11 @@ fi
     return $tcpOpen
 }
 
+# Still-busy spawn abort window (Clear -> Ensure race). Locked by test-stale-forward-wait-init.
+if (-not $script:StillBusyWindowSec) { $script:StillBusyWindowSec = 15 }
+$script:LastStaleForwardStillBusyPort = $null
+$script:LastStaleForwardStillBusyAt = $null
+
 function Clear-ServerStaleTunnelForward {
     param([int]$TargetPort = $Port)
     if (-not $TargetPort) { return }
@@ -502,10 +517,32 @@ function Clear-ServerStaleTunnelForward {
         if (-not (Test-TunnelPortTcpOpen -TargetPort $TargetPort)) {
             Write-GitModeLog "STALE_FORWARD: port released port=$TargetPort wait=$i" 'DEBUG'
             Add-ClearedTunnelPort -TargetPort $TargetPort
+            $script:LastStaleForwardStillBusyPort = $null
+            $script:LastStaleForwardStillBusyAt = $null
             return
         }
     }
+    $script:LastStaleForwardStillBusyPort = [int]$TargetPort
+    $script:LastStaleForwardStillBusyAt = Get-Date
     Write-GitModeLog "STALE_FORWARD: port still busy port=$TargetPort after wait" 'WARN'
+}
+
+function Test-StaleForwardStillBusyAbort {
+    param([int]$TargetPort = $Port)
+    if (-not $TargetPort) { return $false }
+    if ($null -eq $script:LastStaleForwardStillBusyPort) { return $false }
+    if ([int]$script:LastStaleForwardStillBusyPort -ne [int]$TargetPort) { return $false }
+    if (-not $script:LastStaleForwardStillBusyAt) { return $false }
+    $windowSec = 15
+    if ($script:StillBusyWindowSec) { $windowSec = [int]$script:StillBusyWindowSec }
+    $age = ((Get-Date) - $script:LastStaleForwardStillBusyAt).TotalSeconds
+    if ($age -ge $windowSec) { return $false }
+    $tcpOpen = $false
+    try { $tcpOpen = [bool](Test-TunnelPortTcpOpen -TargetPort $TargetPort) } catch { $tcpOpen = $false }
+    if (-not $tcpOpen) { return $false }
+    $localCount = @(Get-LocalTunnelSshPids -TargetPort $TargetPort).Count
+    if ($localCount -gt 0) { return $false }
+    return $true
 }
 
 function Release-StaleTunnelPort {
@@ -569,11 +606,36 @@ function Stop-TunnelProcessWithExitLog {
     }
 }
 
+function Get-LocalTunnelSshReverseRegex {
+    param([Parameter(Mandatory)][int]$TargetPort)
+    $portEsc = [regex]::Escape("$TargetPort")
+    return "-R(?:\s*=\s*|\s+)${portEsc}:(?:localhost|127\.0\.0\.1):22\b"
+}
+
+function Test-LocalTunnelSshCommandLine {
+    param(
+        [string]$CommandLine,
+        [Parameter(Mandatory)][int]$TargetPort
+    )
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
+    if ($CommandLine -match '(?i)ssh-keygen') { return $false }
+    return [bool]($CommandLine -match (Get-LocalTunnelSshReverseRegex -TargetPort $TargetPort))
+}
+
+function Get-LocalTunnelSshReversePortFromCommandLine {
+    param([string]$CommandLine)
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $null }
+    if ($CommandLine -match '-R(?:\s*=\s*|\s+)(\d+):(?:localhost|127\.0\.0\.1):22\b') {
+        return [int]$Matches[1]
+    }
+    return $null
+}
+
 function Get-LocalTunnelSshPids {
     param([Parameter(Mandatory)][int]$TargetPort)
     $pids = @()
     Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "-R\s+${TargetPort}:localhost:22" } |
+        Where-Object { Test-LocalTunnelSshCommandLine -CommandLine $_.CommandLine -TargetPort $TargetPort } |
         ForEach-Object { $pids += [int]$_.ProcessId }
     return @($pids | Select-Object -Unique)
 }
@@ -1415,13 +1477,12 @@ function Get-LocalTunnelPortPidMap {
     # One CIM scan for all ssh -R forwards (avoids ~500ms Get-CimInstance per port).
     $map = @{}
     Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -and $_.CommandLine -match '-R\s+(\d+):localhost:22' } |
+        Where-Object { $null -ne (Get-LocalTunnelSshReversePortFromCommandLine -CommandLine $_.CommandLine) } |
         ForEach-Object {
-            if ($_.CommandLine -match '-R\s+(\d+):localhost:22') {
-                $p = [int]$Matches[1]
-                if (-not $map.ContainsKey($p)) { $map[$p] = New-Object System.Collections.Generic.List[int] }
-                $map[$p].Add([int]$_.ProcessId)
-            }
+            $p = Get-LocalTunnelSshReversePortFromCommandLine -CommandLine $_.CommandLine
+            if ($null -eq $p) { return }
+            if (-not $map.ContainsKey($p)) { $map[$p] = New-Object System.Collections.Generic.List[int] }
+            $map[$p].Add([int]$_.ProcessId)
         }
     return $map
 }
@@ -1634,6 +1695,49 @@ function Test-IsCursorProxyOwner {
     return ($pidOwn -eq $PID)
 }
 
+function Test-CanClaimCursorProxyOwner {
+    # Read-only mirror of Claim success without writing owner.json.
+    # ForeignLiveOwner := alive + pid != self + Connect-shaped cmdline -> CanBindL false.
+    $info = Get-CursorProxyOwnerInfo
+    if (-not $info) { return $true }
+    $pidOwn = 0
+    try { $pidOwn = [int]$info.pid } catch { return $true }
+    if ($pidOwn -le 0) { return $true }
+    if ($pidOwn -eq $PID) { return $true }
+    if (-not (Test-ProcessAlive -ProcessId $pidOwn)) { return $true }
+    try {
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$pidOwn" -ErrorAction Stop
+        $cmd = [string]$cim.CommandLine
+        if (Get-Command Test-ProcessCommandIsConnectUi -ErrorAction SilentlyContinue) {
+            if (-not (Test-ProcessCommandIsConnectUi -CommandLine $cmd)) {
+                return $true # PID reuse by non-Connect -> Claim would adopt
+            }
+        }
+    } catch {
+        # Unreadable cmdline: treat as foreign-live (safe: skip kill)
+        return $false
+    }
+    return $false
+}
+
+function Test-ProxyReseedShouldKill {
+    # Single chokepoint: ReseedEffective = ReseedRaw AND CanClaim (CanBindL).
+    # Under Gap (ReseedRaw + NOT CanBindL) return $false so callers keep -R.
+    param(
+        [Parameter(Mandatory)][int]$TunnelPid,
+        [Parameter(Mandatory)][string]$Alias,
+        [string]$SshCfgPath = ''
+    )
+    if (-not (Test-TunnelNeedsProxyReseed -TunnelPid $TunnelPid -Alias $Alias -SshCfgPath $SshCfgPath)) {
+        return $false
+    }
+    if (-not (Test-CanClaimCursorProxyOwner)) {
+        Write-GitModeLog "ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=$TunnelPid port=$Port" 'WARN'
+        return $false
+    }
+    return $true
+}
+
 function Claim-CursorProxyOwner {
     param([switch]$Force)
     $path = Get-CursorProxyOwnerPath
@@ -1646,11 +1750,27 @@ function Claim-CursorProxyOwner {
             return $true
         }
         if (Test-ProcessAlive -ProcessId $pidOwn) {
-            $script:CursorProxyOwner = $false
-            Write-GitModeLog ("CURSOR_PROXY_OWNER: skip live_owner pid={0} self={1}" -f $pidOwn, $PID) 'INFO'
-            return $false
+            $adoptNonConnect = $false
+            try {
+                $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$pidOwn" -ErrorAction Stop
+                $cmd = [string]$cim.CommandLine
+                if ((Get-Command Test-ProcessCommandIsConnectUi -ErrorAction SilentlyContinue) -and
+                    -not (Test-ProcessCommandIsConnectUi -CommandLine $cmd)) {
+                    $adoptNonConnect = $true
+                }
+            } catch {
+                $adoptNonConnect = $false
+            }
+            if ($adoptNonConnect) {
+                Write-GitModeLog ("CURSOR_PROXY_OWNER: adopt stale_non_connect pid={0} self={1}" -f $pidOwn, $PID) 'INFO'
+            } else {
+                $script:CursorProxyOwner = $false
+                Write-GitModeLog ("CURSOR_PROXY_OWNER: skip live_owner pid={0} self={1}" -f $pidOwn, $PID) 'INFO'
+                return $false
+            }
+        } else {
+            Write-GitModeLog ("CURSOR_PROXY_OWNER: adopt stale pid={0} self={1}" -f $pidOwn, $PID) 'INFO'
         }
-        Write-GitModeLog ("CURSOR_PROXY_OWNER: adopt stale pid={0} self={1}" -f $pidOwn, $PID) 'INFO'
     }
     $payload = [ordered]@{
         pid         = $PID
@@ -1672,11 +1792,105 @@ function Claim-CursorProxyOwner {
 }
 
 function Release-CursorProxyOwner {
+    param([string]$Reason = '')
     if (-not (Test-IsCursorProxyOwner)) { return }
     $path = Get-CursorProxyOwnerPath
     try { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue } catch {}
     $script:CursorProxyOwner = $false
-    Write-GitModeLog "CURSOR_PROXY_OWNER: released pid=$PID" 'INFO'
+    $script:ProxyOwnerServiceDeadSince = $null
+    if ($Reason -eq 'service_dead') {
+        # S2 token must appear literally (Win/Mac parity).
+        Write-GitModeLog "CURSOR_PROXY_OWNER: released reason=service_dead pid=$PID" 'INFO'
+    } elseif ($Reason) {
+        Write-GitModeLog "CURSOR_PROXY_OWNER: released reason=$Reason pid=$PID" 'INFO'
+    } else {
+        Write-GitModeLog "CURSOR_PROXY_OWNER: released pid=$PID" 'INFO'
+    }
+}
+
+function Get-CursorProxyHealthNow {
+    # Injectable clock for owner/service-dead timer tests (CursorProxyHealthNow).
+    if ($null -ne $script:CursorProxyHealthNow) {
+        try { return [datetime]$script:CursorProxyHealthNow } catch {}
+    }
+    return (Get-Date)
+}
+
+function Get-NoProcZombieNow {
+    # Injectable clock for no_proc keep-alive age gate tests (NoProcZombieNow).
+    if ($null -ne $script:NoProcZombieNow) {
+        try { return [datetime]$script:NoProcZombieNow } catch {}
+    }
+    return (Get-Date)
+}
+
+function Test-NoProcShouldKeepAlive {
+    # Returns $true when no_proc keep-alive should continue (age < NO_PROC_ZOMBIE_SEC,
+    # or age>=threshold with auth+Windows banner). $false => caller zombie_drop+Release.
+    $nowZ = Get-NoProcZombieNow
+    if (-not $script:NoProcKeepAliveSince) { $script:NoProcKeepAliveSince = $nowZ }
+    $zombieAge = 0.0
+    try { $zombieAge = ($nowZ - [datetime]$script:NoProcKeepAliveSince).TotalSeconds } catch { $zombieAge = 0.0 }
+    $zombieSec = 120
+    if ($script:NoProcZombieSec) { try { $zombieSec = [int]$script:NoProcZombieSec } catch { $zombieSec = 120 } }
+    if ($zombieSec -lt 1) { $zombieSec = 120 }
+    if ($zombieAge -lt $zombieSec) { return $true }
+    $authOwned = $false
+    try { $authOwned = [bool](Test-TunnelPortAuthOwned -TargetPort $Port) } catch { $authOwned = $false }
+    $bannerOk = $false
+    try {
+        $zb = Get-TunnelBanner
+        if ($zb) { $bannerOk = [bool](Test-TunnelBannerIsWindows -Banner $zb) }
+    } catch { $bannerOk = $false }
+    return ($authOwned -and $bannerOk)
+}
+
+function Test-CursorProxyBackendsUp {
+    $backSocks = 0
+    $backHttp = 0
+    if ($script:SocksProxyPort) { try { $backSocks = [int]$script:SocksProxyPort } catch { $backSocks = 0 } }
+    if ($script:HttpProxyPort) { try { $backHttp = [int]$script:HttpProxyPort } catch { $backHttp = 0 } }
+    if ($backSocks -le 0 -and (Get-Command Get-SocksProxyPort -ErrorAction SilentlyContinue)) {
+        try { $backSocks = [int](Get-SocksProxyPort) } catch { $backSocks = 0 }
+    }
+    if ($backHttp -le 0 -and (Get-Command Get-HttpProxyPort -ErrorAction SilentlyContinue)) {
+        try { $backHttp = [int](Get-HttpProxyPort) } catch { $backHttp = 0 }
+    }
+    if ($backSocks -le 0 -or $backHttp -le 0) { return $false }
+    return ((Test-LocalPortOpen -PortNum $backSocks) -and (Test-LocalPortOpen -PortNum $backHttp))
+}
+
+function Update-CursorProxyOwnerServiceHealth {
+    # OwnerServiceDead := IsOwner AND NOT BackendsUp AND XrayExpected
+    #   AND age(ProxyOwnerServiceDeadSince) >= SERVICE_DEAD_SEC (60)
+    # XrayExpected := SessionEverHadProxyLegs (not bare intentional xray_closed).
+    # Called from Complete AND Sync so zombie owners release without Ensure churn.
+    if (-not (Test-IsCursorProxyOwner)) { return }
+    $xrayExpected = [bool]$script:SessionEverHadProxyLegs
+    if (-not $xrayExpected) {
+        $script:ProxyOwnerServiceDeadSince = $null
+        return
+    }
+    $backendsUp = $false
+    try { $backendsUp = [bool](Test-CursorProxyBackendsUp) } catch { $backendsUp = $false }
+    $now = Get-CursorProxyHealthNow
+    if ($backendsUp) {
+        $script:ProxyOwnerServiceDeadSince = $null
+        return
+    }
+    if (-not $script:ProxyOwnerServiceDeadSince) {
+        $script:ProxyOwnerServiceDeadSince = $now
+        return
+    }
+    $deadSec = 60
+    if ($script:ServiceDeadSec) { try { $deadSec = [int]$script:ServiceDeadSec } catch { $deadSec = 60 } }
+    if ($deadSec -lt 1) { $deadSec = 60 }
+    $age = 0.0
+    try { $age = ($now - [datetime]$script:ProxyOwnerServiceDeadSince).TotalSeconds } catch { $age = 0.0 }
+    if ($age -ge $deadSec) {
+        Write-GitModeLog ("CURSOR_PROXY_OWNER: service_dead age_sec={0} threshold={1}" -f [int]$age, $deadSec) 'WARN'
+        Release-CursorProxyOwner -Reason 'service_dead'
+    }
 }
 
 
@@ -1720,6 +1934,12 @@ function Complete-CursorProxyAfterTunnel {
     # against dead backends and flaps ~10s. NEVER "adopt" orphan 19080/19180 listeners via
     # Get-SocksProxyPort defaults — that defeated skip on reuse when SessionTunnelProxyLegs
     # was unset (Bugbot 2026-07-28). Only session-claimed legs may start the sidecar.
+    # Owner/service coupling: tick health even on early skip (xray_closed must not service_dead).
+    if (Get-Command Update-CursorProxyOwnerServiceHealth -ErrorAction SilentlyContinue) {
+        if (Test-IsCursorProxyOwner) {
+            try { Update-CursorProxyOwnerServiceHealth } catch {}
+        }
+    }
     $sessionSocks = 0
     $sessionHttp = 0
     if ($script:SocksProxyPort) { try { $sessionSocks = [int]$script:SocksProxyPort } catch { $sessionSocks = 0 } }
@@ -1800,6 +2020,11 @@ function Complete-CursorProxyAfterTunnel {
     $mode = 'server_direct'
     try { $mode = Get-CursorProxyMode } catch { $mode = 'server_direct' }
     Write-GitModeLog ("CURSOR_PROXY_MODE mode={0}" -f $mode) 'INFO'
+    if (Get-Command Update-CursorProxyOwnerServiceHealth -ErrorAction SilentlyContinue) {
+        if (Test-IsCursorProxyOwner) {
+            try { Update-CursorProxyOwnerServiceHealth } catch {}
+        }
+    }
 }
 
 function Test-ProxyHealth {
@@ -2199,7 +2424,7 @@ function Clear-LegacyDynamicSocksTunnels {
             if ($ProtectPid -gt 0 -and $procId -eq $ProtectPid) { continue }
             $cmd = [string]$p.CommandLine
             if ($cmd -notmatch '(^|\s)-N(\s|$)') { continue }
-            if ($cmd -notmatch '-R\s+\d+:localhost:22') { continue }
+            if ($cmd -notmatch '-R(?:\s*=\s*|\s+)\d+:(?:localhost|127\.0\.0\.1):22\b') { continue }
             if ($cmd -notmatch $dPat) { continue }
             if ($cmd -match "-L\s+127\.0\.0\.1:${SocksPort}:") { continue }
             if ($cmd -notmatch '\bclaude-server(\s|$)') { continue }
@@ -2524,9 +2749,8 @@ function Get-TunnelSshProcess {
             return $script:TunnelSshCimCache
         }
     }
-    $portPat = [regex]::Escape("$Port")
     $hit = Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "-R\s+${portPat}:localhost:22" } |
+        Where-Object { Test-LocalTunnelSshCommandLine -CommandLine $_.CommandLine -TargetPort $Port } |
         Select-Object -First 1
     $script:TunnelSshCimCache = $hit
     $script:TunnelSshCimCacheAt = Get-Date
@@ -2545,6 +2769,7 @@ function Try-ReattachSessionTunnelProcess {
             $script:SessionBgTunnel = $proc
             $script:TunnelSyncFailCount = 0
             $script:TunnelSoftFailCount = 0
+            $script:NoProcKeepAliveSince = $null
             Write-GitModeLog "TUNNEL_SYNC ok=1 reason=reattached pid=$($proc.Id) port=$Port" 'DEBUG'
             return $true
         }
@@ -2556,6 +2781,13 @@ function Try-ReattachSessionTunnelProcess {
 
 function Sync-SessionTunnelProcess {
     param([ref]$BgTunnel)
+    # Owner/service coupling on every Sync tick (D5): zombie owners must release
+    # without Ensure churn when backends stay down and xray was expected.
+    if (Get-Command Update-CursorProxyOwnerServiceHealth -ErrorAction SilentlyContinue) {
+        if (Test-IsCursorProxyOwner) {
+            try { Update-CursorProxyOwnerServiceHealth } catch {}
+        }
+    }
     if ($BgTunnel.Value -and $BgTunnel.Value.HasExited -and $script:LastTunnelExitLoggedPid -ne $BgTunnel.Value.Id) {
         $exitCode = Get-TunnelProcessExitCode -Process $BgTunnel.Value
         Write-GitModeLog "TUNNEL_EXIT pid=$($BgTunnel.Value.Id) port=$Port exit_code=$exitCode reason=sync_observed_exit" 'WARN'
@@ -2581,9 +2813,18 @@ function Sync-SessionTunnelProcess {
                 if ($BgTunnel.Value) { $dropPid = $BgTunnel.Value.Id }
                 elseif ($script:LastTunnelExitLoggedPid) { $dropPid = $script:LastTunnelExitLoggedPid }
                 Write-GitModeLog ("TUNNEL_SYNC soft_fail_exhausted_keep_alive port=$Port reason=no_proc_tcp_open pid=$dropPid$(Get-TunnelSessionDiagSuffix)") 'WARN'
-                $script:TunnelSoftFailCount = 0
-                $script:TunnelSyncFailCount = 0
-                return $true
+                $script:TunnelSoftFailCount = 0; $script:TunnelSyncFailCount = 0
+                if (Test-NoProcShouldKeepAlive) { return $true }
+                Write-GitModeLog ("TUNNEL_SYNC soft_fail_exhausted_zombie_drop port=$Port reason=no_proc_tcp_open pid=$dropPid$(Get-TunnelSessionDiagSuffix)") 'WARN'
+                Write-TunnelDropLog -Reason 'soft_fail_exhausted_zombie_drop' -TunnelPid $dropPid -TcpOpen $true
+                Release-StaleTunnelPort
+                $script:NoProcKeepAliveSince = $null
+                if (Get-Command Update-CursorProxyOwnerServiceHealth -ErrorAction SilentlyContinue) {
+                    if (Test-IsCursorProxyOwner) {
+                        try { Update-CursorProxyOwnerServiceHealth } catch {}
+                    }
+                }
+                return $false
             }
             $script:TunnelSyncFailCount = 0
             if (-not $BgTunnel.Value -or $BgTunnel.Value.HasExited) {
@@ -2677,6 +2918,7 @@ function Wait-ForTunnelUp {
         [System.Diagnostics.Process]$TunnelProc,
         [switch]$Quiet
     )
+    $localRNotOwned = $false
     for ($i = 1; $i -le 12; $i++) {
         if ($TunnelProc -and $TunnelProc.HasExited) {
             $exitCode = Get-TunnelProcessExitCode -Process $TunnelProc
@@ -2687,23 +2929,41 @@ function Wait-ForTunnelUp {
         }
         $up = Test-TunnelUp
         if ($up) {
-            Write-GitModeLog "TUNNEL_WAIT ok=1 attempt=$i port=$Port pid=$($TunnelProc.Id)" 'DEBUG'
-            if (-not $Quiet) {
-                $label = if ($i -eq 1) { '    Tunnel check...' } else { "    Tunnel check $i/12..." }
-                Write-Host -NoNewline $label -ForegroundColor DarkGray
-                Write-Host " port $Port is open" -ForegroundColor Green
+            # Gate A: banner/TCP alone is not enough — spawn pid must own local -R.
+            # Empty local PID list is failure (fail-closed), not success.
+            $spawnPid = 0
+            if ($TunnelProc) { $spawnPid = [int]$TunnelProc.Id }
+            $localPids = @(Get-LocalTunnelSshPids -TargetPort $Port)
+            if (($spawnPid -gt 0) -and ($localPids -contains $spawnPid)) {
+                Write-GitModeLog "TUNNEL_WAIT ok=1 attempt=$i port=$Port pid=$spawnPid" 'DEBUG'
+                if (-not $Quiet) {
+                    $label = if ($i -eq 1) { '    Tunnel check...' } else { "    Tunnel check $i/12..." }
+                    Write-Host -NoNewline $label -ForegroundColor DarkGray
+                    Write-Host " port $Port is open" -ForegroundColor Green
+                }
+                return $true
             }
-            return $true
+            $localRNotOwned = $true
+            $localJoined = ($localPids -join ',')
+            Write-GitModeLog "TUNNEL_WAIT ok=0 attempt=$i reason=local_r_not_owned port=$Port pid=$spawnPid local_pids=$localJoined" 'WARN'
+            if (-not $Quiet) {
+                Write-Host "    Tunnel check $i/12... port $Port open but not owned by this tunnel" -ForegroundColor DarkGray
+            }
+        } elseif (-not $Quiet) {
+            Write-Host "    Tunnel check $i/12... port $Port not open yet" -ForegroundColor DarkGray
         }
         if ($i -ge 12) { break }
         $sleepSec = [math]::Min(1.5, 0.25 + ($i - 1) * 0.2)
-        if (-not $Quiet) {
-            Write-Host "    Tunnel check $i/12... port $Port not open yet" -ForegroundColor DarkGray
+        if (-not $up) {
+            Write-GitModeLog "TUNNEL_WAIT ok=0 attempt=$i port=$Port" 'TRACE'
         }
-        Write-GitModeLog "TUNNEL_WAIT ok=0 attempt=$i port=$Port" 'TRACE'
         Start-Sleep -Seconds $sleepSec
     }
-    Write-GitModeLog "TUNNEL_WAIT fail=1 reason=timeout port=$Port" 'WARN'
+    if ($localRNotOwned) {
+        Write-GitModeLog "TUNNEL_WAIT fail=1 reason=local_r_not_owned port=$Port pid=$($TunnelProc.Id)" 'WARN'
+    } else {
+        Write-GitModeLog "TUNNEL_WAIT fail=1 reason=timeout port=$Port" 'WARN'
+    }
     Release-StaleTunnelPort
     return $false
 }
@@ -3081,11 +3341,11 @@ function Ensure-SessionTunnel {
             $script:TunnelSyncFailCount = 0
             Write-GitModeLog "ENSURE_TUNNEL reused=1 pid=$($BgTunnel.Value.Id) port=$Port reason=tunnel_up" 'DEBUG'
             Set-SocksProxyPortOnReuse -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath
-            if (-not (Test-TunnelNeedsProxyReseed -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
+            if (-not (Test-ProxyReseedShouldKill -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
                 Complete-CursorProxyAfterTunnel
                 return $true
             }
-            # Fall through: kill + reseed with -L proxy leg
+            # Fall through: kill + reseed with -L proxy leg (ReseedEffective only)
             $TunnelReused.Value = $false
             $skipAdoptAfterSoftFail = $true
         }
@@ -3101,7 +3361,7 @@ function Ensure-SessionTunnel {
                 $script:TunnelSyncFailCount = 0
                 Write-GitModeLog "ENSURE_TUNNEL reused=1 pid=$($BgTunnel.Value.Id) port=$Port reason=recent_success_tcp_open" 'DEBUG'
                 Set-SocksProxyPortOnReuse -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath
-                if (-not (Test-TunnelNeedsProxyReseed -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
+                if (-not (Test-ProxyReseedShouldKill -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
                     Complete-CursorProxyAfterTunnel
                     return $true
                 }
@@ -3126,11 +3386,11 @@ function Ensure-SessionTunnel {
             $TunnelReused.Value = $true
             Write-GitModeLog "ENSURE_TUNNEL reused=1 pid=$($BgTunnel.Value.Id) port=$Port reason=recent_success" 'DEBUG'
             Set-SocksProxyPortOnReuse -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath
-            if (-not (Test-TunnelNeedsProxyReseed -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
+            if (-not (Test-ProxyReseedShouldKill -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
                 Complete-CursorProxyAfterTunnel
                 return $true
             }
-            # Fall through: kill + reseed with -L proxy leg
+            # Fall through: kill + reseed with -L proxy leg (ReseedEffective only)
             $TunnelReused.Value = $false
         }
     }
@@ -3152,11 +3412,11 @@ function Ensure-SessionTunnel {
                     $script:TunnelSoftFailCount = 0
                     Write-GitModeLog "ENSURE_TUNNEL reused=1 pid=$adoptPid port=$Port reason=adopt_local_forward" 'INFO'
                     Set-SocksProxyPortOnReuse -TunnelPid $adoptPid -Alias $Alias -SshCfgPath $SshCfgPath
-                    if (-not (Test-TunnelNeedsProxyReseed -TunnelPid $adoptPid -Alias $Alias -SshCfgPath $SshCfgPath)) {
+                    if (-not (Test-ProxyReseedShouldKill -TunnelPid $adoptPid -Alias $Alias -SshCfgPath $SshCfgPath)) {
                         Complete-CursorProxyAfterTunnel
                         return $true
                     }
-                    # Fall through: kill + reseed with -L proxy leg
+                    # Fall through: kill + reseed with -L proxy leg (ReseedEffective only)
                     $TunnelReused.Value = $false
                     $skipAdoptAfterSoftFail = $true
                 }
@@ -3249,6 +3509,7 @@ function Ensure-SessionTunnel {
             $httpCandidate = Get-HttpProxyPort
             if (Test-LocalPortOpen -PortNum $httpCandidate) { $script:HttpProxyPort = $httpCandidate }
             $script:SessionTunnelProxyLegs = $true
+            $script:SessionEverHadProxyLegs = $true
             Write-GitModeLog "ENSURE_TUNNEL proxy_adopt busy_healthy local=$socksCandidate" 'INFO'
         } else {
             Clear-LegacyDynamicSocksTunnels -ProtectPid 0 -SocksPort $socksCandidate | Out-Null
@@ -3256,6 +3517,7 @@ function Ensure-SessionTunnel {
                 $sshArgs += @('-L', "127.0.0.1:${socksCandidate}:127.0.0.1:$($script:XrayServerSocksPort)")
                 $script:SocksProxyPort = $socksCandidate
                 $script:SessionTunnelProxyLegs = $true
+                $script:SessionEverHadProxyLegs = $true
                 Write-GitModeLog "ENSURE_TUNNEL proxy_leg=-L local=$socksCandidate remote=$($script:XrayServerSocksPort) after_legacy_cleanup" 'INFO'
                 $sshArgsList = New-Object 'System.Collections.Generic.List[string]'
                 if ($null -ne $sshArgs) { [void]$sshArgsList.AddRange([string[]]@($sshArgs)) }
@@ -3270,6 +3532,7 @@ function Ensure-SessionTunnel {
         $sshArgs += @('-L', "127.0.0.1:${socksCandidate}:127.0.0.1:$($script:XrayServerSocksPort)")
         $script:SocksProxyPort = $socksCandidate
         $script:SessionTunnelProxyLegs = $true
+        $script:SessionEverHadProxyLegs = $true
         Write-GitModeLog "ENSURE_TUNNEL proxy_leg=-L local=$socksCandidate remote=$($script:XrayServerSocksPort)" 'INFO'
         $sshArgsList = New-Object 'System.Collections.Generic.List[string]'
         if ($null -ne $sshArgs) { [void]$sshArgsList.AddRange([string[]]@($sshArgs)) }
@@ -3281,6 +3544,13 @@ function Ensure-SessionTunnel {
     # Used by editor-launch.ps1 to route Cursor's own network traffic (chat/agent, not just
     # extensions) through xray on the server so it egresses via the VLESS exit IP for
     # every developer, rather than each laptop's own network or the shared office IP.
+    # Still-busy abort: after Clear logged "port still busy", never Start-Process -R on that
+    # same sticky port within StillBusyWindowSec while TCP is still open and we own no local -R.
+    if (Test-StaleForwardStillBusyAbort -TargetPort $Port) {
+        Write-GitModeLog "ENSURE_TUNNEL refuse_spawn reason=stale_port_busy port=$Port" 'WARN'
+        $BgTunnel.Value = $null
+        return $false
+    }
     $BgTunnel.Value = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList ($sshArgs + @($Alias))
     # #P2: tie the reverse-tunnel lifetime to this Connect process via the same
     # KILL_ON_JOB_CLOSE job used for the sidecar tree, so an abrupt exit (X button,

@@ -179,7 +179,7 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260729.2'
+$script:ConnectVersion = '20260729.15'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
 $script:ConnectBuildId = 'b332a4c2-1666-45bc-bf2a-8112de9599b3'
@@ -2403,6 +2403,14 @@ $script:WindowsMcpEnsured = $false
                 }
                 if (Get-Command Test-TunnelNeedsProxyReseed -ErrorAction SilentlyContinue) {
                     $needReseed = [bool](Test-TunnelNeedsProxyReseed -TunnelPid $bgTunnel.Id -Alias $Alias -SshCfgPath $sshCfg)
+                }
+                if ($needReseed -and (Get-Command Test-CanClaimCursorProxyOwner -ErrorAction SilentlyContinue)) {
+                    if (-not (Test-CanClaimCursorProxyOwner)) {
+                        $needReseed = $false
+                        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                            Write-ConnectLog "ENSURE_TUNNEL bg_init_reseed_skip reason=foreign_owner_cannot_bind pid=$($bgTunnel.Id) port=$Port" 'WARN'
+                        }
+                    }
                 }
                 if (-not $needReseed) {
                     $tunnelReused = $true

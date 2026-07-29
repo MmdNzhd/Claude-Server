@@ -14,7 +14,7 @@ Write-Host ''
 Write-Host '=== Orphan-vs-sibling tunnel kill (LIVE) ===' -ForegroundColor Cyan
 
 $content = Get-Content (Get-ClientFile 'git-mode.ps1') -Raw
-foreach ($n in @('Write-GitModeLog', 'Clear-TunnelBannerCache', 'Get-TunnelProcessExitCode', 'Stop-TunnelProcessWithExitLog', 'Get-LocalTunnelSshPids', 'Test-ProcessCommandIsConnectUi', 'Get-SiblingConnectTunnelPids', 'Remove-LocalOrphanTunnel')) {
+foreach ($n in @('Write-GitModeLog', 'Clear-TunnelBannerCache', 'Get-TunnelProcessExitCode', 'Stop-TunnelProcessWithExitLog', 'Get-LocalTunnelSshReverseRegex', 'Test-LocalTunnelSshCommandLine', 'Get-LocalTunnelSshPids', 'Test-ProcessCommandIsConnectUi', 'Get-SiblingConnectTunnelPids', 'Remove-LocalOrphanTunnel')) {
     $src = Get-FunctionSource -Content $content -Name $n
     if (-not $src) {
         Write-Host "  FAIL  could not extract $n - live test cannot run (source drifted)" -ForegroundColor Red

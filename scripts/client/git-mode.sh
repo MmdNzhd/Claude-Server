@@ -45,6 +45,22 @@ _TUNNEL_BANNER_DEFER_COUNT=0
 _LAST_TUNNEL_SPAWN_SUCCESS_AT=0
 _LAST_TUNNEL_SPAWN_SUCCESS_PORT=
 _LAST_TUNNEL_SPAWN_PID=
+# Still-busy spawn abort window (clear -> ensure race). Locked by test-stale-forward-wait-init.
+STILL_BUSY_WINDOW_SEC=15
+_LAST_STALE_FORWARD_STILL_BUSY_PORT=
+_LAST_STALE_FORWARD_STILL_BUSY_AT=0
+# Owner/service coupling: release empty lease after backends-down + xray-expected.
+# Locked by test-proxy-owner-service-coupling (S3 SERVICE_DEAD_SEC=60).
+SERVICE_DEAD_SEC=60
+_PROXY_OWNER_SERVICE_DEAD_SINCE=0
+SESSION_EVER_HAD_PROXY_LEGS=0
+# Injectable epoch seconds for tests (empty => date +%s).
+_CURSOR_PROXY_HEALTH_NOW=
+# Sync no_proc keep-alive time-box (Task 5). Locked by test-tunnel-no-proc-keepalive (S3=120).
+NO_PROC_ZOMBIE_SEC=120
+_NO_PROC_KEEPALIVE_SINCE=0
+# Injectable epoch seconds for no_proc age-gate tests (empty => date +%s).
+_NO_PROC_ZOMBIE_NOW=
 
 clear_tunnel_banner_cache() {
     _TUNNEL_BANNER_CACHE_AT=0
@@ -898,6 +914,11 @@ sync_session_tunnel_forward() {
     case "$fail_threshold" in ''|*[!0-9]*) fail_threshold=3 ;; esac
     [ "$fail_threshold" -ge 1 ] 2>/dev/null || fail_threshold=3
 
+    # Owner/service coupling on every Sync tick (D5): zombie owners release without Ensure churn.
+    if declare -F update_cursor_proxy_owner_service_health >/dev/null 2>&1; then
+        update_cursor_proxy_owner_service_health || true
+    fi
+
     # A missing local ssh PID is not definitive: the reverse forward can still
     # be healthy after process re-parenting. Trust TCP/banner evidence first.
     if ! kill -0 "$bg_pid" 2>/dev/null; then
@@ -911,12 +932,25 @@ sync_session_tunnel_forward() {
                 return 0
             fi
             # TCP/banner still healthy: lost local ssh PID only. Keep session up
-            # (do not force "Connection dropped" recovery).
+            # (do not force "Connection dropped" recovery). First-exhaust arm has
+            # no release_stale (S5). Age gate via _no_proc_should_keep (D7).
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "TUNNEL_SYNC soft_fail_exhausted_keep_alive port=$PORT reason=no_ssh_proc_tcp_open pid=$bg_pid$(_tunnel_session_diag_suffix)" 'WARN'
             fi
             _TUNNEL_SOFT_FAIL_COUNT=0
-            return 0
+            _no_proc_should_keep && return 0
+            # Age gate drop: >=120s continuous no_proc + (NOT auth OR NOT banner).
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_SYNC soft_fail_exhausted_zombie_drop port=$PORT reason=no_ssh_proc_tcp_open pid=$bg_pid$(_tunnel_session_diag_suffix)" 'WARN'
+                LAST_TUNNEL_SYNC_DROP_REASON=soft_fail_exhausted_zombie_drop
+                log_tunnel_drop soft_fail_exhausted_zombie_drop "${ACTIVE_PROJECT_ID:-?}" false "${_editor_opened:-0}" "${_editor_seen_open:-0}" "${RECOVERY_GENERATION:-0}"
+            fi
+            release_stale_tunnel_port || true
+            _NO_PROC_KEEPALIVE_SINCE=0
+            if declare -F update_cursor_proxy_owner_service_health >/dev/null 2>&1; then
+                update_cursor_proxy_owner_service_health || true
+            fi
+            return 1
         fi
         _TUNNEL_SYNC_FAIL_COUNT=$(( _TUNNEL_SYNC_FAIL_COUNT + 1 ))
         if [ "$_TUNNEL_SYNC_FAIL_COUNT" -lt "$fail_threshold" ]; then
@@ -932,6 +966,9 @@ sync_session_tunnel_forward() {
         _TUNNEL_SYNC_FAIL_COUNT=0
         return 1
     fi
+
+    # Healthy local ssh PID: clear no_proc keep-alive age tracking.
+    _NO_PROC_KEEPALIVE_SINCE=0
 
     now="$(date +%s 2>/dev/null || printf '0')"
     if [ "$_LAST_FORWARD_PROBE_AT" -eq 0 ]; then
@@ -960,6 +997,7 @@ sync_session_tunnel_forward() {
         probe_up=1
         _TUNNEL_SYNC_FAIL_COUNT=0
         _TUNNEL_SOFT_FAIL_COUNT=0
+        _NO_PROC_KEEPALIVE_SINCE=0
     else
         probe_up=0
     fi
@@ -1008,7 +1046,7 @@ sync_session_tunnel_forward() {
 }
 
 wait_for_tunnel_up() {
-    local pid="${1:-}" i sleep_s
+    local pid="${1:-}" i sleep_s local_r_not_owned=0 local_pids="" p owned=0
     for i in $(seq 1 12); do
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
             if declare -F connect_log >/dev/null 2>&1; then
@@ -1019,26 +1057,50 @@ wait_for_tunnel_up() {
             return 1
         fi
         if tunnel_up; then
-            if declare -F connect_log >/dev/null 2>&1; then
-                connect_log "TUNNEL_WAIT ok=1 attempt=$i port=$PORT pid=$pid" 'DEBUG'
+            # Gate A: banner/TCP alone is not enough — spawn pid must own local -R.
+            # Empty local PID list is failure (fail-closed), not success.
+            owned=0
+            local_pids=""
+            if [ -n "$pid" ] && [ -n "${PORT:-}" ]; then
+                local_pids="$(get_local_tunnel_ssh_pids "$PORT" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+                for p in $(get_local_tunnel_ssh_pids "$PORT" 2>/dev/null || true); do
+                    if [ "$p" = "$pid" ]; then owned=1; break; fi
+                done
             fi
-            return 0
+            if [ "$owned" -eq 1 ]; then
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "TUNNEL_WAIT ok=1 attempt=$i port=$PORT pid=$pid" 'DEBUG'
+                fi
+                return 0
+            fi
+            local_r_not_owned=1
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_WAIT ok=0 attempt=$i reason=local_r_not_owned port=$PORT pid=$pid local_pids=$local_pids" 'WARN'
+            fi
+        else
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_WAIT ok=0 attempt=$i port=$PORT" 'TRACE'
+            fi
         fi
         if [ "$i" -ge 12 ]; then
             break
         fi
         sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
-        if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "TUNNEL_WAIT ok=0 attempt=$i port=$PORT" 'TRACE'
-        fi
         sleep "$sleep_s"
     done
+    if declare -F connect_log >/dev/null 2>&1; then
+        if [ "$local_r_not_owned" -eq 1 ]; then
+            connect_log "TUNNEL_WAIT fail=1 reason=local_r_not_owned port=$PORT pid=$pid" 'WARN'
+        else
+            connect_log "TUNNEL_WAIT fail=1 reason=timeout port=$PORT" 'WARN'
+        fi
+    fi
     release_stale_tunnel_port || true
     return 1
 }
 
 poll_tunnel_with_progress() {
-    local pid="${1:-}" i sleep_s up=""
+    local pid="${1:-}" i sleep_s up="" local_r_not_owned=0 local_pids="" p owned=0
     for i in $(seq 1 12); do
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
             if declare -F connect_log >/dev/null 2>&1; then
@@ -1049,26 +1111,51 @@ poll_tunnel_with_progress() {
             return 1
         fi
         if tunnel_up; then
+            # Gate A: banner/TCP alone is not enough — spawn pid must own local -R.
+            # Empty local PID list is failure (fail-closed), not success.
+            owned=0
+            local_pids=""
+            if [ -n "$pid" ] && [ -n "${PORT:-}" ]; then
+                local_pids="$(get_local_tunnel_ssh_pids "$PORT" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+                for p in $(get_local_tunnel_ssh_pids "$PORT" 2>/dev/null || true); do
+                    if [ "$p" = "$pid" ]; then owned=1; break; fi
+                done
+            fi
+            if [ "$owned" -eq 1 ]; then
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "TUNNEL_WAIT ok=1 attempt=$i port=$PORT pid=$pid" 'DEBUG'
+                fi
+                if [ "$i" -eq 1 ]; then
+                    printf '    Tunnel check... port %d is open\n' "$PORT"
+                else
+                    printf '    Tunnel check %d/12... port %d is open\n' "$i" "$PORT"
+                fi
+                return 0
+            fi
+            local_r_not_owned=1
             if declare -F connect_log >/dev/null 2>&1; then
-                connect_log "TUNNEL_WAIT ok=1 attempt=$i port=$PORT pid=$pid" 'DEBUG'
+                connect_log "TUNNEL_WAIT ok=0 attempt=$i reason=local_r_not_owned port=$PORT pid=$pid local_pids=$local_pids" 'WARN'
             fi
-            if [ "$i" -eq 1 ]; then
-                printf '    Tunnel check... port %d is open\n' "$PORT"
-            else
-                printf '    Tunnel check %d/12... port %d is open\n' "$i" "$PORT"
+            printf '    Tunnel check %d/12... port %d open but not owned by this tunnel\n' "$i" "$PORT"
+        else
+            printf '    Tunnel check %d/12... port %d not open yet\n' "$i" "$PORT"
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_WAIT ok=0 attempt=$i port=$PORT" 'TRACE'
             fi
-            return 0
         fi
         if [ "$i" -ge 12 ]; then
             break
         fi
         sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
-        printf '    Tunnel check %d/12... port %d not open yet\n' "$i" "$PORT"
-        if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "TUNNEL_WAIT ok=0 attempt=$i port=$PORT" 'TRACE'
-        fi
         sleep "$sleep_s"
     done
+    if declare -F connect_log >/dev/null 2>&1; then
+        if [ "$local_r_not_owned" -eq 1 ]; then
+            connect_log "TUNNEL_WAIT fail=1 reason=local_r_not_owned port=$PORT pid=$pid" 'WARN'
+        else
+            connect_log "TUNNEL_WAIT fail=1 reason=timeout port=$PORT" 'WARN'
+        fi
+    fi
     release_stale_tunnel_port || true
     return 1
 }
@@ -1272,9 +1359,15 @@ cursor_proxy_owner_path() {
 }
 
 _process_alive() {
-    local pid="${1:-0}"
+    # kill -0 is true for zombies; filter state Z (Claim/CanClaim must adopt).
+    local pid="${1:-0}" state
     [ "$pid" -gt 0 ] 2>/dev/null || return 1
-    kill -0 "$pid" 2>/dev/null
+    kill -0 "$pid" 2>/dev/null || return 1
+    state="$(ps -o state= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    case "$state" in
+        Z*) return 1 ;;
+    esac
+    return 0
 }
 
 get_cursor_proxy_owner_info() {
@@ -1307,8 +1400,48 @@ PY
     [ "$pid_own" -eq "$$" ]
 }
 
+can_claim_cursor_proxy_owner() {
+    # Read-only mirror of claim success (no owner.json write). Return 0 = CanBindL.
+    local path pid_own cmd
+    path="$(cursor_proxy_owner_path)"
+    [ -f "$path" ] || return 0
+    pid_own="$(python3 - "$path" <<'PY' 2>/dev/null || printf '0'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    d = json.load(f)
+print(int(d.get("pid", 0)))
+PY
+)"
+    [ -n "${pid_own:-}" ] && [ "${pid_own}" -gt 0 ] 2>/dev/null || return 0
+    [ "$pid_own" = "$$" ] && return 0
+    if ! _process_alive "$pid_own"; then return 0; fi
+    cmd="$(ps -p "$pid_own" -o args= 2>/dev/null || true)"
+    if [ -n "$cmd" ]; then
+        case "$cmd" in
+            *connect.sh*|*connect-boot*) return 1 ;;
+            *) return 0 ;; # non-Connect PID reuse -> claim would adopt
+        esac
+    fi
+    # Unreadable cmdline: treat as foreign-live (safe: skip kill)
+    return 1
+}
+
+proxy_reseed_should_kill() {
+    # ReseedEffective = ReseedRaw AND CanClaim. Return 0 => kill/reseed; non-zero => keep -R.
+    local tunnel_pid="${1:-}"
+    [ -n "$tunnel_pid" ] || return 1
+    tunnel_needs_proxy_reseed "$tunnel_pid" || return 1
+    if ! can_claim_cursor_proxy_owner; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=$tunnel_pid port=${PORT:-}" 'WARN'
+        fi
+        return 1
+    fi
+    return 0
+}
+
 claim_cursor_proxy_owner() {
-    local force="${1:-0}" path info pid_own slot socks http started
+    local force="${1:-0}" path info pid_own slot socks http started cmd
     path="$(cursor_proxy_owner_path)"
     if [ -f "$path" ] && [ "$force" != "1" ]; then
         pid_own="$(python3 - "$path" <<'PY' 2>/dev/null || printf '0'
@@ -1324,12 +1457,27 @@ PY
             return 0
         fi
         if _process_alive "$pid_own"; then
-            CURSOR_PROXY_OWNER=0
-            export CURSOR_PROXY_OWNER
-            declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: skip live_owner pid=$pid_own self=$$" 'INFO'
-            return 1
+            cmd="$(ps -p "$pid_own" -o args= 2>/dev/null || true)"
+            if [ -z "$cmd" ]; then
+                CURSOR_PROXY_OWNER=0
+                export CURSOR_PROXY_OWNER
+                declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: skip live_owner pid=$pid_own self=$$" 'INFO'
+                return 1
+            fi
+            case "$cmd" in
+                *connect.sh*|*connect-boot*)
+                    CURSOR_PROXY_OWNER=0
+                    export CURSOR_PROXY_OWNER
+                    declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: skip live_owner pid=$pid_own self=$$" 'INFO'
+                    return 1
+                    ;;
+                *)
+                    declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: adopt stale_non_connect pid=$pid_own self=$$" 'INFO'
+                    ;;
+            esac
+        else
+            declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: adopt stale pid=$pid_own self=$$" 'INFO'
         fi
-        declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: adopt stale pid=$pid_own self=$$" 'INFO'
     fi
     slot="${TUNNEL_SLOT:--1}"
     socks="$(socks_proxy_port)"
@@ -1354,11 +1502,101 @@ PY
 }
 
 release_cursor_proxy_owner() {
+    local reason="${1:-}"
     test_is_cursor_proxy_owner || return 0
     rm -f "$(cursor_proxy_owner_path)" 2>/dev/null || true
     CURSOR_PROXY_OWNER=0
     export CURSOR_PROXY_OWNER
-    declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: released pid=$$" 'INFO'
+    _PROXY_OWNER_SERVICE_DEAD_SINCE=0
+    if [ "$reason" = "service_dead" ]; then
+        # S2 token must appear literally (Win/Mac parity).
+        declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: released reason=service_dead pid=$$" 'INFO'
+    elif [ -n "$reason" ]; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: released reason=$reason pid=$$" 'INFO'
+    else
+        declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: released pid=$$" 'INFO'
+    fi
+}
+
+_cursor_proxy_health_now() {
+    if [ -n "${_CURSOR_PROXY_HEALTH_NOW:-}" ]; then
+        printf '%s' "$_CURSOR_PROXY_HEALTH_NOW"
+        return 0
+    fi
+    date +%s 2>/dev/null || printf '0'
+}
+
+_no_proc_zombie_now() {
+    if [ -n "${_NO_PROC_ZOMBIE_NOW:-}" ]; then
+        printf '%s' "$_NO_PROC_ZOMBIE_NOW"
+        return 0
+    fi
+    date +%s 2>/dev/null || printf '0'
+}
+
+# Returns 0 (keep) when no_proc age < NO_PROC_ZOMBIE_SEC, or age>=threshold with auth+banner.
+# Returns 1 when age gate should drop (caller logs soft_fail_exhausted_zombie_drop).
+_no_proc_should_keep() {
+    local now age auth_owned=0 banner_ok=0 zbanner
+    now="$(_no_proc_zombie_now)"
+    if [ -z "${_NO_PROC_KEEPALIVE_SINCE:-}" ] || [ "${_NO_PROC_KEEPALIVE_SINCE}" -eq 0 ]; then
+        _NO_PROC_KEEPALIVE_SINCE="$now"
+    fi
+    age=$(( now - _NO_PROC_KEEPALIVE_SINCE ))
+    if [ "$age" -lt "${NO_PROC_ZOMBIE_SEC:-120}" ]; then
+        return 0
+    fi
+    if declare -F tunnel_port_auth_owned >/dev/null 2>&1 && tunnel_port_auth_owned "${PORT:-0}"; then
+        auth_owned=1
+    fi
+    zbanner="$(fetch_tunnel_banner 2>/dev/null || true)"
+    if [ -n "$zbanner" ] && declare -F tunnel_banner_is_windows >/dev/null 2>&1 && tunnel_banner_is_windows "$zbanner"; then
+        banner_ok=1
+    fi
+    [ "$auth_owned" -eq 1 ] && [ "$banner_ok" -eq 1 ] && return 0
+    return 1
+}
+
+test_cursor_proxy_backends_up() {
+    local back_s back_h
+    back_s="${SOCKS_PROXY_PORT:-}"
+    back_h="${HTTP_PROXY_PORT:-}"
+    if [ -z "$back_s" ]; then back_s="$(socks_proxy_port)"; fi
+    if [ -z "$back_h" ]; then back_h="$(http_proxy_port)"; fi
+    [ -n "$back_s" ] && [ -n "$back_h" ] || return 1
+    test_local_port_open "$back_s" && test_local_port_open "$back_h"
+}
+
+update_cursor_proxy_owner_service_health() {
+    # OwnerServiceDead := IsOwner AND NOT BackendsUp AND XrayExpected
+    #   AND age >= SERVICE_DEAD_SEC (60). XrayExpected := SESSION_EVER_HAD_PROXY_LEGS.
+    # Called from complete AND sync (D5 Sync-tick path).
+    local now age dead_sec
+    test_is_cursor_proxy_owner || return 0
+    if [ "${SESSION_EVER_HAD_PROXY_LEGS:-0}" != "1" ]; then
+        _PROXY_OWNER_SERVICE_DEAD_SINCE=0
+        return 0
+    fi
+    if test_cursor_proxy_backends_up; then
+        _PROXY_OWNER_SERVICE_DEAD_SINCE=0
+        return 0
+    fi
+    now="$(_cursor_proxy_health_now)"
+    case "$now" in ''|*[!0-9]*) now=0 ;; esac
+    if [ "${_PROXY_OWNER_SERVICE_DEAD_SINCE:-0}" -le 0 ] 2>/dev/null; then
+        _PROXY_OWNER_SERVICE_DEAD_SINCE="$now"
+        return 0
+    fi
+    dead_sec="${SERVICE_DEAD_SEC:-60}"
+    case "$dead_sec" in ''|*[!0-9]*) dead_sec=60 ;; esac
+    [ "$dead_sec" -ge 1 ] 2>/dev/null || dead_sec=60
+    age=$(( now - _PROXY_OWNER_SERVICE_DEAD_SINCE ))
+    if [ "$age" -ge "$dead_sec" ] 2>/dev/null; then
+        declare -F connect_log >/dev/null 2>&1 && \
+            connect_log "CURSOR_PROXY_OWNER: service_dead age_sec=$age threshold=$dead_sec" 'WARN'
+        release_cursor_proxy_owner service_dead
+    fi
+    return 0
 }
 
 test_local_port_open() {
@@ -1420,6 +1658,10 @@ complete_cursor_proxy_after_tunnel() {
     # Skip predicate uses SESSION vars only — socks_proxy_port/http_proxy_port
     # always return 19080/19180 and would defeat the skip.
     # Never adopt orphan fixed-port listeners (Bugbot residual 2026-07-28).
+    # Owner/service coupling: tick even on early skip (xray_closed must not service_dead).
+    if declare -F update_cursor_proxy_owner_service_health >/dev/null 2>&1; then
+        update_cursor_proxy_owner_service_health || true
+    fi
     local session_socks="${SOCKS_PROXY_PORT:-}"
     local session_http="${HTTP_PROXY_PORT:-}"
     if [ -z "$session_socks" ] && [ -z "$session_http" ]; then
@@ -1666,7 +1908,13 @@ clear_legacy_dynamic_socks_tunnels() {
             *' -N '*|*-N\ *) ;;
             *) continue ;;
         esac
-        case "$args" in *:localhost:22*) ;; *) continue ;; esac
+        case "$args" in *"-R "*|*"-R="*) ;;
+            *) continue ;;
+        esac
+        case "$args" in
+            *":localhost:22"*|*":127.0.0.1:22"*) ;;
+            *) continue ;;
+        esac
         case "$args" in *"$needle"*) ;; *) continue ;; esac
         case "$args" in *"-L 127.0.0.1:${socks}:"*) continue ;; esac
         case "$args" in *claude-server-sepidz*) continue ;; esac
@@ -1695,7 +1943,7 @@ ensure_session_tunnel() {
                 connect_log "ENSURE_TUNNEL reused=1 pid=$bg_pid port=$PORT reason=tunnel_up" 'DEBUG'
             fi
             set_socks_proxy_port_on_reuse "$bg_pid"
-            if ! tunnel_needs_proxy_reseed "$bg_pid"; then
+            if ! proxy_reseed_should_kill "$bg_pid"; then
                 if declare -F complete_cursor_proxy_after_tunnel >/dev/null 2>&1; then
                     complete_cursor_proxy_after_tunnel || true
                 fi
@@ -1724,7 +1972,7 @@ ensure_session_tunnel() {
                 connect_log "ENSURE_TUNNEL reused=1 pid=$bg_pid port=$PORT reason=recent_success" 'DEBUG'
             fi
             set_socks_proxy_port_on_reuse "$bg_pid"
-            if ! tunnel_needs_proxy_reseed "$bg_pid"; then
+            if ! proxy_reseed_should_kill "$bg_pid"; then
                 if declare -F complete_cursor_proxy_after_tunnel >/dev/null 2>&1; then
                     complete_cursor_proxy_after_tunnel || true
                 fi
@@ -1740,6 +1988,17 @@ ensure_session_tunnel() {
     fi
     local _old_bg="${bg_pid:-}"
     if [ -n "${bg_pid:-}" ]; then
+        # Belt: never kill -R for proxy reseed when foreign owner cannot bind -L
+        if [ "${_PROXY_RESEED:-0}" = "1" ] && ! can_claim_cursor_proxy_owner; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=$bg_pid port=${PORT:-}" 'WARN'
+            fi
+            if declare -F complete_cursor_proxy_after_tunnel >/dev/null 2>&1; then
+                complete_cursor_proxy_after_tunnel || true
+            fi
+            TUNNEL_REUSED=1
+            return 0
+        fi
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "ENSURE_TUNNEL killing stale bg pid=$bg_pid" 'DEBUG'
         fi
@@ -1792,12 +2051,14 @@ ensure_session_tunnel() {
             else
                 HTTP_PROXY_PORT=""
             fi
+            SESSION_EVER_HAD_PROXY_LEGS=1
             declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL proxy_adopt busy_healthy local=$socks_candidate" 'INFO'
         else
             clear_legacy_dynamic_socks_tunnels "" "$socks_candidate"
             if local_port_free "$socks_candidate"; then
                 socks_args=(-L "127.0.0.1:${socks_candidate}:127.0.0.1:${XRAY_SERVER_SOCKS_PORT}")
                 SOCKS_PROXY_PORT="$socks_candidate"
+                SESSION_EVER_HAD_PROXY_LEGS=1
                 declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL proxy_leg=-L local=$socks_candidate remote=${XRAY_SERVER_SOCKS_PORT} after_legacy_cleanup" 'INFO'
                 append_http_proxy_leg
             elif declare -F connect_log >/dev/null 2>&1; then
@@ -1807,8 +2068,18 @@ ensure_session_tunnel() {
     else
         socks_args=(-L "127.0.0.1:${socks_candidate}:127.0.0.1:${XRAY_SERVER_SOCKS_PORT}")
         SOCKS_PROXY_PORT="$socks_candidate"
+        SESSION_EVER_HAD_PROXY_LEGS=1
         declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL proxy_leg=-L local=$socks_candidate remote=${XRAY_SERVER_SOCKS_PORT}" 'INFO'
         append_http_proxy_leg
+    fi
+    # Still-busy abort: after clear logged "port still busy", never spawn -R on that port
+    # within STILL_BUSY_WINDOW_SEC while TCP is still open and we own no local -R.
+    if stale_forward_still_busy_abort "$PORT"; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "ENSURE_TUNNEL refuse_spawn reason=stale_port_busy port=$PORT" 'WARN'
+        fi
+        bg_pid=""
+        return 1
     fi
     ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=5 \
         -R "${PORT}:localhost:22" "${socks_args[@]}" "$ALIAS" 2>/dev/null &
@@ -1875,6 +2146,7 @@ clear_server_stale_tunnel_forward() {
     fi
     sshx "fuser -k ${target_port}/tcp 2>/dev/null || true; pkill -u \\\$USER -f '127\\.0\\.0\\.1:${target_port}' 2>/dev/null || true; pkill -u \\\$USER -f ' -p ${target_port} ' 2>/dev/null || true" 2>/dev/null || true
     clear_tunnel_banner_cache
+    local i=0
     while [ "$i" -lt 8 ]; do
         i=$(( i + 1 ))
         sleep 0.25
@@ -1883,13 +2155,70 @@ clear_server_stale_tunnel_forward() {
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "STALE_FORWARD: port released port=$target_port wait=$i" 'DEBUG'
             fi
+            _LAST_STALE_FORWARD_STILL_BUSY_PORT=
+            _LAST_STALE_FORWARD_STILL_BUSY_AT=0
             return 0
         fi
     done
+    _LAST_STALE_FORWARD_STILL_BUSY_PORT="$target_port"
+    _LAST_STALE_FORWARD_STILL_BUSY_AT="$(date +%s 2>/dev/null || printf '0')"
     if declare -F connect_log >/dev/null 2>&1; then
         connect_log "STALE_FORWARD: port still busy port=$target_port after wait" 'WARN'
     fi
     return 1
+}
+
+# StillBusyAbort: recent clear still-busy + TCP open + no local -R => refuse spawn same port.
+stale_forward_still_busy_abort() {
+    local target_port="${1:-$PORT}"
+    [ -n "$target_port" ] || return 1
+    [ -n "${_LAST_STALE_FORWARD_STILL_BUSY_PORT:-}" ] || return 1
+    [ "$_LAST_STALE_FORWARD_STILL_BUSY_PORT" = "$target_port" ] || return 1
+    [ -n "${_LAST_STALE_FORWARD_STILL_BUSY_AT:-}" ] && [ "${_LAST_STALE_FORWARD_STILL_BUSY_AT:-0}" != "0" ] || return 1
+    local now_ts age window_sec
+    now_ts="$(date +%s 2>/dev/null || printf '0')"
+    [ "$now_ts" != "0" ] || return 1
+    age=$(( now_ts - _LAST_STALE_FORWARD_STILL_BUSY_AT ))
+    window_sec="${STILL_BUSY_WINDOW_SEC:-15}"
+    [ "$age" -lt "$window_sec" ] || return 1
+    tunnel_port_tcp_open "$target_port" || return 1
+    # Empty local -R set required (own forward would make spawn appropriate).
+    if declare -F get_local_tunnel_ssh_pids >/dev/null 2>&1; then
+        local pids
+        pids="$(get_local_tunnel_ssh_pids "$target_port" 2>/dev/null || true)"
+        [ -z "$pids" ] || return 1
+    fi
+    return 0
+}
+
+# Shared local ssh -R matcher (Win Test-LocalTunnelSshCommandLine parity).
+test_local_tunnel_ssh_command() {
+    local target_port="$1"
+    local cmd="$2"
+    [ -n "$target_port" ] || return 1
+    [ -n "$cmd" ] || return 1
+    case "$cmd" in
+        *ssh-keygen*) return 1 ;;
+    esac
+    if echo "$cmd" | grep -Eq -- "-R[[:space:]]*=[[:space:]]*${target_port}:(localhost|127\\.0\\.0\\.1):22([^0-9]|$)"; then
+        return 0
+    fi
+    if echo "$cmd" | grep -Eq -- "-R[[:space:]]+${target_port}:(localhost|127\\.0\\.0\\.1):22([^0-9]|$)"; then
+        return 0
+    fi
+    return 1
+}
+
+get_local_tunnel_ssh_pids() {
+    local target_port="$1"
+    local pid args
+    [ -n "$target_port" ] || return 0
+    for pid in $(pgrep -x ssh 2>/dev/null || true); do
+        args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+        if test_local_tunnel_ssh_command "$target_port" "$args"; then
+            printf '%s\n' "$pid"
+        fi
+    done
 }
 
 remove_local_orphan_tunnel() {
@@ -1902,7 +2231,7 @@ remove_local_orphan_tunnel() {
         fi
         # Kill other matching ssh reverse forwards on this port, if any.
         local p
-        for p in $(pgrep -f "ssh.*-R ${target_port}:localhost:22" 2>/dev/null || true); do
+        for p in $(get_local_tunnel_ssh_pids "$target_port" 2>/dev/null || true); do
             if [ "$p" != "$protect_pid" ]; then
                 kill "$p" 2>/dev/null || true
                 killed=1
@@ -1912,11 +2241,12 @@ remove_local_orphan_tunnel() {
             fi
         done
     else
-        if pkill -f "ssh.*-R ${target_port}:localhost:22" 2>/dev/null; then
+        for p in $(get_local_tunnel_ssh_pids "$target_port" 2>/dev/null || true); do
+            kill "$p" 2>/dev/null || true
             killed=1
-            if declare -F connect_log >/dev/null 2>&1; then
-                connect_log "ORPHAN_TUNNEL: killed local ssh port=$target_port" 'DEBUG'
-            fi
+        done
+        if [ "$killed" -eq 1 ] && declare -F connect_log >/dev/null 2>&1; then
+            connect_log "ORPHAN_TUNNEL: killed local ssh port=$target_port" 'DEBUG'
         fi
     fi
     clear_tunnel_banner_cache
@@ -1932,7 +2262,10 @@ stop_session_tunnel_cleanup() {
         bg_pid=""
     fi
     if [ -n "${PORT:-}" ]; then
-        pkill -f "ssh.*-R ${PORT}:localhost:22" 2>/dev/null || true
+        local _p
+        for _p in $(get_local_tunnel_ssh_pids "$PORT" 2>/dev/null || true); do
+            kill "$_p" 2>/dev/null || true
+        done
         if [ "$clear_server" = "1" ]; then
             clear_server_stale_tunnel_forward "$PORT" || true
         fi
@@ -2043,8 +2376,12 @@ tunnel_banner_is_windows() {
 
 tunnel_port_has_local_reverse() {
     local target_port="$1"
+    local p
     [ -n "$target_port" ] || return 1
-    pgrep -f "ssh.*-R ${target_port}:localhost:22" >/dev/null 2>&1
+    for p in $(get_local_tunnel_ssh_pids "$target_port" 2>/dev/null || true); do
+        [ -n "$p" ] && return 0
+    done
+    return 1
 }
 
 
@@ -2623,7 +2960,7 @@ show_connect_hygiene_interactive() {
     printf '    \033[0;36mHygiene scan\033[0m\n'
     for slot in 0 1 2 3 4 5 6 7 8 9; do
         port=$((port_base + slot))
-        for p in $(pgrep -f "ssh.*-R ${port}:localhost:22" 2>/dev/null || true); do
+        for p in $(get_local_tunnel_ssh_pids "$port" 2>/dev/null || true); do
             if [ -n "${bg_pid:-}" ] && [ "$p" = "$bg_pid" ]; then
                 printf '      [current] port=%s tunnel=%s\n' "$port" "$p"
                 continue
@@ -2695,7 +3032,7 @@ show_connect_hygiene_interactive() {
     sib_projects=()
     for slot in 0 1 2 3 4 5 6 7 8 9; do
         port=$((port_base + slot))
-        for p in $(pgrep -f "ssh.*-R ${port}:localhost:22" 2>/dev/null || true); do
+        for p in $(get_local_tunnel_ssh_pids "$port" 2>/dev/null || true); do
             if [ -n "${bg_pid:-}" ] && [ "$p" = "$bg_pid" ]; then
                 continue
             fi
