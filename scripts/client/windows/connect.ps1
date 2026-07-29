@@ -1,4 +1,4 @@
-﻿# connect.ps1 - Claude Code launcher for Windows.
+# connect.ps1 - Claude Code launcher for Windows.
 # connect.bat invariant: menu footer lives in connect-ui.ps1
 # Usage:  double-click connect.bat
 #         connect.bat -Setup   (reconfigure username)
@@ -179,10 +179,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260729.14'
+$script:ConnectVersion = '20260729.2'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = '0bfa30d6-474b-4499-a569-762de70a21b3'
+$script:ConnectBuildId = 'b332a4c2-1666-45bc-bf2a-8112de9599b3'
 $script:SshMsSamples = [System.Collections.Generic.List[int]]::new()
 $script:SshMsSampleStartUnix = 0
 $script:LastSshRollupUnix = 0
@@ -341,10 +341,6 @@ if (Test-Path -LiteralPath (Join-Path $script:ConnectScriptDir 'cursor-proxy-sid
     # (stale lease PID no longer running) before any Ensure-CursorProxySidecar call.
     if (Get-Command Invoke-CursorProxySidecarBootReap -ErrorAction SilentlyContinue) {
         try { [void](Invoke-CursorProxySidecarBootReap) } catch {}
-    }
-    # Boot-once: kill sticky fronts that listen without -L backends (orphan blackhole).
-    if (Get-Command Invoke-CursorProxySidecarHealBlackhole -ErrorAction SilentlyContinue) {
-        try { [void](Invoke-CursorProxySidecarHealBlackhole) } catch {}
     }
 }
 if (-not (Test-Path $_editorLaunch)) {
@@ -2861,10 +2857,6 @@ $script:WindowsMcpEnsured = $false
             }
             if (-not $mayEnsureSidecar) {
                 Write-ConnectLog 'SIDECAR_ENSURE skip reason=no_tunnel_proxy_legs' 'INFO'
-                # Still tear down orphan fronts that blackhole without backends.
-                if (Get-Command Invoke-CursorProxySidecarHealBlackhole -ErrorAction SilentlyContinue) {
-                    try { [void](Invoke-CursorProxySidecarHealBlackhole) } catch {}
-                }
             } elseif (Get-Command Ensure-CursorProxySidecar -ErrorAction SilentlyContinue) {
                 try { [void](Ensure-CursorProxySidecar) } catch {}
             }
