@@ -234,8 +234,12 @@ Assert ($diag -match 'MOUNT_PENDING') 'diagnostic has MOUNT_PENDING (bg mount !=
 Assert ($diag -match 'started_in_background') 'diagnostic reconciles started_in_background'
 Assert ($diag -match 'mountPendingLight') 'light SESSION_OPEN allows bg-mount + on_folder'
 Assert ($gm -match 'soft_fail_exhausted_keep_alive') 'Win: no_proc+TCP-open keeps session (no forced drop)'
-Assert ($gm -match 'soft_fail_exhausted_keep_alive[\s\S]{0,240}return \$true') 'Win keep-alive returns $true (not $false)'
+# Task 5: keep-alive still returns $true via Test-NoProcShouldKeepAlive; zombie_drop coexists.
+Assert ($gm -match 'soft_fail_exhausted_keep_alive[\s\S]{0,280}return \$true') 'Win keep-alive returns $true (not $false)'
+Assert ($gm -match 'soft_fail_exhausted_zombie_drop') 'Win: zombie age-gate token coexists with keep-alive'
+Assert ($gm -match 'Test-NoProcShouldKeepAlive') 'Win: age gate helper coexists with keep-alive'
 Assert ($gmSh -match 'soft_fail_exhausted_keep_alive') 'Mac: no_ssh_proc+TCP-open keeps session'
+Assert ($gmSh -match 'soft_fail_exhausted_zombie_drop') 'Mac: zombie age-gate token coexists with keep-alive'
 Assert ($win -match 'quiet_tunnel_refresh') 'Win quiet recovery when editor still open'
 Assert ($win -match 'skip_press_o_warn reason=already_on_folder') 'Win skips press-O warn when already on folder'
 Assert ($mac -match 'skip_press_o_warn reason=already_on_folder') 'Mac skips press-O warn when already on folder'

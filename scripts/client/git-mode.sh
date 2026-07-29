@@ -56,6 +56,11 @@ _PROXY_OWNER_SERVICE_DEAD_SINCE=0
 SESSION_EVER_HAD_PROXY_LEGS=0
 # Injectable epoch seconds for tests (empty => date +%s).
 _CURSOR_PROXY_HEALTH_NOW=
+# Sync no_proc keep-alive time-box (Task 5). Locked by test-tunnel-no-proc-keepalive (S3=120).
+NO_PROC_ZOMBIE_SEC=120
+_NO_PROC_KEEPALIVE_SINCE=0
+# Injectable epoch seconds for no_proc age-gate tests (empty => date +%s).
+_NO_PROC_ZOMBIE_NOW=
 
 clear_tunnel_banner_cache() {
     _TUNNEL_BANNER_CACHE_AT=0
@@ -927,12 +932,25 @@ sync_session_tunnel_forward() {
                 return 0
             fi
             # TCP/banner still healthy: lost local ssh PID only. Keep session up
-            # (do not force "Connection dropped" recovery).
+            # (do not force "Connection dropped" recovery). First-exhaust arm has
+            # no release_stale (S5). Age gate via _no_proc_should_keep (D7).
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "TUNNEL_SYNC soft_fail_exhausted_keep_alive port=$PORT reason=no_ssh_proc_tcp_open pid=$bg_pid$(_tunnel_session_diag_suffix)" 'WARN'
             fi
             _TUNNEL_SOFT_FAIL_COUNT=0
-            return 0
+            _no_proc_should_keep && return 0
+            # Age gate drop: >=120s continuous no_proc + (NOT auth OR NOT banner).
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_SYNC soft_fail_exhausted_zombie_drop port=$PORT reason=no_ssh_proc_tcp_open pid=$bg_pid$(_tunnel_session_diag_suffix)" 'WARN'
+                LAST_TUNNEL_SYNC_DROP_REASON=soft_fail_exhausted_zombie_drop
+                log_tunnel_drop soft_fail_exhausted_zombie_drop "${ACTIVE_PROJECT_ID:-?}" false "${_editor_opened:-0}" "${_editor_seen_open:-0}" "${RECOVERY_GENERATION:-0}"
+            fi
+            release_stale_tunnel_port || true
+            _NO_PROC_KEEPALIVE_SINCE=0
+            if declare -F update_cursor_proxy_owner_service_health >/dev/null 2>&1; then
+                update_cursor_proxy_owner_service_health || true
+            fi
+            return 1
         fi
         _TUNNEL_SYNC_FAIL_COUNT=$(( _TUNNEL_SYNC_FAIL_COUNT + 1 ))
         if [ "$_TUNNEL_SYNC_FAIL_COUNT" -lt "$fail_threshold" ]; then
@@ -948,6 +966,9 @@ sync_session_tunnel_forward() {
         _TUNNEL_SYNC_FAIL_COUNT=0
         return 1
     fi
+
+    # Healthy local ssh PID: clear no_proc keep-alive age tracking.
+    _NO_PROC_KEEPALIVE_SINCE=0
 
     now="$(date +%s 2>/dev/null || printf '0')"
     if [ "$_LAST_FORWARD_PROBE_AT" -eq 0 ]; then
@@ -976,6 +997,7 @@ sync_session_tunnel_forward() {
         probe_up=1
         _TUNNEL_SYNC_FAIL_COUNT=0
         _TUNNEL_SOFT_FAIL_COUNT=0
+        _NO_PROC_KEEPALIVE_SINCE=0
     else
         probe_up=0
     fi
@@ -1502,6 +1524,37 @@ _cursor_proxy_health_now() {
         return 0
     fi
     date +%s 2>/dev/null || printf '0'
+}
+
+_no_proc_zombie_now() {
+    if [ -n "${_NO_PROC_ZOMBIE_NOW:-}" ]; then
+        printf '%s' "$_NO_PROC_ZOMBIE_NOW"
+        return 0
+    fi
+    date +%s 2>/dev/null || printf '0'
+}
+
+# Returns 0 (keep) when no_proc age < NO_PROC_ZOMBIE_SEC, or age>=threshold with auth+banner.
+# Returns 1 when age gate should drop (caller logs soft_fail_exhausted_zombie_drop).
+_no_proc_should_keep() {
+    local now age auth_owned=0 banner_ok=0 zbanner
+    now="$(_no_proc_zombie_now)"
+    if [ -z "${_NO_PROC_KEEPALIVE_SINCE:-}" ] || [ "${_NO_PROC_KEEPALIVE_SINCE}" -eq 0 ]; then
+        _NO_PROC_KEEPALIVE_SINCE="$now"
+    fi
+    age=$(( now - _NO_PROC_KEEPALIVE_SINCE ))
+    if [ "$age" -lt "${NO_PROC_ZOMBIE_SEC:-120}" ]; then
+        return 0
+    fi
+    if declare -F tunnel_port_auth_owned >/dev/null 2>&1 && tunnel_port_auth_owned "${PORT:-0}"; then
+        auth_owned=1
+    fi
+    zbanner="$(fetch_tunnel_banner 2>/dev/null || true)"
+    if [ -n "$zbanner" ] && declare -F tunnel_banner_is_windows >/dev/null 2>&1 && tunnel_banner_is_windows "$zbanner"; then
+        banner_ok=1
+    fi
+    [ "$auth_owned" -eq 1 ] && [ "$banner_ok" -eq 1 ] && return 0
+    return 1
 }
 
 test_cursor_proxy_backends_up() {

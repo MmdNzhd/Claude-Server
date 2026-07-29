@@ -124,6 +124,10 @@ if (-not $script:ServiceDeadSec) { $script:ServiceDeadSec = 60 }
 $script:ProxyOwnerServiceDeadSince = $null
 $script:SessionEverHadProxyLegs = $false
 $script:CursorProxyHealthNow = $null
+# Sync no_proc keep-alive time-box (Task 5). Locked by test-tunnel-no-proc-keepalive (S3=120).
+if (-not $script:NoProcZombieSec) { $script:NoProcZombieSec = 120 }
+$script:NoProcKeepAliveSince = $null
+$script:NoProcZombieNow = $null
 
 function Clear-TunnelBannerCache {
     # WS4: CLAUDE_TUNNEL_BANNER_OK (sent to the server in Invoke-MountProject) is only ever
@@ -1812,6 +1816,35 @@ function Get-CursorProxyHealthNow {
     return (Get-Date)
 }
 
+function Get-NoProcZombieNow {
+    # Injectable clock for no_proc keep-alive age gate tests (NoProcZombieNow).
+    if ($null -ne $script:NoProcZombieNow) {
+        try { return [datetime]$script:NoProcZombieNow } catch {}
+    }
+    return (Get-Date)
+}
+
+function Test-NoProcShouldKeepAlive {
+    # Returns $true when no_proc keep-alive should continue (age < NO_PROC_ZOMBIE_SEC,
+    # or age>=threshold with auth+Windows banner). $false => caller zombie_drop+Release.
+    $nowZ = Get-NoProcZombieNow
+    if (-not $script:NoProcKeepAliveSince) { $script:NoProcKeepAliveSince = $nowZ }
+    $zombieAge = 0.0
+    try { $zombieAge = ($nowZ - [datetime]$script:NoProcKeepAliveSince).TotalSeconds } catch { $zombieAge = 0.0 }
+    $zombieSec = 120
+    if ($script:NoProcZombieSec) { try { $zombieSec = [int]$script:NoProcZombieSec } catch { $zombieSec = 120 } }
+    if ($zombieSec -lt 1) { $zombieSec = 120 }
+    if ($zombieAge -lt $zombieSec) { return $true }
+    $authOwned = $false
+    try { $authOwned = [bool](Test-TunnelPortAuthOwned -TargetPort $Port) } catch { $authOwned = $false }
+    $bannerOk = $false
+    try {
+        $zb = Get-TunnelBanner
+        if ($zb) { $bannerOk = [bool](Test-TunnelBannerIsWindows -Banner $zb) }
+    } catch { $bannerOk = $false }
+    return ($authOwned -and $bannerOk)
+}
+
 function Test-CursorProxyBackendsUp {
     $backSocks = 0
     $backHttp = 0
@@ -2736,6 +2769,7 @@ function Try-ReattachSessionTunnelProcess {
             $script:SessionBgTunnel = $proc
             $script:TunnelSyncFailCount = 0
             $script:TunnelSoftFailCount = 0
+            $script:NoProcKeepAliveSince = $null
             Write-GitModeLog "TUNNEL_SYNC ok=1 reason=reattached pid=$($proc.Id) port=$Port" 'DEBUG'
             return $true
         }
@@ -2779,9 +2813,18 @@ function Sync-SessionTunnelProcess {
                 if ($BgTunnel.Value) { $dropPid = $BgTunnel.Value.Id }
                 elseif ($script:LastTunnelExitLoggedPid) { $dropPid = $script:LastTunnelExitLoggedPid }
                 Write-GitModeLog ("TUNNEL_SYNC soft_fail_exhausted_keep_alive port=$Port reason=no_proc_tcp_open pid=$dropPid$(Get-TunnelSessionDiagSuffix)") 'WARN'
-                $script:TunnelSoftFailCount = 0
-                $script:TunnelSyncFailCount = 0
-                return $true
+                $script:TunnelSoftFailCount = 0; $script:TunnelSyncFailCount = 0
+                if (Test-NoProcShouldKeepAlive) { return $true }
+                Write-GitModeLog ("TUNNEL_SYNC soft_fail_exhausted_zombie_drop port=$Port reason=no_proc_tcp_open pid=$dropPid$(Get-TunnelSessionDiagSuffix)") 'WARN'
+                Write-TunnelDropLog -Reason 'soft_fail_exhausted_zombie_drop' -TunnelPid $dropPid -TcpOpen $true
+                Release-StaleTunnelPort
+                $script:NoProcKeepAliveSince = $null
+                if (Get-Command Update-CursorProxyOwnerServiceHealth -ErrorAction SilentlyContinue) {
+                    if (Test-IsCursorProxyOwner) {
+                        try { Update-CursorProxyOwnerServiceHealth } catch {}
+                    }
+                }
+                return $false
             }
             $script:TunnelSyncFailCount = 0
             if (-not $BgTunnel.Value -or $BgTunnel.Value.HasExited) {
