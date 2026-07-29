@@ -2,7 +2,7 @@
 
 **Status:** DONE  
 **Branch:** `fix/zombie-owner-reseed-gap`  
-**Commit:** `83aba07` - `fix(connect): time-box no_proc keep-alive with zombie_drop at 120s`
+**Commit:** `1ed3939` - `fix(connect): time-box no_proc keep-alive with zombie_drop at 120s`
 
 ## Summary
 
