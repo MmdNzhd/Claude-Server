@@ -569,11 +569,36 @@ function Stop-TunnelProcessWithExitLog {
     }
 }
 
+function Get-LocalTunnelSshReverseRegex {
+    param([Parameter(Mandatory)][int]$TargetPort)
+    $portEsc = [regex]::Escape("$TargetPort")
+    return "-R(?:\s*=\s*|\s+)${portEsc}:(?:localhost|127\.0\.0\.1):22\b"
+}
+
+function Test-LocalTunnelSshCommandLine {
+    param(
+        [string]$CommandLine,
+        [Parameter(Mandatory)][int]$TargetPort
+    )
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
+    if ($CommandLine -match '(?i)ssh-keygen') { return $false }
+    return [bool]($CommandLine -match (Get-LocalTunnelSshReverseRegex -TargetPort $TargetPort))
+}
+
+function Get-LocalTunnelSshReversePortFromCommandLine {
+    param([string]$CommandLine)
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $null }
+    if ($CommandLine -match '-R(?:\s*=\s*|\s+)(\d+):(?:localhost|127\.0\.0\.1):22\b') {
+        return [int]$Matches[1]
+    }
+    return $null
+}
+
 function Get-LocalTunnelSshPids {
     param([Parameter(Mandatory)][int]$TargetPort)
     $pids = @()
     Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "-R\s+${TargetPort}:localhost:22" } |
+        Where-Object { Test-LocalTunnelSshCommandLine -CommandLine $_.CommandLine -TargetPort $TargetPort } |
         ForEach-Object { $pids += [int]$_.ProcessId }
     return @($pids | Select-Object -Unique)
 }
@@ -1415,13 +1440,12 @@ function Get-LocalTunnelPortPidMap {
     # One CIM scan for all ssh -R forwards (avoids ~500ms Get-CimInstance per port).
     $map = @{}
     Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -and $_.CommandLine -match '-R\s+(\d+):localhost:22' } |
+        Where-Object { $null -ne (Get-LocalTunnelSshReversePortFromCommandLine -CommandLine $_.CommandLine) } |
         ForEach-Object {
-            if ($_.CommandLine -match '-R\s+(\d+):localhost:22') {
-                $p = [int]$Matches[1]
-                if (-not $map.ContainsKey($p)) { $map[$p] = New-Object System.Collections.Generic.List[int] }
-                $map[$p].Add([int]$_.ProcessId)
-            }
+            $p = Get-LocalTunnelSshReversePortFromCommandLine -CommandLine $_.CommandLine
+            if ($null -eq $p) { return }
+            if (-not $map.ContainsKey($p)) { $map[$p] = New-Object System.Collections.Generic.List[int] }
+            $map[$p].Add([int]$_.ProcessId)
         }
     return $map
 }
@@ -1727,10 +1751,15 @@ function Complete-CursorProxyAfterTunnel {
     # Explicit false (xray_closed / reuse no -L) wins even if stale SocksProxyPort remains.
     if ($script:SessionTunnelProxyLegs -eq $false) {
         Write-GitModeLog 'Complete-CursorProxyAfterTunnel skip_sidecar reason=no_tunnel_proxy_legs' 'INFO'
-        $frontHttp = Get-CursorHttpFrontPort
-        if ($frontHttp -gt 0 -and (Test-LocalPortOpen -PortNum $frontHttp)) {
-            if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
-                try { [void](Clear-CursorProxySettingsSidecar) } catch {}
+        # Clear settings AND stop orphan fronts (Clear alone left listening 18998 blackholes).
+        if (Get-Command Invoke-CursorProxySidecarHealBlackhole -ErrorAction SilentlyContinue) {
+            try { [void](Invoke-CursorProxySidecarHealBlackhole) } catch {}
+        } else {
+            $frontHttp = Get-CursorHttpFrontPort
+            if ($frontHttp -gt 0 -and (Test-LocalPortOpen -PortNum $frontHttp)) {
+                if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
+                    try { [void](Clear-CursorProxySettingsSidecar) } catch {}
+                }
             }
         }
         Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=no_tunnel_proxy_legs' 'INFO'
@@ -1740,10 +1769,14 @@ function Complete-CursorProxyAfterTunnel {
     $sessionHasLegs = ($script:SessionTunnelProxyLegs -eq $true) -or ($sessionSocks -gt 0) -or ($sessionHttp -gt 0)
     if (-not $sessionHasLegs) {
         Write-GitModeLog 'Complete-CursorProxyAfterTunnel skip_sidecar reason=no_tunnel_proxy_legs' 'INFO'
-        $frontHttp = Get-CursorHttpFrontPort
-        if ($frontHttp -gt 0 -and (Test-LocalPortOpen -PortNum $frontHttp)) {
-            if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
-                try { [void](Clear-CursorProxySettingsSidecar) } catch {}
+        if (Get-Command Invoke-CursorProxySidecarHealBlackhole -ErrorAction SilentlyContinue) {
+            try { [void](Invoke-CursorProxySidecarHealBlackhole) } catch {}
+        } else {
+            $frontHttp = Get-CursorHttpFrontPort
+            if ($frontHttp -gt 0 -and (Test-LocalPortOpen -PortNum $frontHttp)) {
+                if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
+                    try { [void](Clear-CursorProxySettingsSidecar) } catch {}
+                }
             }
         }
         Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=no_tunnel_proxy_legs' 'INFO'
@@ -1787,8 +1820,10 @@ function Complete-CursorProxyAfterTunnel {
             }
             Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail_front_down' 'WARN'
         } else {
-            # Front still listening but egress health failed (e.g. austria dead).
-            if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
+            # Front listening but egress/backend unhealthy — stop fronts + scrub sticky.
+            if (Get-Command Invoke-CursorProxySidecarHealBlackhole -ErrorAction SilentlyContinue) {
+                try { [void](Invoke-CursorProxySidecarHealBlackhole) } catch {}
+            } elseif (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
                 try { [void](Clear-CursorProxySettingsSidecar) } catch {}
             }
             Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail' 'WARN'
@@ -2199,7 +2234,7 @@ function Clear-LegacyDynamicSocksTunnels {
             if ($ProtectPid -gt 0 -and $procId -eq $ProtectPid) { continue }
             $cmd = [string]$p.CommandLine
             if ($cmd -notmatch '(^|\s)-N(\s|$)') { continue }
-            if ($cmd -notmatch '-R\s+\d+:localhost:22') { continue }
+            if ($cmd -notmatch '-R(?:\s*=\s*|\s+)\d+:(?:localhost|127\.0\.0\.1):22\b') { continue }
             if ($cmd -notmatch $dPat) { continue }
             if ($cmd -match "-L\s+127\.0\.0\.1:${SocksPort}:") { continue }
             if ($cmd -notmatch '\bclaude-server(\s|$)') { continue }
@@ -2524,9 +2559,8 @@ function Get-TunnelSshProcess {
             return $script:TunnelSshCimCache
         }
     }
-    $portPat = [regex]::Escape("$Port")
     $hit = Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match "-R\s+${portPat}:localhost:22" } |
+        Where-Object { Test-LocalTunnelSshCommandLine -CommandLine $_.CommandLine -TargetPort $Port } |
         Select-Object -First 1
     $script:TunnelSshCimCache = $hit
     $script:TunnelSshCimCacheAt = Get-Date

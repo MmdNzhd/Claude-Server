@@ -1424,12 +1424,12 @@ complete_cursor_proxy_after_tunnel() {
     local session_http="${HTTP_PROXY_PORT:-}"
     if [ -z "$session_socks" ] && [ -z "$session_http" ]; then
         declare -F connect_log >/dev/null 2>&1 && connect_log 'complete_cursor_proxy_after_tunnel skip_sidecar reason=no_tunnel_proxy_legs' 'INFO'
-        local front_h_clear
-        front_h_clear="$(cursor_http_front_port)"
-        if [ -n "$front_h_clear" ] && test_local_port_open "$front_h_clear"; then
-            if declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
-                clear_cursor_proxy_settings || true
-            fi
+        # Stop orphan fronts + scrub sticky 18998 (Clear alone left listening blackholes).
+        if declare -F heal_cursor_proxy_sidecar_blackhole >/dev/null 2>&1; then
+            heal_cursor_proxy_sidecar_blackhole || true
+        elif declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
+            clear_cursor_proxy_settings || true
+            declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR force reason=no_tunnel_proxy_legs' 'WARN'
         fi
         declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=no_tunnel_proxy_legs' 'INFO'
         declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_MODE mode=server_direct' 'INFO'
@@ -1447,28 +1447,21 @@ complete_cursor_proxy_after_tunnel() {
         front_up=1
     fi
     if [ "$health_ok" -eq 0 ]; then
+        # Win Clear-CursorProxySettingsSidecar parity: FORCE scrub sticky 18998 even when
+        # Cursor windows are open. Skipping left personal/server settings pinned at a dead
+        # front door (ECONNREFUSED 127.0.0.1:18998 for MCP/HTTP).
         if [ "$front_up" -eq 0 ]; then
             if declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
-                if declare -F test_may_clear_cursor_proxy_settings >/dev/null 2>&1; then
-                    if test_may_clear_cursor_proxy_settings 1; then
-                        clear_cursor_proxy_settings || true
-                    else
-                        declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR_SKIP: reason=windows_open_or_non_owner action=reload_for_server_direct' 'WARN'
-                    fi
-                else
-                    clear_cursor_proxy_settings || true
-                fi
+                clear_cursor_proxy_settings || true
+                declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR force reason=18998_down_windows_open' 'WARN'
             fi
             declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail_front_down' 'WARN'
         else
-            if declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
-                if declare -F test_may_clear_cursor_proxy_settings >/dev/null 2>&1; then
-                    if test_may_clear_cursor_proxy_settings 1; then
-                        clear_cursor_proxy_settings || true
-                    fi
-                else
-                    clear_cursor_proxy_settings || true
-                fi
+            if declare -F heal_cursor_proxy_sidecar_blackhole >/dev/null 2>&1; then
+                heal_cursor_proxy_sidecar_blackhole || true
+            elif declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
+                clear_cursor_proxy_settings || true
+                declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR force reason=backend_down' 'WARN'
             fi
             declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail' 'WARN'
         fi
@@ -1666,7 +1659,13 @@ clear_legacy_dynamic_socks_tunnels() {
             *' -N '*|*-N\ *) ;;
             *) continue ;;
         esac
-        case "$args" in *:localhost:22*) ;; *) continue ;; esac
+        case "$args" in *"-R "*|*"-R="*) ;;
+            *) continue ;;
+        esac
+        case "$args" in
+            *":localhost:22"*|*":127.0.0.1:22"*) ;;
+            *) continue ;;
+        esac
         case "$args" in *"$needle"*) ;; *) continue ;; esac
         case "$args" in *"-L 127.0.0.1:${socks}:"*) continue ;; esac
         case "$args" in *claude-server-sepidz*) continue ;; esac
@@ -1892,6 +1891,35 @@ clear_server_stale_tunnel_forward() {
     return 1
 }
 
+# Shared local ssh -R matcher (Win Test-LocalTunnelSshCommandLine parity).
+test_local_tunnel_ssh_command() {
+    local target_port="$1"
+    local cmd="$2"
+    [ -n "$target_port" ] || return 1
+    [ -n "$cmd" ] || return 1
+    case "$cmd" in
+        *ssh-keygen*) return 1 ;;
+    esac
+    case "$cmd" in
+        *"-R ${target_port}:localhost:22"*) return 0 ;;
+        *"-R ${target_port}:127.0.0.1:22"*) return 0 ;;
+        *"-R=${target_port}:localhost:22"*) return 0 ;;
+    esac
+    return 1
+}
+
+get_local_tunnel_ssh_pids() {
+    local target_port="$1"
+    local pid args
+    [ -n "$target_port" ] || return 0
+    for pid in $(pgrep -x ssh 2>/dev/null || true); do
+        args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+        if test_local_tunnel_ssh_command "$target_port" "$args"; then
+            printf '%s\n' "$pid"
+        fi
+    done
+}
+
 remove_local_orphan_tunnel() {
     local target_port="$1" killed=0 protect_pid="${2:-${bg_pid:-}}"
     [ -n "$target_port" ] || return 0
@@ -1902,7 +1930,7 @@ remove_local_orphan_tunnel() {
         fi
         # Kill other matching ssh reverse forwards on this port, if any.
         local p
-        for p in $(pgrep -f "ssh.*-R ${target_port}:localhost:22" 2>/dev/null || true); do
+        for p in $(get_local_tunnel_ssh_pids "$target_port" 2>/dev/null || true); do
             if [ "$p" != "$protect_pid" ]; then
                 kill "$p" 2>/dev/null || true
                 killed=1
@@ -1912,11 +1940,12 @@ remove_local_orphan_tunnel() {
             fi
         done
     else
-        if pkill -f "ssh.*-R ${target_port}:localhost:22" 2>/dev/null; then
+        for p in $(get_local_tunnel_ssh_pids "$target_port" 2>/dev/null || true); do
+            kill "$p" 2>/dev/null || true
             killed=1
-            if declare -F connect_log >/dev/null 2>&1; then
-                connect_log "ORPHAN_TUNNEL: killed local ssh port=$target_port" 'DEBUG'
-            fi
+        done
+        if [ "$killed" -eq 1 ] && declare -F connect_log >/dev/null 2>&1; then
+            connect_log "ORPHAN_TUNNEL: killed local ssh port=$target_port" 'DEBUG'
         fi
     fi
     clear_tunnel_banner_cache
@@ -1932,7 +1961,10 @@ stop_session_tunnel_cleanup() {
         bg_pid=""
     fi
     if [ -n "${PORT:-}" ]; then
-        pkill -f "ssh.*-R ${PORT}:localhost:22" 2>/dev/null || true
+        local _p
+        for _p in $(get_local_tunnel_ssh_pids "$PORT" 2>/dev/null || true); do
+            kill "$_p" 2>/dev/null || true
+        done
         if [ "$clear_server" = "1" ]; then
             clear_server_stale_tunnel_forward "$PORT" || true
         fi
@@ -2043,8 +2075,12 @@ tunnel_banner_is_windows() {
 
 tunnel_port_has_local_reverse() {
     local target_port="$1"
+    local p
     [ -n "$target_port" ] || return 1
-    pgrep -f "ssh.*-R ${target_port}:localhost:22" >/dev/null 2>&1
+    for p in $(get_local_tunnel_ssh_pids "$target_port" 2>/dev/null || true); do
+        [ -n "$p" ] && return 0
+    done
+    return 1
 }
 
 
@@ -2623,7 +2659,7 @@ show_connect_hygiene_interactive() {
     printf '    \033[0;36mHygiene scan\033[0m\n'
     for slot in 0 1 2 3 4 5 6 7 8 9; do
         port=$((port_base + slot))
-        for p in $(pgrep -f "ssh.*-R ${port}:localhost:22" 2>/dev/null || true); do
+        for p in $(get_local_tunnel_ssh_pids "$port" 2>/dev/null || true); do
             if [ -n "${bg_pid:-}" ] && [ "$p" = "$bg_pid" ]; then
                 printf '      [current] port=%s tunnel=%s\n' "$port" "$p"
                 continue
@@ -2695,7 +2731,7 @@ show_connect_hygiene_interactive() {
     sib_projects=()
     for slot in 0 1 2 3 4 5 6 7 8 9; do
         port=$((port_base + slot))
-        for p in $(pgrep -f "ssh.*-R ${port}:localhost:22" 2>/dev/null || true); do
+        for p in $(get_local_tunnel_ssh_pids "$port" 2>/dev/null || true); do
             if [ -n "${bg_pid:-}" ] && [ "$p" = "$bg_pid" ]; then
                 continue
             fi
