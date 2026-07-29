@@ -1658,6 +1658,49 @@ function Test-IsCursorProxyOwner {
     return ($pidOwn -eq $PID)
 }
 
+function Test-CanClaimCursorProxyOwner {
+    # Read-only mirror of Claim success without writing owner.json.
+    # ForeignLiveOwner := alive + pid != self + Connect-shaped cmdline -> CanBindL false.
+    $info = Get-CursorProxyOwnerInfo
+    if (-not $info) { return $true }
+    $pidOwn = 0
+    try { $pidOwn = [int]$info.pid } catch { return $true }
+    if ($pidOwn -le 0) { return $true }
+    if ($pidOwn -eq $PID) { return $true }
+    if (-not (Test-ProcessAlive -ProcessId $pidOwn)) { return $true }
+    try {
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$pidOwn" -ErrorAction Stop
+        $cmd = [string]$cim.CommandLine
+        if (Get-Command Test-ProcessCommandIsConnectUi -ErrorAction SilentlyContinue) {
+            if (-not (Test-ProcessCommandIsConnectUi -CommandLine $cmd)) {
+                return $true # PID reuse by non-Connect -> Claim would adopt
+            }
+        }
+    } catch {
+        # Unreadable cmdline: treat as foreign-live (safe: skip kill)
+        return $false
+    }
+    return $false
+}
+
+function Test-ProxyReseedShouldKill {
+    # Single chokepoint: ReseedEffective = ReseedRaw AND CanClaim (CanBindL).
+    # Under Gap (ReseedRaw + NOT CanBindL) return $false so callers keep -R.
+    param(
+        [Parameter(Mandatory)][int]$TunnelPid,
+        [Parameter(Mandatory)][string]$Alias,
+        [string]$SshCfgPath = ''
+    )
+    if (-not (Test-TunnelNeedsProxyReseed -TunnelPid $TunnelPid -Alias $Alias -SshCfgPath $SshCfgPath)) {
+        return $false
+    }
+    if (-not (Test-CanClaimCursorProxyOwner)) {
+        Write-GitModeLog "ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=$TunnelPid port=$Port" 'WARN'
+        return $false
+    }
+    return $true
+}
+
 function Claim-CursorProxyOwner {
     param([switch]$Force)
     $path = Get-CursorProxyOwnerPath
@@ -1670,11 +1713,27 @@ function Claim-CursorProxyOwner {
             return $true
         }
         if (Test-ProcessAlive -ProcessId $pidOwn) {
-            $script:CursorProxyOwner = $false
-            Write-GitModeLog ("CURSOR_PROXY_OWNER: skip live_owner pid={0} self={1}" -f $pidOwn, $PID) 'INFO'
-            return $false
+            $adoptNonConnect = $false
+            try {
+                $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$pidOwn" -ErrorAction Stop
+                $cmd = [string]$cim.CommandLine
+                if ((Get-Command Test-ProcessCommandIsConnectUi -ErrorAction SilentlyContinue) -and
+                    -not (Test-ProcessCommandIsConnectUi -CommandLine $cmd)) {
+                    $adoptNonConnect = $true
+                }
+            } catch {
+                $adoptNonConnect = $false
+            }
+            if ($adoptNonConnect) {
+                Write-GitModeLog ("CURSOR_PROXY_OWNER: adopt stale_non_connect pid={0} self={1}" -f $pidOwn, $PID) 'INFO'
+            } else {
+                $script:CursorProxyOwner = $false
+                Write-GitModeLog ("CURSOR_PROXY_OWNER: skip live_owner pid={0} self={1}" -f $pidOwn, $PID) 'INFO'
+                return $false
+            }
+        } else {
+            Write-GitModeLog ("CURSOR_PROXY_OWNER: adopt stale pid={0} self={1}" -f $pidOwn, $PID) 'INFO'
         }
-        Write-GitModeLog ("CURSOR_PROXY_OWNER: adopt stale pid={0} self={1}" -f $pidOwn, $PID) 'INFO'
     }
     $payload = [ordered]@{
         pid         = $PID
@@ -3104,11 +3163,11 @@ function Ensure-SessionTunnel {
             $script:TunnelSyncFailCount = 0
             Write-GitModeLog "ENSURE_TUNNEL reused=1 pid=$($BgTunnel.Value.Id) port=$Port reason=tunnel_up" 'DEBUG'
             Set-SocksProxyPortOnReuse -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath
-            if (-not (Test-TunnelNeedsProxyReseed -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
+            if (-not (Test-ProxyReseedShouldKill -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
                 Complete-CursorProxyAfterTunnel
                 return $true
             }
-            # Fall through: kill + reseed with -L proxy leg
+            # Fall through: kill + reseed with -L proxy leg (ReseedEffective only)
             $TunnelReused.Value = $false
             $skipAdoptAfterSoftFail = $true
         }
@@ -3124,7 +3183,7 @@ function Ensure-SessionTunnel {
                 $script:TunnelSyncFailCount = 0
                 Write-GitModeLog "ENSURE_TUNNEL reused=1 pid=$($BgTunnel.Value.Id) port=$Port reason=recent_success_tcp_open" 'DEBUG'
                 Set-SocksProxyPortOnReuse -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath
-                if (-not (Test-TunnelNeedsProxyReseed -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
+                if (-not (Test-ProxyReseedShouldKill -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
                     Complete-CursorProxyAfterTunnel
                     return $true
                 }
@@ -3149,11 +3208,11 @@ function Ensure-SessionTunnel {
             $TunnelReused.Value = $true
             Write-GitModeLog "ENSURE_TUNNEL reused=1 pid=$($BgTunnel.Value.Id) port=$Port reason=recent_success" 'DEBUG'
             Set-SocksProxyPortOnReuse -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath
-            if (-not (Test-TunnelNeedsProxyReseed -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
+            if (-not (Test-ProxyReseedShouldKill -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
                 Complete-CursorProxyAfterTunnel
                 return $true
             }
-            # Fall through: kill + reseed with -L proxy leg
+            # Fall through: kill + reseed with -L proxy leg (ReseedEffective only)
             $TunnelReused.Value = $false
         }
     }
@@ -3175,11 +3234,11 @@ function Ensure-SessionTunnel {
                     $script:TunnelSoftFailCount = 0
                     Write-GitModeLog "ENSURE_TUNNEL reused=1 pid=$adoptPid port=$Port reason=adopt_local_forward" 'INFO'
                     Set-SocksProxyPortOnReuse -TunnelPid $adoptPid -Alias $Alias -SshCfgPath $SshCfgPath
-                    if (-not (Test-TunnelNeedsProxyReseed -TunnelPid $adoptPid -Alias $Alias -SshCfgPath $SshCfgPath)) {
+                    if (-not (Test-ProxyReseedShouldKill -TunnelPid $adoptPid -Alias $Alias -SshCfgPath $SshCfgPath)) {
                         Complete-CursorProxyAfterTunnel
                         return $true
                     }
-                    # Fall through: kill + reseed with -L proxy leg
+                    # Fall through: kill + reseed with -L proxy leg (ReseedEffective only)
                     $TunnelReused.Value = $false
                     $skipAdoptAfterSoftFail = $true
                 }

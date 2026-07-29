@@ -1307,8 +1307,48 @@ PY
     [ "$pid_own" -eq "$$" ]
 }
 
+can_claim_cursor_proxy_owner() {
+    # Read-only mirror of claim success (no owner.json write). Return 0 = CanBindL.
+    local path pid_own cmd
+    path="$(cursor_proxy_owner_path)"
+    [ -f "$path" ] || return 0
+    pid_own="$(python3 - "$path" <<'PY' 2>/dev/null || printf '0'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    d = json.load(f)
+print(int(d.get("pid", 0)))
+PY
+)"
+    [ -n "${pid_own:-}" ] && [ "${pid_own}" -gt 0 ] 2>/dev/null || return 0
+    [ "$pid_own" = "$$" ] && return 0
+    if ! _process_alive "$pid_own"; then return 0; fi
+    cmd="$(ps -p "$pid_own" -o args= 2>/dev/null || true)"
+    if [ -n "$cmd" ]; then
+        case "$cmd" in
+            *connect.sh*|*connect-boot*) return 1 ;;
+            *) return 0 ;; # non-Connect PID reuse -> claim would adopt
+        esac
+    fi
+    # Unreadable cmdline: treat as foreign-live (safe: skip kill)
+    return 1
+}
+
+proxy_reseed_should_kill() {
+    # ReseedEffective = ReseedRaw AND CanClaim. Return 0 => kill/reseed; non-zero => keep -R.
+    local tunnel_pid="${1:-}"
+    [ -n "$tunnel_pid" ] || return 1
+    tunnel_needs_proxy_reseed "$tunnel_pid" || return 1
+    if ! can_claim_cursor_proxy_owner; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=$tunnel_pid port=${PORT:-}" 'WARN'
+        fi
+        return 1
+    fi
+    return 0
+}
+
 claim_cursor_proxy_owner() {
-    local force="${1:-0}" path info pid_own slot socks http started
+    local force="${1:-0}" path info pid_own slot socks http started cmd
     path="$(cursor_proxy_owner_path)"
     if [ -f "$path" ] && [ "$force" != "1" ]; then
         pid_own="$(python3 - "$path" <<'PY' 2>/dev/null || printf '0'
@@ -1324,12 +1364,27 @@ PY
             return 0
         fi
         if _process_alive "$pid_own"; then
-            CURSOR_PROXY_OWNER=0
-            export CURSOR_PROXY_OWNER
-            declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: skip live_owner pid=$pid_own self=$$" 'INFO'
-            return 1
+            cmd="$(ps -p "$pid_own" -o args= 2>/dev/null || true)"
+            if [ -z "$cmd" ]; then
+                CURSOR_PROXY_OWNER=0
+                export CURSOR_PROXY_OWNER
+                declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: skip live_owner pid=$pid_own self=$$" 'INFO'
+                return 1
+            fi
+            case "$cmd" in
+                *connect.sh*|*connect-boot*)
+                    CURSOR_PROXY_OWNER=0
+                    export CURSOR_PROXY_OWNER
+                    declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: skip live_owner pid=$pid_own self=$$" 'INFO'
+                    return 1
+                    ;;
+                *)
+                    declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: adopt stale_non_connect pid=$pid_own self=$$" 'INFO'
+                    ;;
+            esac
+        else
+            declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: adopt stale pid=$pid_own self=$$" 'INFO'
         fi
-        declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: adopt stale pid=$pid_own self=$$" 'INFO'
     fi
     slot="${TUNNEL_SLOT:--1}"
     socks="$(socks_proxy_port)"
@@ -1701,7 +1756,7 @@ ensure_session_tunnel() {
                 connect_log "ENSURE_TUNNEL reused=1 pid=$bg_pid port=$PORT reason=tunnel_up" 'DEBUG'
             fi
             set_socks_proxy_port_on_reuse "$bg_pid"
-            if ! tunnel_needs_proxy_reseed "$bg_pid"; then
+            if ! proxy_reseed_should_kill "$bg_pid"; then
                 if declare -F complete_cursor_proxy_after_tunnel >/dev/null 2>&1; then
                     complete_cursor_proxy_after_tunnel || true
                 fi
@@ -1730,7 +1785,7 @@ ensure_session_tunnel() {
                 connect_log "ENSURE_TUNNEL reused=1 pid=$bg_pid port=$PORT reason=recent_success" 'DEBUG'
             fi
             set_socks_proxy_port_on_reuse "$bg_pid"
-            if ! tunnel_needs_proxy_reseed "$bg_pid"; then
+            if ! proxy_reseed_should_kill "$bg_pid"; then
                 if declare -F complete_cursor_proxy_after_tunnel >/dev/null 2>&1; then
                     complete_cursor_proxy_after_tunnel || true
                 fi
@@ -1746,6 +1801,17 @@ ensure_session_tunnel() {
     fi
     local _old_bg="${bg_pid:-}"
     if [ -n "${bg_pid:-}" ]; then
+        # Belt: never kill -R for proxy reseed when foreign owner cannot bind -L
+        if [ "${_PROXY_RESEED:-0}" = "1" ] && ! can_claim_cursor_proxy_owner; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=$bg_pid port=${PORT:-}" 'WARN'
+            fi
+            if declare -F complete_cursor_proxy_after_tunnel >/dev/null 2>&1; then
+                complete_cursor_proxy_after_tunnel || true
+            fi
+            TUNNEL_REUSED=1
+            return 0
+        fi
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "ENSURE_TUNNEL killing stale bg pid=$bg_pid" 'DEBUG'
         fi
