@@ -2759,6 +2759,7 @@ function Wait-ForTunnelUp {
         [System.Diagnostics.Process]$TunnelProc,
         [switch]$Quiet
     )
+    $localRNotOwned = $false
     for ($i = 1; $i -le 12; $i++) {
         if ($TunnelProc -and $TunnelProc.HasExited) {
             $exitCode = Get-TunnelProcessExitCode -Process $TunnelProc
@@ -2769,23 +2770,41 @@ function Wait-ForTunnelUp {
         }
         $up = Test-TunnelUp
         if ($up) {
-            Write-GitModeLog "TUNNEL_WAIT ok=1 attempt=$i port=$Port pid=$($TunnelProc.Id)" 'DEBUG'
-            if (-not $Quiet) {
-                $label = if ($i -eq 1) { '    Tunnel check...' } else { "    Tunnel check $i/12..." }
-                Write-Host -NoNewline $label -ForegroundColor DarkGray
-                Write-Host " port $Port is open" -ForegroundColor Green
+            # Gate A: banner/TCP alone is not enough — spawn pid must own local -R.
+            # Empty local PID list is failure (fail-closed), not success.
+            $spawnPid = 0
+            if ($TunnelProc) { $spawnPid = [int]$TunnelProc.Id }
+            $localPids = @(Get-LocalTunnelSshPids -TargetPort $Port)
+            if (($spawnPid -gt 0) -and ($localPids -contains $spawnPid)) {
+                Write-GitModeLog "TUNNEL_WAIT ok=1 attempt=$i port=$Port pid=$spawnPid" 'DEBUG'
+                if (-not $Quiet) {
+                    $label = if ($i -eq 1) { '    Tunnel check...' } else { "    Tunnel check $i/12..." }
+                    Write-Host -NoNewline $label -ForegroundColor DarkGray
+                    Write-Host " port $Port is open" -ForegroundColor Green
+                }
+                return $true
             }
-            return $true
+            $localRNotOwned = $true
+            $localJoined = ($localPids -join ',')
+            Write-GitModeLog "TUNNEL_WAIT ok=0 attempt=$i reason=local_r_not_owned port=$Port pid=$spawnPid local_pids=$localJoined" 'WARN'
+            if (-not $Quiet) {
+                Write-Host "    Tunnel check $i/12... port $Port open but not owned by this tunnel" -ForegroundColor DarkGray
+            }
+        } elseif (-not $Quiet) {
+            Write-Host "    Tunnel check $i/12... port $Port not open yet" -ForegroundColor DarkGray
         }
         if ($i -ge 12) { break }
         $sleepSec = [math]::Min(1.5, 0.25 + ($i - 1) * 0.2)
-        if (-not $Quiet) {
-            Write-Host "    Tunnel check $i/12... port $Port not open yet" -ForegroundColor DarkGray
+        if (-not $up) {
+            Write-GitModeLog "TUNNEL_WAIT ok=0 attempt=$i port=$Port" 'TRACE'
         }
-        Write-GitModeLog "TUNNEL_WAIT ok=0 attempt=$i port=$Port" 'TRACE'
         Start-Sleep -Seconds $sleepSec
     }
-    Write-GitModeLog "TUNNEL_WAIT fail=1 reason=timeout port=$Port" 'WARN'
+    if ($localRNotOwned) {
+        Write-GitModeLog "TUNNEL_WAIT fail=1 reason=local_r_not_owned port=$Port pid=$($TunnelProc.Id)" 'WARN'
+    } else {
+        Write-GitModeLog "TUNNEL_WAIT fail=1 reason=timeout port=$Port" 'WARN'
+    }
     Release-StaleTunnelPort
     return $false
 }

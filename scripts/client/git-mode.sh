@@ -1008,7 +1008,7 @@ sync_session_tunnel_forward() {
 }
 
 wait_for_tunnel_up() {
-    local pid="${1:-}" i sleep_s
+    local pid="${1:-}" i sleep_s local_r_not_owned=0 local_pids="" p owned=0
     for i in $(seq 1 12); do
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
             if declare -F connect_log >/dev/null 2>&1; then
@@ -1019,26 +1019,46 @@ wait_for_tunnel_up() {
             return 1
         fi
         if tunnel_up; then
-            if declare -F connect_log >/dev/null 2>&1; then
-                connect_log "TUNNEL_WAIT ok=1 attempt=$i port=$PORT pid=$pid" 'DEBUG'
+            # Gate A: banner/TCP alone is not enough — spawn pid must own local -R.
+            # Empty local PID list is failure (fail-closed), not success.
+            owned=0
+            local_pids=""
+            if [ -n "$pid" ] && [ -n "${PORT:-}" ]; then
+                local_pids="$(get_local_tunnel_ssh_pids "$PORT" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+                for p in $(get_local_tunnel_ssh_pids "$PORT" 2>/dev/null || true); do
+                    if [ "$p" = "$pid" ]; then owned=1; break; fi
+                done
             fi
-            return 0
+            if [ "$owned" -eq 1 ]; then
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "TUNNEL_WAIT ok=1 attempt=$i port=$PORT pid=$pid" 'DEBUG'
+                fi
+                return 0
+            fi
+            local_r_not_owned=1
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_WAIT ok=0 attempt=$i reason=local_r_not_owned port=$PORT pid=$pid local_pids=$local_pids" 'WARN'
+            fi
+        else
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_WAIT ok=0 attempt=$i port=$PORT" 'TRACE'
+            fi
         fi
         if [ "$i" -ge 12 ]; then
             break
         fi
         sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
-        if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "TUNNEL_WAIT ok=0 attempt=$i port=$PORT" 'TRACE'
-        fi
         sleep "$sleep_s"
     done
+    if [ "$local_r_not_owned" -eq 1 ] && declare -F connect_log >/dev/null 2>&1; then
+        connect_log "TUNNEL_WAIT fail=1 reason=local_r_not_owned port=$PORT pid=$pid" 'WARN'
+    fi
     release_stale_tunnel_port || true
     return 1
 }
 
 poll_tunnel_with_progress() {
-    local pid="${1:-}" i sleep_s up=""
+    local pid="${1:-}" i sleep_s up="" local_r_not_owned=0 local_pids="" p owned=0
     for i in $(seq 1 12); do
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
             if declare -F connect_log >/dev/null 2>&1; then
@@ -1049,26 +1069,47 @@ poll_tunnel_with_progress() {
             return 1
         fi
         if tunnel_up; then
+            # Gate A: banner/TCP alone is not enough — spawn pid must own local -R.
+            # Empty local PID list is failure (fail-closed), not success.
+            owned=0
+            local_pids=""
+            if [ -n "$pid" ] && [ -n "${PORT:-}" ]; then
+                local_pids="$(get_local_tunnel_ssh_pids "$PORT" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+                for p in $(get_local_tunnel_ssh_pids "$PORT" 2>/dev/null || true); do
+                    if [ "$p" = "$pid" ]; then owned=1; break; fi
+                done
+            fi
+            if [ "$owned" -eq 1 ]; then
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "TUNNEL_WAIT ok=1 attempt=$i port=$PORT pid=$pid" 'DEBUG'
+                fi
+                if [ "$i" -eq 1 ]; then
+                    printf '    Tunnel check... port %d is open\n' "$PORT"
+                else
+                    printf '    Tunnel check %d/12... port %d is open\n' "$i" "$PORT"
+                fi
+                return 0
+            fi
+            local_r_not_owned=1
             if declare -F connect_log >/dev/null 2>&1; then
-                connect_log "TUNNEL_WAIT ok=1 attempt=$i port=$PORT pid=$pid" 'DEBUG'
+                connect_log "TUNNEL_WAIT ok=0 attempt=$i reason=local_r_not_owned port=$PORT pid=$pid local_pids=$local_pids" 'WARN'
             fi
-            if [ "$i" -eq 1 ]; then
-                printf '    Tunnel check... port %d is open\n' "$PORT"
-            else
-                printf '    Tunnel check %d/12... port %d is open\n' "$i" "$PORT"
+            printf '    Tunnel check %d/12... port %d open but not owned by this tunnel\n' "$i" "$PORT"
+        else
+            printf '    Tunnel check %d/12... port %d not open yet\n' "$i" "$PORT"
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_WAIT ok=0 attempt=$i port=$PORT" 'TRACE'
             fi
-            return 0
         fi
         if [ "$i" -ge 12 ]; then
             break
         fi
         sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
-        printf '    Tunnel check %d/12... port %d not open yet\n' "$i" "$PORT"
-        if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "TUNNEL_WAIT ok=0 attempt=$i port=$PORT" 'TRACE'
-        fi
         sleep "$sleep_s"
     done
+    if [ "$local_r_not_owned" -eq 1 ] && declare -F connect_log >/dev/null 2>&1; then
+        connect_log "TUNNEL_WAIT fail=1 reason=local_r_not_owned port=$PORT pid=$pid" 'WARN'
+    fi
     release_stale_tunnel_port || true
     return 1
 }
