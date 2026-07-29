@@ -23,7 +23,8 @@ Write-Host '=== HARD LIVE orphan tunnel (Remove-LocalOrphanTunnel) ===' -Foregro
 $content = Get-Content (Get-ClientFile 'git-mode.ps1') -Raw
 $fnNames = @(
     'Clear-TunnelBannerCache', 'Get-TunnelProcessExitCode', 'Stop-TunnelProcessWithExitLog',
-    'Get-LocalTunnelSshPids', 'Test-ProcessCommandIsConnectUi', 'Get-SiblingConnectTunnelPids',
+    'Get-LocalTunnelSshReverseRegex', 'Test-LocalTunnelSshCommandLine', 'Get-LocalTunnelSshPids',
+    'Test-ProcessCommandIsConnectUi', 'Get-SiblingConnectTunnelPids',
     'Remove-LocalOrphanTunnel'
 )
 $extracted = @{}

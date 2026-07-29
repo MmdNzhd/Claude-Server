@@ -21,7 +21,9 @@ Write-Host '=== HARD LIVE: hygiene Soft race + Sibling clean ===' -ForegroundCol
 $content = Get-Content (Get-ClientFile 'git-mode.ps1') -Raw
 $need = @(
     'Write-GitModeLog', 'Clear-TunnelBannerCache', 'Get-TunnelProcessExitCode',
-    'Stop-TunnelProcessWithExitLog', 'Get-LocalTunnelSshPids', 'Test-ProcessCommandIsConnectUi',
+    'Stop-TunnelProcessWithExitLog',
+    'Get-LocalTunnelSshReverseRegex', 'Test-LocalTunnelSshCommandLine', 'Get-LocalTunnelSshPids',
+    'Test-ProcessCommandIsConnectUi',
     'Get-SiblingConnectTunnelPids', 'Remove-LocalOrphanTunnel', 'Get-ConnectUiPidForProcess',
     'Get-ConnectSessionSlotMarkerDir', 'Get-ConnectSessionSlotMarkerPath',
     'Write-ConnectSessionSlotMarker', 'Clear-ConnectSessionSlotMarker', 'Get-ConnectSessionSlotMarkers',
