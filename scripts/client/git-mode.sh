@@ -1050,8 +1050,12 @@ wait_for_tunnel_up() {
         sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
         sleep "$sleep_s"
     done
-    if [ "$local_r_not_owned" -eq 1 ] && declare -F connect_log >/dev/null 2>&1; then
-        connect_log "TUNNEL_WAIT fail=1 reason=local_r_not_owned port=$PORT pid=$pid" 'WARN'
+    if declare -F connect_log >/dev/null 2>&1; then
+        if [ "$local_r_not_owned" -eq 1 ]; then
+            connect_log "TUNNEL_WAIT fail=1 reason=local_r_not_owned port=$PORT pid=$pid" 'WARN'
+        else
+            connect_log "TUNNEL_WAIT fail=1 reason=timeout port=$PORT" 'WARN'
+        fi
     fi
     release_stale_tunnel_port || true
     return 1
@@ -1107,8 +1111,12 @@ poll_tunnel_with_progress() {
         sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
         sleep "$sleep_s"
     done
-    if [ "$local_r_not_owned" -eq 1 ] && declare -F connect_log >/dev/null 2>&1; then
-        connect_log "TUNNEL_WAIT fail=1 reason=local_r_not_owned port=$PORT pid=$pid" 'WARN'
+    if declare -F connect_log >/dev/null 2>&1; then
+        if [ "$local_r_not_owned" -eq 1 ]; then
+            connect_log "TUNNEL_WAIT fail=1 reason=local_r_not_owned port=$PORT pid=$pid" 'WARN'
+        else
+            connect_log "TUNNEL_WAIT fail=1 reason=timeout port=$PORT" 'WARN'
+        fi
     fi
     release_stale_tunnel_port || true
     return 1
