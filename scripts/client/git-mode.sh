@@ -45,6 +45,10 @@ _TUNNEL_BANNER_DEFER_COUNT=0
 _LAST_TUNNEL_SPAWN_SUCCESS_AT=0
 _LAST_TUNNEL_SPAWN_SUCCESS_PORT=
 _LAST_TUNNEL_SPAWN_PID=
+# Still-busy spawn abort window (clear -> ensure race). Locked by test-stale-forward-wait-init.
+STILL_BUSY_WINDOW_SEC=15
+_LAST_STALE_FORWARD_STILL_BUSY_PORT=
+_LAST_STALE_FORWARD_STILL_BUSY_AT=0
 
 clear_tunnel_banner_cache() {
     _TUNNEL_BANNER_CACHE_AT=0
@@ -1931,6 +1935,15 @@ ensure_session_tunnel() {
         declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL proxy_leg=-L local=$socks_candidate remote=${XRAY_SERVER_SOCKS_PORT}" 'INFO'
         append_http_proxy_leg
     fi
+    # Still-busy abort: after clear logged "port still busy", never spawn -R on that port
+    # within STILL_BUSY_WINDOW_SEC while TCP is still open and we own no local -R.
+    if stale_forward_still_busy_abort "$PORT"; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "ENSURE_TUNNEL refuse_spawn reason=stale_port_busy port=$PORT" 'WARN'
+        fi
+        bg_pid=""
+        return 1
+    fi
     ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=5 \
         -R "${PORT}:localhost:22" "${socks_args[@]}" "$ALIAS" 2>/dev/null &
     bg_pid=$!
@@ -1996,6 +2009,7 @@ clear_server_stale_tunnel_forward() {
     fi
     sshx "fuser -k ${target_port}/tcp 2>/dev/null || true; pkill -u \\\$USER -f '127\\.0\\.0\\.1:${target_port}' 2>/dev/null || true; pkill -u \\\$USER -f ' -p ${target_port} ' 2>/dev/null || true" 2>/dev/null || true
     clear_tunnel_banner_cache
+    local i=0
     while [ "$i" -lt 8 ]; do
         i=$(( i + 1 ))
         sleep 0.25
@@ -2004,13 +2018,40 @@ clear_server_stale_tunnel_forward() {
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "STALE_FORWARD: port released port=$target_port wait=$i" 'DEBUG'
             fi
+            _LAST_STALE_FORWARD_STILL_BUSY_PORT=
+            _LAST_STALE_FORWARD_STILL_BUSY_AT=0
             return 0
         fi
     done
+    _LAST_STALE_FORWARD_STILL_BUSY_PORT="$target_port"
+    _LAST_STALE_FORWARD_STILL_BUSY_AT="$(date +%s 2>/dev/null || printf '0')"
     if declare -F connect_log >/dev/null 2>&1; then
         connect_log "STALE_FORWARD: port still busy port=$target_port after wait" 'WARN'
     fi
     return 1
+}
+
+# StillBusyAbort: recent clear still-busy + TCP open + no local -R => refuse spawn same port.
+stale_forward_still_busy_abort() {
+    local target_port="${1:-$PORT}"
+    [ -n "$target_port" ] || return 1
+    [ -n "${_LAST_STALE_FORWARD_STILL_BUSY_PORT:-}" ] || return 1
+    [ "$_LAST_STALE_FORWARD_STILL_BUSY_PORT" = "$target_port" ] || return 1
+    [ -n "${_LAST_STALE_FORWARD_STILL_BUSY_AT:-}" ] && [ "${_LAST_STALE_FORWARD_STILL_BUSY_AT:-0}" != "0" ] || return 1
+    local now_ts age window_sec
+    now_ts="$(date +%s 2>/dev/null || printf '0')"
+    [ "$now_ts" != "0" ] || return 1
+    age=$(( now_ts - _LAST_STALE_FORWARD_STILL_BUSY_AT ))
+    window_sec="${STILL_BUSY_WINDOW_SEC:-15}"
+    [ "$age" -lt "$window_sec" ] || return 1
+    tunnel_port_tcp_open "$target_port" || return 1
+    # Empty local -R set required (own forward would make spawn appropriate).
+    if declare -F get_local_tunnel_ssh_pids >/dev/null 2>&1; then
+        local pids
+        pids="$(get_local_tunnel_ssh_pids "$target_port" 2>/dev/null || true)"
+        [ -z "$pids" ] || return 1
+    fi
+    return 0
 }
 
 # Shared local ssh -R matcher (Win Test-LocalTunnelSshCommandLine parity).

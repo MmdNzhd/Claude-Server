@@ -475,6 +475,11 @@ fi
     return $tcpOpen
 }
 
+# Still-busy spawn abort window (Clear -> Ensure race). Locked by test-stale-forward-wait-init.
+if (-not $script:StillBusyWindowSec) { $script:StillBusyWindowSec = 15 }
+$script:LastStaleForwardStillBusyPort = $null
+$script:LastStaleForwardStillBusyAt = $null
+
 function Clear-ServerStaleTunnelForward {
     param([int]$TargetPort = $Port)
     if (-not $TargetPort) { return }
@@ -502,10 +507,32 @@ function Clear-ServerStaleTunnelForward {
         if (-not (Test-TunnelPortTcpOpen -TargetPort $TargetPort)) {
             Write-GitModeLog "STALE_FORWARD: port released port=$TargetPort wait=$i" 'DEBUG'
             Add-ClearedTunnelPort -TargetPort $TargetPort
+            $script:LastStaleForwardStillBusyPort = $null
+            $script:LastStaleForwardStillBusyAt = $null
             return
         }
     }
+    $script:LastStaleForwardStillBusyPort = [int]$TargetPort
+    $script:LastStaleForwardStillBusyAt = Get-Date
     Write-GitModeLog "STALE_FORWARD: port still busy port=$TargetPort after wait" 'WARN'
+}
+
+function Test-StaleForwardStillBusyAbort {
+    param([int]$TargetPort = $Port)
+    if (-not $TargetPort) { return $false }
+    if ($null -eq $script:LastStaleForwardStillBusyPort) { return $false }
+    if ([int]$script:LastStaleForwardStillBusyPort -ne [int]$TargetPort) { return $false }
+    if (-not $script:LastStaleForwardStillBusyAt) { return $false }
+    $windowSec = 15
+    if ($script:StillBusyWindowSec) { $windowSec = [int]$script:StillBusyWindowSec }
+    $age = ((Get-Date) - $script:LastStaleForwardStillBusyAt).TotalSeconds
+    if ($age -ge $windowSec) { return $false }
+    $tcpOpen = $false
+    try { $tcpOpen = [bool](Test-TunnelPortTcpOpen -TargetPort $TargetPort) } catch { $tcpOpen = $false }
+    if (-not $tcpOpen) { return $false }
+    $localCount = @(Get-LocalTunnelSshPids -TargetPort $TargetPort).Count
+    if ($localCount -gt 0) { return $false }
+    return $true
 }
 
 function Release-StaleTunnelPort {
@@ -3382,6 +3409,13 @@ function Ensure-SessionTunnel {
     # Used by editor-launch.ps1 to route Cursor's own network traffic (chat/agent, not just
     # extensions) through xray on the server so it egresses via the VLESS exit IP for
     # every developer, rather than each laptop's own network or the shared office IP.
+    # Still-busy abort: after Clear logged "port still busy", never Start-Process -R on that
+    # same sticky port within StillBusyWindowSec while TCP is still open and we own no local -R.
+    if (Test-StaleForwardStillBusyAbort -TargetPort $Port) {
+        Write-GitModeLog "ENSURE_TUNNEL refuse_spawn reason=stale_port_busy port=$Port" 'WARN'
+        $BgTunnel.Value = $null
+        return $false
+    }
     $BgTunnel.Value = Start-Process ssh -WindowStyle Hidden -PassThru -ArgumentList ($sshArgs + @($Alias))
     # #P2: tie the reverse-tunnel lifetime to this Connect process via the same
     # KILL_ON_JOB_CLOSE job used for the sidecar tree, so an abrupt exit (X button,
