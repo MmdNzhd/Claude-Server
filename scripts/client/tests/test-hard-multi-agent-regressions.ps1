@@ -240,6 +240,13 @@ Assert ($gm -match 'soft_fail_exhausted_zombie_drop') 'Win: zombie age-gate toke
 Assert ($gm -match 'Test-NoProcShouldKeepAlive') 'Win: age gate helper coexists with keep-alive'
 Assert ($gmSh -match 'soft_fail_exhausted_keep_alive') 'Mac: no_ssh_proc+TCP-open keeps session'
 Assert ($gmSh -match 'soft_fail_exhausted_zombie_drop') 'Mac: zombie age-gate token coexists with keep-alive'
+# Task 7: Gap reseed gate coexists with keep-alive (foreign owner must not kill -R)
+Assert ($gm -match 'foreign_owner_cannot_bind') 'Win: Gap token foreign_owner_cannot_bind coexists with keep-alive'
+Assert ($gm -match 'Test-ProxyReseedShouldKill|Test-CanClaimCursorProxyOwner') 'Win: CanClaim/ReseedKill gate coexists'
+Assert ($gm -match 'local_r_not_owned') 'Win: Wait Gate A local_r_not_owned coexists with keep-alive'
+Assert ($gmSh -match 'foreign_owner_cannot_bind') 'Mac: Gap token foreign_owner_cannot_bind coexists'
+Assert ($gmSh -match 'local_r_not_owned') 'Mac: Wait Gate A local_r_not_owned coexists'
+Assert ($win -match 'foreign_owner_cannot_bind') 'Win bg_init Gap skip coexists with multi-agent path'
 Assert ($win -match 'quiet_tunnel_refresh') 'Win quiet recovery when editor still open'
 Assert ($win -match 'skip_press_o_warn reason=already_on_folder') 'Win skips press-O warn when already on folder'
 Assert ($mac -match 'skip_press_o_warn reason=already_on_folder') 'Mac skips press-O warn when already on folder'

@@ -55,12 +55,54 @@ Assert (-not ($build -match "AppLaunched=powershell\.exe")) `
 # --- 3) Dead 18998 must never be repaired when backend down ---
 Assert ($side -match 'CURSOR_PROXY_CLEAR force reason=backend_down') `
     'sidecar force-clears when backend -L down'
+Assert ($side -match 'Get-CursorProxySettingsPathsForClear') `
+    'sidecar enumerates personal+profile settings paths for clear'
+Assert ($side -match 'CURSOR_PROXY_CLEAR removed_18998_dead_proxy path=') `
+    'sidecar logs which settings path was scrubbed'
 Assert ($side -match 'SIDECAR_ENSURE front_up backend_down stopping_fronts_clearing_settings') `
     'Ensure stops front doors when backend down'
 Assert ($side -match 'SIDECAR_START front_up backend_down stopping_fronts') `
     'Start refuses to pin settings without backend'
+Assert ($side -match 'SIDECAR_HEAL_BLACKHOLE front_up backend_down') `
+    'HealBlackhole stops orphan fronts without backends'
+Assert ($side -match 'Clear-Sticky18998Settings') `
+    'watchdog scrubs sticky 18998 when front is blackhole'
+$macSide = Get-Content (Join-Path $RepoRoot 'scripts\client\mac\cursor-proxy-sidecar.sh') -Raw
+Assert ($macSide -match 'SIDECAR_HEAL_BLACKHOLE front_up backend_down') `
+    'Mac sidecar has HealBlackhole'
+Assert ($macSide -match 'test_cursor_proxy_backend_open') `
+    'Mac sidecar gates start on backend'
 Assert ($dcb -match 'CURSOR_PROXY_CLEAR force reason=backend_down') `
     'ship-gate requires backend_down force-clear string in staged sidecar'
+Assert ($dcb -match 'Get-CursorProxySettingsPathsForClear') `
+    'ship-gate requires personal+profile path enum'
+Assert ($dcb -match 'SIDECAR_HEAL_BLACKHOLE') `
+    'ship-gate requires HealBlackhole marker'
+Assert ($dcb -match 'Never overwrite versioned src with stale hybrid root leftovers') `
+    'ship-gate requires hybrid no-overwrite'
+Assert ($dcb -match 'mac/editor-launch.sh') `
+    'ship-gate checks Mac editor-launch personal scrub'
+
+$boot = Get-Content (Join-Path $RepoRoot 'scripts\client\windows\connect-boot.ps1') -Raw
+$upd = Get-Content (Join-Path $RepoRoot 'scripts\client\windows\connect-update.ps1') -Raw
+$cps1 = Get-Content (Join-Path $RepoRoot 'scripts\client\windows\connect.ps1') -Raw
+Assert ($boot -match 'Never overwrite versioned src with stale hybrid root leftovers') `
+    'connect-boot hybrid sweep drops stale root instead of overwriting src'
+Assert ($boot -match 'Prefer connect-version when that tree exists') `
+    'connect-boot prefers stamped version tree over stale current.txt'
+Assert ($upd -match 'Never overwrite versioned src with stale hybrid root leftovers') `
+    'connect-update hybrid sweep drops stale root instead of overwriting src'
+# HealBlackhole lives in sidecar; connect.ps1 boot uses BootReap only (Task 1 strip —
+# do not re-add caller drive-bys). Ship gate: function + SIDECAR_HEAL_BLACKHOLE marker above.
+Assert ($cps1 -match 'Invoke-CursorProxySidecarBootReap') `
+    'connect.ps1 invokes BootReap (HealBlackhole is sidecar/boot-sidecar, not connect drive-by)'
+$gmPs1 = Get-Content (Join-Path $RepoRoot 'scripts\client\git-mode.ps1') -Raw
+Assert ($gmPs1 -match 'function Complete-CursorProxyAfterTunnel') `
+    'git-mode Complete-CursorProxyAfterTunnel present'
+Assert ($gmPs1 -notmatch 'Invoke-CursorProxySidecarHealBlackhole') `
+    'git-mode must not drive-by HealBlackhole (sidecar owns blackhole heal)'
+Assert ($side -match 'function Invoke-CursorProxySidecarHealBlackhole') `
+    'sidecar still defines Invoke-CursorProxySidecarHealBlackhole'
 
 # --- 4) Manual update must not stick on Press Enter ---
 Assert ($ui -match 'Stop-Process -Id \$PID -Force') `
@@ -85,6 +127,31 @@ $upd = Get-Content (Join-Path $RepoRoot 'scripts\client\windows\connect-update.p
 $launch = Get-Content (Join-Path $RepoRoot 'publish\_setup-launch-body.ps1') -Raw
 Assert ($upd -match 'foreign_verdir') `
     'update Sync skips Claude-Connect-NEW.exe inside OLD \{ver\} folders'
+Assert ($upd -match 'Repair-ConnectVerDirLayout|Repair-ConnectAllVerDirLayouts') `
+    'update repairs VerDir so only matching EXE + src sit outside root'
+$envRepair = Get-Content (Join-Path $RepoRoot 'scripts\client\windows\connect-env-repair.ps1') -Raw
+Assert ($envRepair -match 'function Repair-ConnectVerDirLayout') `
+    'connect-env-repair owns VerDir-only-EXE layout healer'
+Assert ($launch -match 'verdir_leaf_wins') `
+    'setup forces DestExe name to match VerDir folder leaf'
+Assert ($launch -match 'Repair-SetupVerDirContract') `
+    'setup enforces VerDir src+EXE after instant launcher'
+Assert ($launch -match 'Set-SrcVersionStamp') `
+    'setup stamps src connect-version to folder leaf'
+Assert ($launch -match 'Test-VersionSrcStructural') `
+    'setup uses structural src check (folder leaf may differ from package)'
+Assert ($launch -match 'instant reopen via current\.txt') `
+    'setup instant launcher lives at root via current.txt'
+Assert ($envRepair -match 'removed_foreign_or_launcher') `
+    'VerDir repair removes stale .vbs/.cmd beside EXE'
+Assert ($envRepair -match 'removed_extra_dir') `
+    'VerDir repair removes unexpected directories (only src + EXE allowed)'
+Assert ($envRepair -match 'removed_incomplete_orphan') `
+    'VerDir repair-all drops incomplete src-only orphan trees'
+Assert ($boot -match 'Repair-ConnectVerDirLayout') `
+    'connect-boot heals VerDir stray scripts at boot'
+Assert ($boot -match 'Length -gt 2000') `
+    'connect-boot heals hybrid root when launched from src'
 Assert ($upd -match 'dirLeaf -ne \$verLabel') `
     'update compares VerDir leaf to VersionLabel before promote'
 Assert ($launch -match 'Claude-Connect\.vbs') `
@@ -93,6 +160,11 @@ Assert ($launch -match 'wscript\.exe //B //Nologo') `
     'instant .cmd trampoline uses hidden wscript (no lingering console)'
 Assert ($launch -notmatch 'start "Claude Connect" /D') `
     'instant launcher must not use titled start /D powershell (orphan cmd)'
+$pub = Get-Content (Join-Path $RepoRoot 'publish\publish.ps1') -Raw
+Assert ($pub -match 'versioned \{ver\}\\src') `
+    'publish Desktop sync targets Claude-Connect\{ver}\src (not flat dump)'
+Assert ($pub -match 'src \+ Claude-Connect-\{0\}\.exe only') `
+    'publish reports VerDir contract EXE+src only'
 
 Write-Host ''
 if ($Fail -eq 0) {
