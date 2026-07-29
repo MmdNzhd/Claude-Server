@@ -1424,12 +1424,12 @@ complete_cursor_proxy_after_tunnel() {
     local session_http="${HTTP_PROXY_PORT:-}"
     if [ -z "$session_socks" ] && [ -z "$session_http" ]; then
         declare -F connect_log >/dev/null 2>&1 && connect_log 'complete_cursor_proxy_after_tunnel skip_sidecar reason=no_tunnel_proxy_legs' 'INFO'
-        # Stop orphan fronts + scrub sticky 18998 (Clear alone left listening blackholes).
-        if declare -F heal_cursor_proxy_sidecar_blackhole >/dev/null 2>&1; then
-            heal_cursor_proxy_sidecar_blackhole || true
-        elif declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
-            clear_cursor_proxy_settings || true
-            declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR force reason=no_tunnel_proxy_legs' 'WARN'
+        local front_h_clear
+        front_h_clear="$(cursor_http_front_port)"
+        if [ -n "$front_h_clear" ] && test_local_port_open "$front_h_clear"; then
+            if declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
+                clear_cursor_proxy_settings || true
+            fi
         fi
         declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=no_tunnel_proxy_legs' 'INFO'
         declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_MODE mode=server_direct' 'INFO'
@@ -1447,21 +1447,28 @@ complete_cursor_proxy_after_tunnel() {
         front_up=1
     fi
     if [ "$health_ok" -eq 0 ]; then
-        # Win Clear-CursorProxySettingsSidecar parity: FORCE scrub sticky 18998 even when
-        # Cursor windows are open. Skipping left personal/server settings pinned at a dead
-        # front door (ECONNREFUSED 127.0.0.1:18998 for MCP/HTTP).
         if [ "$front_up" -eq 0 ]; then
             if declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
-                clear_cursor_proxy_settings || true
-                declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR force reason=18998_down_windows_open' 'WARN'
+                if declare -F test_may_clear_cursor_proxy_settings >/dev/null 2>&1; then
+                    if test_may_clear_cursor_proxy_settings 1; then
+                        clear_cursor_proxy_settings || true
+                    else
+                        declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR_SKIP: reason=windows_open_or_non_owner action=reload_for_server_direct' 'WARN'
+                    fi
+                else
+                    clear_cursor_proxy_settings || true
+                fi
             fi
             declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail_front_down' 'WARN'
         else
-            if declare -F heal_cursor_proxy_sidecar_blackhole >/dev/null 2>&1; then
-                heal_cursor_proxy_sidecar_blackhole || true
-            elif declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
-                clear_cursor_proxy_settings || true
-                declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR force reason=backend_down' 'WARN'
+            if declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
+                if declare -F test_may_clear_cursor_proxy_settings >/dev/null 2>&1; then
+                    if test_may_clear_cursor_proxy_settings 1; then
+                        clear_cursor_proxy_settings || true
+                    fi
+                else
+                    clear_cursor_proxy_settings || true
+                fi
             fi
             declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail' 'WARN'
         fi
@@ -1900,11 +1907,12 @@ test_local_tunnel_ssh_command() {
     case "$cmd" in
         *ssh-keygen*) return 1 ;;
     esac
-    case "$cmd" in
-        *"-R ${target_port}:localhost:22"*) return 0 ;;
-        *"-R ${target_port}:127.0.0.1:22"*) return 0 ;;
-        *"-R=${target_port}:localhost:22"*) return 0 ;;
-    esac
+    if echo "$cmd" | grep -Eq -- "-R[[:space:]]*=[[:space:]]*${target_port}:(localhost|127\\.0\\.0\\.1):22([^0-9]|$)"; then
+        return 0
+    fi
+    if echo "$cmd" | grep -Eq -- "-R[[:space:]]+${target_port}:(localhost|127\\.0\\.0\\.1):22([^0-9]|$)"; then
+        return 0
+    fi
     return 1
 }
 

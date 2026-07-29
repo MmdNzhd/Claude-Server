@@ -83,6 +83,66 @@ Assert ($found -contains 102) 'behavioral: finds -R= form pid=102'
 Assert ($found -notcontains 103) 'behavioral: rejects wrong port pid=103'
 Assert ($found -notcontains 104) 'behavioral: rejects -L pid=104'
 
+# Mac behavioral: same pass/fail table via extracted test_local_tunnel_ssh_command
+$bashOk = $false
+try {
+    $probe = & bash -c "echo BASH_OK" 2>$null
+    if ($LASTEXITCODE -eq 0 -and ($probe -join "`n") -match 'BASH_OK') { $bashOk = $true }
+} catch { $bashOk = $false }
+
+if (-not $bashOk) {
+    Assert $false 'mac: bash unavailable - cannot run test_local_tunnel_ssh_command harness'
+} else {
+    function Convert-ToBashPath([string]$WinPath) {
+        if ($WinPath -match '^([A-Za-z]):(.*)$') {
+            return ('/mnt/' + $Matches[1].ToLower() + ($Matches[2] -replace '\\', '/'))
+        }
+        return ($WinPath -replace '\\', '/')
+    }
+    $shPathBash = Convert-ToBashPath $shPath
+    $macHarness = @'
+set -u
+SCRIPT="__SCRIPT__"
+TARGET_PORT="__PORT__"
+FUNC_SRC="$(sed -n '/^test_local_tunnel_ssh_command()/,/^}/p' "$SCRIPT")"
+[ -n "$FUNC_SRC" ] || { echo HARNESS_FAIL extract; exit 1; }
+eval "$FUNC_SRC"
+run_case() {
+    local expect="$1" label="$2" cmd="$3" rc=0
+    if test_local_tunnel_ssh_command "$TARGET_PORT" "$cmd"; then rc=0; else rc=1; fi
+    if [ "$expect" = pass ] && [ "$rc" -eq 0 ]; then echo "PASS mac:$label"; return 0; fi
+    if [ "$expect" = fail ] && [ "$rc" -ne 0 ]; then echo "PASS mac:$label"; return 0; fi
+    echo "FAIL mac:$label expect=$expect rc=$rc"; exit 1
+}
+'@
+    $macHarness = $macHarness.Replace('__SCRIPT__', $shPathBash).Replace('__PORT__', "$TargetPort")
+    foreach ($row in $passRows) {
+        $cmdEsc = ($row.Cmd -replace "'", "'\\''")
+        $macHarness += "`nrun_case pass '$($row.Label)' '$cmdEsc'"
+    }
+    foreach ($row in $failRows) {
+        $cmdEsc = ($row.Cmd -replace "'", "'\\''")
+        $macHarness += "`nrun_case fail '$($row.Label)' '$cmdEsc'"
+    }
+    $macHarness = ($macHarness -replace "`r`n", "`n") -replace "`r", "`n"
+    $tmpSh = [System.IO.Path]::Combine($PSScriptRoot, "_tmp_mac_tunnel_matcher_$([guid]::NewGuid().ToString('N')).sh")
+    try {
+        [System.IO.File]::WriteAllText($tmpSh, $macHarness, [System.Text.UTF8Encoding]::new($false))
+        $tmpShBash = Convert-ToBashPath $tmpSh
+        $macOut = & bash $tmpShBash 2>&1
+        $macText = ($macOut -join "`n")
+        foreach ($row in $passRows) {
+            Assert ($macText -match "PASS mac:$([regex]::Escape($row.Label))") "mac pass: $($row.Label)"
+        }
+        foreach ($row in $failRows) {
+            Assert ($macText -match "PASS mac:$([regex]::Escape($row.Label))") "mac fail: $($row.Label)"
+        }
+        Assert ($macText -notmatch 'FAIL mac:') 'mac: harness reported no FAIL lines'
+    } finally {
+        Remove-Item -LiteralPath $tmpSh -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Write-Host ''
 if ($Fail -eq 0) {
     Write-Host ("All local-tunnel-ssh-pids tests passed ({0} asserts)." -f $Pass) -ForegroundColor Green

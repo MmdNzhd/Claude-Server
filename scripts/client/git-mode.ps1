@@ -1751,15 +1751,10 @@ function Complete-CursorProxyAfterTunnel {
     # Explicit false (xray_closed / reuse no -L) wins even if stale SocksProxyPort remains.
     if ($script:SessionTunnelProxyLegs -eq $false) {
         Write-GitModeLog 'Complete-CursorProxyAfterTunnel skip_sidecar reason=no_tunnel_proxy_legs' 'INFO'
-        # Clear settings AND stop orphan fronts (Clear alone left listening 18998 blackholes).
-        if (Get-Command Invoke-CursorProxySidecarHealBlackhole -ErrorAction SilentlyContinue) {
-            try { [void](Invoke-CursorProxySidecarHealBlackhole) } catch {}
-        } else {
-            $frontHttp = Get-CursorHttpFrontPort
-            if ($frontHttp -gt 0 -and (Test-LocalPortOpen -PortNum $frontHttp)) {
-                if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
-                    try { [void](Clear-CursorProxySettingsSidecar) } catch {}
-                }
+        $frontHttp = Get-CursorHttpFrontPort
+        if ($frontHttp -gt 0 -and (Test-LocalPortOpen -PortNum $frontHttp)) {
+            if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
+                try { [void](Clear-CursorProxySettingsSidecar) } catch {}
             }
         }
         Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=no_tunnel_proxy_legs' 'INFO'
@@ -1769,14 +1764,10 @@ function Complete-CursorProxyAfterTunnel {
     $sessionHasLegs = ($script:SessionTunnelProxyLegs -eq $true) -or ($sessionSocks -gt 0) -or ($sessionHttp -gt 0)
     if (-not $sessionHasLegs) {
         Write-GitModeLog 'Complete-CursorProxyAfterTunnel skip_sidecar reason=no_tunnel_proxy_legs' 'INFO'
-        if (Get-Command Invoke-CursorProxySidecarHealBlackhole -ErrorAction SilentlyContinue) {
-            try { [void](Invoke-CursorProxySidecarHealBlackhole) } catch {}
-        } else {
-            $frontHttp = Get-CursorHttpFrontPort
-            if ($frontHttp -gt 0 -and (Test-LocalPortOpen -PortNum $frontHttp)) {
-                if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
-                    try { [void](Clear-CursorProxySettingsSidecar) } catch {}
-                }
+        $frontHttp = Get-CursorHttpFrontPort
+        if ($frontHttp -gt 0 -and (Test-LocalPortOpen -PortNum $frontHttp)) {
+            if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
+                try { [void](Clear-CursorProxySettingsSidecar) } catch {}
             }
         }
         Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=no_tunnel_proxy_legs' 'INFO'
@@ -1820,10 +1811,8 @@ function Complete-CursorProxyAfterTunnel {
             }
             Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail_front_down' 'WARN'
         } else {
-            # Front listening but egress/backend unhealthy — stop fronts + scrub sticky.
-            if (Get-Command Invoke-CursorProxySidecarHealBlackhole -ErrorAction SilentlyContinue) {
-                try { [void](Invoke-CursorProxySidecarHealBlackhole) } catch {}
-            } elseif (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
+            # Front still listening but egress health failed (e.g. austria dead).
+            if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
                 try { [void](Clear-CursorProxySettingsSidecar) } catch {}
             }
             Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail' 'WARN'
