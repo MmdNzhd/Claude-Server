@@ -49,6 +49,13 @@ _LAST_TUNNEL_SPAWN_PID=
 STILL_BUSY_WINDOW_SEC=15
 _LAST_STALE_FORWARD_STILL_BUSY_PORT=
 _LAST_STALE_FORWARD_STILL_BUSY_AT=0
+# Owner/service coupling: release empty lease after backends-down + xray-expected.
+# Locked by test-proxy-owner-service-coupling (S3 SERVICE_DEAD_SEC=60).
+SERVICE_DEAD_SEC=60
+_PROXY_OWNER_SERVICE_DEAD_SINCE=0
+SESSION_EVER_HAD_PROXY_LEGS=0
+# Injectable epoch seconds for tests (empty => date +%s).
+_CURSOR_PROXY_HEALTH_NOW=
 
 clear_tunnel_banner_cache() {
     _TUNNEL_BANNER_CACHE_AT=0
@@ -902,6 +909,11 @@ sync_session_tunnel_forward() {
     case "$fail_threshold" in ''|*[!0-9]*) fail_threshold=3 ;; esac
     [ "$fail_threshold" -ge 1 ] 2>/dev/null || fail_threshold=3
 
+    # Owner/service coupling on every Sync tick (D5): zombie owners release without Ensure churn.
+    if declare -F update_cursor_proxy_owner_service_health >/dev/null 2>&1; then
+        update_cursor_proxy_owner_service_health || true
+    fi
+
     # A missing local ssh PID is not definitive: the reverse forward can still
     # be healthy after process re-parenting. Trust TCP/banner evidence first.
     if ! kill -0 "$bg_pid" 2>/dev/null; then
@@ -1325,9 +1337,15 @@ cursor_proxy_owner_path() {
 }
 
 _process_alive() {
-    local pid="${1:-0}"
+    # kill -0 is true for zombies; filter state Z (Claim/CanClaim must adopt).
+    local pid="${1:-0}" state
     [ "$pid" -gt 0 ] 2>/dev/null || return 1
-    kill -0 "$pid" 2>/dev/null
+    kill -0 "$pid" 2>/dev/null || return 1
+    state="$(ps -o state= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+    case "$state" in
+        Z*) return 1 ;;
+    esac
+    return 0
 }
 
 get_cursor_proxy_owner_info() {
@@ -1462,11 +1480,70 @@ PY
 }
 
 release_cursor_proxy_owner() {
+    local reason="${1:-}"
     test_is_cursor_proxy_owner || return 0
     rm -f "$(cursor_proxy_owner_path)" 2>/dev/null || true
     CURSOR_PROXY_OWNER=0
     export CURSOR_PROXY_OWNER
-    declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: released pid=$$" 'INFO'
+    _PROXY_OWNER_SERVICE_DEAD_SINCE=0
+    if [ "$reason" = "service_dead" ]; then
+        # S2 token must appear literally (Win/Mac parity).
+        declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: released reason=service_dead pid=$$" 'INFO'
+    elif [ -n "$reason" ]; then
+        declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: released reason=$reason pid=$$" 'INFO'
+    else
+        declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROXY_OWNER: released pid=$$" 'INFO'
+    fi
+}
+
+_cursor_proxy_health_now() {
+    if [ -n "${_CURSOR_PROXY_HEALTH_NOW:-}" ]; then
+        printf '%s' "$_CURSOR_PROXY_HEALTH_NOW"
+        return 0
+    fi
+    date +%s 2>/dev/null || printf '0'
+}
+
+test_cursor_proxy_backends_up() {
+    local back_s back_h
+    back_s="${SOCKS_PROXY_PORT:-}"
+    back_h="${HTTP_PROXY_PORT:-}"
+    if [ -z "$back_s" ]; then back_s="$(socks_proxy_port)"; fi
+    if [ -z "$back_h" ]; then back_h="$(http_proxy_port)"; fi
+    [ -n "$back_s" ] && [ -n "$back_h" ] || return 1
+    test_local_port_open "$back_s" && test_local_port_open "$back_h"
+}
+
+update_cursor_proxy_owner_service_health() {
+    # OwnerServiceDead := IsOwner AND NOT BackendsUp AND XrayExpected
+    #   AND age >= SERVICE_DEAD_SEC (60). XrayExpected := SESSION_EVER_HAD_PROXY_LEGS.
+    # Called from complete AND sync (D5 Sync-tick path).
+    local now age dead_sec
+    test_is_cursor_proxy_owner || return 0
+    if [ "${SESSION_EVER_HAD_PROXY_LEGS:-0}" != "1" ]; then
+        _PROXY_OWNER_SERVICE_DEAD_SINCE=0
+        return 0
+    fi
+    if test_cursor_proxy_backends_up; then
+        _PROXY_OWNER_SERVICE_DEAD_SINCE=0
+        return 0
+    fi
+    now="$(_cursor_proxy_health_now)"
+    case "$now" in ''|*[!0-9]*) now=0 ;; esac
+    if [ "${_PROXY_OWNER_SERVICE_DEAD_SINCE:-0}" -le 0 ] 2>/dev/null; then
+        _PROXY_OWNER_SERVICE_DEAD_SINCE="$now"
+        return 0
+    fi
+    dead_sec="${SERVICE_DEAD_SEC:-60}"
+    case "$dead_sec" in ''|*[!0-9]*) dead_sec=60 ;; esac
+    [ "$dead_sec" -ge 1 ] 2>/dev/null || dead_sec=60
+    age=$(( now - _PROXY_OWNER_SERVICE_DEAD_SINCE ))
+    if [ "$age" -ge "$dead_sec" ] 2>/dev/null; then
+        declare -F connect_log >/dev/null 2>&1 && \
+            connect_log "CURSOR_PROXY_OWNER: service_dead age_sec=$age threshold=$dead_sec" 'WARN'
+        release_cursor_proxy_owner service_dead
+    fi
+    return 0
 }
 
 test_local_port_open() {
@@ -1528,6 +1605,10 @@ complete_cursor_proxy_after_tunnel() {
     # Skip predicate uses SESSION vars only — socks_proxy_port/http_proxy_port
     # always return 19080/19180 and would defeat the skip.
     # Never adopt orphan fixed-port listeners (Bugbot residual 2026-07-28).
+    # Owner/service coupling: tick even on early skip (xray_closed must not service_dead).
+    if declare -F update_cursor_proxy_owner_service_health >/dev/null 2>&1; then
+        update_cursor_proxy_owner_service_health || true
+    fi
     local session_socks="${SOCKS_PROXY_PORT:-}"
     local session_http="${HTTP_PROXY_PORT:-}"
     if [ -z "$session_socks" ] && [ -z "$session_http" ]; then
@@ -1917,12 +1998,14 @@ ensure_session_tunnel() {
             else
                 HTTP_PROXY_PORT=""
             fi
+            SESSION_EVER_HAD_PROXY_LEGS=1
             declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL proxy_adopt busy_healthy local=$socks_candidate" 'INFO'
         else
             clear_legacy_dynamic_socks_tunnels "" "$socks_candidate"
             if local_port_free "$socks_candidate"; then
                 socks_args=(-L "127.0.0.1:${socks_candidate}:127.0.0.1:${XRAY_SERVER_SOCKS_PORT}")
                 SOCKS_PROXY_PORT="$socks_candidate"
+                SESSION_EVER_HAD_PROXY_LEGS=1
                 declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL proxy_leg=-L local=$socks_candidate remote=${XRAY_SERVER_SOCKS_PORT} after_legacy_cleanup" 'INFO'
                 append_http_proxy_leg
             elif declare -F connect_log >/dev/null 2>&1; then
@@ -1932,6 +2015,7 @@ ensure_session_tunnel() {
     else
         socks_args=(-L "127.0.0.1:${socks_candidate}:127.0.0.1:${XRAY_SERVER_SOCKS_PORT}")
         SOCKS_PROXY_PORT="$socks_candidate"
+        SESSION_EVER_HAD_PROXY_LEGS=1
         declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL proxy_leg=-L local=$socks_candidate remote=${XRAY_SERVER_SOCKS_PORT}" 'INFO'
         append_http_proxy_leg
     fi

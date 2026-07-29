@@ -118,6 +118,12 @@ $script:LastTunnelExitLoggedPid = $null
 $script:TunnelForwardProbeIntervalSec = 45
 $script:TunnelSoftFailBudget = 4
 $script:TunnelBannerDeferCount = 0
+# Owner/service coupling: release empty lease after backends-down + xray-expected.
+# Locked by test-proxy-owner-service-coupling (S3 SERVICE_DEAD_SEC=60).
+if (-not $script:ServiceDeadSec) { $script:ServiceDeadSec = 60 }
+$script:ProxyOwnerServiceDeadSince = $null
+$script:SessionEverHadProxyLegs = $false
+$script:CursorProxyHealthNow = $null
 
 function Clear-TunnelBannerCache {
     # WS4: CLAUDE_TUNNEL_BANNER_OK (sent to the server in Invoke-MountProject) is only ever
@@ -1782,11 +1788,76 @@ function Claim-CursorProxyOwner {
 }
 
 function Release-CursorProxyOwner {
+    param([string]$Reason = '')
     if (-not (Test-IsCursorProxyOwner)) { return }
     $path = Get-CursorProxyOwnerPath
     try { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue } catch {}
     $script:CursorProxyOwner = $false
-    Write-GitModeLog "CURSOR_PROXY_OWNER: released pid=$PID" 'INFO'
+    $script:ProxyOwnerServiceDeadSince = $null
+    if ($Reason -eq 'service_dead') {
+        # S2 token must appear literally (Win/Mac parity).
+        Write-GitModeLog "CURSOR_PROXY_OWNER: released reason=service_dead pid=$PID" 'INFO'
+    } elseif ($Reason) {
+        Write-GitModeLog "CURSOR_PROXY_OWNER: released reason=$Reason pid=$PID" 'INFO'
+    } else {
+        Write-GitModeLog "CURSOR_PROXY_OWNER: released pid=$PID" 'INFO'
+    }
+}
+
+function Get-CursorProxyHealthNow {
+    # Injectable clock for owner/service-dead timer tests (CursorProxyHealthNow).
+    if ($null -ne $script:CursorProxyHealthNow) {
+        try { return [datetime]$script:CursorProxyHealthNow } catch {}
+    }
+    return (Get-Date)
+}
+
+function Test-CursorProxyBackendsUp {
+    $backSocks = 0
+    $backHttp = 0
+    if ($script:SocksProxyPort) { try { $backSocks = [int]$script:SocksProxyPort } catch { $backSocks = 0 } }
+    if ($script:HttpProxyPort) { try { $backHttp = [int]$script:HttpProxyPort } catch { $backHttp = 0 } }
+    if ($backSocks -le 0 -and (Get-Command Get-SocksProxyPort -ErrorAction SilentlyContinue)) {
+        try { $backSocks = [int](Get-SocksProxyPort) } catch { $backSocks = 0 }
+    }
+    if ($backHttp -le 0 -and (Get-Command Get-HttpProxyPort -ErrorAction SilentlyContinue)) {
+        try { $backHttp = [int](Get-HttpProxyPort) } catch { $backHttp = 0 }
+    }
+    if ($backSocks -le 0 -or $backHttp -le 0) { return $false }
+    return ((Test-LocalPortOpen -PortNum $backSocks) -and (Test-LocalPortOpen -PortNum $backHttp))
+}
+
+function Update-CursorProxyOwnerServiceHealth {
+    # OwnerServiceDead := IsOwner AND NOT BackendsUp AND XrayExpected
+    #   AND age(ProxyOwnerServiceDeadSince) >= SERVICE_DEAD_SEC (60)
+    # XrayExpected := SessionEverHadProxyLegs (not bare intentional xray_closed).
+    # Called from Complete AND Sync so zombie owners release without Ensure churn.
+    if (-not (Test-IsCursorProxyOwner)) { return }
+    $xrayExpected = [bool]$script:SessionEverHadProxyLegs
+    if (-not $xrayExpected) {
+        $script:ProxyOwnerServiceDeadSince = $null
+        return
+    }
+    $backendsUp = $false
+    try { $backendsUp = [bool](Test-CursorProxyBackendsUp) } catch { $backendsUp = $false }
+    $now = Get-CursorProxyHealthNow
+    if ($backendsUp) {
+        $script:ProxyOwnerServiceDeadSince = $null
+        return
+    }
+    if (-not $script:ProxyOwnerServiceDeadSince) {
+        $script:ProxyOwnerServiceDeadSince = $now
+        return
+    }
+    $deadSec = 60
+    if ($script:ServiceDeadSec) { try { $deadSec = [int]$script:ServiceDeadSec } catch { $deadSec = 60 } }
+    if ($deadSec -lt 1) { $deadSec = 60 }
+    $age = 0.0
+    try { $age = ($now - [datetime]$script:ProxyOwnerServiceDeadSince).TotalSeconds } catch { $age = 0.0 }
+    if ($age -ge $deadSec) {
+        Write-GitModeLog ("CURSOR_PROXY_OWNER: service_dead age_sec={0} threshold={1}" -f [int]$age, $deadSec) 'WARN'
+        Release-CursorProxyOwner -Reason 'service_dead'
+    }
 }
 
 
@@ -1830,6 +1901,12 @@ function Complete-CursorProxyAfterTunnel {
     # against dead backends and flaps ~10s. NEVER "adopt" orphan 19080/19180 listeners via
     # Get-SocksProxyPort defaults — that defeated skip on reuse when SessionTunnelProxyLegs
     # was unset (Bugbot 2026-07-28). Only session-claimed legs may start the sidecar.
+    # Owner/service coupling: tick health even on early skip (xray_closed must not service_dead).
+    if (Get-Command Update-CursorProxyOwnerServiceHealth -ErrorAction SilentlyContinue) {
+        if (Test-IsCursorProxyOwner) {
+            try { Update-CursorProxyOwnerServiceHealth } catch {}
+        }
+    }
     $sessionSocks = 0
     $sessionHttp = 0
     if ($script:SocksProxyPort) { try { $sessionSocks = [int]$script:SocksProxyPort } catch { $sessionSocks = 0 } }
@@ -1910,6 +1987,11 @@ function Complete-CursorProxyAfterTunnel {
     $mode = 'server_direct'
     try { $mode = Get-CursorProxyMode } catch { $mode = 'server_direct' }
     Write-GitModeLog ("CURSOR_PROXY_MODE mode={0}" -f $mode) 'INFO'
+    if (Get-Command Update-CursorProxyOwnerServiceHealth -ErrorAction SilentlyContinue) {
+        if (Test-IsCursorProxyOwner) {
+            try { Update-CursorProxyOwnerServiceHealth } catch {}
+        }
+    }
 }
 
 function Test-ProxyHealth {
@@ -2665,6 +2747,13 @@ function Try-ReattachSessionTunnelProcess {
 
 function Sync-SessionTunnelProcess {
     param([ref]$BgTunnel)
+    # Owner/service coupling on every Sync tick (D5): zombie owners must release
+    # without Ensure churn when backends stay down and xray was expected.
+    if (Get-Command Update-CursorProxyOwnerServiceHealth -ErrorAction SilentlyContinue) {
+        if (Test-IsCursorProxyOwner) {
+            try { Update-CursorProxyOwnerServiceHealth } catch {}
+        }
+    }
     if ($BgTunnel.Value -and $BgTunnel.Value.HasExited -and $script:LastTunnelExitLoggedPid -ne $BgTunnel.Value.Id) {
         $exitCode = Get-TunnelProcessExitCode -Process $BgTunnel.Value
         Write-GitModeLog "TUNNEL_EXIT pid=$($BgTunnel.Value.Id) port=$Port exit_code=$exitCode reason=sync_observed_exit" 'WARN'
@@ -3377,6 +3466,7 @@ function Ensure-SessionTunnel {
             $httpCandidate = Get-HttpProxyPort
             if (Test-LocalPortOpen -PortNum $httpCandidate) { $script:HttpProxyPort = $httpCandidate }
             $script:SessionTunnelProxyLegs = $true
+            $script:SessionEverHadProxyLegs = $true
             Write-GitModeLog "ENSURE_TUNNEL proxy_adopt busy_healthy local=$socksCandidate" 'INFO'
         } else {
             Clear-LegacyDynamicSocksTunnels -ProtectPid 0 -SocksPort $socksCandidate | Out-Null
@@ -3384,6 +3474,7 @@ function Ensure-SessionTunnel {
                 $sshArgs += @('-L', "127.0.0.1:${socksCandidate}:127.0.0.1:$($script:XrayServerSocksPort)")
                 $script:SocksProxyPort = $socksCandidate
                 $script:SessionTunnelProxyLegs = $true
+                $script:SessionEverHadProxyLegs = $true
                 Write-GitModeLog "ENSURE_TUNNEL proxy_leg=-L local=$socksCandidate remote=$($script:XrayServerSocksPort) after_legacy_cleanup" 'INFO'
                 $sshArgsList = New-Object 'System.Collections.Generic.List[string]'
                 if ($null -ne $sshArgs) { [void]$sshArgsList.AddRange([string[]]@($sshArgs)) }
@@ -3398,6 +3489,7 @@ function Ensure-SessionTunnel {
         $sshArgs += @('-L', "127.0.0.1:${socksCandidate}:127.0.0.1:$($script:XrayServerSocksPort)")
         $script:SocksProxyPort = $socksCandidate
         $script:SessionTunnelProxyLegs = $true
+        $script:SessionEverHadProxyLegs = $true
         Write-GitModeLog "ENSURE_TUNNEL proxy_leg=-L local=$socksCandidate remote=$($script:XrayServerSocksPort)" 'INFO'
         $sshArgsList = New-Object 'System.Collections.Generic.List[string]'
         if ($null -ne $sshArgs) { [void]$sshArgsList.AddRange([string[]]@($sshArgs)) }
