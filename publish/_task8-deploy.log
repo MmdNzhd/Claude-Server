@@ -1,0 +1,4043 @@
+﻿
+=== deploy-scripts-only (keep EXE, Smart auto-update bundle) ===
+
+  Version bump: 20260729.14 -> 20260729.15
+  Running client deploy-gate tests...
+
+=== Deploy gate (non-live suites, 130 total) ===
+Source: run-all.ps1 minus *-live.ps1, plus critical deploy scripts
+Skipped (slow): windows-mcp live storm/chaos/brutal - run .ps1 directly when needed
+
+--- pipeline-deep ---
+
+=== PowerShell pipeline deep test (MS docs aligned) ===
+
+  PASS  Join-Path -Path -ChildPath explicit matches Path.Combine
+  PASS  Path.Combine ignores stray pipeline objects (static method)
+  PASS  Unary comma return emits one object (about_Return)
+  PASS  Function can emit multiple success-stream objects
+  PASS  @(func)[-1] picks last emitted object
+  PASS  $null = ($m = ...) suppresses assignment leak in function
+  PASS  connect.ps1 version 20260729.15
+  PASS  editor-launch uses Path.Combine not Join-Path
+  PASS  safe Choose-Project capture
+  PASS  safe Resolve-EditorChoice capture
+
+All deep tests passed.
+  PASS
+
+--- pipeline-repro ---
+
+=== Join-Path ChildPath bug reproduction ===
+
+[1] OLD: while-loop + bare assignment
+    Pipeline leaked object Id=ai; Join-Path result: C:\Users\Smart\.config\claude-connect\editor.conf
+    (Interactive script would PROMPT ChildPath if ChildPath arg omitted)
+
+[2] OLD: Resolve-EditorChoice with Join-Path (pre-fix editor-launch.ps1)
+    OldResolve returned: C:\Users\Smart\.config\claude-connect\editor.conf
+
+[3] FIXED: @(Choose-Project)[-1] + Path.Combine
+    go.Id=ai editor.conf=C:\Users\Smart\.config\claude-connect\editor.conf
+
+[4] MS docs: function without unary comma emits MULTIPLE objects
+    @(TwoEmit).Count = 2  -> need @()[ -1]
+    @((TwoEmit))[-1].n = PICK
+
+All reproduction steps completed (non-interactive).
+  PASS
+
+--- connect-ui ---
+OK test-connect-ui.ps1
+  PASS
+
+--- select-project ---
+
+=== Post-select pipeline test (non-interactive) ===
+
+  PASS  @(Choose-Project)[-1] returns project id
+  PASS  Path.Combine editor.conf path valid
+  PASS  LeakySelect emits at least one object
+  PASS  Path.Combine safe with pipeline context
+  PASS  windows\connect.ps1 uses safe Choose-Project capture
+  PASS  windows\connect.ps1 omits script path in header (v12)
+  PASS  editor-launch uses Path.Combine not Join-Path
+
+All select-project tests passed.
+  PASS
+
+--- connect-pipeline ---
+
+=== connect.ps1 pipeline self-test ===
+
+  PASS  connect-ui.ps1 does not shadow Get-GitModeLabel
+  PASS  windows\connect.ps1 parses cleanly in PS 5.1
+  PASS  windows\connect.ps1 has no smart/curly quotes (PS 5.1 break)
+  PASS  windows\connect.ps1 Set-ConnectTitle avoids pipe-in-double-quote PS 5.1 bug
+  PASS  windows\connect.ps1 uses Choose-Project (no while-loop pipeline leak)
+  PASS  windows\connect.ps1 has no bare $go = [PSCustomObject]
+  PASS  windows\connect.ps1 launches editor via Launch-RemoteEditor
+  PASS  windows\connect.ps1 has current ConnectVersion (20260729.15)
+  PASS  windows\connect.ps1 dot-sources connect-ui
+  PASS  windows\connect.ps1 supports AdminFix
+  PASS  windows\connect.ps1 has post-disconnect helper
+  PASS  windows\connect.ps1 has v11 session features
+  PASS  windows\connect.ps1 dot-sources git-mode.ps1
+  PASS  windows\connect.ps1 has mid-session git remount
+  PASS  windows\connect.ps1 has session hygiene hotkey
+  PASS  windows\connect.ps1 has Get-GitMode (via git-mode.ps1)
+  PASS  windows\connect.ps1 pushes GIT_MODE to server
+  PASS  windows\connect.ps1 pushes LAPTOP_OS to server
+  PASS  windows\connect.ps1 removed git menu option g
+  PASS  windows\connect.ps1 has Push-ServerConnectConf
+  PASS  windows\connect.ps1 uses safe Choose-Project capture
+  PASS  windows\connect.ps1 still defines/uses session bg tunnel
+  PASS  windows\connect.ps1 must not pre-warm tunnel between Ready bootstrap and menuLoop
+  PASS  windows\connect.ps1 must not run Initialize-ServerSession before menuLoop
+  PASS  windows\connect.ps1 must not show Server setup step before menuLoop
+  PASS  windows\connect.ps1 must not call Ensure-LaptopSshReady between Ready and menuLoop
+  PASS  windows\connect.ps1 sets LaptopFirewallOk on Ensure#1 success in Initialize-ServerSession
+  PASS  windows\connect.ps1 caches firewall check in Test-LaptopSshReady
+  PASS  windows\connect.ps1 has disk firewall OK cache
+  PASS  windows\connect.ps1 invalidates firewall cache on Ensure/AdminFix failure
+  PASS  windows\connect.ps1 uses safe Resolve-EditorChoice capture
+  PASS  windows\connect.ps1 has laptop SSH key check helper
+  PASS  windows\connect.ps1 uses tunnel slot acquisition
+  PASS  windows\connect.ps1 sanitizes ssh config (no RemoteForward)
+  PASS  windows\connect.ps1 caches laptop SSH verify
+  PASS  windows\connect.ps1 waits for deferred server setup after project pick
+  PASS  windows\connect.ps1 starts deferred server setup after menu shown
+  PASS  windows\connect.ps1 uses trusted tunnel mount
+  PASS  windows\connect.ps1 ssh config has no RemoteForward
+  PASS  windows\connect.ps1 Select-String uses safe Pattern variable
+  PASS  windows\connect.ps1 resolves logged-on laptop user when elevated
+  PASS  windows\connect.ps1 stores LAPTOP_USER from interactive session not elevated token
+  PASS  windows\connect.ps1 caps tunnel auth retry loop
+  PASS  windows\connect.ps1 elevate-when-needed (not always on launch)
+  PASS  windows\connect.ps1 still has AdminFix RunAs path
+  PASS  windows\connect.ps1 elevate does not -Wait (avoids stuck unelevated console)
+  PASS  windows\connect.ps1 has laptop admin SSH helpers
+  PASS  auto recovery logs RECOVERY_SKIP_CLEAR_MOUNT when editor stays open
+  PASS  finally keeps tunnel alive while editor remains on remote folder
+  PASS  tunnel sync soft-fails when TCP is open without a process handle
+  PASS  Windows tunnel sync debounces consecutive failures
+  PASS  Push-ServerConnectConf does not invoke claude-self-heal
+  PASS  Push-ServerConnectConf uses base64 remote body
+  PASS  Push-ServerConnectConf requires PUSH_CONF_RESULT
+  PASS  Push-ServerConnectConf gates dedupe on hasResult
+  PASS  git-mode.ps1 has Invoke-SshXChecked for Out-Null hot paths
+  PASS  Windows TUNNEL_SYNC TRACE is throttled to at least 30 seconds
+  PASS  cursor-auth-laptop uses merge not file replace
+  PASS  cursor-auth-laptop never closes Cursor
+  PASS  editor-launch uses explorer token for fast de-elevated start
+  PASS  editor-launch has reusable schtasks fallback
+  PASS  editor-launch suppresses schtasks console noise
+  PASS  editor-launch detects visible editor window
+  PASS  editor-launch marks server windows
+  PASS  windows\connect.ps1 syncs cursor auth every reconnect
+  PASS  windows\connect.ps1 opens editor only once
+  PASS  windows\connect.ps1 logs auth_folder_check perf mark
+  PASS  windows\connect.ps1 uses single-pass window check after on_folder
+  PASS  windows\connect.ps1 emits session_open_summary
+  PASS  windows\connect.ps1 tracks ConnectPerf counters
+  PASS  Join-Path after project select (no ChildPath prompt)
+  PASS  claude-mount.sh reads GIT_MODE
+  PASS  claude-mount.sh reads LAPTOP_OS
+  PASS  claude-mount.sh has Mac laptop git ops
+  PASS  claude-mount reports git hide failures
+  PASS  claude-mount warns on git hide failure
+  PASS  claude-mount warns when tunnel down
+  PASS  claude-mount git hide fail-fast (<=2 attempts)
+  PASS  claude-mount restores GIT_MODE explicitly
+  PASS  claude-mount has no RETURN trap on GIT_MODE
+  PASS  connect.ps1 has Begin-ConnectRecovery
+  PASS  connect.ps1 logs RECOVERY_BEGIN
+  PASS  connect.ps1 logs STEP begin
+  PASS  connect.ps1 has SshX wrapper
+  PASS  connect.ps1 SshX supports NoRetryOnTimeout
+  PASS  connect.ps1 retries SshX timeout only when NoRetryOnTimeout is unset
+  PASS  connect.ps1 retains SshX timeout retry logging
+  PASS  connect.ps1 wraps SshX with timeout
+  PASS  git-mode.ps1 auto-retries mount after script push
+  PASS  git-mode.ps1 resolves server scripts for ZIP layout
+  PASS  cursor-auth-laptop emits auth PERF marks
+  PASS  cursor-auth-laptop tracks auth_total
+  PASS  git-mode emits mount PERF marks
+  PASS  connect.bat bootstraps CLAUDE_CONNECT_RUN_ID
+  PASS  connect.bat does not -File connect.ps1 with WindowStyle Hidden
+  PASS  connect.bat async handoff starts connect-boot.ps1
+  PASS  connect.bat handoffs via connect-boot.ps1
+  PASS  git-mode.ps1 emits TUNNEL_DROP on tunnel soft-fail
+  PASS  connect-ui.ps1 forces log sync on TUNNEL_DROP
+  PASS  connect-ui.sh forces log sync on TUNNEL_DROP
+  PASS  no sepidz connect fork (single codebase)
+  PASS  publish uses canonical windows connect.ps1
+  PASS  publish has IP patch flag for Sepidz
+  PASS  publish does not reference users/sepidz fork
+PASS bat RUN_ID
+PASS Get-ConnectSessionId
+PASS sessions.index
+PASS SESSION_FILTER
+PASS silent update fn
+PASS win hooks silent
+PASS TUNNEL_DROP
+PASS mac RUN_ID
+PASS mac silent
+PASS mac SESSION_FILTER
+PASS git silent
+PASS Wait-ConnectExit logs FAIL EXIT on non-zero code
+PASS Write-ConnectUserFacingError helper exists
+PASS single-instance mutex (Global\\ClaudeConnect)
+PASS connect.ps1 logs FAIL NEED_ADMIN
+PASS connect.ps1 logs FAIL STEP
+PASS connect.ps1 logs FAIL ADMIN_UAC
+PASS connect-update.ps1 traps FAIL UPDATE_UNHANDLED
+PASS connect.bat logs FAIL UPDATE_BAT_EXIT
+All session-log contracts passed
+
+All tests passed.
+  PASS
+
+--- connect-hygiene-menu ---
+
+=== Connect hygiene menu contracts ===
+  PASS  Get-ConnectHygieneReport exists
+  PASS  Invoke-ConnectHygieneClean exists
+  PASS  Show-ConnectHygieneInteractive exists
+  PASS  report logs HYGIENE_SCAN
+  PASS  clean modes Soft|Sibling
+  PASS  Soft path uses Remove-LocalOrphanTunnel
+  PASS  Sibling stops tunnels with hygiene_sibling
+  PASS  Sibling closes project Cursor windows
+  PASS  Sibling stops Connect UI pid
+  PASS  hygiene never kills whole Cursor profile tree
+  PASS  Close-CursorProjectWindows exists
+  PASS  window close uses WM_CLOSE
+  PASS  window close respects ProtectRootName
+  PASS  window close only touches server profile mains
+  PASS  Close-Cursor never enumerates personal Cursor
+  PASS  slot marker writer exists
+  PASS  slot marker reader exists
+  PASS  markers reader uses List (not ForEach-Object += hole)
+  PASS  markers reader avoids ForEach-Object pipeline accumulation
+  PASS  markers reader avoids $pid vs automatic $PID collision
+  PASS  markers reader has no $pid assignment
+  PASS  marker write is UTF-8 without BOM
+  PASS  Soft arm calls orphan reclaim
+  PASS  Sibling arm iterates Report.Siblings
+  PASS  Sibling skips Cursor close when root equals protect
+  PASS  interactive asks soft confirm
+  PASS  interactive asks sibling confirm
+  PASS  re-scan siblings after soft without full server probe
+  PASS  Win session footer has H hygiene
+  PASS  Win session footer removed G git
+  PASS  Mac session footer has H hygiene
+  PASS  Mac session footer removed G = git mode
+  PASS  Win session resolves H
+  PASS  Win session calls hygiene interactive
+  PASS  Win H uses VK-safe ConsoleKey::H
+  PASS  Win session no longer resolves g
+  PASS  Win project menu removed g -> Configure-GitMode
+  PASS  Win config menu removed 3 -> Configure-GitMode
+  PASS  Win config menu label removed Change git mode
+  PASS  Win connect.ps1 has zero Configure-GitMode call sites
+  PASS  connect.bat guards hygiene wire
+  PASS  connect.bat guards H hygiene footer
+  PASS  Mac session resolves h
+  PASS  Mac wires hygiene
+  PASS  Mac session no longer resolves g
+  PASS  Mac has no configure_git_mode call
+  PASS  Mac menus dropped numbered git item
+  PASS  git-mode.sh has hygiene helpers
+  PASS  Mac hygiene logs Soft/Sibling tags
+  PASS  Mac re-scans siblings after soft
+
+=== Connect hygiene HARD runtime ===
+  PASS  HARD report ProtectRootName from remote path
+  PASS  HARD report SoftTargetCount=1 orphan
+  PASS  HARD report SiblingCount=1 sibling
+  PASS  HARD classifies current tunnel
+  PASS  HARD classifies sibling tunnel
+  PASS  HARD classifies orphan tunnel
+  PASS  HARD Soft scans all 10 user ports via orphan reclaim
+  PASS  HARD Soft never Stop-TunnelProcessWithExitLog
+  PASS  HARD Soft never Stop-Process Connect UI
+  PASS  HARD Soft never Close-CursorProjectWindows
+  PASS  HARD Soft fail-open calls cursor-server-reaper
+  PASS  HARD Soft parses MUX_DEAD_REMOVED
+  PASS  HARD Sibling never calls Remove-LocalOrphanTunnel
+  PASS  HARD Sibling stops sibling tunnel with hygiene_sibling
+  PASS  HARD Sibling never stops current tunnel
+  PASS  HARD Sibling does not treat orphan as sibling stop
+  PASS  HARD Sibling stops sibling Connect UI pid
+  PASS  HARD Sibling never stops current Connect PID
+  PASS  HARD Sibling closes one Cursor project window
+  PASS  HARD Sibling closes SiblingProj protecting CurrentProj
+  PASS  HARD Sibling counters tunnels=1 connects=1
+  PASS  HARD protect-same-root still stops sibling tunnel
+  PASS  HARD protect-same-root still stops sibling Connect UI
+  PASS  HARD protect-same-root skips Cursor window close
+  PASS  Soft returns before Sibling arm
+  PASS  Sibling arm never runs cursor-server-reaper
+  PASS  Close-Cursor skips when root equals protect
+  PASS  Close-Cursor documents shared-profile no process-kill
+
+Passed: 78  Failed: 0
+  PASS
+
+--- connect-hygiene-complete ---
+
+=== Connect hygiene COMPLETE ===
+  PASS  docs document H hygiene
+  PASS  docs document git menu removal
+  PASS  Win/Mac version.txt lockstep (20260729.15)
+  PASS  connect.ps1 matches version.txt
+  PASS  mac connect.sh matches version.txt
+  PASS  designer still has G (out of scope)
+  PASS  designer does not ship H hygiene
+  PASS  Mac has show_connect_hygiene_interactive
+  PASS  Mac soft uses remove_local_orphan_tunnel
+  PASS  Mac soft fail-open reaper
+  PASS  Mac sibling stops Connect UI from marker
+  PASS  Mac sibling closes Cursor window helper
+  PASS  Mac Cursor close skips protect_current
+  PASS  Mac never kills self $$ as Connect UI
+  PASS  Mac re-scans siblings after soft (Win parity)
+  PASS  Mac session writes slot marker
+  PASS  Mac disconnect clears slot marker
+  PASS  Mac footer H hygiene
+  PASS  Mac footer no G git
+
+--- Marker round-trip ---
+  PASS  marker round-trip count=1 (got 1)
+  PASS  marker ProjectId RoundTrip
+  PASS  marker Port 20003
+  PASS  marker Pid matches ping 42756
+  PASS  Clear-ConnectSessionSlotMarker removes marker
+
+--- Empty ops ---
+  PASS  empty Soft still scans 10 ports (safe reclaim)
+  PASS  empty Soft no sibling side effects
+  PASS  empty Sibling is a pure no-op
+
+--- Interactive UX ---
+
+    Hygiene scan
+    Orphan tunnels : 1
+    Sibling Connect: 1
+      [orphan] port=20002 tunnel=1 ui=0 project=?
+    Server mux/sftp : sftp=0 listens=20000
+
+    Cancelled.
+
+  PASS  interactive N on soft cancels (no Soft/Sibling clean)
+
+    Hygiene scan
+    Orphan tunnels : 1
+    Sibling Connect: 1
+      [orphan] port=20002 tunnel=1 ui=0 project=?
+    Server mux/sftp : sftp=0 listens=20000
+
+    Soft done: orphans_removed~1 mux_dead=0
+
+    1 sibling Connect session(s) still live.
+    This closes their tunnel, Connect window, and that project Cursor window only.
+    Left siblings running.
+
+  PASS  interactive Y soft + N sibling runs Soft only
+
+    Hygiene scan
+    Orphan tunnels : 1
+    Sibling Connect: 1
+      [orphan] port=20002 tunnel=1 ui=0 project=?
+    Server mux/sftp : sftp=0 listens=20000
+
+    Soft done: orphans_removed~1 mux_dead=0
+
+    1 sibling Connect session(s) still live.
+    This closes their tunnel, Connect window, and that project Cursor window only.
+    Sibling clean: tunnels=1 connects=1 cursor_windows=1
+
+  PASS  interactive YES/YES runs Soft then Sibling
+  PASS  interactive re-scans after soft (SkipServer path)
+
+    Hygiene scan
+    Orphan tunnels : 0
+    Sibling Connect: 0
+    Server scan    : skip
+
+    Nothing to clean.
+
+  PASS  interactive nothing-to-clean skips prompts/clean
+
+--- Close-Cursor window targeting ---
+  PASS  extract Test-CursorWindowTitleMatchesProject
+  PASS  extract Close-CursorProjectWindows
+  PASS  Close-Cursor closes only SiblingProj (got 1)
+  PASS  Close-Cursor posted exactly one WM_CLOSE
+  PASS  Close-Cursor targeted SiblingProj hwnd=11
+  PASS  Close-Cursor equals_protect returns 0 without extra posts
+  PASS  Close-Cursor no-match does not process-kill (post count unchanged)
+
+Passed: 39  Failed: 0
+  PASS
+
+--- connect-preflight-skip-heal ---
+
+=== connect-preflight SKIP_HEAL after heal success ===
+  PASS  connect-preflight.ps1 exists
+  PASS  heal block extracted from connect-preflight.ps1
+
+--- Source contracts ---
+  PASS  heal invokes Invoke-PreflightScript
+  PASS  heal exit 2 triggers preflight exit 2
+  PASS  heal block sets CLAUDE_CONNECT_SKIP_HEAL after successful heal
+  PASS  SKIP_HEAL assignment comes after exit-2 guard
+  PASS  SKIP_HEAL gated on heal exit 0
+  PASS  SKIP_HEAL set to literal 1
+  PASS  SKIP_HEAL assignment nested under heal exit 0
+  PASS  heal skips when bootstrap handoff says healthy current
+  PASS  heal runs only when SKIP_HEAL unset
+  PASS  heal requires healPath exists
+  PASS  heal block respects bootstrap handoff SKIP_HEAL
+
+--- connect.bat preflight handoff ---
+  PASS  connect.bat exists
+  PASS  connect.bat has preflight block
+  PASS  connect.bat mints RUN_ID before preflight
+  PASS  pre-preflight block sets RUN_ID
+  PASS  bat adopts shared RUN_ID handoff only when unset
+  PASS  connect.bat preflight block bounded
+  PASS  preflight happy path sets SKIP_HEAL in bat
+  PASS  bat reads bootstrap preflight handoff file
+  PASS  preflight happy path sets SKIP_BOOTSTRAP in bat
+  PASS  bat reads preflight handoff after preflight exit code
+  PASS  handoff read before exit-3 relaunch branch
+  PASS  SKIP_HEAL set before goto AFTER_CLIENT_UPDATE on happy path
+  PASS  preflight skip flags precede connect-boot handoff
+
+--- Runtime stubs (in-process heal block) ---
+  PASS  heal exit 0 sets SKIP_HEAL in-process
+  PASS  heal exit 2 propagates preflight exit 2
+  PASS  parent env unchanged after child heal exit 2
+  PASS  pre-set SKIP_HEAL left unchanged when heal skipped
+  PASS  missing healPath does not set SKIP_HEAL
+
+All connect-preflight skip-heal tests passed.
+  PASS
+
+--- connect-preflight-skip-update ---
+
+=== connect-preflight skip update/heal via bootstrap handoff ===
+
+--- Bootstrap handoff writer ---
+  PASS  bootstrap references preflight handoff file
+  PASS  bootstrap handoff includes SKIP_UPDATE
+  PASS  bootstrap still logs skip canon already current
+  PASS  bootstrap has Write-PreflightHandoff helper
+
+--- Preflight skip reader ---
+  PASS  preflight reads handoff file
+  PASS  preflight has healthy deploy check
+  PASS  preflight checks SKIP_UPDATE from handoff
+  PASS  preflight checks SKIP_HEAL from handoff
+  PASS  preflight update block extracted
+  PASS  update block gated on skip handoff
+  PASS  heal block skips when handoff says healthy current
+
+--- Handoff file round-trip ---
+  PASS  handoff SKIP_UPDATE round-trip
+  PASS  handoff SKIP_HEAL round-trip
+  PASS  handoff REMOTE_VER round-trip
+
+All connect-preflight skip-update tests passed.
+  PASS
+
+--- connect-task7-prefetch-foreign-cache ---
+
+=== Task 7 prefetch / foreign skip / remote-ver cache ===
+
+--- A) Fold open-port batch into Initialize-ServerSession ---
+  PASS  init ssh includes OPEN: port probe markers
+  PASS  init calls Import-PrefetchedOpenTunnelPorts
+  PASS  git-mode defines Import-PrefetchedOpenTunnelPorts
+  PASS  git-mode defines Get-PrefetchedOpenTunnelPortSet
+  PASS  Acquire-TunnelPort uses prefetched batch when present
+  PASS  prefetch returns HashSet for covered port
+  PASS  prefetch marks probed open port
+  PASS  prefetch path issues ZERO ssh for open-port batch
+
+--- B) Warm local conf foreign-session skip ---
+  PASS  Test-WarmLocalConfForeignSkip defined
+  PASS  Warn-ForeignServerSession consults warm local skip
+  PASS  Warn-ForeignServerSession logs warm_local_conf skip
+  PASS  warm local conf passes for matching laptop user + port + slot
+
+--- C) Bootstrap remote-ver disk cache (15m TTL) ---
+  PASS  bootstrap references remote-ver cache file
+  PASS  bootstrap TTL is 15 minutes
+  PASS  bootstrap reads remote-ver cache
+  PASS  bootstrap writes remote-ver cache
+  PASS  bootstrap clears remote-ver cache on pull/force
+  PASS  bootstrap logs cache hit skip
+
+All tests passed.
+  PASS
+
+--- connect-task8-deferred-setup ---
+
+=== Task 8 deferred Server setup contract ===
+
+  PASS  Start-DeferredServerSetup defined
+  PASS  Wait-DeferredServerSetup defined
+  PASS  Ensure-ServerSessionReady defined
+  PASS  connect.ps1 supports DeferredServerSetupOnly child runner
+  PASS  deferred setup is logged
+  PASS  deferred child skips UI mutex (multi-agent safe)
+  PASS  Enter-ConnectSingleInstance not called for deferred child
+  PASS  deferred start preserves parent UI_SLOT
+  PASS  no Initialize-ServerSession between bootstrap done and project_menu_shown
+  PASS  no Server setup Step before project_menu_shown
+  PASS  background setup starts after project_menu_shown
+  PASS  Choose-Project runs while deferred setup may overlap
+  PASS  Wait-DeferredServerSetup runs before tunnel init path
+  PASS  Ensure#1 hard-fail preserved in Initialize-ServerSession
+
+All Task 8 deferred setup tests passed.
+  PASS
+
+--- empty-menu-manual-update ---
+
+=== Empty menu + manual update (u) ===
+  PASS  Win empty menu uses MENU_PROJECT_EMPTY prompt tag
+  PASS  Win logs ensure_laptop_ssh_before_add before empty Add
+  PASS  Win shows admin-prep message on empty Add
+  PASS  Win empty a: Ensure then Add
+  PASS  Win empty path no longer auto-Add without menu
+  PASS  Win project menu has u -> Invoke-ConnectManualUpdate
+  PASS  Win help text includes u
+  PASS  connect-ui.ps1 defines Invoke-ConnectManualUpdate
+  PASS  manual update logs UPDATE_MANUAL
+  PASS  empty Write-ProjectTable footer has a/u/q
+  PASS  full footer includes u update
+  PASS  manual update clears miss cache
+  PASS  extracted Invoke-ConnectManualUpdate body
+  PASS  manual update must not pass -Quiet switch
+  PASS  manual update calls connect-update.ps1
+  PASS  update relaunch closes leftover connect.bat cmd host
+  PASS  update relaunch skips blocking SSH log drain
+  PASS  Wait-ConnectExit knows update_manual_relaunch
+  PASS  Wait-ConnectExit has skipEnter fast path
+  PASS  update relaunch local session-end before Force drain path
+  PASS  Mac empty menu prompt tag
+  PASS  Mac calls invoke_connect_manual_update
+  PASS  Mac empty Add is after prompt
+  PASS  Mac help includes u
+  PASS  connect-ui.sh defines invoke_connect_manual_update
+  PASS  Mac empty footer a/u/q
+  PASS  Mac full footer includes u update
+  PASS  extracted Win empty mounts branch
+  PASS  empty branch still Ensures before Add
+  PASS  Ensure-ServerSessionReady before Add-Project in empty branch
+  PASS  empty branch waits for user key before Add
+
+All empty-menu / manual-update tests passed.
+  PASS
+
+--- run-id-multi-ui ---
+=== test-run-id-multi-ui ===
+  PASS  bat documents multi-UI RUN_ID mint
+  PASS  mint precedes preflight
+  PASS  shared file read is gated on unset
+  PASS  preflight per-PID handoff
+  PASS  preflight does not stomp existing shared handoff
+--- Runtime: two parallel bat-like mints keep distinct ids ---
+  PASS  both probe processes exited
+  PASS  probe stdout files exist
+  PASS  ui1 RUN_ID format (eced0f52eee0)
+  PASS  ui2 RUN_ID format (c2b15a3f1a29)
+  PASS  dual UI RUN_IDs distinct (eced0f52eee0 vs c2b15a3f1a29)
+
+ALL CHECKS PASSED
+  PASS
+
+--- connect-update-script-only-drift ---
+
+=== connect-update script-only drift gate ===
+  PASS  fixture has no local Claude-Connect.exe
+  PASS  equal versions are not newer
+  PASS  script-only + version match must not set contentDrift
+  PASS  script-only deploy must skip EXE drift
+  PASS  must not treat missing EXE as mismatch when versions equal
+  PASS  must not log local_exe_missing drift when script-only
+  PASS  must not SSH-fetch checksums.txt when no local EXE and versions match
+
+ALL PASS
+  PASS
+
+--- baseline-connect-working-invariants ---
+
+=== Baseline Connect working invariants (current truth) ===
+  PASS  Start-MountProjectBackground function exists
+  PASS  session mount path calls Start-MountProjectBackground
+  PASS  BG up path logs MOUNT_CHECK_SKIPPED reason=bg_up
+  PASS  Invoke-RecoverIfNeeded is gated by if ($gitModeOff) (not shared hide/server cold path)
+  PASS  skipRemount path still present
+  PASS  BG path assigns mountResult after Start-MountProjectBackground
+  PASS  BG mountResult Ok=$false (not false-green MountOk)
+  PASS  BG mountResult Pending=$true
+  PASS  StepOk path includes 'started in background' for BG mount
+  PASS  BG mount result Out uses started_in_background marker
+  PASS  Test-ProjectMountHealthy exists
+  PASS  Test-ProjectMountHealthy uses NoRetryOnTimeout
+  PASS  trust path log contains 'SESSION: trusting launch result'
+  PASS  connect.ps1 documents elevate-when-needed
+  PASS  cold-start header has no Verb RunAs
+  PASS  AdminFix on-demand RunAs path still present
+  PASS  Initialize-ConnectLog exists
+  PASS  day log opens with FileShare.ReadWrite
+  PASS  Sync-SessionTunnelProcess exists
+  PASS  TunnelSoftFailBudget is defined
+  PASS  Sync-SessionTunnelProcess has soft_fail path
+  PASS  tunnel_down_debounce path returns $true (intentional debounce)
+  PASS  Start-ProcessAsInteractiveUser exists
+  PASS  Start-ProcessAsInteractiveUser uses Start-EditorProcessDirect
+  PASS  Start-ProcessAsInteractiveUser does not use Quiet launcher
+  PASS  Choose-Project function exists
+  PASS  pipeline-safe @(Choose-Project -Mounts ...)[-1] capture
+  PASS  connect.ps1 has ConnectVersion dated string
+  PASS  mac/connect.sh has CONNECT_VERSION dated string
+
+Passed: 29  Failed: 0
+  PASS
+
+--- ssh-user-fix-retry ---
+
+=== SSH_USER_FIX in-process retry (source contracts) ===
+
+--- version 20260729.15 (all client version files consistent) ---
+  PASS  windows/connect.ps1 ConnectVersion is 20260729.15 (current: 20260729.15)
+  PASS  connect.ps1 pins ConnectVersion 20260729.15
+  PASS  mac/connect.sh CONNECT_VERSION is 20260729.15
+  PASS  windows/connect-version.txt is 20260729.15
+  PASS  mac/connect-version.txt is 20260729.15
+  PASS  windows needsKey block extracted
+  PASS  mac needs_key block extracted
+--- Windows in-process retry loop ---
+  PASS  windows needsKey has in-process retry / max-2 markers
+  PASS  windows prompts with SSH_USER_FIX tag
+  PASS  windows rewrites Host block with Get-SshConfigUserForServer after FIX
+  PASS  windows rewrites connect.conf REMOTE_USER after FIX
+  PASS  windows sets RemoteUser from FIX
+  PASS  windows validates FIX username via $fix -match '[@/\\]'
+  PASS  windows logs in-process retry (not re-run bat)
+  PASS  windows does not tell user to Re-run connect.bat after FIX
+  PASS  windows has no unconditional Wait-ConnectExit right after saving FIX without retry path
+  PASS  windows uses a retry loop (for/while/fixAttempt)
+--- Mac in-process retry parity ---
+  PASS  mac needs_key has in-process retry loop markers
+  PASS  mac prompts with SSH_USER_FIX tag
+  PASS  mac rewrites CFG REMOTE_USER after FIX
+  PASS  mac rewrites Host User after FIX
+  PASS  mac does not tell user to Re-run connect.sh after FIX
+  PASS  mac logs in-process retry
+  PASS  mac has no unconditional exit 1 right after saving FIX without retry path
+
+ALL PASS
+  PASS
+
+--- auth-stamp-skip ---
+
+=== AUTH_STAMP_SKIP: authComplete-aware personal_without_profile + stamp-mismatch fast path (source contracts) ===
+
+  PASS  extracted Test-CursorAuthNeedsRefresh function body
+  PASS  extracted connect.ps1 auth-decision block
+  PASS  extracted mac git-mode.sh LIVE cursor_auth_needs_refresh() body (post local_cursor_auth_complete anchor)
+  PASS  extracted mac block is the LIVE definition, not the dead stub
+  PASS  extracted mac/connect.sh sync-gate block
+--- #6 Windows: Test-CursorAuthNeedsRefresh gains authComplete-aware gate ---
+  PASS  Test-CursorAuthNeedsRefresh has a param() block
+  PASS  Test-CursorAuthNeedsRefresh param block declares $AuthComplete
+  PASS  personal_without_profile reason gated by "-and -not $AuthComplete" (exact token sequence)
+  PASS  personal_without_profile reason string still added when the gate condition is met
+--- #6 Windows: AUTH_WARN personal_cursor_dominant gated on -not skipAuth ---
+  PASS  connect.ps1 still logs AUTH_WARN personal_cursor_dominant
+  PASS  personal_cursor_dominant gated on -not skipAuth (skip process enum when stamp current)
+  PASS  extracted Test-PersonalCursorDominant warn block
+  PASS  dominant-warn block not coupled to authComplete (dominant threshold check stays independent)
+--- Task 2 hardening: Windows golden_stale reason unaffected by AuthComplete (mutation-testing regression guard) ---
+  PASS  extracted Windows golden_stale condition block
+  PASS  Windows golden_stale is NOT gated by AuthComplete (regression guard)
+--- #7v1 Windows: stamp-mismatch fast path sets authNeedsRefresh without calling Test-CursorAuthNeedsRefresh ---
+  PASS  connect.ps1 has the stamp_mismatch_skip_needs_refresh_check log string
+  PASS  stamp-mismatch branch condition references $authComplete
+  PASS  stamp-mismatch branch condition inspects $stampCheck.SyncedAt / $stampCheck.GoldenExportedAt
+  PASS  stamp_mismatch_skip_needs_refresh_check present in auth-decision block
+  PASS  Test-CursorAuthNeedsRefresh -DbPath call present in auth-decision block
+  PASS  stamp-mismatch branch appears BEFORE the elseif that calls Test-CursorAuthNeedsRefresh
+  PASS  stamp-mismatch branch sets $authNeedsRefresh = $true
+--- #7v1 Windows: new call site passes -AuthComplete to Test-CursorAuthNeedsRefresh ---
+  PASS  connect.ps1 calls Test-CursorAuthNeedsRefresh -DbPath $gsPath -AuthComplete $authComplete
+--- #7v1 / item 3 Windows: Sync must never be skipped on stamp mismatch (regression guard) ---
+  PASS  no naive "$stampCurrent -eq $false -> skipAuth=$true" bug pattern
+  PASS  $skipAuth gate still requires -not $authNeedsRefresh (mismatch -> authNeedsRefresh=$true -> sync still runs)
+--- #6 Mac: live cursor_auth_needs_refresh() gains authComplete-aware gate ---
+  PASS  live cursor_auth_needs_refresh() reads 2nd positional arg into local auth_complete ("${2:-0}")
+  PASS  personal_without_profile reason gated by "[ $personal_main -gt 0 ] && [ $profile_main -eq 0 ] && [ "$auth_complete" != "1" ]" (raw threshold, parity with Windows -gt 0)
+  PASS  personal_without_profile reason string still added when the gate condition is met
+--- #6 Mac: other reasons unaffected by auth_complete (regression guard) ---
+  PASS  extracted golden_stale reason segment
+  PASS  golden_stale reason is NOT gated by auth_complete
+  PASS  machineid_file_mismatch reason is NOT gated by auth_complete
+--- Task 2 hardening: Mac personal_without_profile threshold parity with Windows (currently a real bug, awaiting parallel fix) ---
+  PASS  Mac cursor_auth_needs_refresh() no longer delegates personal_without_profile to the >=3 dominant-only helper (uses its own >0 threshold instead)
+  PASS  Mac cursor_auth_needs_refresh() gates personal_without_profile by personal_main -gt 0 (matches Windows threshold)
+  PASS  mac/connect.sh still uses test_personal_cursor_dominant for the AUTH_WARN personal_cursor_dominant path (unchanged, >=3 threshold preserved)
+--- #6 Mac: mac/connect.sh caller computes and passes _auth_complete ---
+  PASS  mac/connect.sh sync-gate block initializes _auth_complete=0 (mirrors existing _auth_needs_refresh=0 pattern)
+  PASS  mac/connect.sh sets _auth_complete=1 from local_cursor_auth_complete "$_cursor_gs" result
+  PASS  mac/connect.sh calls cursor_auth_needs_refresh "$_cursor_gs" "$_auth_complete" (both args)
+--- #6 Mac: AUTH_WARN personal_cursor_dominant unaffected (regression guard) ---
+  PASS  mac/connect.sh still logs AUTH_WARN personal_cursor_dominant unconditionally
+
+ALL PASS
+  PASS
+
+--- auth-stamp-prefetch-no-block ---
+
+=== Auth stamp prefetch WaitForExit skip (source contracts) ===
+  PASS  connect.ps1 logs AUTH_STAMP_WAIT_SKIPPED when stamp already current
+  PASS  WaitForExit(5000) still present for cold prefetch path
+  PASS  skip log uses reason=local_ttl
+  PASS  extracted auth-stamp harvest block before Syncing Cursor auth
+  PASS  harvest block contains WaitForExit(5000)
+  PASS  WaitForExit(5000) is conditional (stampAlreadyCurrent / local_ttl / AUTH_STAMP_WAIT_SKIPPED in harvest)
+  PASS  harvest must not bare-WaitForExit immediately inside BgAuthStampProc try (unconditional)
+
+Passed: 7  Failed: 0
+  PASS
+
+--- laptop-ssh-ready ---
+OK test-laptop-ssh-ready.ps1
+  PASS
+
+--- git-mode-deep ---
+  PASS  Get-GitMode parse '' -> off (got off)
+  PASS  Get-GitMode parse 'hide' -> hide (got hide)
+  PASS  Get-GitMode parse 'fast' -> hide (got hide)
+  PASS  Get-GitMode parse 'server' -> server (got server)
+  PASS  Get-GitMode parse 'on' -> server (got server)
+  PASS  Get-GitMode parse '1' -> server (got server)
+  PASS  Get-GitMode parse 'slow' -> server (got server)
+  PASS  Get-GitMode parse 'SERVER' -> server (got server)
+  PASS  Get-GitMode parse 'garbage' -> off (got off)
+  PASS  Get-GitMode parse 'off' -> off (got off)
+  PASS  claude-mount normalizes server aliases
+  PASS  claude-mount supports GIT_MODE=off
+  PASS  claude-mount has off-mode stub path
+  PASS  claude-mount restores on already-mounted off
+  PASS  claude-mount normalizes mac aliases
+  PASS  cmd_up loads global config
+  PASS  cmd_down loads global config
+  PASS  cmd_recover loads global config
+  PASS  claude-mount has multiple _restore_git safety nets (count=30)
+  PASS  sshfs failure restores .git
+  PASS  Mac stub path exists
+  PASS  Windows stub path exists
+  PASS  claude-mount supports per-project git_mode override
+  PASS  claude-mount stops git.exe on hide retry
+  PASS  claude-mount has recover-one command
+  PASS  git-mode.ps1 has tunnel banner cache
+  PASS  git-mode.ps1 logs SCP timeout
+  PASS  git-mode.ps1 logs LAPTOP_SSH probe
+  PASS  git-mode.ps1 pushes ACTIVE_MOUNT in connect conf
+  PASS  claude-mount has down-others command
+  PASS  claude-mount has force unmount for hung sshfs
+  PASS  claude-mount reads ACTIVE_MOUNT from connect conf
+  PASS  watchdog loads ACTIVE_MOUNT before remount
+  PASS  watchdog remounts only active project
+  PASS  automount only mounts ACTIVE_MOUNT project
+  PASS  automount applies off mode when mount already ok
+  PASS  windows\connect.ps1 dot-sources git-mode.ps1
+  PASS  windows\connect.ps1 does not unmount other projects on connect
+  PASS  users\designer\connect.ps1 dot-sources git-mode.ps1
+  PASS  users\designer\connect.ps1 does not unmount other projects on connect
+  PASS  mac\connect.sh sources git-mode.sh
+  PASS  users\designer\connect.sh sources git-mode.sh
+  PASS  git-mode.sh has clear_session_mount
+  PASS  git-mode.sh has initialize_server_session
+  PASS  mac auto recovery logs RECOVERY_SKIP_CLEAR_MOUNT when editor stays open
+  PASS  mac cleanup keeps tunnel alive while editor remains on remote folder
+  PASS  mac tunnel sync soft-fails when TCP is open without a process handle
+  PASS  mac tunnel sync debounces consecutive failures
+  PASS  mac push_server_connect_conf does not invoke claude-self-heal
+  PASS  mac TUNNEL_SYNC TRACE is throttled to at least 30 seconds
+  PASS  git-mode.sh sets INIT_SERVER_SESSION_ERROR
+  PASS  git-mode.sh has warn_foreign_server_session
+  PASS  git-mode.sh self-heals stale foreign session
+  PASS  git-mode.sh Mac admin password once
+  PASS  git-mode.sh documents tilde chmod fix
+  PASS  git-mode.sh Mac password has timeout
+  PASS  connect-ui.sh syncs logs to server
+  PASS  connect-ui.sh deletes server logs older than 1 day
+  PASS  connect-ui.sh keeps durable local day logs
+  PASS  connect-ui.ps1 syncs logs to server
+  PASS  connect-ui.ps1 deletes server logs older than 1 day
+  PASS  connect-ui.ps1 does not write connect.log beside scripts
+  PASS  git-mode.ps1 self-heals stale foreign session
+  PASS  git-mode.sh documents non-fatal script push
+  PASS  initialize_server_session does not fail on push_ok
+  PASS  git-mode.ps1 has Warn-ForeignServerSession
+  PASS  git-mode.ps1 Clear-SessionMount uses opt-in StopEditor
+  PASS  git-mode.ps1 removed SkipEditorStop
+  PASS  connect.ps1 does not pass SkipEditorStop
+  PASS  mac\connect.sh calls warn_foreign_server_session
+  PASS  mac\connect.sh shows INIT_SERVER_SESSION_ERROR
+  PASS  mac\connect.sh setup clarifies server username
+  PASS  connect.ps1 calls Warn-ForeignServerSession
+  PASS  connect.ps1 setup clarifies server username
+  PASS  connect.ps1 continues after script push fail
+  PASS  connect.ps1 tracks PushOk for non-fatal script push
+  PASS  git-mode.sh has stop_remote_editor
+  PASS  git-mode.sh stop_remote_editor is path-scoped by uri/path
+  PASS  git-mode.sh clear_session_mount skips editor stop by default
+  PASS  mac\connect.sh has current CONNECT_VERSION (20260729.15)
+  PASS  mac\connect.sh has post-disconnect menu loop
+  PASS  mac\connect.sh has post-disconnect countdown
+  PASS  mac\connect.sh has session hygiene hotkey
+  PASS  mac\connect.sh clears mount on disconnect
+  PASS  mac\connect.sh uses parallel server setup
+  PASS  mac\connect.sh does not unmount other projects on connect
+  PASS  mac\connect.sh tracks ACTIVE_MOUNT on server
+  PASS  mac\connect.sh has mid-session git remount
+  PASS  mac\connect.sh opens editor only once per menu pick
+  PASS  mac\connect.sh calls begin_connect_recovery on reconnect
+  PASS  mac\connect.sh uses stop_session_tunnel_cleanup on disconnect
+  PASS  mac\connect.sh forces cursor auth after recovery
+  PASS  mac\connect.sh uses launch_remote_editor for editor open
+  PASS  mac\connect.sh relaunches when cursor not on folder
+  PASS  mac\connect.sh calls ensure_mac_cursor_prerequisites before auth
+  PASS  mac\connect.sh shows Reload Window hint after auth sync
+  PASS  mac\connect.sh logs recovery tags
+  PASS  git-mode.sh has cursor_auth_needs_refresh
+  PASS  git-mode.sh stamps golden-synced-at after merge
+  PASS  git-mode.sh sets useLocalServer in profile template
+  PASS  git-mode.sh has Mac Cursor prerequisites
+  PASS  git-mode.sh patches existing profile settings
+  PASS  git-mode.sh checks anysphere.remote-ssh
+  PASS  editor-launch.sh detects on-folder
+  PASS  editor-launch.sh detects agent home
+  PASS  editor-launch.sh supports new-window relaunch
+  PASS  editor-launch.sh does not match any folder-uri
+  PASS  git-mode.sh pushes ACTIVE_MOUNT in connect conf
+  PASS  git-mode.ps1 has Read-RetryQuitKey with timeout
+  PASS  git-mode.sh has post-disconnect helper
+  PASS  git-mode.sh queries ACTIVE_MOUNT from server
+  PASS  git-mode.sh has FAST/SLOW label helper
+  PASS  git-mode.sh uses sqlite3 for cursor auth
+  PASS  git-mode.ps1 has Read-PostDisconnectKey
+  PASS  git-mode.sh honors Q on tunnel drop
+  PASS  git-mode.sh has begin_connect_recovery
+  PASS  git-mode.sh checks storage.serviceMachineId in local_cursor_auth_complete
+  PASS  git-mode.sh checks stripeMembershipType in local_cursor_auth_complete
+  PASS  git-mode.sh has mount success helper
+  PASS  Initial conf push before Choose-Project
+  PASS  install.sh deploys to /usr/local/lib
+  PASS  install.sh redeploys claude-mount to all users
+  PASS  git-mode.sh has ensure_session_tunnel
+  PASS  git-mode.sh has invoke_mount_project
+  PASS  git-mode.ps1 has Ensure-LaptopReverseSshCached
+  PASS  git-mode.ps1 has Acquire-TunnelPort
+  PASS  git-mode.ps1 has foreign peer guard
+  PASS  git-mode.ps1 skips foreign peer ports
+  PASS  git-mode.ps1 never kills foreign peer forwards
+  PASS  git-mode.ps1 pins laptop host key fingerprint
+  PASS  git-mode.ps1 refuses PushConf for foreign ports
+  PASS  git-mode.ps1 never fuser-kills foreign peers
+  PASS  claude-self-heal clears unowned TUNNEL_PORT
+  PASS  claude-self-heal logs unowned port clear
+  PASS  git-mode.sh refuses killing foreign peers
+  PASS  git-mode.sh blocks PushConf for foreign ports
+  PASS  git-mode.sh pushes LAPTOP_HOSTKEY_FP
+  PASS  git-mode.ps1 reuses or skips mount when check ok
+  PASS  git-mode.ps1 still runs up / applies off when GIT_MODE=off
+  PASS  claude-mount has trusted-tunnel fast path
+  PASS  claude-automount skips IDE shell resolution
+  PASS  git-mode.sh skips mount when check ok
+  PASS  git-mode.sh still runs up when GIT_MODE=off
+  PASS  git-mode.ps1 clears stale server tunnel forward
+  PASS  git-mode.ps1 detects zombie tunnel port
+  PASS  git-mode.ps1 has Stop-SessionTunnelCleanup
+  PASS  git-mode.sh clears stale server tunnel forward
+  PASS  git-mode.sh has stop_session_tunnel_cleanup
+  PASS  connect.ps1 uses Stop-SessionTunnelCleanup on disconnect
+  PASS  git-mode.ps1 uses mount known_hosts for reverse SSH probe
+  PASS  Clear-ServerTunnelKnownHost resets mount and tunnel known_hosts
+  PASS  probe retries after host-key clear
+  PASS  git-mode.ps1 surfaces reverse SSH error detail
+  PASS  git-mode.ps1 uses hidden Windows reverse SSH probe
+  PASS  git-mode.ps1 finds claude-mount.sh in mac package folder
+  PASS  claude-mount has check command
+  PASS  git-mode.ps1 pre-warms background tunnel
+  PASS  claude-mount supports trusted tunnel skip
+  PASS  claude-mount has git hide with tunnel guard
+  PASS  claude-mount disables SSH mux to laptop
+  PASS  claude-mount uses EncodedCommand for Windows git hide
+  PASS  git-setup skips mirror when GIT_MODE=server or off
+  PASS  git-setup skips mirror when GIT_MODE=off
+  PASS  laptop-exec defaults GIT_MODE to off
+  PASS  laptop-exec no hide pre-read default
+  PASS  claude-mount warns when off restore blocked by tunnel
+  PASS  claude-mount recover-if-needed applies off restore
+  PASS  git-mode.ps1 recover applies off when mount ok
+  PASS  deploy-laptop-exec refuses stripped CLIENT_BUNDLE/server
+  PASS  deploy-laptop-exec prefers REPO_ROOT laptop-exec SoT
+  PASS  deploy-laptop-exec fails if GIT_MODE not off
+  PASS  deploy-laptop-exec deploys claude-mount
+  PASS  deploy-client-bundle uses scripts/client/connect-ui.sh
+  PASS  claude-mount has CLAUDE_GIT_MODE_FORCE_OFF killswitch
+  PASS  claude-mount killswitch sites >=2 (got 2)
+  PASS  git-mode.ps1 documents force-off policy
+  PASS  git-mode.ps1 Get-GitMode returns off
+  PASS  git-mode.sh documents force-off policy
+  PASS  git-mode.sh get_git_mode echoes off
+  PASS  Get-GitMode force-off runtime (got off)
+  PASS  git.conf rewritten to off (got off)
+  PASS  GIT_MODE force-off killswitch + client policy
+
+All deep git-mode tests passed.
+  PASS
+
+--- cursor-proxy-lifetime ---
+  PASS Win CLEAR_SKIP present
+  PASS Win Test-MayClearCursorProxySettings
+  PASS Win CURSOR_PROXY_ALIGN
+  PASS Win prefers sidecar front port
+  PASS Win fixed socks 19080
+  PASS Win fixed http 19180
+  PASS Win no per-slot socks
+  PASS Win owner claim
+  PASS Win PROXY_HEALTH
+  PASS Win TcpClient port probe
+  PASS Win no Test-NetConnection
+  PASS Win wait backoff
+  PASS Win reseed_skip
+  PASS Win proxy_adopted_elsewhere
+  PASS Win ConnectVersion defined
+  PASS Mac never_kill
+  PASS Mac clear skip
+  PASS Mac fixed 19080
+  PASS Mac owner claim
+  PASS Mac reseed_skip
+  PASS Mac proxy_adopted_elsewhere
+  PASS Win sidecar file exists
+  PASS Win sidecar function
+  PASS Win PROXY_FALLBACK server_direct
+  PASS Win Get-CursorProxyMode
+  PASS Win Get-CursorProxyMode server_direct
+  PASS Win LAUNCH_PROXY log
+  PASS Win LAUNCH_PROXY server_direct
+  PASS Mac PROXY_FALLBACK server_direct
+  PASS Mac get_cursor_proxy_mode
+  PASS Mac LAUNCH_PROXY log
+  PASS cursor-remote-proxy-sync.sh exists
+  PASS remote sync server_direct mode
+  PASS remote sync proxySupport off
+All proxy lifetime asserts passed
+  PASS
+
+--- mac-proxy-release-on-clear ---
+
+=== Mac proxy release on clear_session_mount ===
+  PASS  clear_session_mount function extracted from git-mode.sh
+  PASS  clear_session_mount body calls release_cursor_proxy_owner (Win Release-CursorProxyOwner parity)
+  PASS  release_cursor_proxy_owner is defined in git-mode.sh
+  PASS  Win Clear-SessionMount still calls Release-CursorProxyOwner
+All Mac proxy-release-on-clear asserts passed
+  PASS
+
+--- designer-close-log ---
+
+=== Designer Close-ConnectLog presence ===
+  PASS  designer opens connect day log
+  PASS  designer references Close-ConnectLog
+  PASS  designer finally block calls Close-ConnectLog
+  PASS  designer script exit path calls Close-ConnectLog
+All designer Close-ConnectLog asserts passed
+  PASS
+
+--- editor-launch ---
+
+=== Editor launch self-test ===
+
+  PASS  code on PATH
+  PASS  Launch-RemoteEditor defined
+  PASS  Get-RemoteEditorLaunchStrategies defined
+  PASS  Write-EditorLaunchSnapshot defined
+  PASS  cursor on PATH (C:\Users\Smart\AppData\Local\Programs\cursor\resources\app\bin\cursor.cmd)
+  PASS  Cursor stdout/stderr uses a day log
+  PASS  Start-EditorProcessDirect helper defined
+  PASS  direct launch redirects stdout and stderr
+  PASS  both direct launch paths use Direct launcher
+  PASS  interactive launch does not use Quiet launcher
+  PASS  Start-EditorProcessQuiet helper removed (dead SAFE_DELETE)
+  PASS  interactive launch has no direct Start-Process call
+  PASS  launch order is NE then LIMITED task then elevated fallback
+  PASS  launch task is attempted when NE Start=false
+  PASS  NE Start=false logs Win32 error
+  PASS  launch-task evidence timeout stays short
+
+All tests passed.
+  PASS
+
+--- dead-safe-delete-connect ---
+
+=== Dead SAFE_DELETE helpers ===
+
+  PASS  windows\connect.ps1 has no function Escape-BashSingleQuoted
+  PASS  windows\connect.ps1 has no function Get-ActiveMountId
+  PASS  editor-launch.ps1 has no function Start-EditorProcessQuiet
+  PASS  editor-launch.ps1 has no function Stop-CursorServerProfileTreeIfNeeded
+  PASS  connect-ui.ps1 has no function Write-ConnectPhaseLog
+  PASS  connect-ui.ps1 has no function Write-ConnectTimedLog
+  PASS  connect-ui.ps1 has no function Invoke-ConnectPerfBlock
+  PASS  git-mode.ps1 has no function Unmount-OtherProjects
+  PASS  git-mode.ps1 has no function Test-TunnelPortOccupiedByPeer
+  PASS  KEEP Write-ConnectUserFacingError still defined
+  PASS  Start-EditorProcessDirect remains (Quiet replacement)
+  PASS  Start-EditorProcessQuiet definition removed
+
+All tests passed.
+  PASS
+
+--- editor-launch-strategies ---
+
+=== Editor launch strategies ===
+
+  PASS  Get-RemoteFolderUri format
+  PASS  Get-RemoteEditorLaunchStrategies defined
+  PASS  Get-RemoteEditorProcessSnapshot defined
+  PASS  Write-EditorLaunchSnapshot defined
+  PASS  Get-RemoteEditorStateExplain defined
+  PASS  Write-EditorLaunchVerboseState defined
+  PASS  Stop-CursorServerProfileTreeIfNeeded removed (dead SAFE_DELETE)
+  PASS  cursor has 4 launch strategies
+  PASS  first strategy is remote (opens the real folder on a warm handoff)
+  PASS  remote includes --remote
+  PASS  remote authority matches alias
+  PASS  remote includes absolute remote path
+  PASS  primary remote strategy omits --classic (not needed for the folder to open)
+  PASS  primary remote strategy does NOT use --folder-uri (the warm-handoff welcome-page trap)
+  PASS  cursor strategies use --new-window when requested
+  PASS  cursor strategies use isolated profile
+  PASS  remote strategy ordered before folder-uri
+  PASS  remote strategy ordered before folder-uri-classic
+  PASS  remote-classic strategy exists
+  PASS  remote-classic includes --remote
+  PASS  remote-classic authority matches alias
+  PASS  remote-classic includes absolute remote path
+  PASS  folder-uri fallback strategy exists
+  PASS  folder-uri fallback uses combined --folder-uri=<uri>
+  PASS  folder-uri fallback does NOT pass a lone --folder-uri flag
+  PASS  warm handoff uses exactly 1 strategy (remote only)
+  PASS  warm handoff strategy is remote
+  PASS  warm handoff includes --remote
+  PASS  warm handoff does NOT use --folder-uri
+  PASS  code has 2 launch strategies
+  PASS  VS Code strategies omit --classic
+  PASS  code strategies use isolated profile
+  PASS  Get-CodeRemoteProfileDir defined
+  PASS  VS Code profile is ClaudeServerCodeProfile
+  PASS  Test-CursorWindowTitleIsAgentHome defined
+  PASS  Claude Server title with project is not agent home
+  PASS  Agents title without project in title is agent home
+  PASS  Get-RemoteEditorStateExplain includes target_uri
+  PASS  Get-RemoteEditorStateExplain includes on_folder
+  PASS  Launch-RemoteEditor has KnownOnFolder param
+  PASS  Launch-RemoteEditor has AuthRelaunch param
+  PASS  AuthRelaunch never soft-stops profile
+  PASS  F1 early skip (on_folder authoritative) before verbose
+  PASS  F1 removed SKIP verbose block
+  PASS  F3 VerboseLaunch defined
+  PASS  F5 CIM cache wrapper
+  PASS  single-pass window check helper
+  PASS  PERF launch logging
+  PASS  launch_total perf mark
+  PASS  launch skips force-kill to preserve open windows
+  PASS  launch retry does not force-kill profile tree
+  PASS  pre_launch force-kill removed
+  PASS  retry force-kill removed
+  PASS  Get-CursorLaunchWindowPlan defined
+  PASS  plan: no profile activity at all -> cold_start
+  PASS  plan: cold_start does not need --new-window (nothing to collide with)
+  PASS  plan: helper processes with no classified main -> orphan_helpers
+  PASS  plan: orphan_helpers now requests --new-window too (race fix)
+  PASS  plan: classified main window present -> profile_open
+  PASS  plan: profile_open requests --new-window
+  PASS  plan: agent_home takes priority over other reasons
+  PASS  plan: agent_home requests --new-window
+  PASS  Launch-RemoteEditor delegates plan decision to the testable helper
+  PASS  recovery cold-launch poll budget widened to 90 ticks (45s, was 20/10s)
+  PASS  old too-short 20-tick recovery budget removed
+
+All tests passed.
+  PASS
+
+--- connect-diagnostic ---
+
+=== Connect diagnostic ===
+
+  PASS  Get-ConnectProblemVerdict defined
+  PASS  Write-ConnectDiagnosticReport defined
+  PASS  detects TUNNEL_DOWN
+  PASS  TUNNEL_DOWN suggests R
+  PASS  detects MOUNT_PATH_MISSING
+  PASS  detects CURSOR_AGENT_HOME from launch history
+  PASS  detects CURSOR_ON_FOLDER_OK
+  PASS  bg mount + mountpoint=yes + on_folder => CURSOR_ON_FOLDER_OK
+  PASS  bg mount alone (no live truth yet) => MOUNT_PENDING INFO
+  PASS  MOUNT_PENDING is INFO (no red DIAGNOSTIC box)
+  PASS  real mount failure still MOUNT_FAILED
+  PASS  F7 light SESSION_OPEN diagnostic gate
+  PASS  F7 skips expensive process snapshot
+  PASS  light path includes bg-mount + on_folder
+  PASS  MOUNT_PENDING verdict present
+
+
+=== SESSION_FILTER tip (Task 8: usable bracketed sid filter) ===
+  PASS  Win SESSION_FILTER tip includes Select-String -Pattern (usable filter, not prose-only)
+  PASS  Win tip pattern starts with escaped \[ for literal bracketed session id
+  PASS  can parse Pattern from tip line
+  PASS  expanded Win tip Pattern matches bracketed sid in sample log line
+  PASS  Mac SESSION_FILTER tip uses grep -F (fixed string; BRE [sid] char-class is broken)
+  PASS  Mac tip contains grep -F
+  PASS  Mac tip must not use unescaped BRE grep before bracketed sid
+
+All tests passed.
+  PASS
+
+--- mounts-cache ---
+
+=== Mounts cache round-trip ===
+
+  PASS  Get-MountsCached defined
+  PASS  Get-MountsCachePath defined
+  PASS  read assigns parse result before wrapping (PS5.1 unroll-safe)
+  PASS  read does NOT use buggy @($raw | ConvertFrom-Json)
+  PASS  Get-Mounts write-through serializes cache
+  PASS  menu load path uses Get-MountsCached
+  PASS  extracted Get-MountsCachePath body
+  PASS  extracted Get-MountsCached body
+  PASS  cache round-trip preserves 16 projects (got 16)
+  PASS  first/last ids intact after round-trip
+  PASS  label is a scalar, not array-joined
+  PASS  boolean fields survive round-trip
+  PASS  PS5.1 unroll documented: buggy @($raw|ConvertFrom-Json) collapses to 1
+
+All tests passed.
+  PASS
+
+--- xray-probe-cache ---
+
+=== Xray probe cache ===
+
+  PASS  Get-XrayProbeCachePath defined
+  PASS  Import-XrayProbeDiskCache defined
+  PASS  Save-XrayProbeDiskCache defined
+  PASS  in-memory xray cache present
+  PASS  probe hydrates disk cache before checking
+  PASS  probe short-circuits on cache hit
+  PASS  probe persists verdict to disk
+  PASS  reseed checks leg-state before probing xray
+  PASS  disk cache file written
+  PASS  verdict restored across process
+  PASS  restored verdict value correct
+  PASS  expired disk entry dropped on import
+
+All tests passed.
+  PASS
+
+--- pushconf-tcp-gate ---
+
+=== Push-conf tcp gate ===
+
+  PASS  extracted Push-ServerConnectConf body
+  PASS  Push-ServerConnectConf probes Test-TunnelPortTcpOpen
+  PASS  foreign-peer + hostkey-mismatch checks still present
+  PASS  tcp-open gate runs BEFORE both safety probes
+  PASS  uses a listening-gate variable
+  PASS  logs the closed-port skip for observability
+  PASS  logs session_tunnel_fresh skip (post Ensure-Tunnel Prepare path)
+  PASS  session_tunnel_fresh consults LastTunnelSpawnSuccessAt
+  PASS  session_tunnel_fresh checks port match
+  PASS  session_tunnel_fresh TTL is 30s (matches ENSURE recent_success)
+  PASS  both safety probes are inside the if($pushPortListening) block
+  PASS  ssh-keyscan retains a bounded timeout
+
+All tests passed.
+  PASS
+
+--- server-setup-step-progress ---
+
+=== Server setup step progress (A) ===
+  PASS  Update-StepProgress defined
+  PASS  StepProgressActive script flag present
+  PASS  extracted Initialize-ServerSession
+  PASS  Initialize-ServerSession calls Update-StepProgress at least 3 times
+  PASS  progress: key
+  PASS  progress: port
+  PASS  progress: conf
+  PASS  StepOk rewrites line when progress was shown
+  PASS  StepOk keeps classic append path when no progress
+
+All tests passed.
+  PASS
+
+--- tunnel-tcp-state-cache ---
+
+=== Tunnel tcp-state cache ===
+
+  PASS  Set-TunnelTcpState defined
+  PASS  Clear-TunnelTcpState defined
+  PASS  Test-TunnelPortTcpOpen accepts -MaxCacheAgeMs
+  PASS  probe short-circuits on fresh cache entry
+  PASS  acquire batch seeds the tcp-state cache
+  PASS  push-conf gate reuses cached verdict
+  PASS  cache cleared after tunnel spawn
+  PASS  cache hit returns cached verdict (closed)
+  PASS  cache hit issues ZERO ssh probes
+  PASS  default (no MaxCacheAgeMs) probes live
+  PASS  expired entry falls back to a live probe
+  PASS  Clear-TunnelTcpState removes the entry
+
+All tests passed.
+  PASS
+
+--- xray-http-leg-resilience ---
+
+=== Xray HTTP leg resilience ===
+
+  PASS  probe accepts -ForceProbe
+  PASS  ForceProbe bypasses the cache lookup
+  PASS  probe tracks a conclusive flag
+  PASS  timeout marks verdict inconclusive
+  PASS  only CONCLUSIVE verdicts are cached
+  PASS  extracted Add-TunnelHttpProxyLeg body
+  PASS  HTTP leg re-probes with -ForceProbe
+  PASS  retry happens BEFORE giving up on the HTTP leg
+  PASS  logs a recovered-on-retry outcome
+  PASS  extracted Test-TunnelNeedsProxyReseed body
+  PASS  front-adoption is gated to full non-owner (missing) only
+  PASS  missing_http with dead HTTP backend + live front => reseed_needed (self-heal, not false-adopt)
+  PASS  missing (non-owner) with live sidecar fronts => adopt, skip reseed
+  PASS  missing_http with LIVE http backend => genuine adoption, skip reseed
+  PASS  ok state => no reseed
+
+All tests passed.
+  PASS
+
+--- launch-fresh-project-windows-open ---
+
+=== Fresh project launch with windows open ===
+
+  PASS  skip-for-preserve requires $onCorrectFolder (Win)
+  PASS  launch block gated on -not $skipForPreserve (Win)
+  PASS  old buggy (-not $profileAlreadyOpen) launch gate is gone (Win)
+  PASS  logs the fresh-project new-window path (Win)
+  PASS  no unconditional preserve-skip on (authRelaunch -and profileAlreadyOpen) (Win)
+  PASS  _skip_for_preserve introduced (Mac)
+  PASS  preserve-skip requires _on_folder -eq 1 (Mac)
+  PASS  launch branch keys off _skip_for_preserve (Mac)
+  PASS  logs the fresh-project new-window path (Mac)
+
+All tests passed.
+  PASS
+
+--- title-project-match ---
+
+=== Window-title -> project match (anchored) ===
+
+  PASS  Test-CursorWindowTitleMatchesProject defined
+  PASS  project smart matches its own "[Claude Server Smart] smart" window
+  PASS  dirty/editor prefix before the tag still matches (root at end)
+  PASS  project smartdesk matches its own window
+  PASS  hyphenated project ai-gap-summay matches its own window
+  PASS  project smart does NOT match a bare "[Claude Server Smart]" (agent-home) window (site-tag collision)
+  PASS  project smart does NOT match an unrelated "[Claude Server Smart] deploy" window
+  PASS  project smart does NOT match "smartdesk" (prefix sibling)
+  PASS  project ai does NOT match "ai-gap-summay" (hyphen boundary would false-match a bare \b)
+  PASS  default SSH title "smart [SSH: claude-server]" matches project smart
+  PASS  default SSH title "smartdesk [SSH: ...]" does NOT match project smart
+  PASS  site-qualified title with a DIFFERENT root + [SSH:] does NOT match project smart (site-tag "Smart" must not reach the marker)
+  PASS  site-qualified title still matches its OWN root (refactoreoldclub) via the anchored template check
+  PASS  site-qualified title "[Claude Server Smart] smart [SSH:...]" matches project smart (real match)
+  PASS  explicit "Cursor Agents" title is agent home even for project smart
+  PASS  "[Claude Server Smart] smart" is a real project window, not agent home
+  PASS  no bare ($title -match $rootNeedle) title check remains in editor-launch.ps1
+
+All tests passed.
+  PASS
+
+--- agent-home-launch-gate ---
+
+=== Agent-home / launch-gate ("opening matters") ===
+
+  PASS  Get-CursorServerWindowTitleTemplate defined
+  PASS  title template contains literal ${rootName} (not PowerShell-expanded to empty)
+  PASS  title template keeps ${dirty}/${activeEditorShort}/${separator} literals
+  PASS  title template embeds the site tag
+  PASS  Cursor profile builds title via the helper variable (no inline double-quoted expansion)
+  PASS  Cursor profile here-string interpolates the prebuilt $titleTemplate (single interpolation, tokens stay literal)
+  PASS  Repair-CursorServerWindowTitle defined
+  PASS  repair reports it changed a broken window.title
+  PASS  repaired settings.json now has ${rootName}
+  PASS  repair preserved other settings
+  PASS  repair is idempotent (no-op when ${rootName} already present)
+  PASS  agent-home check computes $opensFolder (folder-uri OR --remote OR ssh-remote+)
+  PASS  agent-home $opensFolder includes --remote
+  PASS  agent-home $opensFolder includes ssh-remote+
+  PASS  old bare "cmd lacks folder-uri => agent-home" heuristic removed
+  PASS  on_folder no longer globally short-circuits on Test-RemoteEditorInAgentHome
+  PASS  $afterFolder alone marks launch OK (standalone Agents window cannot veto a real folder open)
+  PASS  window-count fallback stays gated by -not $afterAgent (folder-uri splash guard)
+  PASS  old combined gate (afterFolder OR wincount) AND not agent removed
+  PASS  entry skip gated on $onFolder alone
+  PASS  Get-RemoteEditorLaunchStrategies accepts -WarmHandoff
+  PASS  warm handoff returns early (remote only, no folder-uri cascade)
+  PASS  warm attempt-1 poll ceiling is 80 ticks (20s) for Remote-SSH title settle
+  PASS  post-exhaustion warm grace wait for late on_folder
+  PASS  Get-RemoteEditorSessionPresence delegates OnFolder to Test-RemoteEditorOnCorrectFolder
+  PASS  presence no longer short-circuits on global agent-home
+  PASS  Start-EditorProcessDirect helper defined
+  PASS  non-elevated path logs non_elevated_direct
+  PASS  non-elevated path calls Start-EditorProcessDirect
+  PASS  non-elevated path no longer calls Start-EditorProcessQuiet
+  PASS  direct launch sets ELECTRON_NO_ATTACH_CONSOLE (no parent-console attach)
+  PASS  direct launch redirects stderr away from connect console
+
+All tests passed.
+  PASS
+
+--- parse-connect-perf ---
+
+=== parse-connect-perf ===
+
+  PASS  parse-connect-perf.ps1 exists
+  PASS  parser reports Opening Cursor step ms
+  PASS  parser counts SNAPSHOT lines
+  PASS  parser shows session summary
+  PASS  parser includes session summary fields
+
+All tests passed.
+  PASS
+
+--- verify-perf-gates ---
+  PASS  verify-perf-gates.ps1 exists
+
+=== Perf gate verification ===
+Log: C:\Users\Smart\AppData\Local\Temp\connect-perf-good-3a8b8070df6a4732b27e4ddbb0f3a74f.log
+Version: 20260714.5
+
+  PASS  client version is post-fix (20260714.5)
+  PASS  PERF marks present (4 lines)
+  PASS  Opening Cursor step recorded (ms=520)
+  PASS  skip path Opening Cursor < 1500 ms (got 520)
+  PASS  SNAPSHOT count = 0 (got 0)
+  PASS  no LAUNCH_ATTEMPT_RESULT after LAUNCH_OK (F2 tail, got 0)
+  PASS  no post-poll waste before LAUNCH_OK (F2, got 0)
+  PASS  no verbose STATE/SNAPSHOT before skip when on_folder (F1, got 0)
+  PASS  no false double-launch relaunch after LAUNCH_OK within Opening step (WS3, got 0)
+  PASS  launch_total < 8000 ms (got 450)
+  PASS  session_open_summary present
+  PASS  diag_ms < 500 (got 95)
+  PASS  light SESSION_OPEN diagnostic used (F7)
+
+All perf gates passed.
+  PASS  post-fix sample passes all gates
+
+=== Perf gate verification ===
+Log: C:\Users\Smart\AppData\Local\Temp\connect-perf-bad-5499e652e78f4d19a90c98e65a4f8b84.log
+Version: 20260714.2
+
+  FAIL  client version is post-fix (20260714.2)
+  FAIL  PERF marks present (0 lines)
+  PASS  Opening Cursor step recorded (ms=15242)
+  FAIL  cold path Opening Cursor < 8000 ms (got 15242)
+  FAIL  SNAPSHOT count = 0 (got 1)
+  PASS  no LAUNCH_ATTEMPT_RESULT after LAUNCH_OK (F2 tail, got 0)
+  FAIL  no post-poll waste before LAUNCH_OK (F2, got 1)
+  PASS  no verbose STATE/SNAPSHOT before skip when on_folder (F1, got 0)
+  PASS  no false double-launch relaunch after LAUNCH_OK within Opening step (WS3, got 0)
+
+5 gate(s) failed.
+  PASS  pre-fix baseline fails gates (expected)
+
+All verify-perf-gates tests passed.
+  PASS
+
+--- cursor-auth-merge ---
+  PASS  uses SQLite merge
+  PASS  uses winsqlite3 via C# P/Invoke
+  PASS  no Python dependency
+  PASS  no close/kill
+  PASS  does not delete WAL files
+  PASS  reads auth from golden bundle
+  PASS  storage merge from golden
+  PASS  auth merge does not force WAL checkpoint
+  PASS  writes Electron machineid file
+  PASS  skip path still heals machineid
+  PASS  auth sync skips when local tokens complete
+  PASS  auth can repair composer workspace links
+  PASS  uses Get-CursorAuthTempRoot for temp dirs
+  PASS  uses Remove-CursorAuthTempDir for cleanup
+  PASS  stamps/reads golden-synced-at
+  PASS  needs-refresh detects golden rotation
+  PASS  needs-refresh detects machineid file drift
+  PASS  early merge keeps email/stripe metadata
+  PASS  no bare Remove-Item $tmp (8.3 TEMP trap)
+  PASS  cursor-auth-laptop has Test-CursorAuthNeedsRefresh
+  PASS  Test-CursorAuthNeedsRefresh checks serviceMachineId
+  PASS  logs AUTH ERROR on refresh failures
+  PASS  auth sync on every mount
+  PASS  auth sync skipped while Cursor open
+  PASS  session can reopen editor with O
+  PASS  connect.ps1 resets auth on recovery
+  PASS  connect.ps1 force auth after recovery
+  PASS  connect can auth-relaunch editor
+  PASS  auth relaunch works when already on folder
+  PASS  Mac O allows reopen when sticky not on folder
+  PASS  Mac relaunches when AUTH_RELAUNCH set
+  PASS  Mac has skipped auth case
+  PASS  Mac skipped auth does not set AUTH_RELAUNCH
+
+All cursor-auth merge tests passed.
+  PASS
+
+--- ssh-remote-bash-lf ---
+
+=== Stage 1b: SSH remote bash LF-only ===
+  PASS  Invoke-SshXCore extracted
+  PASS  Invoke-SshXCore strips CR LF
+  PASS  Invoke-SshXCore strips lone CR
+  PASS  CR strip happens before ToBase64String
+  PASS  Get-ServerOpenTunnelPorts still has for-loop probe
+  PASS  Get-ServerOpenTunnelPorts also LF-normalizes script (defense)
+  PASS  sample sanitizer removes all CR
+  PASS  sample keeps LF newlines
+
+Passed: 8  Failed: 0
+  PASS
+
+--- acquire-no-port-alias ---
+
+=== Stage 1: Acquire no $port alias + Get-SessionTunnelPort ===
+  PASS  Acquire-TunnelPort function extracted
+  PASS  Get-SessionTunnelPort exists
+  PASS  Acquire-TunnelPort has no lowercase $port= assignments
+  PASS  Acquire-TunnelPort uses $candPort
+  PASS  Acquire syncs $Port = $script:Port after claim
+  PASS  Push-ServerConnectConf uses Get-SessionTunnelPort
+  PASS  Push-ServerConnectConf logs PORT_SHADOW_DETECT
+  PASS  Foreign peer does not assign $Port = $TargetPort
+  PASS  Test-TunnelPortTcpOpen accepts TargetPort
+  PASS  Get-TunnelBanner accepts TargetPort
+
+Passed: 10  Failed: 0
+  PASS
+
+--- push-conf-script-port ---
+
+=== Stage 1: PushConf uses session tunnel port ===
+  PASS  PushConf assigns $sessionPort = Get-SessionTunnelPort
+  PASS  dedupeKey uses sessionPort
+  PASS  portEsc from sessionPort
+  PASS  remote body sets PORT via $portEsc
+  PASS  PORT_SHADOW_DETECT present
+
+Passed: 5  Failed: 0
+  PASS
+
+--- foreign-no-port-mutation ---
+
+=== Stage 1: foreign peer no global $Port mutation ===
+  PASS  Foreign peer has no $savedPort=$Port dance
+  PASS  Foreign peer assigns no $Port=
+  PASS  Foreign uses TcpOpen -TargetPort
+  PASS  Stale clear uses TcpOpen -TargetPort
+  PASS  Stale clear does not set $Port=$TargetPort
+
+Passed: 5  Failed: 0
+  PASS
+
+--- foreign-own-block ---
+
+=== Stage 2: own-block FOREIGN_INDETERMINATE + TTL ===
+  PASS  Test-TunnelPortInOwnUidBlock exists
+  PASS  Remove-ForeignTunnelPort exists
+  PASS  Foreign peer logs FOREIGN_INDETERMINATE
+  PASS  Foreign peer checks own UID block
+  PASS  Cached foreign has own-block TTL / forget
+  PASS  TTL default 300s
+  PASS  Indeterminate returns not-foreign
+
+Passed: 7  Failed: 0
+  PASS
+
+--- orphan-skip-sibling ---
+
+=== Stage 3: orphan skip_sibling + hybrid ===
+  PASS  Get-SiblingConnectTunnelPids exists
+  PASS  Remove-LocalOrphanTunnel logs skip_sibling
+  PASS  Orphan cleanup merges sibling PIDs
+  PASS  Acquire handles sibling_live / sticky_shared
+  PASS  Acquire classifies siblings before sticky kill
+  PASS  Acquire still reads UI slot + preferredPort
+  PASS  Acquire hybrid prefers UI slot ordering
+  PASS  Sticky path: orphan classify before PushConf
+  PASS  Test-IsPrimaryTunnelPublisher exists
+  PASS  PushConf gates non-primary TUNNEL_PORT publish
+
+Passed: 10  Failed: 0
+  PASS
+
+--- recovery-skip-clear ---
+
+=== Stage 4: auto-recovery skip-clear matrix ===
+  PASS  Auto-recovery CLEAR_MOUNT block found
+  PASS  Recovery block calls Get-RemoteEditorSessionPresence
+  PASS  Recovery block does not call Test-RemoteEditorWindowOpen
+  PASS  Logs editor_window_open_not_on_folder
+  PASS  Logs editor_check_failed_sticky
+  PASS  Uses presence.OnFolder
+  PASS  Uses presence.WindowOpen
+  PASS  WindowOpen API still requires on-folder (auth gate)
+  PASS  Presence API exists
+  PASS  Manual R branch found
+  PASS  Manual R uses Trigger manual
+  PASS  Manual R chunk (to first continue) has no auto_recovery clear
+
+Passed: 12  Failed: 0
+  PASS
+
+--- presence-recovery-parity ---
+
+=== Stage 4: presence recovery parity ===
+  PASS  connect.ps1 references presence API
+  PASS  Poll loop documents single-pass presence
+  PASS  Recovery block extractable
+  PASS  Recovery uses presence (parity with poll)
+  PASS  Recovery not gated by WindowOpen-when-on-folder API
+
+Passed: 5  Failed: 0
+  PASS
+
+--- mount-ok-reassert ---
+
+=== Stage 5: MountOk reassert before RECOVERY_END ===
+  PASS  Complete-PostTunnelRecovery exists
+  PASS  Re-probes live mount before RECOVERY_END
+  PASS  Logs reassert result
+  PASS  Reassert happens before RECOVERY_END log
+
+Passed: 4  Failed: 0
+  PASS
+
+--- active-mount-guard ---
+
+=== Stage 5: ACTIVE_MOUNT_GUARD ===
+  PASS  Push-ServerConnectConf exists
+  PASS  Logs ACTIVE_MOUNT_GUARD
+  PASS  Guard reason other_still_mounted
+  PASS  Guard checks live mount of current ACTIVE_MOUNT (remote mountpoint -q, no extra round trip)
+
+Passed: 4  Failed: 0
+  PASS
+
+--- pushconf-quoting ---
+
+=== PushConf quoting / RESULT e2e (static) ===
+  PASS  Push-ServerConnectConf extracted from git-mode.ps1
+  PASS  Win PushConf encodes remote body as Base64
+  PASS  Win PushConf runs echo b64 | base64 -d | bash
+  PASS  Win remote body prints PUSH_CONF_RESULT
+  PASS  Win PushConf writes LAPTOP_HOSTKEY_FP
+  PASS  Win PushConf sets HK= for hostkey
+  PASS  Win remote body uses CLEAR= single-quoted assignment
+  PASS  Win remote body has elif PREFER branch
+  PASS  Comment documents historical AM="" quote-storm vector
+  PASS  Non-comment Win PushConf lines have no AM="" (elif storm vector)
+  PASS  Win PushConf tracks hasResult for PUSH_CONF_RESULT
+  PASS  Win exit 0 without RESULT is treated as fail
+  PASS  Win PushConf uses LastPushConfKey dedupe
+  PASS  Dedupe key set only after RESULT gate
+  PASS  Sample remote body base64 encodes
+  PASS  Decoded body still has PUSH_CONF_RESULT
+  PASS  Decoded body still has elif branch
+  PASS  Decoded body has no AM=""
+  PASS  Nasty prefer survives inside base64 body (not ssh argv)
+  PASS  Nasty prefer body still ends with RESULT
+  PASS  Mac git-mode.sh has PushConf RESULT
+  PASS  Mac PushConf uses base64 -d | bash
+  PASS  Mac PushConf does not swallow sshx with || true
+  PASS  Mac checks PUSH_CONF_RESULT line
+  PASS  Mac fails closed when RESULT line empty
+
+All pushconf quoting tests passed.
+  PASS
+
+--- connect-update-fail-exit ---
+
+=== connect-update ERROR -> nonzero exit ===
+  PASS  Win update has ERROR log sites (found 19)
+  PASS  Win ERROR '"FAIL $msg path=$LaunchPath ip=$ServerIp"' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR '"FAIL $msg path=$LaunchPath ip=$ServerIp smart_canon=$smartCanon sepidz_path=$sepidzPath"' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR '"UNHANDLED $msg at $pos"' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR '"FAIL UPDATE_UNHANDLED: $msg"' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR 'exe_only_scp_fail' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR '"exe_only_too_small bytes=$len"' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR '"exe_only_pe_invalid bytes=$len"' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR '"exe_only_setup_fail exit=$ec"' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR 'exe_only_canon_missing_after_setup' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR 'ssh_missing' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR 'scp_missing' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR 'manifest_empty_or_unreachable' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR 'manifest_zero_files' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR 'download_failed' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR 'checksum_verify_failed exit=1' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR '"swap_fail live=$Live err=$err"' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR '"UPDATE_EXIT pending=1 reason=swap_inplace_fail"' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR 'apply_rollback' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win ERROR 'UPDATE_EXIT exit=1 reason=apply_rollback_swap_fail' exits nonzero or returns \False soon after (no exit 0)
+  PASS  Win download_failed -> exit 1
+  PASS  Win incomplete_files -> exit 1
+  PASS  Win manifest_empty -> exit 1
+  PASS  Win manifest_zero -> exit 1
+  PASS  Win applied_ok still signals exit 2
+  PASS  Win has exit 2 relaunch
+  PASS  Mac download_failed -> exit 1
+  PASS  Mac incomplete_files -> exit 1
+  PASS  Mac manifest_empty -> exit 1
+
+All update fail-exit tests passed.
+  PASS
+
+--- session-log-contracts ---
+PASS bat RUN_ID
+PASS Get-ConnectSessionId
+PASS sessions.index
+PASS SESSION_FILTER
+PASS silent update fn
+PASS win hooks silent
+PASS TUNNEL_DROP
+PASS mac RUN_ID
+PASS mac silent
+PASS mac SESSION_FILTER
+PASS git silent
+PASS Wait-ConnectExit logs FAIL EXIT on non-zero code
+PASS Write-ConnectUserFacingError helper exists
+PASS single-instance mutex (Global\\ClaudeConnect)
+PASS connect.ps1 logs FAIL NEED_ADMIN
+PASS connect.ps1 logs FAIL STEP
+PASS connect.ps1 logs FAIL ADMIN_UAC
+PASS connect-update.ps1 traps FAIL UPDATE_UNHANDLED
+PASS connect.bat logs FAIL UPDATE_BAT_EXIT
+All session-log contracts passed
+  PASS
+
+--- log-sync-contracts ---
+=== log sync contracts (WARN coalesce + session-end Force) ===
+root=D:\Smart\Claude-Code-Server
+
+PASS  [1] Win: no ; true after log append
+      exit $ec
+PASS  [2] Win: watermark only in appendOk
+      gated
+PASS  [3] Win: trap Write-Log + Wait-ConnectExit
+      ok
+PASS  [4] Win: ERROR Force; WARN Request-ConnectLogSync coalesce
+      ERROR Force + WARN coalesce
+PASS  [5] Win: Request-ConnectLogSync + LOG_SYNC_ASYNC
+      ok
+PASS  [6] Win: session-end Complete-ConnectLogAsyncDrain -Force
+      Wait + Close
+PASS  [7] Win: sync lock
+      ok
+PASS  [8] Mac: watermark gated by cat_ok
+      ok
+PASS  [9] Mac: ERROR force drain; WARN coalesce
+      ok
+PASS  [10] Mac: flush_connect_log_to_server Force drain
+      ok
+PASS  [11] Mac: ERR/EXIT trap calls flush_connect_log_to_server
+      ok
+PASS  [12] Mac: bash -n syntax
+      clean
+PASS  [13] Midnight flushes previous day
+      ok
+PASS  [14] Stage9: forbid_shrink skip Win+Mac
+      ok
+PASS  [15] Stage9: LOG_SYNC_FAIL detail surfaced
+      ok
+
+=== RESULT fail=0 ===
+VERDICT: PASS
+  PASS
+
+--- log-sync-forbid-shrink ---
+=== Stage 9 log sync forbid-shrink contracts ===
+root=D:\Smart\Claude-Code-Server
+
+PASS  [1] Win: forbid_shrink skip + LocalSize < RemoteSize guard
+      ok
+PASS  [2] Mac: forbid_shrink skip + local < remote guard
+      ok
+PASS  [3] Win: NeedsRebuild never true on remote>local shrink
+      ok
+PASS  [4] Mac: needs_rebuild never returns 0 (always forbid)
+      ok
+PASS  [5] Win: LOG_SYNC_FAIL surfaces detail= (incl exception)
+      ok
+PASS  [6] Mac: LOG_SYNC_FAIL detail helper wired
+      ok
+PASS  [7] Append/merge path still present (Win+Mac)
+      ok
+PASS  [8] Runtime: NeedsRebuild false when local<remote
+      ok
+
+=== RESULT fail=0 ===
+VERDICT: PASS
+  PASS
+
+--- log-sync-mkdir-no-find-on-fast-path ---
+
+=== Log-sync fast mkdir (no find) + Needed on Force fail ===
+  PASS  connect-ui.ps1 exists via Get-ClientFile (D:\Smart\Claude-Code-Server\scripts\client\connect-ui.ps1)
+  PASS  LogSyncFastMkdir budget symbol present
+  PASS  fast $mk single-quoted assignment found
+  note  $mk = 'mkdir -p "$HOME/.claude/logs" && chmod 700 "$HOME/.claude" "$HOME/.claude/logs" 2>/dev/null; true'
+  PASS  fast $mk must not embed find ... mtime retention
+  PASS  Complete-ConnectLogAsyncDrain extractable via Get-FunctionSource
+  PASS  Complete-ConnectLogAsyncDrain must restore ConnectLogSyncNeeded=$true when Force sync fails (or not clear Needed before Force)
+
+Result: 6 passed, 0 failed
+  PASS
+
+--- error-flush-contract ---
+=== error-flush + WARN coalesce contract ===
+root=D:\Smart\Claude-Code-Server
+
+PASS  connect.ps1 exists
+PASS  connect-ui.ps1 exists
+PASS  connect-update.ps1 exists
+PASS  trap block parseable
+PASS  trap Write-ConnectLog ERROR before exit
+PASS  trap exits via Wait-ConnectExit or exit N
+PASS  trap logs ERROR before Wait-ConnectExit
+PASS  Write-ConnectLog ERROR triggers Complete-ConnectLogAsyncDrain -Force
+PASS  Write-ConnectLog WARN coalesces via Request-ConnectLogSync
+PASS  Wait-ConnectExit calls Complete-ConnectLogAsyncDrain -Force
+PASS  Close-ConnectLog calls Complete-ConnectLogAsyncDrain -Force
+PASS  Sync-ConnectLogToServer parseable
+PASS  watermark advances only inside if ($scpOk)
+PASS  no ; true in log append ssh remote cmd
+PASS  Mac ERR/EXIT trap calls flush_connect_log_to_server
+PASS  Mac flush_connect_log_to_server uses complete_connect_log_async_drain force
+PASS  connect-update ERROR paths must not exit 0
+PASS  connect-update has exit 1/nonzero near ERROR
+
+=== WATERMARK (code read) ===
+  cat line: $cat = 'cat "$HOME/' + $remoteTmp + '" >> "$HOME/' + $remoteDay + '"; ec=$?; rm -f "$HOME/' + $remoteTmp + '"; chmod 600 "$HOME/' + $remoteDay + '" 2>/dev/null; exit $ec'
+  offset advance gated by scpOk: True
+  cat contains '; true' (masks append fail): False
+
+=== RESULT pass=18 fail=0 ===
+CONTRACT OK
+  PASS
+
+--- mount-failfast ---
+
+=== Mount fail-fast contracts ===
+  PASS  SshX exists
+  PASS  SshX supports NoRetryOnTimeout
+  PASS  SshX skips timeout retry when requested
+  PASS  Test-ProjectMountHealthy exists
+  PASS  Mount health check disables timeout retry
+  PASS  Session mount path calls Start-MountProjectBackground
+  PASS  BG up path logs MOUNT_CHECK_SKIPPED reason=bg_up
+  PASS  skipRemount path still present
+  PASS  Session remount decision reuses recover health result
+  PASS  git=off path may still call Invoke-RecoverIfNeeded
+  PASS  Extracted BG kick branch
+  PASS  BG kick logs MOUNT_CHECK_SKIPPED
+  PASS  BG mountResult Ok=$false
+  PASS  BG mountResult Pending=$true
+  PASS  BG kick branch does not call Test-ProjectMountHealthy
+  PASS  _is_mounted exists
+  PASS  _is_mounted kills timed-out probe after grace
+  PASS  _is_mounted does not use bare timeout 2 ls
+
+=== Recover / force-unmount ls probes must use timeout -k ===
+  PASS  claude-mount.sh has timeout -k 1 2 probes
+  PASS  no bare timeout 2 ls left (recover/force-unmount)
+  PASS  extracted cmd_recover
+  PASS  cmd_recover has no bare timeout 2 ls
+
+Passed: 22  Failed: 0
+  PASS
+
+--- session-fresh-probe-skips ---
+
+=== Session-fresh probe skips ===
+
+  PASS  extracted Test-TunnelUp
+  PASS  extracted Ensure-LaptopReverseSshCached
+  PASS  extracted Ensure-SessionTunnel (or Ensure-Tunnel)
+-- A) Test-TunnelUp spawn-TTL (#8) --
+  PASS  A-src: Test-TunnelUp (or its spawn-fresh helper) mentions LastTunnelSpawnSuccessAt
+  PASS  A-src: spawn-TTL checks LastTunnelSpawnSuccessPort match
+  PASS  A-src: spawn-TTL checks LastTunnelSpawnPid match
+  PASS  A-src: spawn-TTL requires SessionBgTunnel alive same pid
+  PASS  A-src: spawn-TTL age window is < 30s
+  PASS  A-src: must NOT extend generic TunnelBannerCache 3s path blindly for all cases (need LastTunnelSpawnSuccess* branch)
+  PASS  A-neg-src: Test-TunnelUp still has Get-TunnelBanner probe path for age>=30s / pid mismatch
+  PASS  A-beh: fresh spawn-TTL returns $true
+  PASS  A-beh: fresh spawn-TTL does NOT call Get-TunnelBanner (no SSH banner probe)
+  PASS  A-neg-beh: age>=30s still probes via Get-TunnelBanner
+  PASS  A-neg-beh: pid mismatch still probes via Get-TunnelBanner
+-- B) Ensure-LaptopReverseSshCached session-fresh (#3) --
+  PASS  B-src: connect.ps1 Verifying laptop SSH uses Ensure-LaptopReverseSshCached
+  PASS  B-src: Ensure-LaptopReverseSshCached logs reason=session_tunnel_fresh or reason=spawn_fresh
+  PASS  B-src HARD: ensure_cached has fresh-spawn skip branch (LastTunnelSpawnSuccess* + TTL), not solely LaptopSshVerified
+  PASS  B-src: preferred (ENSURE ok sets LaptopSshVerified after reverse probe) OR acceptable (ensure_cached session-fresh + SessionBgTunnel)
+  PASS  B-beh: session-fresh ensure_cached returns 0 without reverse probe
+  PASS  B-beh: session-fresh skip issues ZERO Test-LaptopReverseSsh / Ensure-LaptopReverseSsh calls
+  PASS  B-beh: session-fresh skip logs reason=session_tunnel_fresh or spawn_fresh
+  PASS  B-neg-beh: without fresh-spawn markers, ensure_cached still probes (not forever-skip on verified=false)
+-- C) GIT_MODE=off mount check TTL (#2) --
+  PASS  C-src: $gitModeOff derived from Get-GitMode -eq 'off'
+  PASS  C-src: connect.ps1 has $script:LastMountCheckOkAt (or equivalent) for mount-check TTL
+  PASS  C-src: connect.ps1 has $script:LastMountCheckOkProject for same-ProjectId skip
+  PASS  C-src: logs MOUNT_CHECK_SKIPPED reason=session_mount_ok (or session mount-ok skip)
+  PASS  C-src: extracted if ($gitModeOff) { Invoke-RecoverIfNeeded ... } block
+  PASS  C-src: gitModeOff block consults LastMountCheck* / session_mount_ok before recover
+  PASS  C-neg-src: cold first pick still has Invoke-RecoverIfNeeded inside gitModeOff (not removed)
+  PASS  C-neg-src: TTL (~60s) + ProjectId gate present so different ProjectId / expiry still checks
+  PASS  C-guard: BG up skip (reason=bg_up) still present - session_mount_ok is additive
+  PASS  C-src: both session_mount_ok and bg_up skip reasons exist (session TTL does not replace BG skip)
+
+Passed: 32  Failed: 0
+All tests passed.
+  PASS
+
+--- session-fresh-probe-skips-deep ---
+
+=== Session-fresh probe skips (DEEP) ===
+
+  PASS  extracted Test-TunnelUp
+  PASS  extracted Ensure-LaptopReverseSshCached
+  PASS  extracted Ensure-SessionTunnel (or Ensure-Tunnel)
+  PASS  extracted Clear-SessionMount
+-- A) Test-TunnelUp deep --
+  PASS  A1-beh: HasExited=$true MUST call Get-TunnelBanner (even age<30s + pid match)
+  PASS  A2-beh: LastTunnelSpawnSuccessPort != Port MUST probe Get-TunnelBanner
+  PASS  A3-beh: SessionBgTunnel=$null MUST probe Get-TunnelBanner
+  PASS  A4-beh: fresh spawn-TTL returns $true
+  PASS  A4-beh: fresh spawn-TTL does not call Get-TunnelBanner
+  PASS  A4-beh: fresh skip does NOT set TunnelBannerCacheUp (no cache pollution)
+  PASS  A4-beh: fresh skip leaves TunnelBannerCacheAt unset
+  PASS  A5-beh: aged-out first call probes and returns $true
+  PASS  A5-beh: aged-out first call hits Get-TunnelBanner once
+  PASS  A5-beh: successful probe may populate TunnelBannerCacheUp
+  PASS  A5-beh: second call within 3s still returns $true
+  PASS  A5-beh: second call within 3s uses TunnelBannerCache (zero Get-TunnelBanner)
+  PASS  A5-src: spawn-TTL branch (LastTunnelSpawnSuccessAt) remains independent of TunnelBannerCache
+  PASS  A5-src: TunnelBannerCache 3s path still present alongside spawn-TTL
+-- B) Ensure-LaptopReverseSshCached deep --
+  PASS  B1-beh: fresh spawn + TunnelBannerCacheUp=$false returns rc=0
+  PASS  B1-beh: fresh spawn + TunnelBannerCacheUp=$false issues ZERO reverse probe calls
+  PASS  B1-beh: fresh spawn + banner=false skip logs reason=session_tunnel_fresh
+  PASS  B2-beh: age=29s + banner up returns rc=0
+  PASS  B2-beh: age=29s + banner up issues ZERO reverse probe calls
+  PASS  B2-beh: age=29s skip logs reason=session_tunnel_fresh
+  PASS  B3-beh: age=31s + banner up MUST probe (TTL expired)
+  PASS  B4-beh: verified_tunnel_up returns rc=0
+  PASS  B4-beh: verified_tunnel_up issues ZERO reverse probe calls
+  PASS  B4-beh: verified path logs reason=verified_tunnel_up
+  PASS  B5-beh: session_tunnel_fresh returns rc=0
+  PASS  B5-beh: after session_tunnel_fresh skip, LaptopSshVerified becomes $true (script scope)
+  PASS  B5-src: Ensure-LaptopReverseSshCached assigns LaptopSshVerified=$true on fresh skip
+-- C) Mount check TTL deep --
+  PASS  C1-src: Clear-SessionMount nulls LastMountCheckOkAt
+  PASS  C1-src: Clear-SessionMount nulls LastMountCheckOkProject
+  PASS  C2-src: extracted gitModeOff mount-check block
+  PASS  C2-src: recoverCheckOk=$false clears LastMountCheckOkAt and LastMountCheckOkProject
+  PASS  C3-src: gitModeOff block uses mountCheckSessionOk gate
+  PASS  C3-src: session_mount_ok path sets recoverCheckOk=$true
+  PASS  C3-src: Invoke-RecoverIfNeeded gated by -not $mountCheckSessionOk
+  PASS  C3-src: Invoke-RecoverIfNeeded only inside -not $mountCheckSessionOk branch
+  PASS  C4-src: ProjectId gate compares LastMountCheckOkProject to $go.Id
+  PASS  C4-src HARD: comparison is [string]$script:LastMountCheckOkProject -eq [string]$go.Id
+  PASS  C5-src: mount-check TTL is TotalSeconds -lt 60
+-- D) Interaction / safety --
+  PASS  D1-src: Ensure ok path mentions Wait-ForTunnelUp
+  PASS  D1-src: Ensure ok path assigns LastTunnelSpawnSuccessAt
+  PASS  D1-src: Wait-ForTunnelUp appears BEFORE LastTunnelSpawnSuccessAt= assignment in ENSURE ok path
+  PASS  D2-src: connect.ps1 still has MOUNT_CHECK_SKIPPED reason=bg_up
+  PASS  D3: new test file has no Persian characters
+  PASS  D3: new test file is ASCII only (no emoji / non-ASCII)
+  PASS  D3: new test file has no em-dash / curly quotes (ASCII only)
+
+Passed: 49  Failed: 0
+All tests passed.
+  PASS
+
+--- session-fresh-ttl-matrix ---
+
+=== Session-fresh TTL matrix (cross-cutting) ===
+
+  PASS  extracted Push-ServerConnectConf
+  PASS  extracted Test-TunnelUp
+  PASS  extracted Ensure-LaptopReverseSshCached
+  PASS  extracted Clear-SessionMount
+-- 1) Shared 30s session_tunnel_fresh TTL family --
+  PASS  1: Push-ServerConnectConf uses TotalSeconds -lt 30
+  PASS  1: Test-TunnelUp uses TotalSeconds -lt 30
+  PASS  1: Ensure-LaptopReverseSshCached uses TotalSeconds -lt 30
+  PASS  1-guard: Push-ServerConnectConf logs reason=session_tunnel_fresh
+  PASS  1-guard: Test-TunnelUp logs reason=session_tunnel_fresh
+  PASS  1-guard: Ensure-LaptopReverseSshCached logs reason=session_tunnel_fresh
+-- 2) Mount check TTL is 60 (not 30) --
+  PASS  2: extracted LastMountCheckOkAt TTL comparison
+  PASS  2: mount check uses TotalSeconds -lt 60
+  PASS  2 HARD: mount check must NOT use TotalSeconds -lt 30 (tunnel-fresh family)
+-- 3) Test-TunnelUp reason=session_tunnel_fresh --
+  PASS  3: Test-TunnelUp source logs reason=session_tunnel_fresh
+-- 4) Ensure-LaptopReverseSshCached reason=session_tunnel_fresh --
+  PASS  4: Ensure-LaptopReverseSshCached source logs reason=session_tunnel_fresh
+-- 5) Test-TunnelUp behavioral BannerCalls matrix --
+  PASS  5-matrix: age=0s port=yes pid=yes bg=alive -> BannerCalls=0
+  PASS  5-matrix: age=0s port=yes pid=yes bg=HasExited -> BannerCalls>=1
+  PASS  5-matrix: age=0s port=no pid=yes bg=alive -> BannerCalls>=1
+  PASS  5-matrix: age=0s port=yes pid=no bg=alive -> BannerCalls>=1
+  PASS  5-matrix: age=29s port=yes pid=yes bg=alive -> BannerCalls=0
+  PASS  5-matrix: age=30s boundary (-lt 30) probes -> BannerCalls>=1
+-- 6) Ensure-LaptopReverseSshCached skip then probe after clear --
+  PASS  6-beh: verified=false + spawn fresh + SessionBgTunnel alive + age=0 returns 0
+  PASS  6-beh: session-fresh skip (banner not required) -> ReverseProbe+EnsureReverse = 0
+  PASS  6-beh: after clearing spawn stamps, next call probes >=1
+-- 7) Clear-SessionMount clears LastMountCheckOk* --
+  PASS  7: Clear-SessionMount clears LastMountCheckOkAt
+  PASS  7: Clear-SessionMount clears LastMountCheckOkProject
+-- 8) connect.ps1 session_mount_ok + recover-fail clear --
+  PASS  8: connect.ps1 has session_mount_ok skip path
+  PASS  8: recover fail clear path sets both LastMountCheckOk* to $null
+-- 9) HARD: no Invoke-RecoverIfNeeded when mountCheckSessionOk --
+  PASS  9: extracted gitModeOff / mountCheckSessionOk recover block
+  PASS  9 HARD: if (-not $mountCheckSessionOk) { ... Invoke-RecoverIfNeeded }
+  PASS  9-guard: Invoke-RecoverIfNeeded must not appear before if (-not $mountCheckSessionOk)
+
+Passed: 31  Failed: 0
+All tests passed.
+  PASS
+
+--- mount-check-skipped-on-bg-up ---
+
+=== Mount check skipped on BG up ===
+  PASS  BG up path must log MOUNT_CHECK_SKIPPED reason=bg_up
+  PASS  Extracted BG else-branch that kicks Start-MountProjectBackground
+  PASS  BG kick branch body must not call Invoke-RecoverIfNeeded / Test-ProjectMountHealthy
+  PASS  MOUNT_CHECK_SKIPPED reason=bg_up must appear inside the BG kick branch
+  PASS  $gitModeOff is derived from Get-GitMode -eq 'off'
+  PASS  Invoke-RecoverIfNeeded call site must be structurally inside if ($gitModeOff) { ... }
+  PASS  at least one $recoverCheckOk = Invoke-RecoverIfNeeded call site
+  PASS  each $recoverCheckOk = Invoke-RecoverIfNeeded must be preceded by if ($gitModeOff) { in nearby scope
+  PASS  BG path assigns $mountResult pscustomobject
+  PASS  BG mountResult must set Ok=$false AND Pending=$true (not false-green MountOk)
+  PASS  skipRemount path still present (may call Invoke-RecoverIfNeeded — allowed)
+
+Passed: 11  Failed: 0
+  PASS
+
+--- mount-hash-seed-from-setup ---
+
+=== Mount hash seed from Server setup MOUNT_HASH ===
+  PASS  Initialize-ServerSession present in connect.ps1
+  PASS  Server setup batch emits / parses MOUNT_HASH
+  PASS  setup must seed $script:ClaudeMountSyncVerifiedHash (from MOUNT_HASH parse)
+  PASS  extracted Initialize-ServerSession body
+  PASS  Initialize-ServerSession assigns $script:ClaudeMountSyncVerifiedHash
+  PASS  Initialize-ServerSession seed path is tied to MOUNT_HASH parse
+  PASS  Prepare-ServerSessionParallel present
+  PASS  Prepare must honor seeded hash
+  PASS  extracted Prepare-ServerSessionParallel body
+  PASS  Prepare-ServerSessionParallel references ClaudeMountSyncVerifiedHash
+  PASS  Prepare skips sha256 SshX when ClaudeMountSyncVerifiedHash already matches localHash
+
+Passed: 11  Failed: 0
+  PASS
+
+--- elevate-when-needed ---
+
+=== Elevate-when-needed contracts ===
+  PASS  connect.ps1 documents elevate-when-needed
+  PASS  always-elevate main UI block removed
+  PASS  cold-start header has no Verb RunAs
+  PASS  Invoke-LaptopAdminOps still present for on-demand elevate
+  PASS  AdminFix path still uses RunAs
+  PASS  AdminFix switch retained
+
+PASS elevate-when-needed (6 checks)
+  PASS
+
+--- save-connect-conf-key ---
+
+=== Save-ConnectConfKey contracts ===
+  PASS  Save-ConnectConfKey helper exists
+  PASS  no two-key REMOTE_USER Set-Content wipe
+  PASS  extracted Save-ConnectConfKey
+  PASS  REMOTE_USER updated to smart
+  PASS  LAPTOP_USER preserved
+  PASS  GIT_MODE preserved
+  PASS  TUNNEL_SLOT preserved
+  PASS  PORT preserved
+
+PASS save-connect-conf-key (8 checks)
+  PASS
+
+--- hard-connect-ux-20260723 ---
+
+=== HARD connect UX/perf adversarial (20260723.13) ===
+--- V) Version lockstep ---
+  PASS  connect.ps1 ConnectVersion present
+  PASS  connect-version.txt lockstep with connect.ps1 (txt='20260729.15' ps1='20260729.15')
+  PASS  mac connect-version.txt lockstep (got '20260729.15' expected '20260729.15')
+--- T1) Mount fail-fast ---
+  PASS  SshX has NoRetryOnTimeout
+  PASS  SshX skips timeout retry when NoRetryOnTimeout
+  PASS  skipRemount reuses recoverCheckOk
+  PASS  claude-mount uses timeout -k for hung FUSE ls
+--- T2) Quiet bat / preflight ---
+  PASS  connect-preflight.ps1 present
+  PASS  bat references preflight
+  PASS  bat does not Hidden -File connect.ps1
+  PASS  bat Starting Claude Connect without UAC nag
+  PASS  accept UAC echo removed
+--- T3) Elevate-when-needed ---
+  PASS  cold-start header: no Verb RunAs
+  PASS  elevate-when-needed documented
+  PASS  always-elevate block gone
+  PASS  connect-boot still launches connect.ps1
+  PASS  AdminFix retained
+--- T4) Quiet Cursor / non-admin prefer ---
+  PASS  cursor-launch log path present
+  PASS  elevated_direct_fallback last resort present
+  PASS  launch order NE then LIMITED then elevated_direct
+--- T5) Sticky conf / no wipe ---
+  PASS  Save-ConnectConfKey present
+  PASS  no two-key REMOTE_USER wipe arrays
+  PASS  username paths call Save-ConnectConfKey
+  PASS  extract Save-ConnectConfKey for runtime
+  PASS  runtime: REMOTE_USER -> smart
+  PASS  runtime: EXTRA_KEY preserved
+  PASS  runtime: GIT_MODE preserved
+  PASS  runtime: TUNNEL_SLOT preserved
+  PASS  runtime: second save still preserves EXTRA_KEY
+  PASS  runtime: key count >= 6 after two saves
+--- T6) Quieter logs + auth skip enum ---
+  PASS  forbid_shrink is DEBUG on Win
+  PASS  forbid_shrink not INFO on Win
+  PASS  forbid_shrink DEBUG on Mac
+  PASS  PersonalCursorDominant gated on -not skipAuth
+--- X) Mutation / anti-regression ---
+  PASS  mutation: cold-start RunAdminFix elevate loop gone
+  PASS  bat still handoffs connect-boot
+
+HARD UX PASS: 36 checks
+  PASS
+
+--- hard-multi-agent-regressions ---
+
+=== HARD multi-agent regressions ===
+
+--- A) Up to 10 Connect UIs per PC (multi instance) ---
+  PASS  Win: Enter-ConnectSingleInstance uses Global\ClaudeConnect# slot mutexes
+  PASS  Win: connect-ui takes slot Mutex
+  PASS  Win: blocks at 10 or logs MULTI_INSTANCE acquire
+  PASS  Win: multi-instance slot pool enabled
+  PASS  Win: mutex catch is fail-closed (block)
+  PASS  Win: mutex catch must not fail-open
+  PASS  git-mode: pushLine null-safe fallback
+  PASS  connect.bat handoffs via connect-boot.ps1 (atomic slot mutex)
+  PASS  connect.bat must not probe/release mutex (TOCTOU)
+  PASS  connect-boot owns slot mutex release (not cold-start UAC in connect.ps1)
+  PASS  connect.ps1 elevate-when-needed (no always-elevate before UAC)
+  PASS  on-demand AdminFix RunAs still present
+  PASS  connect-boot.ps1 exists
+  PASS  connect-boot acquires ClaudeConnect# slot pool
+  PASS  client-bundle-manifest (or deploy-client-bundles) ships connect-boot.ps1
+  PASS  Mac: enter_connect_single_instance uses flock or instance message
+  PASS  Designer Win: shares main instance gate
+  PASS  Designer Win: honors mutex false (exits)
+  PASS  Designer Win: must not discard mutex result
+  PASS  Designer Mac: shares main instance gate
+  PASS  Tunnel slots 0..9 align with multi-UI capacity
+  PASS  git-mode prefers CLAUDE_CONNECT_UI_SLOT for tunnel acquire
+  PASS  git-mode ORPHAN_TUNNEL skip_sibling present
+  PASS  git-mode Get-SiblingConnectTunnelPids present
+  PASS  git-mode hygiene Soft/Sibling helpers present
+  PASS  session footer has H hygiene
+  PASS  session footer removed G git
+  PASS  Win session resolves H hygiene
+  PASS  Win session removed g git resolve
+  PASS  Mac wires hygiene interactive
+  PASS  Mac re-scans siblings after soft
+  PASS  git-mode Acquire sticky_shared / sibling_live
+  PASS  git-mode am_only PushConf keeps primary TUNNEL_PORT
+  PASS  git-mode warns PUSH_CONF signal= for ABORT_EMPTY/port_empty/mismatch
+  PASS  connect-ui AGENT_PATH probe (Connect green vs agent dead)
+  PASS  AGENT_PATH ok log present
+  PASS  AGENT_PATH bad reasons are explicit
+  PASS  connect.ps1 SSH_ROLLUP latency rollup
+  PASS  connect.ps1 Add-SshMsSample ring buffer
+  PASS  laptop-exec loud TUNNEL_PORT_MISSING on blank conf
+  PASS  EXE setup defines Test-ConnectUiOpen
+  PASS  EXE setup blocks only when zero free ClaudeConnect# slots
+  PASS  EXE setup resolves launch path / versioned tree
+  PASS  EXE setup documents no Win32_Process UI gate
+  PASS  EXE UI gate (Test-ConnectUiOpen) does not scan Win32_Process
+  PASS  EXE UI gate uses ClaudeConnect# mutex slots
+  PASS  EXE MessageBox matches 10 already-open text
+  PASS  ExeLaunch double-launch gate lives in the detached worker (setup-launch exits fast)
+  PASS  EXE setup spawns the detached worker
+  PASS  Win: DeferredServerSetupOnly child mode exists
+  PASS  Win: deferred setup skips Enter-ConnectSingleInstance (no 2nd UI slot)
+  PASS  Win: Enter-ConnectSingleInstance gated behind DeferredServerSetupOnly skip
+  PASS  Win: deferred setup logs/preserves parent UI_SLOT for tunnel acquire
+--- B) Ensure-ConnectRunId define-before-use ---
+  PASS  connect-update.ps1 defines Ensure-ConnectRunId
+  PASS  connect-update.ps1 seeds Ensure-ConnectRunId early
+  PASS  Ensure-ConnectRunId defined at L78 before call at L296
+  PASS  connect-update.ps1 parses cleanly
+  PASS  Ensure-ConnectRunId runtime probe OK
+--- C) User-visible failures MUST be FAIL ERROR in log ---
+  PASS  Wait-ConnectExit emits FAIL EXIT
+  PASS  Write-ConnectUserFacingError helper exists
+  PASS  FAIL EXIT only on non-zero code with ERROR level
+  PASS  StepFail emits FAIL STEP
+  PASS  StepFail uses ERROR not WARN
+  PASS  Admin prompt emits FAIL NEED_ADMIN
+  PASS  Admin decline emits FAIL ADMIN_DENIED
+  PASS  UAC failure emits FAIL ADMIN_UAC
+  PASS  Die emits FAIL DIE
+  PASS  trap emits FAIL UNHANDLED
+  PASS  update trap emits FAIL UPDATE_UNHANDLED
+  PASS  bat logs FAIL UPDATE_BAT_EXIT on update exit 1
+  PASS  Mac step_fail emits FAIL STEP
+  PASS  Mac die emits FAIL DIE
+--- D) Console [X] must not be log-orphaned (spot checks) ---
+  PASS  OpenSSH missing writes FAIL to day log
+  PASS  AdminFix missing pending writes FAIL
+--- E) Session correlation for concurrent agents ---
+  PASS  bat sets RUN_ID before update
+  PASS  bat mints unique RUN_ID before preflight (dual-UI)
+  PASS  RUN_ID mint precedes preflight block
+  PASS  shared RUN_ID file adopted only when unset
+  PASS  preflight prefers parent bat RUN_ID
+  PASS  preflight writes per-PID RUN_ID handoff
+  PASS  session id helper present
+  PASS  SESSION_FILTER tip for grepping concurrent sessions
+  PASS  log lines include session id bracket
+--- F) Update swap must not nest bak under live (flat layout) ---
+  PASS  connect-update.ps1 guards flat Desktop layout bak outside live
+  PASS  connect-update.ps1 detects windowsDir -eq packageRoot
+  PASS  mac connect-update.sh guards flat layout bak outside live
+  PASS  connect.bat logs FAIL OUTDATED_SCRIPTS
+  PASS  connect-update.ps1 inplace fallback when live in use
+  PASS  connect-update.ps1 logs UPDATE_SWAP_IN_USE
+--- G) Admin AK ACL false-positive ---
+  PASS  connect.ps1 skips NEED_ADMIN when admin_ak unreadable
+  PASS  Test-AuthorizedKeyFragment logs cannot_read_ak on access denied
+  PASS  explicit null check for AK membership
+--- H) Deep log completeness (20260720.7) ---
+  PASS  SSH quoting glitch logs FAIL SSH_QUOTE
+  PASS  connect retry attempts logged
+  PASS  unreachable after 10 attempts logs FAIL CONNECT_UNREACHABLE
+  PASS  project menu wait is logged
+  PASS  empty Choose-Project logs FAIL MENU_ABORT
+  PASS  no Initialize-ServerSession between Ready and menuLoop
+  PASS  no duplicate Ensure-LaptopSshReady between Ready and menuLoop
+  PASS  Ensure#1 success sets LaptopFirewallOk in Initialize-ServerSession
+  PASS  server script push fail logged
+  PASS  Mac connect_log has millisecond timestamps helper
+  PASS  Mac unreachable logs FAIL CONNECT_UNREACHABLE
+  PASS  Mac BOOTSTRAP uses ms timestamp
+  PASS  Mac update ERROR prefixed FAIL UPDATE_
+--- I) Dual-UI false-positive UX (20260726.08) ---
+  PASS  diagnostic has MOUNT_PENDING (bg mount != MOUNT_FAILED)
+  PASS  diagnostic reconciles started_in_background
+  PASS  light SESSION_OPEN allows bg-mount + on_folder
+  PASS  Win: no_proc+TCP-open keeps session (no forced drop)
+  PASS  Win keep-alive returns $true (not $false)
+  PASS  Win: zombie age-gate token coexists with keep-alive
+  PASS  Win: age gate helper coexists with keep-alive
+  PASS  Mac: no_ssh_proc+TCP-open keeps session
+  PASS  Mac: zombie age-gate token coexists with keep-alive
+  PASS  Win: Gap token foreign_owner_cannot_bind coexists with keep-alive
+  PASS  Win: CanClaim/ReseedKill gate coexists
+  PASS  Win: Wait Gate A local_r_not_owned coexists with keep-alive
+  PASS  Mac: Gap token foreign_owner_cannot_bind coexists
+  PASS  Mac: Wait Gate A local_r_not_owned coexists
+  PASS  Win bg_init Gap skip coexists with multi-agent path
+  PASS  Win quiet recovery when editor still open
+  PASS  Win skips press-O warn when already on folder
+  PASS  Mac skips press-O warn when already on folder
+
+Hard regressions: 123 passed, 0 failed
+  PASS
+
+--- git-tunnel-hard-batch ---
+
+=== GIT tunnel hard batch (sticky / sibling / am_only) ===
+
+--- A) Port formula non-overlap (static + LIVE) ---
+  PASS  Win/Mac port base uses offset*10 disjoint blocks
+  PASS  LIVE base UID1000 = 20000
+  PASS  LIVE base UID1001 = 20010
+  PASS  LIVE adjacent UID blocks do not overlap (max1000 < base1001)
+--- B) Acquire-TunnelPort hybrid slot / sticky / sibling ---
+  PASS  Acquire: CLAUDE_CONNECT_UI_SLOT seeds trySlots; conf PORT reorder only when UI slot unset
+  PASS  Acquire sticky_shared: sibling_live skips orphan reclaim
+  PASS  Acquire claim_sticky: Remove-LocalOrphanTunnel before Push-ServerConnectConf
+--- C) LIVE trySlots UI_SLOT preference ---
+  PASS  LIVE trySlots: UI_SLOT=3 first, all 10 slots retained
+--- D) Sibling orphan + am_only PushConf ---
+  PASS  Get-SiblingConnectTunnelPids walks Connect UI ancestors (max 14 hops)
+  PASS  Remove-LocalOrphanTunnel skip_sibling + merges siblings into protected
+  PASS  Push-ServerConnectConf am_only suppresses publish_port for non-primary slot
+--- E) LIVE Test-IsPrimaryTunnelPublisher ---
+  PASS  LIVE primary: empty UI_SLOT publishes TUNNEL_PORT
+  PASS  LIVE am_only: UI_SLOT=3 is non-primary
+--- F) Soft fail keep_alive ---
+  PASS  Sync-SessionTunnelProcess keep_alive returns true and clears sync fail counter
+
+GIT tunnel hard batch: 14 passed, 0 failed
+  PASS
+
+--- mac-connect-hard-batch ---
+
+=== Mac connect hard batch (Windows parity invariants) ===
+
+  PASS  mac/connect.sh passes bash -n (or balanced-brace fallback when bash missing)
+  PASS  CONNECT_VERSION lockstep connect.sh + version.txt (20260729.15)
+  PASS  connect-update.sh syncs mac/connect-version.txt from windows on update
+  PASS  mac/connect.sh sets CONNECT_PORT_BASE=20000
+  PASS  git-mode.sh tunnel_port_user_base uses 20000 + (UID-1000)*10
+  PASS  CM='\$HOME/.local/bin/claude-mount' single-quoted (remote expand)
+  PASS  _tunnel_alive rejects zombie processes (grep -qv Z)
+  PASS  session traps install EXIT + SIGTERM + SIGHUP cleanup_session handlers
+  PASS  exit_requested menu loop handles M/C/X via read_post_disconnect_key
+  PASS  connect.sh calls clear_session_mount on session end / recovery
+  PASS  mac/connect.sh runs initialize_server_session for Server setup
+  PASS  mac/connect.sh die() and step_fail() emit FAIL DIE / FAIL STEP logs
+  PASS  git-mode.sh keeps session alive after soft_fail budget exhausted (TCP open, no ssh proc)
+  PASS  post-tunnel recovery skips press-O warn when editor already on folder
+
+Asserts: 14  Passed: 14  Failed: 0
+  PASS
+
+--- designer-connect-hard-batch ---
+
+=== Designer connect hard-batch (static invariants) ===
+
+  PASS  connect.sh registers EXIT+SIGTERM+SIGHUP cleanup traps
+  PASS  connect.ps1 sets novncOpened only on Test-NovncLocal success
+  PASS  connect.sh sets _novnc_opened=1 only after novnc_open succeeds
+  PASS  connect.ps1 resets autoFixCount on manual R reconnect
+  PASS  connect.sh grep -E escapes mount-id pipe for ERE
+  PASS  connect.ps1 dies when LAPTOP_USER or LAPTOP_PATH missing from conf
+  PASS  connect.sh dies when LAPTOP_USER or LAPTOP_PATH missing from conf
+  PASS  connect.ps1 icacls .ssh grants USERNAME and LaptopUser when they differ
+  PASS  connect.ps1 SSH tunnel -L binds noVNC on 127.0.0.1 only
+  PASS  connect.sh SSH tunnel -L binds noVNC on 127.0.0.1 only
+  PASS  connect.ps1 honors Enter-ConnectSingleInstance single-instance lock
+  PASS  designer connect does not launch remote editor
+  PASS  designer source uses Smart IP; README documents Sepidz IP patch
+  PASS  publish.ps1 IP-patches designer connect.ps1 and connect.sh for Sepidz
+
+All 14 designer hard-batch asserts passed
+  PASS
+
+--- mount-active-hard-batch ---
+
+=== Mount ACTIVE hard batch (static + live) ===
+
+--- ACTIVE_MOUNT single-project ---
+  PASS  PushConf remote: CLEAR wipes AM; guard uses mountpoint -q before clobber
+  PASS  disconnect Clear-SessionMount clears ACTIVE_MOUNT via Push-ServerConnectConf
+
+--- MOUNT_HASH hash seed ---
+  PASS  Initialize-ServerSession seeds ClaudeMountSyncVerifiedHash from MOUNT_HASH batch line
+
+--- Failfast mount health ---
+  PASS  Test-ProjectMountHealthy: bounded timeout 12 + NoRetryOnTimeout
+  PASS  SshX skips timeout retry when NoRetryOnTimeout (failfast contract)
+
+--- BG mount skip sync check ---
+  PASS  cold BG branch: MOUNT_CHECK_SKIPPED + Pending Ok=$false, no sync mount/up
+  PASS  Start-MountProjectBackground logs MOUNT_BG_STARTED on parent kickoff
+  PASS  healthy git_mode=off skipRemount branch skips BG kick (single mounted project reuse)
+
+--- Live diagnostic sandbox ---
+  PASS  live: bg kickoff alone => MOUNT_PENDING INFO (not red MOUNT_FAILED)
+  PASS  live: real fuse failure => MOUNT_FAILED ERROR
+
+--- Live mounts cache ---
+  PASS  live Get-MountsCached round-trip preserves 8 distinct projects (got 8)
+  PASS  PS5.1 guard: buggy @($raw|ConvertFrom-Json) collapses array to 1 element
+
+--- Live BG kickoff ---
+  PASS  live: Start-MountProjectBackground spawns detached runner
+  PASS  live: kickoff non-blocking (248ms, not waiting on ssh mount)
+
+Passed: 14  Failed: 0
+  PASS
+
+--- windows-mcp-hard-batch ---
+
+=== HARD: windows-mcp batch invariants ===
+
+  PASS  Listen fallback ProcessStartInfo targets netstat.exe (not cmd /c)
+  PASS  Listen netstat fallback is headless (CreateNoWindow + UseShellExecute=false)
+  PASS  Module has no cmd /c netstat anywhere
+  PASS  Orphan reaper runs only after listen probe succeeds
+  PASS  Orphan reaper targets cmd.exe start-server.cmd wrappers and logs reaped pid
+  PASS  Ensure-WindowsMcpTask reinstalls when start-server.cmd port is stale
+  PASS  Winget install uses Start-Process -WindowStyle Hidden
+  PASS  Winget install is bounded (10m) and kills on timeout
+  PASS  Direct start uses python -m windows_mcp serve
+  PASS  Direct start never wraps via cmd.exe or start-server.cmd (code lines only)
+  PASS  Direct start ProcessStartInfo is fully hidden
+  PASS  Start-WindowsMcpIfNeeded uses direct start and orphan reaper
+  PASS  Start-WindowsMcpIfNeeded has no schtasks /Run (visible cmd)
+  PASS  Hidden logon VBS launcher helper is shipped
+  PASS  Hidden logon trampoline uses start-server-hidden.vbs
+  PASS  setup-worker clears MOTW via Unblock-File on installed files
+  PASS  windows-mcp + setup bodies never call Set-MpPreference
+
+Passed: 17  Failed: 0
+HARD windows-mcp batch: ALL PASS
+  PASS
+
+--- sidecar-xray-hard-batch ---
+
+=== sidecar + xray hard batch (14 contracts) ===
+
+  PASS Clear force-clears when backend -L is down
+  PASS backend_down branch precedes Repair (force clear, never repair to 18998)
+  PASS Start stops front relays when backend -L is down
+  PASS Ensure stops fronts and clears settings when backend -L is down
+  PASS Watchdog uses Local\ClaudeConnectSidecarWatchdog mutex
+  PASS Watchdog writes lease file and holds mutex in $script:CursorProxyWatchdogMutex
+  PASS Relay processes are assigned into KILL_ON_JOB_CLOSE sidecar job
+  PASS BootReap skips reap when fronts are up (skip before StopWatchdog)
+  PASS deploy-client-bundle ship-gate requires backend_down force-clear in staged sidecar
+  PASS deploy-client-bundle ship-gate requires personal+profile path enum
+  PASS deploy-client-bundle ship-gate checks Mac editor-launch personal scrub
+  PASS Repair skips when 18998 is not listening (never repair dead sticky)
+  PASS xray probe caches only CONCLUSIVE verdicts (not timeout/inconclusive)
+  PASS Add-TunnelHttpProxyLeg retries with -ForceProbe before skipping HTTP leg
+  PASS missing_http with dead HTTP backend + live front => reseed (not false adopt)
+  PASS listening uses bounded TcpClient probe; backend check never skips on known-down cache
+
+All 16 hard-batch contracts passed.
+  PASS
+
+--- editor-auth-hard-batch ---
+
+=== Editor + auth hard batch (19 asserts) ===
+
+  PASS  Get-CursorRemoteProfileDir isolates Smart vs Sepidz under LOCALAPPDATA
+  PASS  Get-CursorRemoteProfileDir documents personal Cursor is never touched
+  PASS  Resolve-EditorChoice uses Path.Combine for editor.conf with Join-Path hazard comment
+  PASS  connect.ps1 writes editor.conf via Path.Combine only
+  PASS  folder-uri strategies pass combined --folder-uri=<uri> with no lone flag
+  PASS  didLaunch+launchOk trust path sets onFolderNow without re-probe
+  PASS  opening_step_fail clears EditorSeenOpen/EditorOpened when window not proven
+  PASS  recovery press-O warn skipped when already_on_folder; only nags when not on folder
+  PASS  AuthRelaunch skipForPreserve when profile windows open on correct folder
+  PASS  cursor-auth-laptop never Stop-Process/CloseMainWindow
+  PASS  Launch-RemoteEditor auth_relaunch_never_kill (no profile tree soft-stop)
+  PASS  Test-CursorWindowTitleMatchesProject rejects site-tag collision for project smart
+  PASS  Get-CursorServerWindowTitleTemplate preserves ${rootName} and site tag literals
+  PASS  on_folder requires Test-CursorVisibleWindowMatchesProject (no cmdline+any-visible shortcut)
+  PASS  Confirm-RemoteEditorLaunchVisible is project-scoped only
+  PASS  Complete-CursorProxyAfterTunnel skips sidecar when no tunnel proxy legs
+  PASS  Complete skip uses session legs only (no adopt_backends / Get-SocksProxyPort fallback)
+  PASS  WindowOpenWhenOnFolder requires title-matched visible window for cursor
+  PASS  connect.ps1 skips post-auth Ensure-CursorProxySidecar when no tunnel proxy legs
+
+All editor-auth hard-batch tests passed (19 asserts).
+  PASS
+
+--- tunnel-proxy-skip-hard ---
+
+=== tunnel proxy skip hard (xray_closed thrash) ===
+
+  PASS  git-mode clears SessionTunnelProxyLegs on xray_closed and logs skip_sidecar
+  PASS  connect.ps1 gates post-auth Ensure when SessionTunnelProxyLegs=false
+  PASS  Complete early-returns on SessionTunnelProxyLegs=false without Get-SocksProxyPort fallback
+  PASS  behavioral: Complete logs skip_sidecar when SessionTunnelProxyLegs=false
+  PASS  behavioral: Complete does not throw into Ensure/Start
+  PASS  behavioral: Complete never invokes Ensure/Start when no legs
+  PASS  behavioral: SessionTunnelProxyLegs=false wins even if fixed ports exist in Get-*
+  PASS  behavioral: with SessionTunnelProxyLegs=true Complete still calls Ensure
+
+All tunnel-proxy-skip hard tests passed (8 asserts).
+  PASS
+
+--- tunnel-proxy-skip-harder ---
+
+=== tunnel proxy skip HARDER (reuse / adopt / Start ungated) ===
+
+  PASS  Win Complete has NO orphan-listener adopt path
+  PASS  Mac complete has NO orphan-listener adopt path
+  PASS  Mac logs skip_sidecar when session has no proxy ports
+  PASS  Set-SocksProxyPortOnReuse sets SessionTunnelProxyLegs on success and failure paths
+  PASS  Complete early-skips on SessionTunnelProxyLegs=false before sessionHasLegs
+  PASS  post-auth sidecar heal block present
+  PASS  post-auth Start-CursorProxySidecar requires mayEnsureSidecar (not ungated)
+  PASS  HARDER A: Legs=$null + orphan 19080/19180 up => skip, no Ensure
+  PASS  HARDER B: Legs=$false wins over stale SocksProxyPort (no Ensure)
+  PASS  HARDER C: Set-SocksProxyPortOnReuse sets Legs=$false when tunnel cmdline has no -L
+  PASS  HARDER D: Legs=$true still calls Ensure (positive path)
+
+All HARDER tunnel-proxy-skip tests passed (11 asserts).
+  PASS
+
+--- logging-runid-hard-batch ---
+
+=== test-logging-runid-hard-batch ===
+
+--- Static contracts (13) ---
+  PASS  Wait-ConnectExit FAIL EXIT on non-zero uses ERROR level
+  PASS  Write-ConnectUserFacingError logs USER_ERROR at ERROR level
+  PASS  SESSION_FILTER grep tip + usable Select-String -Pattern filter
+  PASS  Write-ConnectLog lines include [session-id] bracket
+  PASS  day-log mutex Global\ClaudeConnectDayLogWrite-<dayTag>
+  PASS  zero-loss offline-first policy in code or docs/client-connect.md
+  PASS  no-shrink sync: forbid_shrink when local < remote (Win+Mac)
+  PASS  log-sync fast mkdir: LogSyncFastMkdirMs + $mk without find ... mtime
+  PASS  ERROR force-flush vs WARN coalesce via Request-ConnectLogSync
+  PASS  connect.bat mints RUN_ID before preflight
+  PASS  preflight per-PID RUN_ID handoff file
+  PASS  bat adopts shared RUN_ID handoff only when unset
+  PASS  connect.bat FAIL/BOOTSTRAP lines use [ERROR]/[INFO] with session id bracket
+--- LIVE dual-mint (1) ---
+  PASS  LIVE dual-mint: distinct 12-hex RUN_IDs (271e88f8511d vs 8d15efae7d42)
+
+=== RESULT pass=14 fail=0 asserts=14 ===
+ALL CHECKS PASSED
+  PASS
+
+--- bat-preflight-heal-hard-batch ---
+
+=== HARD batch: connect.bat preflight / heal / boot ===
+
+--- HARD batch asserts (14) ---
+  PASS  BAT_INNER outer uses VBS style-0 hide relaunch then exit /b 0
+  PASS  BAT_INNER belt calls connect-hide-console.ps1
+  PASS  BAT_INNER token bounded (guard + set only)
+  PASS  preflight early-path powershell starts <=3 (got 3)
+  PASS  preflight exit 2 heal routes Smart bat to HEAL_RELAUNCH
+  PASS  preflight exit 3 update relaunch bounded by UPDATE_DEPTH>=3
+  PASS  bat+preflight honor SKIP_HEAL/SKIP_UPDATE handoff file
+  PASS  preflight happy path sets SKIP_HEAL/SKIP_BOOTSTRAP then AFTER_CLIENT_UPDATE
+  PASS  bat logs FAIL UPDATE_BAT_EXIT when UPD_EC=1
+  PASS  bat logs FAIL OUTDATED_SCRIPTS inside OUTDATED block
+  PASS  connect-boot owns mutex release; connect.bat has no ReleaseMutex
+  PASS  connect.bat detaches connect-boot.ps1 (no inline hidden connect.ps1)
+  PASS  preflight exit 2 Sepidz skips HEAL_RELAUNCH
+  PASS  Sepidz guards block Smart copy and skip auto-update
+  PASS  version guard: findstr EXPECT_VER + live parity (20260729.15)
+
+ALL PASS (14 bat preflight heal hard batch asserts)
+  PASS
+
+--- publish-iexpress-hard-batch ---
+
+=== publish / IExpress hard batch (2026-07-27) ===
+
+  PASS  AppLaunched is wscript //B //Nologo setup-run-hidden.vbs
+  PASS  AppLaunched is not powershell Bypass+Hidden (Defender SFX heuristic)
+  PASS  IExpress stage ships setup-claude-connect.cmd
+  PASS  setup-run-hidden.vbs uses sh.Run style 0 (no console flash)
+  PASS  setup-launch resolves Claude-Connect\{ver}\src versioned layout
+  PASS  Write-ConnectInstantLauncher writes Claude-Connect.vbs and .cmd trampoline
+  PASS  instant launcher must not use titled start /D powershell (orphan cmd)
+  PASS  setup clears install-notice env; worker has no install MessageBox
+  PASS  fast_path boots connect-boot directly when src already complete
+  PASS  worker skips preboot update (manual_only)
+  PASS  worker does not set CLAUDE_CONNECT_UPDATE_YES=1
+  PASS  setup-launch and setup-worker call Unblock-File on client scripts
+  PASS  publish.ps1 Assert-ClientPackage forbids server/ in client packages
+  PASS  publish.ps1 patches Smart IP 192.168.210.240 -> Sepidz 192.168.250.70
+  PASS  client-bundle-manifest lists 12 core handoff files (missing: )
+
+All 15 publish/IExpress hard-batch gates passed.
+  PASS
+
+--- elevate-ssh-hard-batch ---
+
+=== test-elevate-ssh-hard-batch ===
+
+--- A) Elevate-when-needed (not always elevate) ---
+  PASS  connect.ps1 documents elevate-when-needed
+  PASS  cold-start header has no Verb RunAs
+  PASS  AdminFix switch retained for on-demand elevate
+--- B) AdminFix RunAs + admin failure codes ---
+  PASS  Invoke-LaptopAdminOps elevates via RunAs -AdminFix
+  PASS  Invoke-LaptopAdminOps logs FAIL NEED_ADMIN
+  PASS  Invoke-LaptopAdminOps logs FAIL ADMIN_DENIED on decline
+  PASS  Invoke-LaptopAdminOps logs FAIL ADMIN_UAC on UAC/fix failure
+--- C) admin_ak unreadable / cannot_read_ak ---
+  PASS  Test-AuthorizedKeyFragment logs cannot_read_ak on access denied
+  PASS  Test-LaptopSshReady skips admin_ak when unreadable unelevated
+  PASS  Test-LaptopSshReady uses explicit null check (no false-positive NEED_ADMIN)
+--- D) sshd readiness wait + firewall Profile Any ---
+  PASS  Install-ServerKey waits up to 20s for sshd TcpClient readiness
+  PASS  SSH firewall rule uses Profile Any (Invoke-LaptopAdminOps + AdminFix path)
+--- E) authorized_keys repair ---
+  PASS  Install-ServerKey repairs authorized_keys with loopback restriction
+--- F) Console Key+KeyChar Persian layout (R/Q/C/X) ---
+  PASS  Session loop resolves R/Q via KeyChar + VK fallback (Persian-safe)
+  PASS  Read-PostDisconnectKey resolves C/X via KeyChar + VK fallback
+
+=== RESULT pass=15 fail=0 asserts=15 ===
+ALL CHECKS PASSED
+  PASS
+
+--- update-relaunch-hard-batch ---
+
+=== Update relaunch hard batch (apply + handoff contracts) ===
+
+  PASS  apply success logs applied_ok + UPDATE_EXIT exit=2 need_relaunch breadcrumbs
+  PASS  apply tail order: applied_ok -> Release mutex -> kill_self -> Environment.Exit(2)
+  PASS  calledFromLiveUi block relaunches bat, logs kill_self, schedules self Stop-Process, hard Exit(2)
+  PASS  Wait-ConnectExit skipEnter fast path for update_* relaunch (no Press Enter drain)
+  PASS  Invoke-ConnectManualUpdate flags manual update and forbids stale Press Enter fallthrough
+  PASS  Quiet mid-session skips optional unless CLAUDE_CONNECT_UPDATE_YES auto-applies
+  PASS  optional Quiet logs silent skip; force apply gated on mode=force AND force_min
+  PASS  server client-update-policy.json mode is optional
+  PASS  Sync-ConnectExeBesideClient skips foreign_verdir (no NEW.exe into OLD VerDir)
+  PASS  versioned_apply writes current.txt, sets CLAUDE_CONNECT_VER_DIR, logs versioned_apply ok
+  PASS  Swap-LiveDir inplace fallback when live folder in use still pending exit=2 relaunch
+  PASS  flat Desktop layout stages bak/new outside live root (flat_layout staging_ext)
+  PASS  Release-ConnectSingleInstanceForUpdateRelaunch stops stale connect.ps1 and parent cmd /K connect.bat
+  PASS  optional prompt is Y/N only; defer helpers removed; stale update-defer.txt cleared
+
+Assert count: 14
+Script: D:\Smart\Claude-Code-Server\scripts\client\tests\test-update-relaunch-hard-batch.ps1
+All 14 hard-batch contracts passed.
+  PASS
+
+--- connect-ui-menu-hard-batch ---
+
+=== HARD: connect-ui menu / session batch ===
+
+  PASS  Write-SessionBox footer has H hygiene (G git removed)
+  PASS  Wait-ConnectExit logs EXIT_WAIT and FAIL EXIT on failure
+  PASS  Wait-ConnectExit offers Press Enter close (P)
+  PASS  Choose-Project uses unary comma pipeline-safe return
+  PASS  connect.ps1 captures Choose-Project via @(..)[-1]
+  PASS  connect.ps1 captures Resolve-EditorChoice via @(..)[-1]
+  PASS  Resolve-EditorChoice uses unary comma pipeline-safe return
+  PASS  multi-instance cap surfaces 10 windows already open (MessageBox or console)
+  PASS  Enter-ConnectSingleInstance logs MULTI_INSTANCE acquired
+  PASS  Enter-ConnectSingleInstance mutex catch is fail-closed (block)
+  PASS  session loop resolves R/H/O/Q (+ Enter for Q) with ConsoleKey VK fallback
+  PASS  Read-PostDisconnectKey resolves M/C/X with VK-safe ConsoleKey fallback
+  PASS  connect.ps1 logs INTERACTIVE project_menu_shown
+  PASS  empty Choose-Project logs FAIL MENU_ABORT
+
+Passed: 14  Failed: 0
+  PASS
+
+--- server-laptop-exec-hard-batch ---
+
+=== HARD: server laptop-exec batch invariants ===
+
+  PASS  hooks-project.json is {"version":1,"hooks":{}}
+  PASS  laptop-exec-setup writes empty project hooks.json
+  PASS  guard-wrap fail-open (never lock agent on guard failure)
+  PASS  preToolUse matcher excludes Shell (golden + setup)
+  PASS  laptop-exec rg rejects -i
+  PASS  laptop-exec rg rejects --glob
+  PASS  laptop-exec caps mux at 8 concurrent slots
+  PASS  laptop-exec loud TUNNEL_PORT_MISSING on blank conf
+  PASS  sudo-from-laptop exists and install.sh deploys it
+  PASS  deploy-laptop-exec installs skill+rule
+  PASS  install.sh deploys skill+rule to users
+  PASS  install.sh deploys golden hooks-project.json
+  PASS  laptop-exec/mount/heal have no cmd /c exit 0
+  PASS  push-laptop uses Hidden EncodedCommand probe
+
+Passed: 14  Failed: 0
+HARD server laptop-exec batch: ALL PASS
+  PASS
+
+--- diagnostic-scorecard-hard-batch ---
+
+=== HARD: diagnostic + scorecard batch ===
+
+  PASS  Get-ConnectProblemVerdict defined in canon diagnostic
+  PASS  MOUNT_PENDING is INFO when bg mount has no live mount truth yet
+  PASS  bg mount + mountpoint=yes + on_folder => CURSOR_ON_FOLDER_OK (not MOUNT_FAILED)
+  PASS  canon diagnostic mountPendingLight skips heavy probes on happy SESSION_OPEN
+  PASS  connect.ps1 lightOpen allows bg-mount + on_folder without false MOUNT_FAILED
+  PASS  connect-ui emits AGENT_PATH ok log line
+  PASS  AGENT_PATH bad reasons are explicit (conf_empty|conf_port_closed|probe_fail)
+  PASS  canon connect-diagnostic.ps1 is not a shadow wrapper
+  PASS  windows/connect-diagnostic.ps1 remains repo-dev shadow only
+  PASS  deploy-client-bundle fail-closed blocks STALE-SHADOW diagnostic in flat bundle
+  PASS  Add-SshMsSample feeds SSH_ROLLUP with over_2s/over_5s buckets
+  PASS  Write-ConnectScorecard sources LastAgentPathResult and agent_path= field
+  PASS  SCORECARD live: agent_path=ok conf_port= emitted (got: SCORECARD end auth_ms=n/a banner=n/a mount_ms=n/a am=none editor=closed slot=0 ver=test-diag-scorecard-hard conf_port=21004 agent_path=ok)
+  PASS  Windows skips press-O recovery warn when already on project folder
+  PASS  Mac skips press-O recovery warn when already on project folder
+
+HARD diagnostic+scorecard batch: ALL PASS
+  PASS
+
+--- p0-connect-fixes ---
+
+=== P0 Connect fixes (source contracts) ===
+
+--- 1) Write-TunnelDropLog TunnelPid (not $Pid shadow) ---
+  PASS  Write-TunnelDropLog declares [int]$TunnelPid param
+  PASS  Write-TunnelDropLog does not declare [int]$Pid param
+--- 2) Acquire-TunnelPort peer-live skip ---
+  PASS  git-mode.ps1 skips peer-live probe (skip_peer_live or ACQUIRE_SKIP)
+--- 3) Launch-RemoteEditor fail-closed ---
+  PASS  Launch-RemoteEditor fail-closed markers present
+--- 4) Invoke-ConnectSilentUpdateCheck manual-only ---
+  PASS  Invoke-ConnectSilentUpdateCheck is manual_only no-op
+--- 5) Begin-ConnectRecovery no silent update at start ---
+  PASS  Begin-ConnectRecovery does not call silent update at function start
+--- 6) CONNECT_VERSION consistency (20260729.15) ---
+  PASS  connect.ps1 ConnectVersion is dated (20260729.15)
+  PASS  windows/connect-version.txt matches connect.ps1 (20260729.15 vs 20260729.15)
+  PASS  mac/connect-version.txt matches connect.ps1 (20260729.15 vs 20260729.15)
+  PASS  mac/connect.sh CONNECT_VERSION matches connect.ps1 (20260729.15)
+--- 7) claude-mount git hide fail-fast (soft) ---
+  PASS  (soft) claude-mount hide retries are fail-fast (not 3x long sleep)
+
+P0 connect fixes: 11 passed, 0 failed, 0 soft-pending
+  PASS
+
+--- windows-mcp-no-orphan-cmd ---
+
+=== Stage 6: windows-mcp no orphan cmd ===
+  PASS  Start-WindowsMcpProcessDirect exists
+  PASS  Direct start sets CreateNoWindow=true
+  PASS  Direct start sets UseShellExecute=false
+  PASS  Logs started_via_windows_mcp_exe or python_direct
+  PASS  Uses exe or python -m windows_mcp path
+  PASS  Stop-WindowsMcpOrphanCmdWrappers exists
+  PASS  Orphan reaper targets start-server.cmd wrappers
+  PASS  Start-WindowsMcpIfNeeded uses direct helper
+  PASS  Restart-WindowsMcpServer uses direct helper
+  PASS  Start path calls orphan reaper
+  PASS  Restart path calls orphan reaper
+  PASS  Start-WindowsMcpIfNeeded never schtasks /Run (cmd flash)
+  PASS  Restart-WindowsMcpServer never schtasks /Run
+  PASS  Start has no bare schtasks /Run
+  PASS  Restart has no bare schtasks /Run
+  PASS  Hidden logon VBS launcher present
+  PASS  Maintain path can quiet host messages
+  PASS  Start-WindowsMcpIfNeeded does not Start-Process start-server.cmd
+  PASS  Restart-WindowsMcpServer does not Start-Process start-server.cmd
+  PASS  Legacy started_via_start-server.cmd log removed
+  PASS  connect.ps1 logs auto_relaunch_skip reason=cursor_settings
+  PASS  connect.ps1 checks Settings window title before auto_relaunch
+  PASS  Test-RemoteEditorInAgentHome excludes Settings titles
+  PASS  Agent-home still uses Test-CursorWindowShowsAgentHome
+
+Passed: 24  Failed: 0
+  PASS
+
+--- windows-mcp-ports ---
+
+=== windows-mcp ports (client + server) ===
+  PASS  Client default local port is 18765
+  PASS  Get-WindowsMcpLocalPort exists
+  PASS  Test-WindowsMcpPortBindable exists
+  PASS  Client documents Hyper-V / WinError 10013 risk
+  PASS  Sync exports WMCP_LPORT to server
+  PASS  Sync writes dynamic LOCAL_PORT (not hardcoding 8000)
+  PASS  Sync does not hardcode LOCAL_PORT=8000
+  PASS  Client uses Get-WindowsMcpLocalPort helper
+  PASS  No hardcoded --port 8000 in serve/auth/install paths
+  PASS  Port 18765 is bindable (or already listening) on this laptop
+  PASS  Port 8000 is excluded/unusable here (Hyper-V range) â€” default 18765 is required
+  PASS  Server has per-UID default forward helper
+  PASS  Server formula is 28000+(UID-1000)
+  PASS  Server default LPORT is 18765
+  PASS  Forward disables ControlMaster
+  PASS  Forward disables ControlPath
+  PASS  Server does not default FPORT to shared 18000
+  PASS  smart UID 1002 -> forward 28002
+  PASS  mehrdad UID 1007 -> forward 28007
+  PASS  UID 1000 -> forward 28000
+  PASS  UID <1000 fallback 18000
+  PASS  reference-windows-mcp.md documents laptop port 18765
+  PASS  reference-windows-mcp.md documents per-UID forward
+  PASS  reference no longer teaches laptop :8000 as the product default
+  PASS  Sync HTTP-probes forward (WMCP_PROBE)
+  PASS  Sync logs probe result
+  PASS  Maintain-WindowsMcpSession exists
+  PASS  Ensure fails closed when probe fails
+  PASS  Watchdog keeps windows-mcp-forward alive
+  PASS  Forward leaves healthy live listeners alone
+  PASS  verify.sh checks per-UID windows-mcp ports
+  PASS  connect.ps1 mid-session maintain hook
+
+Passed: 32  Failed: 0
+  PASS
+
+--- figma-skills-pack ---
+PASS  exists server\skills\figma-use\SKILL.md
+PASS  exists server\skills\figma-use\references\gotchas.md
+PASS  exists server\skills\figma-use\references\plugin-api-standalone.d.ts
+PASS  exists server\skills\figma-generate-design\SKILL.md
+PASS  exists server\skills\figma-create-new-file\SKILL.md
+PASS  exists server\skills\figma-designer\SKILL.md
+PASS  exists server\skills\FIGMA-SKILLS-VENDOR.md
+PASS  plugin-api-standalone.d.ts > 100KB
+PASS  figma-designer frontmatter name
+PASS  figma-designer requires figma-use
+PASS  figma-designer mentions figma-generate-design
+PASS  figma-designer has pasteable prompt template
+PASS  figma-designer is orchestrator (not thin stub)
+PASS  exists server\skills\figma-designer\references\skill-map.md
+PASS  exists server\skills\figma-designer\references\canvas-workflows.md
+PASS  exists server\skills\figma-designer\references\hard-gates.md
+PASS  exists server\skills\figma-designer\references\club-design-kit.md
+PASS  club-design-kit has Club fileKey
+PASS  club-design-kit documents Club font
+PASS  club-design-kit documents Design Kit V.2
+PASS  club-design-kit has libraryKey
+PASS  figma-designer references club-design-kit
+PASS  figma-design.mdc points to figma-designer
+PASS  figma-design.mdc covers write-to-canvas
+PASS  cursor-mcp-pack.md designer prompts
+PASS  install.sh deploys figma-use
+PASS  install.sh deploys figma-generate-design
+PASS  install.sh deploys figma-create-new-file
+PASS  install.sh deploys figma-designer
+PASS  add-user.sh deploys figma-use
+PASS  add-user.sh deploys figma-designer
+PASS  verify.sh checks figma-use skill
+PASS  verify.sh checks club-design-kit
+
+ALL PASS
+  PASS
+
+--- connect-bat-max-ps-starts ---
+
+=== Stage 6: connect.bat max PS starts (preflight optional) ===
+  PASS  connect.bat exists
+  PASS  connect.bat gates preflight with if exist (optional)
+  PASS  connect.bat hands off to connect-boot.ps1
+  PASS  preflight reference index found
+  PASS  preflight path jumps to AFTER_CLIENT_UPDATE
+  PASS  preflight early-path powershell starts <=3 (got 1)
+  INFO  preflight present; early-path PS starts=1
+ALL PASS
+  PASS
+
+--- client-update-policy-optional ---
+
+=== client-update-policy optional (Stage 6b) ===
+
+  PASS client-update-policy.json exists
+  PASS policy mode is optional
+  PASS policy latest is dated version (got 20260729.15)
+  PASS policy force_min_version is null/empty
+  PASS policy JSON has no defer_hours
+  PASS policy keeps message_optional
+  PASS connect-update prompt catch defaults to N
+  PASS connect-update empty answer defaults to N
+  PASS connect-update catch no longer defaults to Y
+  PASS Win prompt is Yes / Not now only
+  PASS Win prompt has no [D]efer
+  PASS Save-UpdateDefer removed
+  PASS Test-UpdateDeferActive removed
+  PASS connect-update still uses Test-UpdateForceRequired
+  PASS UPDATE_FORCE gated on mode force AND force_min (forceReq)
+  PASS Quiet optional path logs UPDATE_OPTIONAL_SKIP
+  PASS Quiet path defines autoYes from UPDATE_YES
+  PASS Quiet skip requires no UPDATE_YES
+  PASS optional/Quiet path uses -not forceApply (no force without min)
+  PASS hard-refuse mentions claude-code-sepidz
+  PASS hard-refuse mentions Claude-Connect-Sepidz
+  PASS hard-refuse mentions Sepidz IP .70
+  PASS hard-refuse FAIL/REFUSE marker present in connect.ps1 or connect-update.ps1
+  PASS connect.ps1 has Smart hard-refuse path check
+  PASS connect-update.ps1 has Smart hard-refuse path check
+  PASS publish.ps1 still defines Clear-PublishedWindowsToExeOnly
+  PASS Smart publish gates EXE-only strip behind env flag
+  PASS Smart publish documents full script tree retention
+  PASS SEPIDZ_PUBLISH_FROZEN marker still present
+  PASS Mac optional prompt shows [y/N]
+  PASS Mac optional prompt no longer shows [y/N/D]
+  PASS Mac has no Defer answer branch
+  PASS Mac optional ans defaults to N
+  PASS Mac empty Enter keeps N
+  PASS Mac optional block uses [y/N]
+
+All 35 contracts passed.
+  PASS
+
+--- smartscreen-docs-contract ---
+
+=== smartscreen / Defender FP docs (Stage 6c) ===
+
+  PASS docs state folder/ZIP primary handoff
+  PASS README mentions folder or ZIP
+  PASS README marks folder/ZIP as primary
+  PASS README no longer prefers EXE-only Option A
+  PASS docs mention SmartScreen
+  PASS docs mention Defender
+  PASS docs mention false positive
+  PASS docs mention unsigned IExpress EXE risk
+  PASS docs mention Allow/Unblock MOTW
+  PASS docs scope exclusion to Desktop\Claude-Connect
+  PASS docs mention scoped exclusion
+  PASS docs mention Authenticode
+  PASS docs mention OV code-signing
+  PASS docs mention RFC 3161 timestamp
+  PASS docs link WDSI submission
+  PASS docs never suggest Set-MpPreference DisableRealtime
+  PASS docs never advise disabling Defender
+  PASS build-windows-exe never disables Defender via Set-MpPreference
+  PASS docs explicitly forbid disabling Defender
+  PASS build-windows-exe.ps1 comments point at FP docs
+  PASS AppLaunched uses hidden wscript setup-run-hidden.vbs (no console flash)
+  PASS setup still chains through setup-claude-connect.cmd
+  PASS AppLaunched is not powershell Bypass+Hidden (Defender dropper heuristic)
+  PASS AppLaunched AppendLine is not raw powershell.exe
+
+All 24 contracts passed.
+  PASS
+
+--- never-again-ship-gates ---
+
+=== never-again ship gates (2026-07-27 fleet) ===
+
+  PASS deploy maps connect-diagnostic + connect-ui from CLIENT_DIR canon
+  PASS deploy stages scripts/client/connect-diagnostic.ps1 (not only windows/ stub)
+  PASS deploy fail-closed greps STALE-SHADOW before install
+  PASS deploy has post-stage ship-gate verifier
+  PASS ship-gate explicitly blocks diagnostic shadow
+  PASS ship-gate blocks AV AppLaunched EXE heuristic
+  PASS canon diagnostic has verdict helper
+  PASS canon diagnostic is not a shadow
+  PASS windows/ diagnostic remains repo-dev shadow only
+  PASS IExpress AppLaunched is hidden wscript -> setup-run-hidden.vbs
+  PASS IExpress stage still runs setup-claude-connect.cmd under the hidden launcher
+  PASS hidden VBS runs cmd with window style 0 (no console flash)
+  PASS IExpress AppLaunched is not raw powershell.exe
+  PASS sidecar force-clears when backend -L down
+  PASS sidecar enumerates personal+profile settings paths for clear
+  PASS sidecar logs which settings path was scrubbed
+  PASS Ensure stops front doors when backend down
+  PASS Start refuses to pin settings without backend
+  PASS HealBlackhole stops orphan fronts without backends
+  PASS watchdog scrubs sticky 18998 when front is blackhole
+  PASS Mac sidecar has HealBlackhole
+  PASS Mac sidecar gates start on backend
+  PASS ship-gate requires backend_down force-clear string in staged sidecar
+  PASS ship-gate requires personal+profile path enum
+  PASS ship-gate requires HealBlackhole marker
+  PASS ship-gate requires hybrid no-overwrite
+  PASS ship-gate checks Mac editor-launch personal scrub
+  PASS connect-boot hybrid sweep drops stale root instead of overwriting src
+  PASS connect-boot prefers stamped version tree over stale current.txt
+  PASS connect-update hybrid sweep drops stale root instead of overwriting src
+  PASS connect.ps1 invokes BootReap (HealBlackhole is sidecar/boot-sidecar, not connect drive-by)
+  PASS git-mode Complete-CursorProxyAfterTunnel present
+  PASS git-mode must not drive-by HealBlackhole (sidecar owns blackhole heal)
+  PASS sidecar still defines Invoke-CursorProxySidecarHealBlackhole
+  PASS connect-ui hard-kills self after update apply (no stale Press Enter)
+  PASS Wait-ConnectExit still knows update_manual_relaunch
+  PASS manual update path documents no Press Enter fallthrough
+  PASS deploy documents BusyBox sed \\r = letter-r hazard
+  PASS deploy prefers perl for CR strip (not sed \\r)
+  PASS ship-gate rejects truncated connect.ps1 identifiers
+  PASS ship-gate requires intact Get-InteractiveLaptopUser in connect.ps1
+  PASS update Sync skips Claude-Connect-NEW.exe inside OLD \{ver\} folders
+  PASS update repairs VerDir so only matching EXE + src sit outside root
+  PASS connect-env-repair owns VerDir-only-EXE layout healer
+  PASS setup forces DestExe name to match VerDir folder leaf
+  PASS setup enforces VerDir src+EXE after instant launcher
+  PASS setup stamps src connect-version to folder leaf
+  PASS setup uses structural src check (folder leaf may differ from package)
+  PASS setup instant launcher lives at root via current.txt
+  PASS VerDir repair removes stale .vbs/.cmd beside EXE
+  PASS VerDir repair removes unexpected directories (only src + EXE allowed)
+  PASS VerDir repair-all drops incomplete src-only orphan trees
+  PASS connect-boot heals VerDir stray scripts at boot
+  PASS connect-boot heals hybrid root when launched from src
+  PASS update compares VerDir leaf to VersionLabel before promote
+  PASS setup-launch writes Claude-Connect.vbs instant reopen
+  PASS instant .cmd trampoline uses hidden wscript (no lingering console)
+  PASS instant launcher must not use titled start /D powershell (orphan cmd)
+  PASS publish Desktop sync targets Claude-Connect\{ver}\src (not flat dump)
+  PASS publish reports VerDir contract EXE+src only
+
+All 60 never-again gates passed.
+  PASS
+
+--- versioned-layout ---
+
+=== Versioned Claude-Connect layout ===
+  PASS  setup-launch has fast-path complete check
+  PASS  setup-launch builds versioned tree
+  PASS  setup-launch uses Claude-Connect root name
+  PASS  setup-launch uses src under version dir
+  PASS  setup-launch prunes old versions
+  PASS  setup-launch keeps 3 versions
+  PASS  setup-launch logs fast_path
+  PASS  setup-launch boots UI directly on fast path (no worker/network)
+  PASS  setup-launch writes instant launcher
+  PASS  setup-launch writes Claude-Connect.vbs (no orphan cmd console)
+  PASS  setup-launch still writes Claude-Connect.cmd trampoline
+  PASS  setup-launch moves EXE into version dir
+  PASS  setup-launch has no install confirm notice
+  PASS  setup-launch does not enable install notice
+  PASS  worker has no install MessageBox helper
+  PASS  worker has no relocate confirm dialog
+  PASS  worker does not ask where to reopen
+  PASS  worker closes old UI on relocate
+  PASS  update detects versioned layout
+  PASS  update prunes version dirs
+  PASS  update migrates flat layout
+  PASS  update applies into new version folder
+  PASS  update prune keep=3
+  PASS  extracted Prune-OldVersionDirs
+  PASS  prune kept .5
+  PASS  prune kept .12
+  PASS  prune kept .15
+  PASS  prune removed oldest .1
+  PASS  prune left exactly 3 dirs
+  PASS  extracted Test-VersionSrcStructural
+  PASS  extracted Test-VersionSrcComplete
+  PASS  incomplete src => false
+  PASS  complete src => true
+  PASS  stamp mismatch still structural-complete
+  PASS  missing src => structural false
+
+RESULT: 35 pass / 0 fail
+  PASS
+
+--- exe-launch-slot-gate ---
+
+=== EXE launch slot gate (Stage 6f) ===
+
+  PASS _setup-launch-body.ps1 exists
+  PASS _setup-worker-body.ps1 exists
+  PASS defines Test-ConnectUiOpen
+  PASS probes Global\ClaudeConnect# slots
+  PASS ExeLaunch double-launch gate lives in the detached worker
+  PASS MessageBox/text mentions 10 Claude Connect
+  PASS MessageBox/text mentions already open
+  PASS setup-launch spawns the detached setup-worker.ps1
+  PASS setup-launch quotes -File worker path (spaces-safe)
+  PASS worker quotes -File boot path (spaces-safe)
+  PASS setup-launch refreshes worker on first install/repair
+  PASS setup-launch fast path boots without worker
+  PASS setup-launch does NOT run the update inline (moved to worker - keeps wextract mutex hold short)
+  PASS setup-launch has no debounce sleep (would hold wextract mutex) - debounce moved to worker
+  PASS worker skips pre-boot update (manual menu u only)
+  PASS worker does NOT set UPDATE_YES (no EXE auto-update)
+  PASS worker boots UI without auto-update
+  PASS worker documents manual-only update policy
+  PASS worker never boots a folder without connect-boot.ps1
+  PASS worker starts connect-boot.ps1
+  PASS no connect-boot CommandLine process gate
+  PASS no connect.ps1 CommandLine process gate
+  PASS portable/versioned install resolves beside double-clicked EXE
+  PASS UI-open gate is still a dedicated function (mutex slots)
+  PASS slot/free vocabulary present
+  PASS blocks only when zero free slots (explicit free-count gate)
+  PASS old single-instance MessageBox text removed
+
+All 27 contracts passed.
+  PASS
+
+--- exe-spaced-path-launch ---
+
+=== EXE spaced-path launch (worker/boot -File quoting) ===
+
+  PASS  setup-launch embeds quoted workerDest for -File
+  PASS  setup-worker embeds quoted $boot for -File
+  PASS  setup-launch always refreshes setup-worker.ps1
+  PASS  setup-launch no longer skips worker refresh on fast path
+  PASS  LIVE unquoted -File with spaces does NOT run (bug baseline)
+  PASS  LIVE quoted -File with spaces DOES run (fix)
+
+RESULT: 6 pass / 0 fail
+  PASS
+
+--- cursor-profile-db-tool ---
+
+=== cursor-profile-db-tool (Stage 10) ===
+
+  PASS cursor-profile-db-tool.ps1 exists
+  PASS has -Report
+  PASS has -PruneChatAgent
+  PASS has -Force
+  PASS checks profile Cursor closed before prune
+  PASS emits REFUSE prune on unsafe path
+  PASS documents never wire into connect
+  PASS uses Get-CursorRemoteProfileDir
+  PASS connect.ps1 does not call cursor-profile-db-tool
+  PASS connect-boot.ps1 does not call cursor-profile-db-tool
+  PASS connect.bat does not call cursor-profile-db-tool
+  PASS tool parses cleanly
+  PASS -Report exit 0 (got 0)
+  PASS -Report prints state_vscdb_bytes
+  PASS -Report prints profile_cursor_closed
+  PASS -PruneChatAgent without -Force exits non-zero
+  PASS -PruneChatAgent without -Force says REFUSE
+  PASS -PruneChatAgent -Force refuses while profile Cursor running
+  PASS refuse message mentions still running
+
+All 19 contracts passed.
+  PASS
+
+--- chat-freeze-skip-paths ---
+
+=== chat freeze skip paths (Stage 6d) ===
+
+  PASS editor-launch has CURSOR_PROXY_CLEAR_SKIP
+  PASS editor-launch has Test-MayClearCursorProxySettings
+  PASS editor-launch prefers repair when windows open
+  PASS sidecar Clear skips when windows open AND front up
+  PASS sidecar force-clears sticky when windows open AND 18998 down
+  PASS sidecar repair helper exists
+  PASS sidecar clear logs repair_sidecar_only
+  PASS boot reap preserves live fronts / open windows
+  PASS watchdog gets job-handle detach so Connect exit keeps fronts
+  PASS auth has AUTH_SYNC_SKIP
+  PASS auth skips reason=db_too_large
+  PASS auth threshold is 500 MiB (524288000)
+  PASS db_too_large only on mid-session (!Force)
+  PASS auto_relaunch still gated on cursor_settings
+  PASS AutoRelaunchAttempted one-shot still present
+  PASS proxy lifetime test still covers CLEAR_SKIP
+
+All 16 contracts passed.
+  PASS
+
+--- banner-probe-interval ---
+
+=== BANNER_PROBE_INTERVAL: adaptive 45s interval + SoftFail/4 budget + keepalive-first defer (source contracts) ===
+
+  PASS  extracted Sync-SessionTunnelProcess function body
+  PASS  extracted sync_session_tunnel_forward() function body
+--- #2 Windows: forward-probe interval 30s -> 45s ---
+  PASS  forward-probe elseif gate on ($now - $script:LastForwardProbeAt).TotalSeconds -ge <threshold> found
+  PASS  forward-probe gate threshold resolves to 45 seconds (found token: '$script:TunnelForwardProbeIntervalSec')
+  PASS  forward-probe gate is NOT the old bare 30s threshold
+--- #2 Windows: SoftFail budget 6 -> 4 in Sync-SessionTunnelProcess ---
+  PASS  Sync-SessionTunnelProcess has >=2 'TunnelSoftFailCount -ge <threshold>' checks resolving to 4 (found 2 of 2 total)
+  PASS  no TunnelSoftFailCount -ge <threshold> check resolves to the old value 6
+  PASS  Sync-SessionTunnelProcess logs 'soft_fail count=.../<threshold>' at least twice resolving to 4 (found 2 of 2 total)
+  PASS  no 'soft_fail count=.../<threshold>' log resolves to the old value 6
+--- #2 Windows: steady-state probe attempts (SoftFail==0 -> 1 attempt, SoftFail>0 -> 3 attempts) ---
+  PASS  a variable is assigned 1 attempt when TunnelSoftFailCount==0 and 3 attempts when TunnelSoftFailCount>0 (either branch order)
+  PASS  probe loop bound uses the adaptive attempts variable ($attempts), not a hardcoded literal
+  PASS  old hardcoded "for ($i = 1; $i -le 3; $i++)" probe loop bound removed
+--- #1 Windows: keepalive-first defer path ---
+  PASS  $script:TunnelBannerDeferCount initialized at script scope (0)
+  PASS  defer gate requires BOTH $script:TunnelSoftFailCount -eq 0 AND TunnelBannerDeferCount unused (-eq 0 / -lt 1)
+  PASS  defer gate consults last banner cache success ($script:TunnelBannerCacheUp)
+  PASS  defer path increments $script:TunnelBannerDeferCount
+  PASS  defer path logs a message containing 'probe_deferred' or 'keepalive_defer'
+--- Anti-#3 Windows: SoftFail>0 must still probe via Test-TunnelUp (never skip solely on bg_alive) ---
+  PASS  Sync-SessionTunnelProcess still calls Test-TunnelUp in the bg-alive path
+  PASS  defer branch is never gated on $script:TunnelBannerDeferCount alone (must also require $script:TunnelSoftFailCount -eq 0)
+--- #2 Mac: forward-probe interval 30s -> 45s ---
+  PASS  sync_session_tunnel_forward has a $(( now - _LAST_FORWARD_PROBE_AT )) -lt <threshold> gate
+  PASS  forward-probe gate threshold resolves to 45 seconds (found token: '"$_TUNNEL_FORWARD_PROBE_INTERVAL_SEC"')
+  PASS  forward-probe gate is NOT the old bare 30s threshold
+--- #2 Mac: SoftFail budget 6 -> 4 in sync_session_tunnel_forward ---
+  PASS  sync_session_tunnel_forward checks "$_TUNNEL_SOFT_FAIL_COUNT" -ge 4
+  PASS  old "$_TUNNEL_SOFT_FAIL_COUNT" -ge 6 check removed
+  PASS  sync_session_tunnel_forward logs 'soft_fail count=.../4' at least twice (found 2)
+  PASS  sync_session_tunnel_forward no longer logs 'soft_fail count=.../6'
+--- #1 Mac: keepalive-first defer path ---
+  PASS  _TUNNEL_BANNER_DEFER_COUNT initialized (=0) alongside other tunnel globals
+  PASS  defer gate requires BOTH _TUNNEL_SOFT_FAIL_COUNT -eq 0 AND _TUNNEL_BANNER_DEFER_COUNT -eq 0
+  PASS  Mac defer gate consults last banner cache success (_TUNNEL_BANNER_CACHE_UP)
+  PASS  Mac defer path logs a message containing 'probe_deferred' or 'keepalive_defer'
+--- Anti-#3 Mac: SoftFail>0 must still call tunnel_up ---
+  PASS  sync_session_tunnel_forward still calls tunnel_up() in the bg-alive path
+  PASS  Mac defer branch is never gated on _TUNNEL_BANNER_DEFER_COUNT alone (must also require _TUNNEL_SOFT_FAIL_COUNT -eq 0)
+
+ALL PASS
+  PASS
+
+--- sidecar-watchdog-lease ---
+
+=== SIDECAR_WATCHDOG_LEASE: watchdog mutex ownership + Stop/Reap cleanup + lease file (source contracts) ===
+
+--- #1 Start-CursorProxySidecarWatchdog: keep mutex in $script:CursorProxyWatchdogMutex ---
+  PASS  extracted Start-CursorProxySidecarWatchdog function body
+  PASS  Start-CursorProxySidecarWatchdog creates a Mutex object into a variable (not a $null = discard)
+  PASS  $script:CursorProxyWatchdogMutex is assigned the Mutex object (not discarded)
+  PASS  watchdog mutex handle is WaitOne()-ed (not just created-and-ignored)
+  PASS  old discard-only "$null = New-Object System.Threading.Mutex(...)" pattern removed from Start-CursorProxySidecarWatchdog
+--- #4 Watchdog lease file (owner PID) ---
+  PASS  lease filename 'claude-connect-sidecar-watchdog.lease' present in cursor-proxy-sidecar.ps1
+  PASS  Start-CursorProxySidecarWatchdog references the lease file path
+  PASS  Start-CursorProxySidecarWatchdog writes the owner PID into the lease file
+  PASS  lease file is actually written to disk (Set-Content/Out-File/WriteAllText)
+--- #2 Stop-CursorProxySidecarWatchdog exists: release/dispose mutex + cmdline-scoped kill ---
+  PASS  Stop-CursorProxySidecarWatchdog function exists in cursor-proxy-sidecar.ps1
+  PASS  Stop-CursorProxySidecarWatchdog calls ReleaseMutex() on the held mutex
+  PASS  Stop-CursorProxySidecarWatchdog Disposes/Closes the held mutex
+  PASS  Stop-CursorProxySidecarWatchdog operates on $script:CursorProxyWatchdogMutex
+  PASS  Stop-CursorProxySidecarWatchdog filters kill target by cmdline containing 'claude-connect-sidecar-watchdog.ps1'
+  PASS  Stop-CursorProxySidecarWatchdog process kill is CommandLine-scoped (not by bare process name)
+  PASS  Stop-CursorProxySidecarWatchdog actually terminates the matched watchdog process(es)
+--- #3 Stop-CursorProxySidecarRelays / Reap-CursorProxySidecarOrphans: cmdline-scoped only ---
+  PASS  Stop-CursorProxySidecarRelays (or Reap-CursorProxySidecarOrphans) function exists
+  PASS  Stop-CursorProxySidecarRelays filters by cmdline containing 'claude-connect-sidecar-18998.ps1'
+  PASS  Stop-CursorProxySidecarRelays filters by cmdline containing 'claude-connect-sidecar-18999.ps1'
+  PASS  Stop-CursorProxySidecarRelays kill is CommandLine-scoped (not a bare process-name kill)
+  PASS  Stop-CursorProxySidecarRelays never does a blind 'Get-Process powershell | Stop-Process' (would kill foreign PS)
+  PASS  Stop-CursorProxySidecarRelays actually terminates matched relay process(es)
+--- #5 connect.ps1 finally/cleanup: Stop/Reap called on disconnect, not when keepTunnelForEditor ---
+  PASS  located the sessionLoop finally{} block in connect.ps1
+  PASS  located "if ($keepTunnelForEditor) { ... } else { ... }" inside the finally block
+  PASS  located the else-branch (disconnect path) of the keepTunnelForEditor check
+  PASS  disconnect (else) branch calls Stop-CursorProxySidecarWatchdog / Stop-CursorProxySidecarRelays / Reap-CursorProxySidecarOrphans
+  PASS  keepTunnelForEditor branch must NOT stop/reap the sidecar watchdog (editor still open)
+--- #14 Job Object present after #15 PASS ---
+  PASS  cursor-proxy-sidecar.ps1 has Job Object APIs (#14)
+  PASS  connect.ps1 has no Job Object Win32 API usage (job stays in sidecar module)
+--- MUST-NOT: no -ForceUnfreeze / Sepidz paths in this feature ---
+  PASS  cursor-proxy-sidecar.ps1 has no -ForceUnfreeze flag
+  PASS  connect.ps1 has no -ForceUnfreeze flag
+  PASS  cursor-proxy-sidecar.ps1 has no Sepidz deploy/unfreeze wiring
+
+ALL PASS
+  PASS
+
+--- pushconf-am-only ---
+
+=== PushConf am_only / publish_port=0 (static) ===
+  PASS  Push-ServerConnectConf extracted
+  PASS  PushConf mentions am_only
+  PASS  PushConf logs publish_port=0 for non-primary
+  PASS  Remote body sets AM_ONLY
+  PASS  Remote body reads CUR_PORT
+  PASS  Remote body uses PORT_OUT
+  PASS  Remote body warns port_mismatch_keep
+  PASS  PushConf no longer bare-returns skip_non_primary
+  PASS  Still gates on Test-IsPrimaryTunnelPublisher
+  PASS  RESULT line includes am_only
+  PASS  connect.ps1 mentions need_mount
+  PASS  SshX demotes expected need_mount to TRACE
+  PASS  elevated_direct OK is DEBUG
+  PASS  elevated_direct FAIL still logged
+ALL PASS
+  PASS
+
+--- agent-path-diag-logs ---
+
+=== Agent-path + SSH latency diagnostic logs (static) ===
+  PASS  Windows Invoke-AgentPathProbe defined
+  PASS  Windows AGENT_PATH ok log
+  PASS  Windows AGENT_PATH bad log
+  PASS  Windows AGENT_PATH bad reasons
+  PASS  Agent path probe callable
+  PASS  Status line host present
+  PASS  Write-ConnectScorecard emits port=
+  PASS  SCORECARD keeps auth_ms=
+  PASS  SCORECARD can emit agent_path=
+  PASS  SCORECARD reuses LastAgentPathResult
+  PASS  Add-SshMsSample defined
+  PASS  Write-SshLatencyRollupIfDue defined
+  PASS  SSH_ROLLUP log line
+  PASS  SshX records samples
+  PASS  SSH_ROLLUP over_2s field
+  PASS  SSH_ROLLUP over_5s field
+  PASS  git-mode.ps1 knows ABORT_EMPTY
+  PASS  git-mode.ps1 knows port_empty_recovered
+  PASS  git-mode.ps1 knows port_mismatch_keep
+  PASS  git-mode.ps1 emits PUSH_CONF signal= WARN
+  PASS  git-mode.sh surfaces PushConf signals
+  PASS  laptop-exec TUNNEL_PORT_MISSING
+  PASS  laptop-exec logs deprecated_would_be
+  PASS  fallback still (UID-1000)*10
+  PASS  Mac scorecard includes port=
+  PASS  Mac SSH_ROLLUP helper
+  PASS  Mac AGENT_PATH helper
+
+ALL PASS (agent-path diag log contracts)
+  PASS
+
+--- connect-scorecard ---
+
+=== Connect scorecard #19 (static + EditorOpened fixture) ===
+  PASS  Write-ConnectScorecard defined
+  PASS  Phases boot/end
+  PASS  Emits SCORECARD
+  PASS  UI opt-in env
+  PASS  Scorecard not PERF-gated in function header region
+  PASS  boot hook in connect.ps1
+  PASS  end hook in connect.ps1
+  PASS  Mac/sh helper present
+  PASS  Write-ConnectScorecard extractable
+  PASS  SCORECARD prefers $script:EditorOpened (null-check)
+  PASS  SCORECARD must not OR EditorSeenOpen (false-green)
+  PASS  Task8: $script:EditorOpened=$true fixture => SCORECARD has editor=open (got: SCORECARD end auth_ms=n/a banner=n/a mount_ms=n/a am=none editor=open slot=0 ver=test-scorecard)
+  PASS  Task8: EditorSeenOpen alone => editor=closed (got: SCORECARD end auth_ms=n/a banner=n/a mount_ms=n/a am=none editor=closed slot=0 ver=test-scorecard)
+
+ALL PASS
+  PASS
+
+--- editor-opened-script-scope ---
+
+=== EditorOpened script-scope + honest MountOk (Task 5) ===
+  PASS  connect.ps1 must assign $script:EditorOpened = $true on open
+  PASS  connect.ps1 must clear $script:EditorOpened = $false on closed / reset path
+  PASS  must not rely only on local $editorOpened = $true (script scope required)
+  PASS  SESSION_OPEN must pass -MountOk $mountOk (live)
+  PASS  SESSION_OPEN must not hardcode -MountOk $true
+  PASS  Complete-PostTunnelRecovery must pass -MountOk $mountOk
+  PASS  Complete-PostTunnelRecovery must not hardcode -MountOk $true
+  PASS  $mountOk is derived from $mountResult.Ok
+  PASS  Write-ConnectScorecard function extracted from connect-ui.ps1
+  PASS  Write-ConnectScorecard references $script:EditorOpened
+  PASS  SCORECARD must not OR $script:EditorSeenOpen as equal-primary editor signal
+  PASS  SCORECARD prefers $script:EditorOpened via null-check (not sticky OR alone)
+  PASS  SCORECARD keeps Scope-1 editorOpened as secondary fallback only
+  PASS  SCORECARD reads $script:EditorOpened before Scope-1 fallback
+
+Passed: 14  Failed: 0
+  PASS
+
+--- launch-trust-path-no-double-relaunch ---
+
+=== Launch trust path (no double relaunch) â€” Task 6 ===
+  PASS  trust path still has 'SESSION: trusting launch result'
+  PASS  trust log sits inside if ($didLaunch -and $launchOk)
+  PASS  trust path keeps skip-reprobe (skip relaunch check)
+  PASS  trust log documents didLaunch+launchOk skip relaunch check
+  PASS  extracted didLaunch+launchOk trust block
+  PASS  trust block sets $onFolderNow = $true
+  PASS  trust block must not re-probe with Test-RemoteEditorOnCorrectFolder (double-launch risk)
+
+Passed: 7  Failed: 0
+  PASS
+
+--- opening-fail-clears-editor-seen ---
+
+=== Opening fail clears EditorSeenOpen (Task 6) ===
+  PASS  fail path must log EDITOR_SEEN_CLEAR reason=opening_step_fail
+  PASS  found Launch-RemoteEditor / -not $launchOk StepFail region
+  PASS  EDITOR_SEEN_CLEAR reason=opening_step_fail present (sticky clear on Opening fail)
+  PASS  on launch not ok + window not proven: clear $script:EditorSeenOpen and $script:EditorOpened with opening_step_fail
+  PASS  opening_step_fail block clears $script:EditorSeenOpen = $false
+  PASS  opening_step_fail block clears $script:EditorOpened = $false
+  PASS  Opening fail clear must use reason=opening_step_fail (not only editor_closed phase=session_open)
+
+Passed: 7  Failed: 0
+  PASS
+
+--- sidecar-job-object ---
+
+=== Sidecar Job Object #14 (static) ===
+  PASS  Initialize-CursorProxySidecarJob present
+  PASS  Add-CursorProxySidecarJobProcess present
+  PASS  Stop-CursorProxySidecarJob present
+  PASS  KILL_ON_JOB_CLOSE flag
+  PASS  CreateKillOnCloseJob helper
+  PASS  Start-Process uses PassThru for assign
+  PASS  AssignProcessToJobObject P/Invoke
+  PASS  Does not enumerate all powershell for kill-via-job
+ALL PASS
+  PASS
+
+--- sidecar-front-flap ---
+
+=== sidecar front-flap contracts (18998 ECONNREFUSED) ===
+
+  PASS BootReap has preserve-fronts skip path
+  PASS BootReap skip log includes front_up
+  PASS BootReap skip reason fronts_up present
+  PASS BootReap can skip for windows_open
+  PASS BootReap still drops stale lease on skip
+  PASS Start-CursorProxySidecarWatchdog detaches Job into watchdog
+  PASS Clear force path when 18998 down + windows open
+  PASS Clear force path when backend -L down (never repair to 18998)
+  PASS Clear enumerates personal + server profile settings paths
+  PASS Clear scrubs personal %APPDATA%\Cursor sticky 18998
+  PASS Clear logs which settings path was scrubbed
+  PASS Mac editor-launch enumerates personal+profile settings paths
+  PASS Mac clear logs per-path scrub
+  PASS Mac clear includes personal Cursor settings
+  PASS Mac launch force-clears dead sticky with windows open
+  PASS Mac editor-launch clear path present
+  PASS Mac git-mode complete_cursor_proxy_after_tunnel present
+  PASS Mac git-mode skips sidecar when no tunnel proxy legs
+  PASS Mac git-mode must not drive-by heal_blackhole (connect.sh / sidecar own it)
+  PASS Mac connect.sh boot calls heal_blackhole
+  PASS Mac sidecar HealBlackhole
+  PASS Mac sidecar defines heal_blackhole
+  PASS Ensure stops fronts when backend down
+  PASS HealBlackhole orphan front without backend
+  PASS watchdog clears sticky settings on blackhole
+  PASS Start refuses to pin settings without backend
+  PASS CLEAR_SKIP gated on windows open AND front listening
+  PASS editor-launch still routes clear through sidecar helper
+  PASS editor-launch still logs repair_sidecar_only for open windows
+  PASS extracted Invoke-CursorProxySidecarBootReap
+  PASS BootReap still can stop orphan watchdog when safe
+  PASS BootReap body contains skip before kill
+  PASS BootReap has Get-Command-gated StopWatchdog call
+  PASS skip path appears before gated StopWatchdog call
+
+All 34 contracts passed.
+  PASS
+
+--- connect-update-bundle-primary ---
+
+=== connect-update bundle-primary contracts ===
+  PASS bundle_primary is the update path
+  PASS exe_only_primary early-exit removed
+  PASS exe_only_fallback label removed
+  PASS EXE copy pairs use Tag= (not Req=)
+  PASS Req= typo gone
+  PASS exe_promote null-safe path compare
+  PASS comment documents why bundle wins over SFX
+
+All 7 contracts passed.
+  PASS
+
+--- windows-shadow-canon ---
+
+=== Stage G shadow/canon (static) ===
+  PASS  canon connect-ui.ps1 exists
+  PASS  canon connect-diagnostic.ps1 exists
+  PASS  windows/connect-ui.ps1 is wrapper or hash==canon
+  PASS  windows/connect-diagnostic.ps1 is wrapper or hash==canon
+  PASS  shadow ui does not embed full canon body
+ALL PASS
+  PASS
+
+--- skip-12-fingerprint-hold ---
+
+=== #12 conf fingerprint HOLD/SKIP ===
+  SKIP  #12 held: write trigger must be first STATUS_OK (not bare CONNECT_OK); restore keyed by ServerIP; Setup/Config => fingerprint_skip; MUST-NOT #11 quarantine
+ALL PASS (explicit SKIP recorded)
+  PASS
+
+--- step-console-quiet ---
+
+=== STEP_CONSOLE_QUIET: suppress repeat session-loop step-ok console noise (source contracts) ===
+
+--- Windows: connect.ps1 ---
+  PASS  $script:StepConsoleQuiet initialized to $false at script scope
+  PASS  extracted Step($m) function body
+  PASS  Step() header Write-Host is gated behind "if (-not $script:StepConsoleQuiet)"
+  PASS  Step() still logs "STEP begin" to the file unconditionally
+  PASS  extracted StepOk function body
+  PASS  StepOk result line (" ok" / " $d" / progress rewrite) is gated behind "if (-not $script:StepConsoleQuiet)"
+  PASS  StepOk "-> fixed:" loop is gated behind "if (-not $script:StepConsoleQuiet)"
+  PASS  StepOk still logs "STEP end...ok" to the file unconditionally
+  PASS  extracted StepFail function body
+  PASS  StepFail is NOT gated by $script:StepConsoleQuiet (failures always visible)
+  PASS  StepFail still unconditionally prints " failed" to console
+  PASS  sessionLoop sets $script:StepConsoleQuiet = ($script:SessionLoopIter -gt 1) right after incrementing the iter counter
+--- Mac: connect.sh ---
+  PASS  extracted step() function body
+  PASS  step() returns early on STEP_CONSOLE_QUIET=1 (before the printf header)
+  PASS  step() still logs "STEP begin" to the file unconditionally
+  PASS  step() logs to file BEFORE the quiet-gate early return, and prints the header AFTER it
+  PASS  extracted step_ok() function body
+  PASS  step_ok() returns early on STEP_CONSOLE_QUIET=1 (before the printf result line)
+  PASS  step_ok() still logs "STEP end...ok" to the file unconditionally
+  PASS  step_ok() logs to file BEFORE the quiet-gate early return
+  PASS  extracted step_fail() function body
+  PASS  step_fail() is NOT gated by STEP_CONSOLE_QUIET (failures always visible)
+  PASS  step_fail() still unconditionally prints " failed" to console
+  PASS  Mac session loop sets STEP_CONSOLE_QUIET based on (SESSION_LOOP_ITER -gt 1) right after incrementing the iter counter
+
+ALL PASS
+  PASS
+
+--- cursor-launch-console-detached ---
+
+=== Cursor launch console detach (source contracts) ===
+  PASS  editor-launch.ps1 exists (D:\Smart\Claude-Code-Server\scripts\client\editor-launch.ps1)
+  PASS  Start-EditorProcessDirect extractable via Get-FunctionSource
+  PASS  Start-EditorProcessDirect sets ELECTRON_NO_ATTACH_CONSOLE
+  PASS  Start-EditorProcessDirect redirects stdout+stderr (RedirectStandardOutput/Error)
+  PASS  Start-EditorProcessDirect redirect targets cursor-launch day logs
+  PASS  Start-EditorProcessDirect hard-detaches (DETACHED_PROCESS 0x8 and/or CREATE_NEW_PROCESS_GROUP) — Redirect* alone is not enough
+  PASS  NonElevatedLauncher CreateProcessWithTokenW present
+  PASS  NonElevatedLauncher type present
+  PASS  NonElevatedLauncher source extractable
+  PASS  NonElevatedLauncher CreateProcessWithTokenW must use DETACHED_PROCESS / CREATE_NEW_PROCESS_GROUP (creationFlags != 0)
+
+Result: 10 passed, 0 failed
+  PASS
+
+--- tunnel-job-object ---
+
+=== Tunnel Job Object #P2 (static) ===
+  PASS  Ensure-SessionTunnel main tunnel spawn line found
+  PASS  tunnel process gets assigned to KILL_ON_JOB_CLOSE job right after spawn
+  PASS  job-object call is defensively guarded (load-order safe)
+  PASS  the exact spawned tunnel process object is passed to the job
+  PASS  shared job-assign function still defined in sidecar file (reused, not duplicated)
+ALL PASS
+  PASS
+
+--- sshx-hard-kill ---
+
+=== SSH client hard-kill #P3 (static) ===
+  PASS  Invoke-SshXCore extracted
+  PASS  uses Start-Process (not blocking native-exe call) so it can be killed
+  PASS  has a configurable client-side hard-kill ceiling
+  PASS  WaitForExit is bounded by the hard-kill ceiling, not unbounded
+  PASS  kills the process when the wait times out
+  PASS  timeout path reports exit=124 (same sentinel as remote timeout, compatible with existing retry/log logic)
+  PASS  touches .Handle before WaitForExit (avoids PS5.1 ExitCode-null quirk on Start-Process -PassThru)
+  PASS  redirects stdout to a file (still captures Out/Lines for callers)
+  PASS  redirects stderr to a file (still captures Out/Lines for callers)
+  PASS  cleans up its own temp files
+  PASS  still strips CRLF (pre-existing contract preserved)
+  PASS  still strips lone CR (pre-existing contract preserved)
+ALL PASS
+  PASS
+
+--- update-check-failfast ---
+
+=== Update-check fail-fast cache #P1 (static) ===
+  PASS  Get-UpdateMissCachePath defined
+  PASS  Test-UpdateCheckRecentlyMissed defined
+  PASS  Save-UpdateCheckMiss defined
+  PASS  Clear-UpdateCheckMiss defined
+  PASS  cache lives alongside other per-user connect config (not a new ad-hoc location)
+  PASS  Resolve-UpdateEndpoint call site found
+  PASS  cache is checked BEFORE attempting SSH resolution (skips the whole retry dance)
+  PASS  a fresh miss gets cached for next launch
+  PASS  a success clears any stale miss cache (self-healing once server is reachable again)
+ALL PASS
+  PASS
+
+--- logsync-fast-timeout ---
+
+=== Log-sync fast-timeout budget #P7 (static) ===
+  PASS  fast probe budget variable defined
+  PASS  fast mkdir budget variable defined
+  PASS  fast scp budget variable defined
+  PASS  fast cat budget variable defined
+  PASS  probe budget is short (2.5s) unless -Force
+  PASS  mkdir budget is short (3s) unless -Force
+  PASS  scp budget is short (4s) unless -Force
+  PASS  Get-ConnectRemoteLogByteSize defined
+  PASS  probe helper has an overridable TimeoutMs param (default unchanged)
+  PASS  probe helper forwards the caller-supplied timeout to Invoke-ConnectLogProcTimed
+  PASS  Test-ConnectLogChunkAlreadyRemote defined
+  PASS  chunk-hash helper has an overridable TimeoutMs param (default unchanged)
+  PASS  Sync-ConnectLogToServer defined
+  PASS  remote-size probes pass the fast budget
+  PASS  mkdir call uses the fast budget
+  PASS  scp call uses the fast budget
+  PASS  cat call uses the fast budget
+  PASS  old hardcoded 12000ms mkdir timeout removed from mkdir call site
+ALL PASS
+  PASS
+
+--- exe-atomic-swap ---
+
+=== EXE atomic rename-swap #P6 (static) ===
+  PASS  Copy-ExeAtomicSwap helper defined
+  PASS  skips the copy entirely when source/dest already match (avoids needless rename dance)
+  PASS  tries a normal Copy-Item first (fast path when the file is not locked)
+  PASS  falls back to renaming the locked destination out of the way
+  PASS  renamed-aside file uses a distinct .old- suffix (not silently dropped)
+  PASS  best-effort cleanup of the renamed-aside old file (ok if still locked)
+  PASS  returns a clear success/failure signal to the caller
+  PASS  Sync-ConnectExeBesideClient still defined
+  PASS  promote dirs refresh Claude-Connect.exe via atomic-swap
+  PASS  versioned Claude-Connect-{ver}.exe via atomic-swap
+  PASS  legacy Desktop Setup name still promoted
+  PASS  Setup mirror goes through atomic-swap helper
+  PASS  guards against copying the exe onto itself (GetFullPath compare)
+  PASS  old unconditional Copy-Item (no lock fallback) removed from the Desktop mirror path
+ALL PASS
+  PASS
+
+--- exe-promote-dirs-contract ---
+
+=== EXE promote dirs contracts (static) ===
+
+  PASS  Get-ConnectExePromoteDirs defined
+  PASS  skips Claude-Connect root when versioned
+  PASS  skips src\ for EXE promote
+  PASS  documents no EXE litter at versioned root
+  PASS  Sync-ConnectExeBesideClient defined
+  PASS  connect-update persists last-launch-dir.txt
+  PASS  connect-update honors CLAUDE_CONNECT_LAUNCH_DIR
+  PASS  Get-ConnectExePromoteDirs dedupes with HashSet[string]
+  PASS  no return ,$dirs.ToArray() nested-array bug
+  PASS  Get-ConnectExePromoteDirs returns $dirs directly (not unary comma)
+  PASS  Sync-ConnectExeBesideClient calls Get-ConnectExePromoteDirs
+  PASS  Sync writes versioned Claude-Connect-{ver}.exe
+  PASS  Sync skips Claude-Connect-NEW.exe inside OLD \{ver\} folders
+  PASS  apply path calls Sync with remoteVer
+  PASS  apply path prints EXE ready lines
+  PASS  apply path notes older EXEs kept
+  PASS  Sync surfaces written paths for UI
+  PASS  publish/_setup-launch-body.ps1 exists
+  PASS  SFX setup-launch stamps CLAUDE_CONNECT_LAUNCH_DIR
+  PASS  SFX setup-launch stamps CLAUDE_CONNECT_INSTALL_DIR
+  PASS  SFX setup-launch has launch / versioned resolver
+  PASS  SFX setup-launch writes last-launch-dir.txt
+
+All 22 contracts passed.
+  PASS
+
+--- update-no-defer-prompt ---
+
+=== Update prompt: no Defer (static) ===
+
+  PASS  client-update-policy.json exists
+  PASS  policy JSON has no defer_hours key
+  PASS  Win prompt is [Y]es / [N]ot now
+  PASS  Win prompt has no [D]efer
+  PASS  Save-UpdateDefer removed from connect-update.ps1
+  PASS  Test-UpdateDeferActive removed from connect-update.ps1
+  PASS  Win connect-update documents Defer removal
+  PASS  Win connect-update clears leftover update-defer.txt
+  PASS  Mac optional prompt shows [y/N]
+  PASS  Mac optional prompt no longer shows [y/N/D]
+  PASS  Mac has no D|DEFER answer branch
+  PASS  Mac connect-update documents Defer removal
+  PASS  Mac connect-update clears leftover update-defer.txt
+  PASS  Mac optional ans defaults to N
+  PASS  Mac empty Enter keeps N
+  PASS  connect-ui.ps1 clears update-defer.txt on manual update
+  PASS  Invoke-ConnectManualUpdate removes update-defer.txt
+  PASS  connect-ui.sh clears update-defer.txt on manual update
+  PASS  SFX setup-launch stamps last-launch-dir (launch context for updates)
+
+All 19 contracts passed.
+  PASS
+
+--- update-kill-self-contract ---
+
+=== Update kill_self + relaunch contracts (static) ===
+
+  PASS  connect-update logs kill_self skip_stale_press_enter
+  PASS  connect-update spawns bat_relaunch_from_update_self
+  PASS  connect-update uses [Environment]::Exit(2) hard exit
+  PASS  connect-update detects CLAUDE_CONNECT_MANUAL_UPDATE
+  PASS  connect-update has calledFromLiveUi detection
+  PASS  calledFromLiveUi probes Wait-ConnectExit in caller
+  PASS  calledFromLiveUi detection honors CLAUDE_CONNECT_MANUAL_UPDATE=1
+  PASS  extracted if ($calledFromLiveUi) -> Exit(2) block
+  PASS  kill block relaunches connect.bat before exit
+  PASS  kill block schedules self Stop-Process
+  PASS  connect-ui defines Invoke-ConnectManualUpdate
+  PASS  Invoke-ConnectManualUpdate sets CLAUDE_CONNECT_MANUAL_UPDATE=1
+  PASS  Invoke-ConnectManualUpdate clears CLAUDE_CONNECT_MANUAL_UPDATE in finally
+  PASS  Wait-ConnectExit knows update_relaunch reason
+  PASS  Wait-ConnectExit knows update_manual_relaunch reason
+  PASS  Wait-ConnectExit logs session end (update_relaunch)
+  PASS  Wait-ConnectExit has skipEnter fast path
+  PASS  update_relaunch fast path before Force log drain
+  PASS  silent update is manual_only no-op (no Wait-ConnectExit relaunch)
+
+All 19 contracts passed.
+  PASS
+
+--- console-declutter-warnings ---
+
+=== Console decluttering: xray + personal-Cursor warnings ===
+  PASS  Win: xray "international path down" no longer printed to console
+  PASS  Win: xray warning still fully recorded in the day log
+  PASS  Win: "Personal Cursor is open" no longer printed to console
+  PASS  Win: personal-Cursor warning still fully recorded in the day log
+  PASS  Mac: "Personal Cursor is open" no longer printed to console
+  PASS  Mac: personal-Cursor warning still fully recorded in the day log
+
+ALL PASS (GREEN): both chronic console warnings are quiet now, still fully logged.
+  PASS
+
+--- tunnel-sync-down-debounce-returns-true ---
+
+=== Tunnel sync down debounce returns $true (Task 8 document) ===
+  PASS  Sync-SessionTunnelProcess extractable
+  PASS  source mentions tunnel_down_debounce
+  PASS  source: tunnel_down_debounce path returns $true
+  PASS  miss 1/3: Sync-SessionTunnelProcess returns $true (soft-health debounce)
+  PASS  miss 1/3: logs reason=tunnel_down_debounce
+  PASS  miss 1/3: log shows miss=1/3
+  PASS  miss 2/3: still returns $true
+  PASS  miss 2/3: still logs tunnel_down_debounce
+  PASS  miss 3/3: returns $false (debounce exhausted)
+  PASS  miss 3/3: no longer soft-returns via tunnel_down_debounce
+
+ALL PASS: soft-health debounce documented (returns $true + tunnel_down_debounce for miss<3).
+  PASS
+
+--- tunnel-no-proc-keepalive ---
+=== test-tunnel-no-proc-keepalive ===
+  PASS  Win source has keep-alive marker
+  PASS  Mac source has keep-alive marker
+  PASS  Win still soft-fails no_proc_tcp_open under budget
+  PASS  found soft_fail_exhausted_keep_alive
+  PASS  keep-alive arm has return $true
+  PASS  keep-alive arm is for no_proc_tcp_open
+  PASS  keep-alive arm must not Release-StaleTunnelPort
+  PASS  keep-alive arm must not return $false
+  PASS  old no_proc_tcp_open_budget drop reason removed
+  PASS  Mac has soft_fail_exhausted_keep_alive
+  PASS  Mac keep-alive returns 0 (session up)
+  PASS  Mac keep-alive slice must not return 1
+  PASS  old Mac no_ssh_proc_tcp_open_budget drop removed
+  PASS  runtime sim returns keep-alive true
+  PASS  runtime sim did not Release-StaleTunnelPort
+  PASS  runtime sim resets soft-fail counter
+-- Task 5 static: zombie_drop + 120 locked --
+  PASS  Win has soft_fail_exhausted_zombie_drop
+  PASS  Mac has soft_fail_exhausted_zombie_drop
+  PASS  Win NO_PROC_ZOMBIE_SEC/NoProcZombieSec=120 locked
+  PASS  Mac NO_PROC_ZOMBIE_SEC=120 locked
+  PASS  Win tracks NoProcKeepAliveSince
+  PASS  Mac tracks _NO_PROC_KEEPALIVE_SINCE
+  PASS  zombie_drop arm is after first keep-alive return $true
+  PASS  zombie_drop arm calls Release-StaleTunnelPort
+  PASS  Win resets NoProcKeepAliveSince
+  PASS  Win resets NoProcKeepAliveSince on healthy reattach
+-- Task 5 behavioral: age gate via Sync stubs --
+  PASS  first exhaust: keep-alive returns true
+  PASS  first exhaust: no Release-Stale (D6/S5)
+  PASS  first exhaust: logs soft_fail_exhausted_keep_alive
+  PASS  first exhaust: sets NoProcKeepAliveSince
+  PASS  age=119 + NOT auth: keep-alive
+  PASS  age=119 + NOT auth: no Release
+  PASS  age=119: no zombie_drop log
+  PASS  age=120 + NOT auth: drop returns false
+  PASS  age=120 + NOT auth: Release-Stale fired
+  PASS  age=120 + NOT auth: logs soft_fail_exhausted_zombie_drop
+  PASS  Sync false path invokes owner health update
+  PASS  age=120 + auth AND banner: keep-alive
+  PASS  age=120 + auth AND banner: no Release
+  PASS  age=120 + auth AND banner: no zombie_drop
+  PASS  extracted Try-ReattachSessionTunnelProcess for reattach sim
+  PASS  reattach sim returns true
+  PASS  healthy reattach clears NoProcKeepAliveSince
+
+ALL CHECKS PASSED
+  PASS
+
+--- reseed-canbindl-gate ---
+
+=== reseed CanBindL gate (foreign_owner_cannot_bind) ===
+
+  PASS  Win Test-CanClaimCursorProxyOwner
+  PASS  Win Test-ProxyReseedShouldKill preferred chokepoint
+  PASS  Win foreign_owner_cannot_bind
+  PASS  connect.ps1 bg_init token
+  PASS  Mac can_claim_cursor_proxy_owner
+  PASS  Mac foreign_owner_cannot_bind
+  PASS  Mac ensure uses claim gate helper
+  PASS  extracted Ensure-SessionTunnel
+  PASS  Ensure gates via Test-ProxyReseedShouldKill
+  PASS  gate before killing stale bg in Ensure
+  PASS  Ensure calls Test-ProxyReseedShouldKill >=4 times (got 4)
+  PASS  extracted Test-TunnelNeedsProxyReseed
+  PASS  ReseedRaw stays Claim-free
+  PASS  connect.ps1 bg_init gates needReseed with CanClaim + token
+  PASS  Claim checks Connect-shaped cmdline before live_owner skip
+-- behavioral Ensure Gap + positive --
+  PASS  Gap: Ensure does not reach kill (no STOP_COUNTED throw)
+  PASS  Gap: Ensure returns success $true
+  PASS  Gap: kill_count=0 (D1)
+  PASS  Gap: TunnelReused stays true (keep bg)
+  PASS  Gap: logs foreign_owner_cannot_bind
+  PASS  positive: kill_count>=1 when CanBindL (heal still runs)
+  PASS  positive: Stop-TunnelProcessWithExitLog reached
+  PASS  chokepoint: Gap => ShouldKill false
+  PASS  chokepoint: Gap logs foreign_owner_cannot_bind
+  PASS  chokepoint: CanBindL => ShouldKill true
+  PASS  D2 sim: bg_init needReseed=false under Gap
+
+All reseed-canbindl contracts passed (26 asserts).
+  PASS
+
+--- wait-local-r-ownership ---
+
+=== Wait local -R ownership (Gate A / local_r_not_owned) ===
+
+  PASS  extracted Wait-ForTunnelUp
+  PASS  Wait body calls Get-LocalTunnelSshPids
+  PASS  Wait emits local_r_not_owned
+  PASS  Get-LocalTunnelSshPids appears before return $true in Wait
+  PASS  Mac local_r_not_owned token
+  PASS  Mac wait_for_tunnel_up exists
+  PASS  Mac get_local_tunnel_ssh_pids available
+  PASS  Mac wait/poll body contains local_r_not_owned
+-- behavioral Wait Gate A --
+  PASS  behavioral: Test-TunnelUp=true + empty local PIDs => Wait false
+  PASS  behavioral: empty PIDs logs local_r_not_owned
+  PASS  behavioral: spawn pid in local -R list => Wait true
+  PASS  behavioral: success logs TUNNEL_WAIT ok=1
+  PASS  behavioral: owned path does not log local_r_not_owned
+  PASS  behavioral: foreign-only local PIDs => Wait false
+  PASS  behavioral: foreign-only PIDs logs local_r_not_owned
+
+All wait local -R ownership tests passed (15 asserts).
+  PASS
+
+--- stale-forward-wait-init ---
+
+=== stale-forward wait-init + still-busy abort ===
+
+  PASS  extracted Clear-ServerStaleTunnelForward
+  PASS  Clear sets LastStaleForwardStillBusyPort
+  PASS  Clear sets LastStaleForwardStillBusyAt
+  PASS  Clear still logs port still busy
+  PASS  Win Test-StaleForwardStillBusyAbort
+  PASS  Win StillBusyWindowSec=15 locked
+  PASS  Win still-busy uses window seconds compare
+  PASS  extracted Ensure-SessionTunnel
+  PASS  Ensure emits stale_port_busy
+  PASS  Ensure calls Test-StaleForwardStillBusyAbort
+  PASS  StillBusyAbort before Start-Process ssh in Ensure
+  PASS  Mac STILL_BUSY_WINDOW_SEC=15 locked
+  PASS  Mac stale_port_busy token
+  PASS  Mac stale_forward_still_busy_abort
+  PASS  Mac clear_server_stale_tunnel_forward has local i=0 before while
+  PASS  Mac ensure refuses before ssh spawn
+-- behavioral still-busy refuse spawn --
+  PASS  still-busy: Ensure returns false OR Port rebinds away from busy port
+  PASS  still-busy: spawn_count on old port = 0 (D4)
+  PASS  still-busy: logs stale_port_busy
+  PASS  still-busy: total spawn_count=0 on refuse path
+  PASS  positive: spawn_count>=1 when not still-busy
+  PASS  positive: Ensure returns true when spawn+Wait ok
+  PASS  helper: age=1s within 15 => abort true
+  PASS  helper: age=16s => abort false
+
+All stale-forward-wait-init contracts passed (24 asserts).
+  PASS
+
+--- proxy-owner-service-coupling ---
+
+=== proxy owner/service coupling (service_dead) ===
+
+  PASS  Win Update-CursorProxyOwnerServiceHealth
+  PASS  Win SERVICE_DEAD_SEC/ServiceDeadSec=60 locked
+  PASS  Win reason=service_dead token
+  PASS  Win stale_non_connect token
+  PASS  Win SessionEverHadProxyLegs
+  PASS  extracted Update-CursorProxyOwnerServiceHealth
+  PASS  Update compares age against 60s
+  PASS  Update gates on SessionEverHadProxyLegs
+  PASS  Update calls Release-CursorProxyOwner
+  PASS  Release accepts/emits reason
+  PASS  Complete calls Update-CursorProxyOwnerServiceHealth
+  PASS  Sync calls Update-CursorProxyOwnerServiceHealth (D5 Sync-tick path)
+  PASS  Ensure sets SessionEverHadProxyLegs when legs claimed
+  PASS  Ensure sets EverHad near proxy_leg=-L
+  PASS  Ensure sets EverHad on proxy_adopt busy_healthy
+  PASS  Mac update_cursor_proxy_owner_service_health
+  PASS  Mac SERVICE_DEAD_SEC=60 locked
+  PASS  Mac reason=service_dead token
+  PASS  Mac stale_non_connect token
+  PASS  Mac SESSION_EVER_HAD_PROXY_LEGS
+  PASS  Mac complete calls update health
+  PASS  Mac sync calls update health
+  PASS  Mac _process_alive filters zombie state Z
+  PASS  Claim logs stale_non_connect on non-Connect adopt
+-- behavioral service_dead timer + xray_closed negative --
+  PASS  t=0 backends-down: no release (timer start)
+  PASS  t=0 sets ProxyOwnerServiceDeadSince
+  PASS  t=59s: no service_dead release
+  PASS  t=59s: reason list has no service_dead
+  PASS  t=60s: release fires
+  PASS  t=60s: reason=service_dead
+  PASS  t=60s: log contains reason=service_dead
+  PASS  backends up: no release
+  PASS  backends up: clears dead-since
+  PASS  xray_closed (EverHad=false): never service_dead at 120s
+  PASS  xray_closed: reason list has no service_dead
+  PASS  Sync-SessionTunnelProcess invokes Update (behavioral)
+  PASS  Claim adopts live non-Connect pid
+  PASS  Claim logs stale_non_connect on adopt
+
+Asserts: 38 passed, 0 failed
+  PASS
+
+--- local-tunnel-ssh-pids ---
+
+=== local tunnel ssh pids matcher (Task 6) ===
+
+  PASS  static: Test-LocalTunnelSshCommandLine exists in git-mode.ps1
+  PASS  static: Get-LocalTunnelSshPids exists in git-mode.ps1
+  PASS  static: test_local_tunnel_ssh_command exists in git-mode.sh
+  PASS  static: get_local_tunnel_ssh_pids exists in git-mode.sh
+  PASS  pass: space localhost
+  PASS  pass: space 127.0.0.1
+  PASS  pass: equals localhost
+  PASS  pass: double-space localhost
+  PASS  fail: wrong port
+  PASS  fail: wrong dest port
+  PASS  fail: no -R ( -L )
+  PASS  fail: no -R bare
+  PASS  fail: no -R hostkey
+  PASS  fail: wrong host
+  PASS  fail: concat no sep
+  PASS  behavioral: Get-LocalTunnelSshPids returns only matching pids
+  PASS  behavioral: finds 127.0.0.1 form pid=101
+  PASS  behavioral: finds -R= form pid=102
+  PASS  behavioral: rejects wrong port pid=103
+  PASS  behavioral: rejects -L pid=104
+  PASS  mac pass: space localhost
+  PASS  mac pass: space 127.0.0.1
+  PASS  mac pass: equals localhost
+  PASS  mac pass: double-space localhost
+  PASS  mac fail: wrong port
+  PASS  mac fail: wrong dest port
+  PASS  mac fail: no -R ( -L )
+  PASS  mac fail: no -R bare
+  PASS  mac fail: no -R hostkey
+  PASS  mac fail: wrong host
+  PASS  mac fail: concat no sep
+  PASS  mac: harness reported no FAIL lines
+
+All local-tunnel-ssh-pids tests passed (32 asserts).
+  PASS
+
+--- incident-gap-replay-contract ---
+
+=== incident Gap replay contract (S2 + S6 A-E) ===
+
+  PASS  S2 Win git-mode.ps1 has foreign_owner_cannot_bind
+  PASS  S2 Mac git-mode.sh has foreign_owner_cannot_bind
+  PASS  S2 Win git-mode.ps1 has local_r_not_owned
+  PASS  S2 Mac git-mode.sh has local_r_not_owned
+  PASS  S2 Win git-mode.ps1 has stale_port_busy
+  PASS  S2 Mac git-mode.sh has stale_port_busy
+  PASS  S2 Win git-mode.ps1 has reason=service_dead
+  PASS  S2 Mac git-mode.sh has reason=service_dead
+  PASS  S2 Win git-mode.ps1 has stale_non_connect
+  PASS  S2 Mac git-mode.sh has stale_non_connect
+  PASS  S2 Win git-mode.ps1 has soft_fail_exhausted_zombie_drop
+  PASS  S2 Mac git-mode.sh has soft_fail_exhausted_zombie_drop
+  PASS  S2 connect.ps1 bg_init has foreign_owner_cannot_bind
+  PASS  extracted Ensure-SessionTunnel
+  PASS  Ensure calls Test-ProxyReseedShouldKill or Test-CanClaimCursorProxyOwner
+  PASS  Ensure still has killing stale bg path (positive heal)
+  PASS  Ensure orders CanClaim/ProxyReseedShouldKill before killing stale bg
+  PASS  extracted Test-ProxyReseedShouldKill
+  PASS  Test-ProxyReseedShouldKill consults Test-CanClaimCursorProxyOwner
+  PASS  Test-ProxyReseedShouldKill emits foreign_owner_cannot_bind
+  PASS  Mac ensure uses claim/reseed gate helper
+  PASS  extracted Mac ensure_session_tunnel
+  PASS  Mac ensure has claim/reseed gate
+  PASS  Mac ensure orders claim gate before stale kill (or no kill string in body)
+  PASS  extracted Wait-ForTunnelUp
+  PASS  Wait calls Get-LocalTunnelSshPids
+  PASS  Wait emits local_r_not_owned
+  PASS  Wait: Get-LocalTunnelSshPids before return $true
+  PASS  Mac wait/poll has local_r_not_owned
+  PASS  Mac get_local_tunnel_ssh_pids present
+-- S6 A-E source contracts --
+  PASS  S6-A: Win Ensure + bg_init + Mac emit foreign_owner_cannot_bind skip
+  PASS  S6-B: ProxyReseedShouldKill can return false (keep -R)
+  PASS  S6-B: Ensure uses ProxyReseedShouldKill chokepoint
+  PASS  S6-B: ReseedRaw stays Claim/CanClaim-free (gate at caller)
+  PASS  S6-C: Win refuse_spawn stale_port_busy
+  PASS  S6-C: Mac refuse_spawn stale_port_busy
+  PASS  S6-C: Ensure still-busy abort before spawn
+  PASS  S6-C: Wait logs ok=0 local_r_not_owned (not false ok=1)
+  PASS  S6-D: Win released reason=service_dead
+  PASS  S6-D: Mac released reason=service_dead
+  PASS  S6-D: Win Claim stale_non_connect adopt
+  PASS  S6-D: Mac Claim stale_non_connect adopt
+  PASS  S6-D: SERVICE_DEAD_SEC locked at 60s
+  PASS  S6-E: Win still wires proxy -L path
+  PASS  S6-E: Complete-CursorProxyAfterTunnel / proxy path retained
+  PASS  S6-E: Ensure Gap/keep path still reaches Complete-CursorProxyAfterTunnel
+
+All incident-gap-replay-contract tests passed (46 asserts).
+  PASS
+
+--- incident-gap-replay-harness ---
+
+=== incident Gap replay harness (S6 A-E / D10) ===
+
+  PASS  S6-E source: Ensure/Complete still emit/use proxy_leg=-L path
+  PASS  S6-A source: bg_init Gap token present
+  LOG   === S6 Gap replay harness start (Step 2b; live dual-UI skipped: zombie owner pid holds lease) ===
+-- S6-A/B Gap Ensure (foreign_owner_cannot_bind, no kill) --
+  LOG   GITMODE: ENSURE_TUNNEL reused=1 pid=424242 port=20021 reason=tunnel_up
+  LOG   GITMODE: ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=424242 port=20021
+  PASS  S6-A/B: Ensure does not reach kill
+  PASS  S6-A/B: Ensure returns success under Gap
+  PASS  S6-B: kill_count=0 (no killing stale bg for Gap skip)
+  PASS  S6-A: logs foreign_owner_cannot_bind
+  PASS  S6-B: Gap segment has zero killing stale bg
+  LOG   ENSURE_TUNNEL bg_init_reseed_skip reason=foreign_owner_cannot_bind pid=424242 port=20021
+-- S6-C still-busy refuse_spawn + Wait local_r_not_owned --
+  LOG   GITMODE: ENSURE_TUNNEL start port=20021 alias=claude-server had_bg=False
+  LOG   GITMODE: ENSURE_TUNNEL skip_acquire port=20021 reason=already_set
+  LOG   GITMODE: ENSURE_TUNNEL proxy_leg=-L local=19080 remote=10808
+  LOG   GITMODE: ENSURE_TUNNEL refuse_spawn reason=stale_port_busy port=20021
+  PASS  S6-C: refuse_spawn path spawn_count=0
+  PASS  S6-C: logs refuse_spawn/stale_port_busy
+  PASS  S6-C: Ensure refuses or rebinds away from busy port
+  LOG   GITMODE: TUNNEL_WAIT ok=0 attempt=1 reason=local_r_not_owned port=20021 pid=53480 local_pids=
+  LOG   GITMODE: TUNNEL_WAIT ok=0 attempt=2 reason=local_r_not_owned port=20021 pid=53480 local_pids=
+  LOG   GITMODE: TUNNEL_WAIT ok=0 attempt=3 reason=local_r_not_owned port=20021 pid=53480 local_pids=
+  LOG   GITMODE: TUNNEL_WAIT ok=0 attempt=4 reason=local_r_not_owned port=20021 pid=53480 local_pids=
+  LOG   GITMODE: TUNNEL_WAIT ok=0 attempt=5 reason=local_r_not_owned port=20021 pid=53480 local_pids=
+  LOG   GITMODE: TUNNEL_WAIT ok=0 attempt=6 reason=local_r_not_owned port=20021 pid=53480 local_pids=
+  LOG   GITMODE: TUNNEL_WAIT ok=0 attempt=7 reason=local_r_not_owned port=20021 pid=53480 local_pids=
+  LOG   GITMODE: TUNNEL_WAIT ok=0 attempt=8 reason=local_r_not_owned port=20021 pid=53480 local_pids=
+  LOG   GITMODE: TUNNEL_WAIT ok=0 attempt=9 reason=local_r_not_owned port=20021 pid=53480 local_pids=
+  LOG   GITMODE: TUNNEL_WAIT ok=0 attempt=10 reason=local_r_not_owned port=20021 pid=53480 local_pids=
+  LOG   GITMODE: TUNNEL_WAIT ok=0 attempt=11 reason=local_r_not_owned port=20021 pid=53480 local_pids=
+  LOG   GITMODE: TUNNEL_WAIT ok=0 attempt=12 reason=local_r_not_owned port=20021 pid=53480 local_pids=
+  LOG   GITMODE: TUNNEL_WAIT fail=1 reason=local_r_not_owned port=20021 pid=53480
+  PASS  S6-C: Wait returns false when local -R empty
+  PASS  S6-C: Wait logs local_r_not_owned
+  PASS  S6-C: no TUNNEL_WAIT ok=1 after still-busy/unowned
+-- S6-D service_dead release (60s timer) --
+  LOG   GITMODE: CURSOR_PROXY_OWNER: service_dead age_sec=60 threshold=60
+  LOG   GITMODE: CURSOR_PROXY_OWNER: released reason=service_dead pid=53480
+  PASS  S6-D: logs released reason=service_dead (or adopt path token)
+-- S6-E healthy proxy_leg=-L control --
+  LOG   GITMODE: ENSURE_TUNNEL proxy_leg=-L local=19080 remote=1080 healthy_control=1
+  PASS  S6-E: harness emits proxy_leg=-L healthy control marker
+  LOG   === S6 Gap replay harness end ===
+  Wrote transcript: D:\Smart\Claude-Code-Server\.superpowers\sdd\briefs\task-8-gap-replay-transcript.txt
+  PASS  transcript: foreign_owner_cannot_bind
+  PASS  transcript: zero killing stale bg in Gap segment
+  PASS  transcript: local_r_not_owned
+  PASS  transcript: refuse_spawn/stale_port_busy
+  PASS  transcript: reason=service_dead
+  PASS  transcript: proxy_leg=-L
+
+All incident-gap-replay-harness asserts passed (21).
+  PASS
+
+--- connect-update-hardening ---
+
+=== connect-update hardening contracts ===
+
+  PASS win exit-code docs include ERROR=1
+  PASS win update SSH uses IdentityAgent=none
+  PASS win update SSH uses IdentitiesOnly=yes
+  PASS win verifies checksums after download
+  PASS win stages then swaps live dirs
+  PASS win rolls back on swap failure
+  PASS win incomplete apply exits 1
+  PASS win download_failed exits 1
+  PASS win download_failed does not exit 0
+  PASS win tracks copy failures
+  PASS mac update SSH uses IdentityAgent=none
+  PASS mac update has process kill timeouts
+  PASS mac verifies checksums
+  PASS mac stages then swaps
+  PASS mac ERROR paths exit 1
+  PASS connect.bat bounds update relaunch
+  PASS connect.bat bounds exit=1 update fail relaunch
+  PASS connect.bat uses STA for update progress UI
+  PASS connect.bat enables update progress UI
+  PASS connect-update.ps1 has progress modal
+  PASS connect-update.ps1 guards FileHash under StrictMode
+  PASS connect.bat relaunch depth limit is 3
+  PASS connect.bat async handoff to connect-boot.ps1
+  PASS connect.bat does not inline-hidden connect.ps1
+  PASS connect.bat exits after connect.ps1 handoff
+  PASS mac connect.sh documents manual-only updates
+  PASS mac connect.sh no longer auto-bounds UPDATE_DEPTH (manual-only)
+  PASS deploy-client-bundle stages before swap
+  PASS deploy-client-bundle tracks live path
+  PASS deploy-client-bundle writes checksums.txt
+  PASS deploy-client-bundle maps connect-diagnostic from CLIENT_DIR canon
+  PASS deploy-client-bundle stages scripts/client/connect-diagnostic.ps1
+  PASS deploy-client-bundle fail-closed rejects STALE-SHADOW wrappers
+  PASS deploy-client-bundle runs ship-gate verifier before promote
+  PASS deploy-client-bundle prefers laptop staging before /opt
+  PASS deploy-client-bundle uses fallback only after laptop stage
+  PASS deploy-client-bundle does not prefer /opt over laptop
+  PASS deploy-client-bundle records laptop vs server-fallback source
+  PASS deploy-client-bundle does not rm -rf live root
+  PASS update-server tracks verify result
+  PASS update-server fails on verify
+  PASS publish manifest written without BOM
+  PASS publish deploy writes checksums.txt
+  PASS publish no longer Set-Content UTF8 BOM for manifest
+
+All 44 contracts passed.
+  PASS
+
+=== Deploy gate summary ===
+  Passed: 130
+  Failed: 0
+  Skipped live: *-live.ps1 / *-live-* / harder-live* (not run)
+  Skipped EXE-seed / fleet / Sepidz publish suites (scripts-only deploy)
+  Skipped slow MCP: storm / chaos / brutal (not run on deploy gate)
+
+Deploy gate passed.
+  Deploy-gate tests passed
+  Live EXE md5 (must stay): 26f8003b29e97b2390e665f4fc43a445
+  Reusing live Claude-Connect.exe from smart@192.168.210.240 (no rebuild)...
+  Staged from manifest + reused EXE ok
+
+Deploy auto-update bundle -> Smart (smart@192.168.210.240)
+  Smart : expected package version v20260729.15
+  Smart : uploading bundle to smart@192.168.210.240...
+  Smart : installing (non-interactive, timed; never prompts)...
+
+[1mInstall client bundle from ZIP[0m
+  [1msource[0m  /home/smart/claude-client-bundle-deploy/bundle.zip
+  [1mtarget[0m  /usr/local/share/claude-client
+
+  [0;32mok[0m    bash -n claude-mount.sh
+  [0;32mok[0m    bash -n claude-mount.sh
+  [0;32mok[0m    Claude-Connect.exe PE header valid
+  [0;32mok[0m    removed server/ from world-readable client share
+
+[0;32mDone.[0m Client bundle v20260729.15 at /usr/local/share/claude-client
+  Laptops auto-update on connect.bat / mac/connect.sh launch.
+
+INSTALL_EC=0
+
+  OK  Smart deployed v20260729.15 on smart@192.168.210.240
+
+Server deploy complete (Smart).
+20260729.15
+26f8003b29e97b2390e665f4fc43a445  /usr/local/share/claude-client/Claude-Connect.exe
+2
+
+
+OK  Smart bundle v20260729.15 deployed. EXE unchanged (26f8003b29e97b2390e665f4fc43a445).
+    Laptop update NOT run - launch Connect Update yourself to pull it.
+    NOTE: scripts-only keeps the previous IExpress payload. Do NOT treat
+    Claude-Connect-{new}.exe as a rebuilt SFX â€” run publish.bat to rebuild EXE.
+

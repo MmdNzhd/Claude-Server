@@ -38,7 +38,7 @@ _update_script="$(cd "$(dirname "$0")" && pwd)/connect-update.sh"
 # Manual-only updates: skip auto-update on start (user presses u in the menu).
 # connect-update.sh remains available for invoke_connect_manual_update.
 
-CONNECT_VERSION='20260729.2'
+CONNECT_VERSION='20260729.15'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).
@@ -349,6 +349,10 @@ fi
 [ -f "$_EDITOR_SH" ] || die "editor-launch.sh not found - re-copy the full mac package"
 # shellcheck source=../editor-launch.sh
 . "$_EDITOR_SH"
+# Boot-once: kill sticky fronts that listen without -L backends (Win HealBlackhole parity).
+if declare -F heal_cursor_proxy_sidecar_blackhole >/dev/null 2>&1; then
+  heal_cursor_proxy_sidecar_blackhole || true
+fi
 
 # Win parity: silent client update after tunnel is up (git-mode begin_connect_recovery runs pre-tunnel).
 begin_connect_recovery() {

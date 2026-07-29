@@ -205,6 +205,7 @@ $suites = @(
     @{ Name = 'proxy-owner-service-coupling'; Script = 'test-proxy-owner-service-coupling.ps1' }
     @{ Name = 'local-tunnel-ssh-pids'; Script = 'test-local-tunnel-ssh-pids.ps1' }
     @{ Name = 'incident-gap-replay-contract'; Script = 'test-incident-gap-replay-contract.ps1' }
+    @{ Name = 'incident-gap-replay-harness'; Script = 'test-incident-gap-replay-harness.ps1' }
 )
 
 $fail = 0
