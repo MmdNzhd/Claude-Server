@@ -179,10 +179,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260802.1'
+$script:ConnectVersion = '20260802.2'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = '4490fe4e-4dbd-446f-bdcf-487141d88293'
+$script:ConnectBuildId = '4e2d46bc-2fd8-4cbb-94d8-452669a7ad4d'
 $script:SshMsSamples = [System.Collections.Generic.List[int]]::new()
 $script:SshMsSampleStartUnix = 0
 $script:LastSshRollupUnix = 0
@@ -1130,7 +1130,12 @@ function Start-DeferredServerSetup {
         '-DeferredSetupResultPath', $script:DeferredSetupResultPath
     )
     try {
-        $script:DeferredSetupProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -PassThru -WindowStyle Hidden -ErrorAction Stop
+        # Job-bound: dies with Connect on X/crash (session job, not sidecar job).
+        if (Get-Command Start-JobBoundProcess -ErrorAction SilentlyContinue) {
+            $script:DeferredSetupProc = Start-JobBoundProcess -FilePath 'powershell.exe' -ArgumentList $argList -PassThru -WindowStyle Hidden
+        } else {
+            $script:DeferredSetupProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -PassThru -WindowStyle Hidden -ErrorAction Stop
+        }
         if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
             Write-ConnectLog ("SERVER_SETUP deferred=1 bg pid=$($script:DeferredSetupProc.Id) inherit_slot=$parentSlot") 'INFO'
         }
@@ -1416,7 +1421,12 @@ try {
             '-File', $runnerPath,
             '-ProjectId', $ProjectId, '-Alias', $Alias, '-LogDir', $LogDir, '-SessionId', $SessionId
         )
-        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WindowStyle Hidden -PassThru -ErrorAction Stop
+        # Job-bound: dies with Connect on X/crash (session job, not sidecar job).
+        if (Get-Command Start-JobBoundProcess -ErrorAction SilentlyContinue) {
+            $p = Start-JobBoundProcess -FilePath 'powershell.exe' -ArgumentList $argList -WindowStyle Hidden -PassThru
+        } else {
+            $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WindowStyle Hidden -PassThru -ErrorAction Stop
+        }
         if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
             Write-ConnectLog "MOUNT_BG_STARTED project=$ProjectId pid=$($p.Id)" 'INFO'
         }

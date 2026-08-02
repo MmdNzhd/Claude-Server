@@ -3,7 +3,7 @@
 #
 # Bundle co-origination stamp: must match connect.ps1 ConnectBuildId (publish bumps both).
 # Detects split-generation installs where version string alone is unchanged (P1.2 residual).
-$script:GitModeBuildId = '4490fe4e-4dbd-446f-bdcf-487141d88293'
+$script:GitModeBuildId = '4e2d46bc-2fd8-4cbb-94d8-452669a7ad4d'
 
 function Get-GitMode {
     # Site policy: GIT_MODE hide/server disabled. Always OFF (no .git rename).
@@ -34,6 +34,161 @@ function Write-GitModeLog {
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
         Write-ConnectLog "GITMODE: $Message" $Level
     }
+}
+
+# Session-bound helper lifetime (DeferredSetup / MountBg / Windows-MCP ensure).
+# Separate from the sidecar/tunnel KILL_ON_JOB_CLOSE job in cursor-proxy-sidecar.ps1:
+# that job is deliberately kept alive across Connect exit (watchdog DuplicateHandle /
+# keepTunnelForEditor). Helpers must die with THIS Connect process for ANY exit path
+# (X button, crash, force-kill) and must not ride the surviving sidecar job.
+$script:ConnectSessionJob = $null
+
+function Initialize-ConnectSessionJob {
+    if ($script:ConnectSessionJob) { return $true }
+    try {
+        if (-not ('ClaudeConnect.SessionJob' -as [type])) {
+            Add-Type -Language CSharp -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class ClaudeConnectSessionJob {
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool SetInformationJobObject(IntPtr hJob, int JobObjectInfoClass, IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool CloseHandle(IntPtr hObject);
+  [StructLayout(LayoutKind.Sequential)]
+  public struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+    public long PerProcessUserTimeLimit;
+    public long PerJobUserTimeLimit;
+    public uint LimitFlags;
+    public UIntPtr MinimumWorkingSetSize;
+    public UIntPtr MaximumWorkingSetSize;
+    public uint ActiveProcessLimit;
+    public UIntPtr Affinity;
+    public uint PriorityClass;
+    public uint SchedulingClass;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct IO_COUNTERS {
+    public ulong ReadOperationCount;
+    public ulong WriteOperationCount;
+    public ulong OtherOperationCount;
+    public ulong ReadTransferCount;
+    public ulong WriteTransferCount;
+    public ulong OtherTransferCount;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+    public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+    public IO_COUNTERS IoInfo;
+    public UIntPtr ProcessMemoryLimit;
+    public UIntPtr JobMemoryLimit;
+    public UIntPtr PeakProcessMemoryUsed;
+    public UIntPtr PeakJobMemoryUsed;
+  }
+  public const int JobObjectExtendedLimitInformation = 9;
+  public const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+  public static IntPtr CreateKillOnCloseJob() {
+    IntPtr h = CreateJobObject(IntPtr.Zero, null);
+    if (h == IntPtr.Zero) return IntPtr.Zero;
+    var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    int len = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+    IntPtr ptr = Marshal.AllocHGlobal(len);
+    try {
+      Marshal.StructureToPtr(info, ptr, false);
+      if (!SetInformationJobObject(h, JobObjectExtendedLimitInformation, ptr, (uint)len)) {
+        CloseHandle(h);
+        return IntPtr.Zero;
+      }
+    } finally { Marshal.FreeHGlobal(ptr); }
+    return h;
+  }
+}
+"@
+        }
+        $h = [ClaudeConnectSessionJob]::CreateKillOnCloseJob()
+        if ($h -eq [IntPtr]::Zero) { return $false }
+        $script:ConnectSessionJob = $h
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog 'SESSION_JOB created kill_on_close=1' 'INFO'
+        }
+        return $true
+    } catch {
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("SESSION_JOB create_fail err={0}" -f $_.Exception.Message) 'WARN'
+        }
+        return $false
+    }
+}
+
+function Add-ConnectSessionJobProcess {
+    param([Parameter(Mandatory)]$Process)
+    if (-not $Process) { return $false }
+    if (-not (Initialize-ConnectSessionJob)) { return $false }
+    try {
+        # Touch .Handle early so PS 5.1 Start-Process -PassThru yields a usable handle.
+        $null = $Process.Handle
+        $ok = [ClaudeConnectSessionJob]::AssignProcessToJobObject(
+            [IntPtr]$script:ConnectSessionJob,
+            $Process.Handle
+        )
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("SESSION_JOB assign pid={0} ok={1}" -f $Process.Id, [int]$ok) 'DEBUG'
+        }
+        return [bool]$ok
+    } catch {
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("SESSION_JOB assign_fail pid={0} err={1}" -f $Process.Id, $_.Exception.Message) 'DEBUG'
+        }
+        return $false
+    }
+}
+
+function Stop-ConnectSessionJob {
+    if (-not $script:ConnectSessionJob) { return }
+    try {
+        [void][ClaudeConnectSessionJob]::CloseHandle([IntPtr]$script:ConnectSessionJob)
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog 'SESSION_JOB closed' 'INFO'
+        }
+    } catch {}
+    $script:ConnectSessionJob = $null
+}
+
+function Start-JobBoundProcess {
+    # Start-Process wrapper that assigns the child to the Connect session job object
+    # (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE). When THIS Connect process exits for any reason,
+    # Windows tears down every still-running job member. Fail-open on job create/assign:
+    # the process still starts (same orphan risk as before, but Connect keeps working).
+    # Do not declare an -ErrorAction param - it collides with PS common parameters.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [ValidateSet('Normal', 'Hidden', 'Minimized', 'Maximized')][string]$WindowStyle = 'Hidden',
+        [string]$WorkingDirectory,
+        [switch]$PassThru,
+        [switch]$NoNewWindow
+    )
+    $spArgs = @{
+        FilePath     = $FilePath
+        ArgumentList = $ArgumentList
+        PassThru     = $true
+        ErrorAction  = 'Stop'
+    }
+    if ($NoNewWindow) { $spArgs['NoNewWindow'] = $true }
+    else { $spArgs['WindowStyle'] = $WindowStyle }
+    if ($WorkingDirectory) { $spArgs['WorkingDirectory'] = $WorkingDirectory }
+    $proc = Start-Process @spArgs
+    if ($proc) {
+        [void](Add-ConnectSessionJobProcess -Process $proc)
+    }
+    if ($PassThru) { return $proc }
+    return
 }
 
 function Get-TunnelSessionDiagSuffix {

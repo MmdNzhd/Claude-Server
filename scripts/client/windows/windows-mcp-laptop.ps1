@@ -1094,8 +1094,15 @@ try {
         )
         # Inherit elevation from connect.ps1 (already RunAs at start) - do NOT use -Verb RunAs here
         # (would pop a second UAC and break non-interactive background).
-        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList `
-            -WindowStyle Hidden -PassThru -ErrorAction Stop
+        # Job-bound via Start-JobBoundProcess (git-mode session job) so force-close of Connect
+        # cannot leave this ensure process orphaned burning CPU/RAM.
+        if (Get-Command Start-JobBoundProcess -ErrorAction SilentlyContinue) {
+            $p = Start-JobBoundProcess -FilePath 'powershell.exe' -ArgumentList $argList `
+                -WindowStyle Hidden -PassThru
+        } else {
+            $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList `
+                -WindowStyle Hidden -PassThru -ErrorAction Stop
+        }
         $script:WindowsMcpBgStarted = $true
         $script:WindowsMcpBgProcId = if ($p) { $p.Id } else { 0 }
         Write-WindowsMcpEnsureLog ("background_started pid={0} alias={1} admin={2}" -f `

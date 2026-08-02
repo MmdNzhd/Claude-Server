@@ -635,6 +635,10 @@ while ($true) {
         $ps1 = Join-Path $env:TEMP ("claude-connect-sidecar-{0}.ps1" -f $pair.L)
         if (-not (Test-Path -LiteralPath $ps1)) { continue }
         try {
+            # Intentional: this runs inside the standalone watchdog .ps1 (no sidecar
+            # helpers in-scope). Relays restarted here outlive Connect by design
+            # (watchdog holds a duplicated KILL_ON_JOB_CLOSE handle). Binding them
+            # to the Connect session job would wrongly kill 18998/18999 on UI exit.
             Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList @(
                 "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ps1
             ) | Out-Null

@@ -168,6 +168,7 @@ $suites = @(
     @{ Name = 'cursor-launch-console-detached'; Script = 'test-cursor-launch-console-detached.ps1' }
     @{ Name = 'tunnel-job-object'; Script = 'test-tunnel-job-object.ps1' }
     @{ Name = 'tunnel-job-object-live'; Script = 'test-tunnel-job-object-live.ps1' }
+    @{ Name = 'session-job-bound-process-live'; Script = 'test-session-job-bound-process-live.ps1' }
     @{ Name = 'sshx-hard-kill'; Script = 'test-sshx-hard-kill.ps1' }
     @{ Name = 'sshx-hard-kill-live'; Script = 'test-sshx-hard-kill-live.ps1' }
     @{ Name = 'update-check-failfast'; Script = 'test-update-check-failfast.ps1' }

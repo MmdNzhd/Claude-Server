@@ -132,7 +132,7 @@ Assert ($startFn -match 'starting windows-mcp \(background\)') 'Start host text 
 Assert ($startFn -notmatch 'starting windows-mcp-server task') 'Old "starting ... task" host text removed'
 # Get-Fn truncates on nested here-strings; assert against full module source.
 Assert ($mcp -match "(?s)function\s+Start-WindowsMcpEnsureBackground.*?-WindowStyle',\s*'Hidden'") 'Background ensure arglist uses -WindowStyle Hidden'
-Assert ($mcp -match "(?s)function\s+Start-WindowsMcpEnsureBackground.*?Start-Process[\s\S]{0,200}?-WindowStyle Hidden") 'Background ensure Start-Process uses -WindowStyle Hidden'
+Assert ($mcp -match "(?s)function\s+Start-WindowsMcpEnsureBackground.*?Start-JobBoundProcess[\s\S]{0,200}?-WindowStyle Hidden") 'Background ensure uses Start-JobBoundProcess -WindowStyle Hidden (session job)'
 Assert ($el -match 'Visible') 'editor-launch on_folder path considers Visible'
 Assert ($el -match 'visibleWins|Visible\s*-and') 'editor-launch filters Visible windows for on_folder'
 Assert ($connect -match 'EDITOR_LAUNCH_SKIP_OVERRIDE|known_on_folder_not_visible') 'connect overrides false known_on_folder'
