@@ -50,7 +50,7 @@ _update_script="$(cd "$(dirname "$0")" && pwd)/connect-update.sh"
 # Manual-only updates: skip auto-update on start (user presses u in the menu).
 # connect-update.sh remains available for invoke_connect_manual_update.
 
-CONNECT_VERSION='20260801.10'
+CONNECT_VERSION='20260802.1'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).
