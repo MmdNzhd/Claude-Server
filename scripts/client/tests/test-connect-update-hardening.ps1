@@ -48,7 +48,11 @@ Assert ($bat -match 'start "" /D "%HERE(_NOTRAIL)?%" powershell(\.exe)? -NoProfi
 Assert ($bat -notmatch '-WindowStyle Hidden -ExecutionPolicy Bypass -File "%HERE%connect\.ps1"') 'connect.bat does not inline-hidden connect.ps1'
 Assert ($bat -match 'exit /b 0') 'connect.bat exits after connect.ps1 handoff'
 
-Assert ($macConn -match "CLAUDE_CONNECT_UPDATE_DEPTH") 'mac connect.sh bounds update relaunch'
+# Mac connect is manual-update only after SSH ready (no auto relaunch depth loop in connect.sh).
+Assert (
+    ($macConn -match 'Manual-only updates') -and
+    ($macConn -match 'invoke_connect_manual_update')
+) 'mac connect.sh bounds update relaunch (manual-only; no auto UPDATE_DEPTH loop)'
 
 Assert ($dcb -match "STAGE_BUNDLE") 'deploy-client-bundle stages before swap'
 Assert ($dcb -match "BUNDLE_LIVE") 'deploy-client-bundle tracks live path'
@@ -63,6 +67,11 @@ Assert ($dcb -match '_stage_repo_from_laptop; then') 'deploy-client-bundle prefe
 Assert ($dcb -match '_resolve_repo_fallback') 'deploy-client-bundle uses fallback only after laptop stage'
 Assert ($dcb -notmatch '(?m)^_resolve_repo \|\| _stage_repo_from_laptop') 'deploy-client-bundle does not prefer /opt over laptop'
 Assert ($dcb -match 'BUNDLE_SOURCE_KIND') 'deploy-client-bundle records laptop vs server-fallback source'
+Assert ($dcb -match 'ALLOW_STALE_SERVER_FALLBACK') 'deploy-client-bundle gates server-fallback behind ALLOW override'
+Assert ($dcb -match 'refuse server-fallback') 'deploy-client-bundle hard-fails server-fallback by default'
+Assert ($dcb -match '_verify_live_bundle_checksums|post-swap checksum') 'deploy-client-bundle post-swap checksum verify'
+Assert ($dcb -match 'bundle-origin\.txt') 'deploy-client-bundle writes bundle-origin.txt'
+Assert ($dcb -match '_refuse_same_version_content_drift|same-version content drift') 'deploy-client-bundle refuses same-version content drift'
 Assert ($dcb -notmatch '(?m)^rm -rf "\$BUNDLE_ROOT"$') 'deploy-client-bundle does not rm -rf live root'
 
 Assert ($upd -match "VERIFY_OK") 'update-server tracks verify result'

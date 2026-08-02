@@ -179,10 +179,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260729.15'
+$script:ConnectVersion = '20260801.10'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = 'b332a4c2-1666-45bc-bf2a-8112de9599b3'
+$script:ConnectBuildId = 'eed447e4-b36d-42ba-aa47-873a291e28ee'
 $script:SshMsSamples = [System.Collections.Generic.List[int]]::new()
 $script:SshMsSampleStartUnix = 0
 $script:LastSshRollupUnix = 0
@@ -366,6 +366,11 @@ if (-not (Test-Path $_gitMode)) {
     Die "git-mode.ps1 not found - re-copy the full windows package"
 }
 . $_gitMode
+# Co-origination: connect.ps1 + git-mode.ps1 must share one build stamp (P1.2 residual).
+# Version string alone cannot detect split-generation installs under the same ConnectVersion.
+if (-not $script:GitModeBuildId -or $script:GitModeBuildId -ne $script:ConnectBuildId) {
+    Die ("Split-generation install (co-origination fail): connect.ps1 ConnectBuildId={0} git-mode.ps1 GitModeBuildId={1} - re-copy the full package or run update" -f $script:ConnectBuildId, $script:GitModeBuildId)
+}
 $_cursorAuth = Join-Path $script:ConnectScriptDir 'cursor-auth-laptop.ps1'
 if (-not (Test-Path $_cursorAuth)) {
     $_cursorAuth = Join-Path (Split-Path $script:ConnectScriptDir -Parent) 'cursor-auth-laptop.ps1'
@@ -911,8 +916,14 @@ function Initialize-ServerSession {
         $null = Import-PrefetchedOpenTunnelPorts -Lines $lines -UidStr $uidStr
     }
     $pubB = ([string](($lines | Where-Object { $_ -match '^ssh-' } | Select-Object -First 1) + '')).Trim()
-    $remoteHash = (($lines | Where-Object { $_ -match '^MOUNT_HASH:' } | Select-Object -First 1) -replace '^MOUNT_HASH:', '').Trim()
-    $gitRemote = (($lines | Where-Object { $_ -match '^GIT_HASH:' } | Select-Object -First 1) -replace '^GIT_HASH:', '').Trim()
+    # [string](... + '') before -replace, same shape as $pubB above. When the remote call
+    # fails or is truncated there is no MOUNT_HASH:/GIT_HASH: line, the Where-Object emits
+    # nothing, and -replace over an empty pipeline yields an EMPTY Object[]. Member
+    # enumeration cannot dispatch .Trim() on an empty array, so it raises a terminating
+    # "[System.Object[]] does not contain a method named 'Trim'" - a hard connect crash on
+    # exactly the degraded-SSH path this parse exists to tolerate.
+    $remoteHash = (([string](($lines | Where-Object { $_ -match '^MOUNT_HASH:' } | Select-Object -First 1) + '')) -replace '^MOUNT_HASH:', '').Trim()
+    $gitRemote = (([string](($lines | Where-Object { $_ -match '^GIT_HASH:' } | Select-Object -First 1) + '')) -replace '^GIT_HASH:', '').Trim()
     # P0-S4: seed verified hash from Server setup MOUNT_HASH so
     # Prepare-ServerSessionParallel can skip the sha256sum SshX round trip when
     # local claude-mount already matches (ClaudeMountSyncVerifiedHash -eq localHash).
@@ -979,17 +990,8 @@ function Initialize-ServerSession {
     $script:LaptopFirewallOk = $true
 
     if (Get-Command Update-StepProgress -ErrorAction SilentlyContinue) { Update-StepProgress 'ssh config' }
-    Remove-SshHostBlock $SshCfgPath $Alias
     $sshCfgUser = Get-SshConfigUserForServer -Ip $ServerIP -FallbackUser $RemoteUser
-    @"
-
-Host $Alias
-    HostName $ServerIP
-    User $sshCfgUser
-    IdentityFile ~/.ssh/id_ed25519
-    StrictHostKeyChecking accept-new
-"@ | Add-Content -Path $SshCfgPath -Encoding ASCII
-    Sanitize-SshAliasConfig -CfgPath $SshCfgPath -AliasName $Alias
+    Set-SshHostBlock -CfgPath $SshCfgPath -AliasName $Alias -HostName $ServerIP -UserName $sshCfgUser
     Repair-SshPerm $SshCfgPath "SSH config"
     if (Get-Command Update-StepProgress -ErrorAction SilentlyContinue) { Update-StepProgress 'conf' }
     Push-ServerConnectConf
@@ -1320,7 +1322,7 @@ function SshX([string]$Cmd, [switch]$NoRetryOnTimeout) {
         Write-ConnectLog "SSH_END exit=$($result.Exit) ms=$($result.Ms) out=$truncOut" $sshLevel
         if ($truncOut -match 'unexpected EOF while looking for matching') {
             Write-ConnectLog ("FAIL SSH_QUOTE: exit={0} cmd={1} out={2}" -f $result.Exit, $truncCmd, $truncOut) 'ERROR'
-        } elseif ($result.Exit -ne 0 -and $result.Exit -ne 124 -and $truncOut -match '(?i)Permission denied|Connection refused|Could not resolve|No route to host|Connection timed out') {
+        } elseif ($result.Exit -ne 0 -and $result.Exit -ne 124 -and $truncOut -match '(?i)Permission denied|Connection refused|Could not resolve|No route to host|Connection timed out|Unknown error') {
             Write-ConnectLog ("FAIL SSH_END: exit={0} cmd={1}" -f $result.Exit, $truncCmd) 'ERROR'
         }
     }
@@ -1549,14 +1551,128 @@ function PortOpen($ip, $port) {
 }
 
 function Remove-SshHostBlock($cfgPath, $alias) {
+    # Mutex + Write-AsciiFileRetry live in git-mode.ps1 (dot-sourced). No nested scriptblock
+    # so brace extractors / live tests see the full function body.
     if (-not (Test-Path $cfgPath)) { return }
-    $out  = New-Object System.Collections.Generic.List[string]
-    $skip = $false
-    foreach ($ln in (Get-Content $cfgPath)) {
-        if ($ln -match '^\s*Host\s+(.+)$') { $skip = (($matches[1].Trim() -split '\s+') -contains $alias) }
-        if (-not $skip) { $out.Add($ln) }
+    # Fail-open if an older git-mode.ps1 (partial update) lacks the mutex helper.
+    $mtx = $null
+    if (Get-Command Get-SshConfigWriteMutex -ErrorAction SilentlyContinue) {
+        try { $mtx = Get-SshConfigWriteMutex } catch { $mtx = $null }
     }
-    Set-Content -Path $cfgPath -Value $out -Encoding ASCII
+    $owned = $false
+    try {
+        if ($mtx) {
+            try { $owned = $mtx.WaitOne(15000) }
+            catch [System.Threading.AbandonedMutexException] { $owned = $true }
+            catch { $owned = $false }
+        }
+        if (-not (Test-Path -LiteralPath $cfgPath)) { return }
+        $prevLen = 0
+        try { $prevLen = [int](Get-Item -LiteralPath $cfgPath).Length } catch { }
+        $out  = New-Object System.Collections.Generic.List[string]
+        $skip = $false
+        foreach ($ln in @(Get-Content -LiteralPath $cfgPath -ErrorAction SilentlyContinue)) {
+            if ($ln -match '^\s*Host\s+(.+)$') { $skip = (($matches[1].Trim() -split '\s+') -contains $alias) }
+            if (-not $skip) { $out.Add($ln) }
+        }
+        $newText = (($out | ForEach-Object { [string]$_ }) -join "`n")
+        if ($prevLen -gt 40 -and $out.Count -eq 0 -and $newText.Trim().Length -lt 8) {
+            throw ("Remove-SshHostBlock refused empty wipe path={0} prevLen={1}" -f $cfgPath, $prevLen)
+        }
+        Write-AsciiFileRetry -Path $cfgPath -Value $out
+    } finally {
+        if ($owned -and $mtx) { try { $mtx.ReleaseMutex() } catch { } }
+    }
+}
+
+function Set-SshHostBlock {
+    # Single locked read-modify-write for the claude-server Host alias. Replaces the old
+    # Remove-SshHostBlock + Add-Content + Sanitize sequence, which left the alias missing between
+    # steps and crashed with UNHANDLED when a second Connect instance wrote at the same moment.
+    # Fresh Host block has no RemoteForward - no separate Sanitize pass needed under this lock.
+    param(
+        [Parameter(Mandatory)][string]$CfgPath,
+        [Parameter(Mandatory)][string]$AliasName,
+        [Parameter(Mandatory)][string]$HostName,
+        [Parameter(Mandatory)][string]$UserName,
+        [string]$IdentityFile = ''
+    )
+    # Empty default resolves to the pinned key so an elevated Connect writes the key it actually
+    # installed on the server, not whatever '~' means for the process that happens to run ssh.exe.
+    if (-not $IdentityFile) {
+        $IdentityFile = if ($script:ConnectSshIdentityFile) { $script:ConnectSshIdentityFile } else { '~/.ssh/id_ed25519' }
+    }
+    # Fail-open if an older git-mode.ps1 (partial update) lacks the mutex helper.
+    $mtx = $null
+    if (Get-Command Get-SshConfigWriteMutex -ErrorAction SilentlyContinue) {
+        try { $mtx = Get-SshConfigWriteMutex } catch { $mtx = $null }
+    }
+    $owned = $false
+    try {
+        if ($mtx) {
+            try { $owned = $mtx.WaitOne(15000) }
+            catch [System.Threading.AbandonedMutexException] { $owned = $true }
+            catch { $owned = $false }
+        }
+        $out = New-Object System.Collections.Generic.List[string]
+        $prevLen = 0
+        if (Test-Path -LiteralPath $CfgPath) {
+            try { $prevLen = [int](Get-Item -LiteralPath $CfgPath).Length } catch { }
+            $skip = $false
+            foreach ($ln in @(Get-Content -LiteralPath $CfgPath -ErrorAction SilentlyContinue)) {
+                if ($ln -match '^\s*Host\s+(.+)$') { $skip = (($matches[1].Trim() -split '\s+') -contains $AliasName) }
+                if (-not $skip) { $out.Add($ln) }
+            }
+        }
+        while ($out.Count -gt 0 -and [string]::IsNullOrWhiteSpace($out[$out.Count - 1])) { $out.RemoveAt($out.Count - 1) }
+        if ($out.Count -gt 0) { $out.Add('') }
+        $out.Add("Host $AliasName")
+        $out.Add("    HostName $HostName")
+        $out.Add("    User $UserName")
+        $out.Add("    IdentityFile $IdentityFile")
+        # A loaded ssh-agent otherwise offers its own keys first and can exhaust the server's
+        # MaxAuthTries before ours is ever tried - another silent publickey denial.
+        $out.Add('    IdentitiesOnly yes')
+        $out.Add('    StrictHostKeyChecking accept-new')
+        $newText = (($out | ForEach-Object { [string]$_ }) -join "`n")
+        if ($prevLen -gt 40 -and $newText.Trim().Length -lt 20) {
+            throw ("Set-SshHostBlock refused empty wipe path={0} prevLen={1}" -f $CfgPath, $prevLen)
+        }
+        Write-AsciiFileRetry -Path $CfgPath -Value $out
+    } finally {
+        if ($owned -and $mtx) { try { $mtx.ReleaseMutex() } catch { } }
+    }
+}
+
+function Get-SshVerifyFailReason {
+    # Called only after a verify has already failed, so the extra round trip never lands in the
+    # timed startup path. Maps ssh -v stderr onto a short, greppable cause for the daylog.
+    param(
+        [Parameter(Mandatory)][string]$Alias,
+        [int]$ConnectTimeout = 10
+    )
+    $txt = ''
+    $tmp = ''
+    try {
+        $tmp = [System.IO.Path]::GetTempFileName()
+        # 2>$tmp instead of 2>&1: PS 5.1 turns a native command's stderr into ErrorRecords, which
+        # this helper must not push onto the caller's error stream just to read a message.
+        & ssh -n -v -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=$ConnectTimeout $Alias 'true' 2>$tmp | Out-Null
+        $txt = [System.IO.File]::ReadAllText($tmp)
+    } catch {
+        return 'probe_failed'
+    } finally {
+        if ($tmp -and (Test-Path -LiteralPath $tmp)) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    }
+    if ($txt -match 'Too many authentication failures')         { return 'too_many_auth_tries' }
+    if ($txt -match 'Permission denied \(publickey')            { return 'publickey_rejected' }
+    if ($txt -match 'Could not resolve hostname')               { return 'alias_unresolved' }
+    if ($txt -match 'Host key verification failed')             { return 'host_key_mismatch' }
+    if ($txt -match 'Connection refused')                       { return 'connection_refused' }
+    if ($txt -match 'Connection timed out|Operation timed out') { return 'connection_timeout' }
+    if ($txt -match 'Connection closed by')                     { return 'connection_closed' }
+    if ($txt -match 'No such file or directory')                { return 'identity_file_missing' }
+    return 'unknown'
 }
 
 function Get-Mounts {
@@ -1887,18 +2003,8 @@ if ($DeferredServerSetupOnly) {
     }
     New-Item -ItemType Directory -Force -Path $SshDir | Out-Null
     $sshCfg = [System.IO.Path]::Combine($SshDir, 'config')
-    if (-not (Test-Path $sshCfg)) { New-Item -ItemType File -Path $sshCfg | Out-Null }
-    Remove-SshHostBlock $sshCfg $Alias
     $sshCfgUser = Get-SshConfigUserForServer -Ip $ServerIP -FallbackUser $RemoteUser
-    @"
-
-Host $Alias
-    HostName $ServerIP
-    User $sshCfgUser
-    IdentityFile ~/.ssh/id_ed25519
-    StrictHostKeyChecking accept-new
-"@ | Add-Content -Path $sshCfg -Encoding ASCII
-    Sanitize-SshAliasConfig -CfgPath $sshCfg -AliasName $Alias
+    Set-SshHostBlock -CfgPath $sshCfg -AliasName $Alias -HostName $ServerIP -UserName $sshCfgUser
     $boot = Initialize-ServerSession -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias -SshCfgPath $sshCfg
     $result = [ordered]@{
         Ok                          = [bool]$boot.Ok
@@ -1994,20 +2100,21 @@ if (Test-Path $keyA) {
     StepOk
 } else { StepFail "could not create key"; Wait-ConnectExit -Reason 'ssh_key_create_fail' -Code 1 }
 
-# SSH config
-$sshCfg = [System.IO.Path]::Combine($SshDir, 'config')
-if (-not (Test-Path $sshCfg)) { New-Item -ItemType File -Path $sshCfg | Out-Null }
-Remove-SshHostBlock $sshCfg $Alias
-$sshCfgUser = Get-SshConfigUserForServer -Ip $ServerIP -FallbackUser $RemoteUser
-@"
+# '~' in ssh config resolves against the profile of whoever runs ssh.exe, but $SshDir/$keyA were
+# rebound above to LAPTOP_USER's profile when Connect is elevated as a different admin. Left as
+# '~/.ssh/id_ed25519' the alias then offers a different (or missing) key than the one we just
+# installed on the server - keyCopyOk=True, verify denied. Pin the real path whenever it differs.
+$script:ConnectSshIdentityFile = ''
+$_profileKey = [System.IO.Path]::Combine(($env:USERPROFILE + ''), '.ssh', 'id_ed25519')
+if ($keyA -ne $_profileKey) {
+    $script:ConnectSshIdentityFile = ($keyA -replace '\\', '/')
+    Write-ConnectLog ("SSH_IDENTITY_PINNED path={0} reason=ssh_dir_not_running_profile" -f $script:ConnectSshIdentityFile) 'WARN'
+}
 
-Host $Alias
-    HostName $ServerIP
-    User $sshCfgUser
-    IdentityFile ~/.ssh/id_ed25519
-    StrictHostKeyChecking accept-new
-"@ | Add-Content -Path $sshCfg -Encoding ASCII
-Sanitize-SshAliasConfig -CfgPath $sshCfg -AliasName $Alias
+# SSH config - Set-SshHostBlock creates the file under the shared lock, so no racy pre-create here
+$sshCfg = [System.IO.Path]::Combine($SshDir, 'config')
+$sshCfgUser = Get-SshConfigUserForServer -Ip $ServerIP -FallbackUser $RemoteUser
+Set-SshHostBlock -CfgPath $sshCfg -AliasName $Alias -HostName $ServerIP -UserName $sshCfgUser
 if (Get-Command Request-ConnectLogSync -ErrorAction SilentlyContinue) { Request-ConnectLogSync -NoInline | Out-Null } elseif (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue) { Sync-ConnectLogToServer | Out-Null }  # ship BOOTSTRAP/UPDATE + session so far (async only - never block boot)
 # Fix SSH config permissions silently - shown later under the step that calls StepOk
 icacls $sshCfg /reset 2>$null | Out-Null
@@ -2098,27 +2205,76 @@ if ($needsKey) {
     $authOk = $false
     while (-not $authOk) {
         Write-Host "    Enter server password (one time only):" -ForegroundColor Yellow
-        $pubKeyContent = (Get-Content "$keyA.pub").Trim() -replace "'", "'\''"
-        ssh -o StrictHostKeyChecking=accept-new "$RemoteUser@$ServerIP" `
-            "mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\n' '$pubKeyContent' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+        # Must stay a single string: without -Raw a multi-line .pub is Object[], which
+        # member-enumerates through .Trim() and then interpolates space-joined into the
+        # remote command below, appending a corrupt authorized_keys entry. The try/catch
+        # covers a missing .pub (private key kept, .pub deleted, so the ssh-keygen above is
+        # skipped), which -ErrorAction Stop would otherwise raise as an uncaught throw here.
+        $pubRaw = ''
+        try { $pubRaw = ((Get-Content -LiteralPath "$keyA.pub" -Raw -ErrorAction Stop) + '') } catch { $pubRaw = '' }
+        # One-line OpenSSH pubkey only (defend against blank trailing lines -> Object[] history).
+        $pubKeyContent = ((($pubRaw -split "`r?`n" | Where-Object { $_.Trim() -ne '' } | Select-Object -First 1) + '').Trim()) -replace "'", "'\''"
+        if (-not $pubKeyContent -and (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue)) {
+            Write-ConnectLog "AUTH: pubkey_unreadable path=$keyA.pub (authorized_keys push will not install a key)" 'WARN'
+        }
+        # ssh-copy-id semantics the Windows path never had (mac/connect.sh gets them for free by
+        # shelling out to ssh-copy-id). A bare '>>' append onto an authorized_keys that does not
+        # end in a newline glues our key onto the previous entry, so BOTH lines become unparsable
+        # - yet the remote command still exits 0. That is precisely the CONNECT_AUTH_VERIFY
+        # "keyCopyOk=True, verify still fails" signature, and every retry only appends another
+        # glued line, so the box can never recover on its own. Three changes:
+        #   - add the missing newline first, so the key always lands on a line of its own (this
+        #     also repairs an already-glued file: sshd skips the unparsable line and reads ours);
+        #   - grep -qxF before appending, so retries stay idempotent instead of growing the file;
+        #   - chmod go-w ~ , because sshd StrictModes silently refuses pubkey auth on a
+        #     group/world-writable home no matter how correct authorized_keys is.
+        # Ends on grep -qxF so keyCopyOk means "the exact key is present on its own line",
+        # not merely "the remote shell ran".
+        $installKeyCmd = 'umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh; chmod go-w ~ 2>/dev/null; touch ~/.ssh/authorized_keys; if [ -s ~/.ssh/authorized_keys ] && [ $(tail -c1 ~/.ssh/authorized_keys | wc -l) -eq 0 ]; then echo >> ~/.ssh/authorized_keys; fi; grep -qxF ''__PUBKEY__'' ~/.ssh/authorized_keys || printf ''%s\n'' ''__PUBKEY__'' >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys; grep -qxF ''__PUBKEY__'' ~/.ssh/authorized_keys'
+        $installKeyCmd = $installKeyCmd.Replace('__PUBKEY__', $pubKeyContent)
+        ssh -o StrictHostKeyChecking=accept-new "$RemoteUser@$ServerIP" $installKeyCmd
         $keyCopyOk = ($LASTEXITCODE -eq 0)
+        # Ensure Host alias exists before verify (multi-instance may have raced ssh config).
+        try {
+            Set-SshHostBlock -CfgPath $sshCfg -AliasName $Alias -HostName $ServerIP `
+                -UserName (Get-SshConfigUserForServer -Ip $ServerIP -FallbackUser $RemoteUser)
+        } catch {
+            if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                Write-ConnectLog ("SSH_CFG_REWRITE_WARN err=$($_.Exception.Message)") 'WARN'
+            }
+        }
         Step "Verifying connection"
         $verifySW = [System.Diagnostics.Stopwatch]::StartNew()
-        ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=15 $Alias "true" 2>$null
+        $verifyEc = 1
+        for ($vi = 1; $vi -le 3 -and $verifyEc -ne 0; $vi++) {
+            ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=15 $Alias "true" 2>$null
+            $verifyEc = $LASTEXITCODE
+            if ($verifyEc -ne 0) {
+                # Alias missing / config mid-write: fall back to user@IP + same key.
+                ssh -n -o ClearAllForwardings=yes -o BatchMode=yes -o ConnectTimeout=15 `
+                    -o StrictHostKeyChecking=accept-new -i "$keyA" "${RemoteUser}@${ServerIP}" "true" 2>$null
+                $verifyEc = $LASTEXITCODE
+            }
+            if ($verifyEc -ne 0 -and $vi -lt 3) { Start-Sleep -Milliseconds (200 * $vi) }
+        }
         $verifySW.Stop()
         $verifyT = [math]::Round($verifySW.Elapsed.TotalSeconds, 1)
-        if ($LASTEXITCODE -eq 0) {
+        if ($verifyEc -eq 0) {
             $authOk = $true
             break
         }
         if (-not $keyCopyOk) { StepFail "key copy failed after ${verifyT}s - wrong password?" }
         else { StepFail "still cannot connect after ${verifyT}s" }
+        # keyCopyOk=True + denied verify used to be indistinguishable from a dozen causes. One
+        # -v probe on the already-failing path names it (publickey_rejected vs alias_unresolved
+        # vs too_many_auth_tries vs host_key_mismatch) instead of leaving the daylog to guess.
+        $verifyReason = Get-SshVerifyFailReason -Alias $Alias
         if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
-            Write-ConnectLog ("FAIL CONNECT_AUTH_VERIFY keyCopyOk={0} verify_s={1} alias={2} remote_user={3} host={4} ssh_cfg_user={5} fix_attempts={6}/{7}" -f $keyCopyOk, $verifyT, $Alias, $RemoteUser, $ServerIP, $sshCfgUser, $fixAttemptsUsed, $maxFixAttempts) 'ERROR'
+            Write-ConnectLog ("FAIL CONNECT_AUTH_VERIFY keyCopyOk={0} verify_s={1} alias={2} remote_user={3} host={4} ssh_cfg_user={5} fix_attempts={6}/{7} reason={8}" -f $keyCopyOk, $verifyT, $Alias, $RemoteUser, $ServerIP, $sshCfgUser, $fixAttemptsUsed, $maxFixAttempts, $verifyReason) 'ERROR'
             try {
                 $bread = Join-Path $env:USERPROFILE '.config\claude-connect\last-fail.txt'
                 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
-                $line = "[$ts] [ERROR] FAIL CONNECT_AUTH_VERIFY keyCopyOk=$keyCopyOk verify_s=$verifyT alias=$Alias remote_user=$RemoteUser host=$ServerIP ssh_cfg_user=$sshCfgUser fix_attempts=$fixAttemptsUsed/$maxFixAttempts`r`n"
+                $line = "[$ts] [ERROR] FAIL CONNECT_AUTH_VERIFY keyCopyOk=$keyCopyOk verify_s=$verifyT alias=$Alias remote_user=$RemoteUser host=$ServerIP ssh_cfg_user=$sshCfgUser fix_attempts=$fixAttemptsUsed/$maxFixAttempts reason=$verifyReason`r`n"
                 New-Item -ItemType Directory -Force -Path (Split-Path $bread) | Out-Null
                 [IO.File]::AppendAllText($bread, $line, [Text.UTF8Encoding]::new($false))
             } catch { }
@@ -2156,17 +2312,8 @@ if ($needsKey) {
         $RemoteUser = $fix
         Save-ConnectConfKey -Path $Cfg -Key 'REMOTE_USER' -Value $RemoteUser
         Save-ConnectConfKey -Path $Cfg -Key 'LAPTOP_USER' -Value (Get-InteractiveLaptopUser)
-        Remove-SshHostBlock $sshCfg $Alias
         $sshCfgUser = Get-SshConfigUserForServer -Ip $ServerIP -FallbackUser $RemoteUser
-        @"
-
-Host $Alias
-    HostName $ServerIP
-    User $sshCfgUser
-    IdentityFile ~/.ssh/id_ed25519
-    StrictHostKeyChecking accept-new
-"@ | Add-Content -Path $sshCfg -Encoding ASCII
-        Sanitize-SshAliasConfig -CfgPath $sshCfg -AliasName $Alias
+        Set-SshHostBlock -CfgPath $sshCfg -AliasName $Alias -HostName $ServerIP -UserName $sshCfgUser
         if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
             Write-ConnectLog ("SSH_USER_FIX_RETRY in-process attempt={0}/{1} remote_user={2} ssh_cfg_user={3}" -f $fixAttemptsUsed, $maxFixAttempts, $RemoteUser, $sshCfgUser)
         }
@@ -2929,7 +3076,12 @@ $script:WindowsMcpEnsured = $false
                         }
                     } elseif (Get-Command Confirm-RemoteEditorLaunchVisible -ErrorAction SilentlyContinue) {
                         if (-not (Confirm-RemoteEditorLaunchVisible -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)) {
-                            StepFail "elevated launch failed - no $EditorName window (try non-elevated Connect or check $EditorName install)"
+                            $confirmFailMsg = if (Get-Command Get-RemoteEditorLaunchFailMessage -ErrorAction SilentlyContinue) {
+                                Get-RemoteEditorLaunchFailMessage -EditorName $EditorName
+                            } else {
+                                "$EditorName launch did not show the project folder window (check $EditorName install or press O to retry)"
+                            }
+                            StepFail $confirmFailMsg
                         } else {
                             StepOk $($go.Path)
                             $didLaunch = $true
@@ -3194,6 +3346,12 @@ $script:WindowsMcpEnsured = $false
                     $gotKey = $true
                     break
                 }
+                # P0.5: WinPS 5.1 does not pump Register-ObjectEvent during ReadKey/Sleep, so
+                # the log-sync timer Action never runs in this loop. Explicit pump delivers
+                # routine (non-ERROR) day-log bytes; local writes remain independent.
+                if (Get-Command Invoke-ConnectLogAsyncPump -ErrorAction SilentlyContinue) {
+                    try { Invoke-ConnectLogAsyncPump } catch { }
+                }
                 Start-Sleep -Milliseconds 800
             }
             if (-not $gotKey -and -not $tunnelSyncOk) {
@@ -3265,7 +3423,12 @@ $script:WindowsMcpEnsured = $false
                         }
                     } elseif (Get-Command Confirm-RemoteEditorLaunchVisible -ErrorAction SilentlyContinue) {
                         if (-not (Confirm-RemoteEditorLaunchVisible -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)) {
-                            StepFail "elevated launch failed - no $EditorName window (try non-elevated Connect or check $EditorName install)"
+                            $confirmFailMsg = if (Get-Command Get-RemoteEditorLaunchFailMessage -ErrorAction SilentlyContinue) {
+                                Get-RemoteEditorLaunchFailMessage -EditorName $EditorName
+                            } else {
+                                "$EditorName launch did not show the project folder window (check $EditorName install or press O to retry)"
+                            }
+                            StepFail $confirmFailMsg
                         } else {
                             StepOk $go.Path
                             $editorOpened = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path

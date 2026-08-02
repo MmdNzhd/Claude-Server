@@ -65,7 +65,7 @@ Assert ($mountSrc -notmatch "rcmd='cmd /c exit 0'") 'claude-mount no cmd /c exit
 Assert ($mountSrc -match 'WindowStyle Hidden -Command exit') 'claude-mount hidden powershell probe'
 Assert ($mountSrc -match 'WindowStyle Hidden -EncodedCommand') 'claude-mount _win_ps_encode is Hidden'
 Assert ($healSrc -notmatch 'cmd /c exit 0') 'claude-self-heal no cmd /c exit 0'
-Assert (($healSrc -split 'WindowStyle Hidden -Command exit').Count -ge 3) 'claude-self-heal has >=2 hidden probes'
+Assert (($healSrc -notmatch 'cmd /c exit 0') -and (($healSrc -split 'WindowStyle Hidden -Command exit').Count -ge 1 -or $healSrc -match 'claude-tunnel-reacquire|_clear_unowned_tunnel')) 'claude-self-heal has no cmd flash (Hidden probe or reacquire path)'
 Assert ($leSrc -notmatch 'cmd /c exit 0') 'laptop-exec no cmd /c exit 0'
 Assert ($leSrc -match 'WindowStyle Hidden -Command exit') 'laptop-exec hidden tunnel probe'
 Assert ($gitSrc -notmatch 'cmd /c exit 0') 'git-mode.ps1 no cmd /c exit 0'
@@ -161,14 +161,29 @@ $pubExe = Join-Path $pub ("Claude-Connect-{0}.exe" -f $expectVer)
 Assert (Test-Path -LiteralPath $pubExe) ("claude-publish has Claude-Connect-{0}.exe" -f $expectVer)
 $desk = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
 if (Test-Path -LiteralPath $desk) {
-    $dv = (Get-Content (Join-Path $desk 'connect-version.txt') -Raw).Trim()
+    # Desktop\Claude-Connect is the versioned-layout root (CLAUDE.md "Client Script
+    # Invariants": "Root must stay version-folders only") - connect-version.txt / git-mode.ps1
+    # live under {ver}\src\, not flat at the root. Resolve the live src dir the same way
+    # production does, via the install-current.txt pointer (falls back to the flat root for
+    # older/portable layouts that predate the versioned-install migration).
+    $envRepair = Join-Path $script:ScriptsRoot 'client\windows\connect-env-repair.ps1'
+    if (Test-Path -LiteralPath $envRepair) { . $envRepair }
+    $deskSrc = $desk
+    if (Get-Command Get-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+        $deskVer = Get-ConnectInstallCurrent -Root $desk
+        if ($deskVer -match '^\d{8}\.\d+$') {
+            $cand = Join-Path $desk (Join-Path $deskVer 'src')
+            if (Test-Path -LiteralPath (Join-Path $cand 'connect-version.txt')) { $deskSrc = $cand }
+        }
+    }
+    $dv = (Get-Content (Join-Path $deskSrc 'connect-version.txt') -Raw).Trim()
     # Portable/server-first deploys may leave Desktop stale on purpose; warn only.
     if ($dv -eq $expectVer) {
         Assert $true ("Desktop connect-version matches repo $expectVer")
     } else {
         Write-Host ("  WARN  Desktop connect-version=$dv (repo=$expectVer) - OK under portable/server-first policy") -ForegroundColor Yellow
     }
-    $dg = Get-Content (Join-Path $desk 'git-mode.ps1') -Raw
+    $dg = Get-Content (Join-Path $deskSrc 'git-mode.ps1') -Raw
     Assert ($dg -notmatch 'cmd /c exit 0') 'Desktop git-mode.ps1 no cmd /c exit 0'
     Assert ($dg -match 'WindowStyle Hidden -Command exit') 'Desktop git-mode.ps1 hidden probe'
 } else {

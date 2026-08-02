@@ -1,8 +1,8 @@
 #Requires -Version 5.1
 # publish.ps1 - Client-only distributable packages (windows/ + mac/ + README).
 # Run: double-click publish.bat  (or: powershell -File publish\publish.ps1)
-# Output is ALWAYS Desktop\claude-publish\claude-code-client (and claude-code-sepidz) —
-# replace-in-place; no dated folder per run. Server scripts stay in the repo Ã¢â‚¬â€ NOT shipped in ZIPs.
+# Output is ALWAYS Desktop\claude-publish\claude-code-client (and claude-code-sepidz) -
+# replace-in-place; no dated folder per run. Server scripts stay in the repo ," NOT shipped in ZIPs.
 
 param(
     [switch]$NoZip,
@@ -331,7 +331,7 @@ if (-not $NoExe) {
         ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
     Write-Ok ("claude-publish\Claude-Connect-{0}.exe (+ Claude-Connect.exe alias, {1:N0} bytes)" -f $ConnectVersion, (Get-Item -LiteralPath $exePath).Length)
     try {
-        # Never leave unversioned Claude-Connect.exe / Setup on Desktop root —
+        # Never leave unversioned Claude-Connect.exe / Setup on Desktop root -
         # those used to overwrite Desktop\Claude-Connect with stale extracts.
         foreach ($stale in @(
             (Join-Path $env:USERPROFILE 'Desktop\Claude-Connect.exe'),
@@ -470,13 +470,14 @@ if (-not $NoZip) {
 }
 }
 
-# Laptop deploy: one flat folder Desktop\Claude-Connect (canonical heal path).
+# Laptop deploy: versioned {ver}\src under Desktop\Claude-Connect (canonical heal path).
+# VerDir contract: src + Claude-Connect-{0}.exe only (launchers at root via current.txt).
 if (-not $SepidzOnly) {
     try {
         $winPkg = Join-Path $OutDir 'windows'
         $deskConnect = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
         if (Test-Path -LiteralPath $winPkg) {
-            Write-Step "Syncing Desktop\Claude-Connect (single deploy folder)..."
+            Write-Step "Syncing Desktop\Claude-Connect versioned {ver}\src ..."
             if (Test-Path -LiteralPath $deskConnect) {
                 $ji = Get-Item -LiteralPath $deskConnect -Force
                 if ($ji.Attributes -band [IO.FileAttributes]::ReparsePoint) {
@@ -486,19 +487,50 @@ if (-not $SepidzOnly) {
             if (-not (Test-Path -LiteralPath $deskConnect)) {
                 $null = New-Item -ItemType Directory -Force -Path $deskConnect
             }
+            $verDir = Join-Path $deskConnect $ConnectVersion
+            $srcDir = Join-Path $verDir 'src'
+            New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
             Get-ChildItem -LiteralPath $winPkg -File -ErrorAction Stop | ForEach-Object {
-                # Do not drop SFX into the live deploy folder (Desktop root keeps Claude-Connect-VERSION.exe).
-                if ($_.Name -match '^connect\.log|^\.laptop-deploy|^Design\.|^connect-design\.|^Claude-Connect\.exe$|^READ-ME') { return }
-                Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $deskConnect $_.Name) -Force
+                # Do not drop SFX into src (EXE lives beside src in VerDir).
+                if ($_.Name -match '^connect\.log|^\.laptop-deploy|^Design\.|^connect-design\.|^Claude-Connect(-[\d.]+)?\.exe$|^READ-ME') { return }
+                Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $srcDir $_.Name) -Force
             }
-            Set-Content -Path (Join-Path $deskConnect 'VERSION.txt') -Value $ConnectVersion -Encoding ASCII
-            Get-ChildItem -LiteralPath $deskConnect -Force -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $_.Name -match '^connect-\d{8}\.\d+\.bat$|^Design(\.rar)?$|^connect-design\.|^\.rar$|^Claude-Connect\.exe$|^READ-ME' -or
-                    ($_.PSIsContainer -and $_.Name -match '^(Design|mac)$')
-                } |
-                ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
-            Write-Ok ("Desktop\Claude-Connect  v{0}" -f $ConnectVersion)
+            $destExe = Join-Path $verDir ("Claude-Connect-{0}.exe" -f $ConnectVersion)
+            $exeSrc = Join-Path $OutBase ("Claude-Connect-{0}.exe" -f $ConnectVersion)
+            if (-not (Test-Path -LiteralPath $exeSrc)) { $exeSrc = Join-Path $OutBase 'Claude-Connect.exe' }
+            if (-not (Test-Path -LiteralPath $exeSrc)) { $exeSrc = Join-Path $winPkg 'Claude-Connect.exe' }
+            $desktop = Split-Path -Parent $deskConnect
+            if (Test-Path -LiteralPath $exeSrc) {
+                Copy-Item -LiteralPath $exeSrc -Destination $destExe -Force
+                # Primary daily launcher: Desktop\Claude-Connect.exe (never inside folder root).
+                Copy-Item -LiteralPath $exeSrc -Destination (Join-Path $desktop 'Claude-Connect.exe') -Force
+            }
+            Set-Content -LiteralPath (Join-Path $srcDir 'connect-version.txt') -Value $ConnectVersion -Encoding ASCII -NoNewline
+            # Strip non-contract files from VerDir (src + Claude-Connect-{ver}.exe only)
+            Get-ChildItem -LiteralPath $verDir -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_.Name -eq 'src') { return }
+                if ($_.Name -eq ("Claude-Connect-{0}.exe" -f $ConnectVersion)) { return }
+                Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            # Root contract: version folders ONLY. Launch via Desktop\Claude-Connect.exe.
+            $repair = Join-Path $srcDir 'connect-env-repair.ps1'
+            if (Test-Path -LiteralPath $repair) {
+                . $repair
+                if (Get-Command Set-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+                    Set-ConnectInstallCurrent -Root $deskConnect -Ver $ConnectVersion
+                }
+                if (Get-Command Write-ConnectRootInstantLauncher -ErrorAction SilentlyContinue) {
+                    Write-ConnectRootInstantLauncher -Root $deskConnect -Ver $ConnectVersion
+                }
+                if (Get-Command Repair-ConnectRootLayout -ErrorAction SilentlyContinue) {
+                    [void](Repair-ConnectRootLayout -Root $deskConnect -Ver $ConnectVersion)
+                }
+            } else {
+                Get-ChildItem -LiteralPath $deskConnect -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                }
+            }
+            Write-Ok ("Desktop\Claude-Connect\{0}\src  v{0} + Desktop\Claude-Connect.exe (root=ver-folders only)" -f $ConnectVersion)
         }
     } catch {
         Write-Host ("  warn: Desktop\Claude-Connect sync failed: {0}" -f $_.Exception.Message) -ForegroundColor DarkYellow

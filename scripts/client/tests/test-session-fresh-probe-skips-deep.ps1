@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 # Deep HARD contracts for session-fresh probe skips (spawn-TTL / reverse-SSH / mount check).
 # Complements test-session-fresh-probe-skips.ps1 - do not weaken that suite.
 # Product version: 20260725.40

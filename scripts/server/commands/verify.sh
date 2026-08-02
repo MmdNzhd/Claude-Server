@@ -186,6 +186,33 @@ if [ -x /usr/local/bin/laptop-exec ]; then
 fi
 echo ""
 
+# --- codebase-memory-mcp fleet size gate ---
+echo -e "${BOLD}codebase-memory-mcp${NC}"
+_CBM_GOOD_SIZE=270253064
+_cbm_bad=0
+_cbm_ok=0
+if [ "$EUID" -eq 0 ] || command -v sudo >/dev/null 2>&1; then
+    for f in /home/*/.local/bin/codebase-memory-mcp; do
+        [ -f "$f" ] || continue
+        u=$(echo "$f" | cut -d/ -f3)
+        sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
+        if [ "$sz" = "$_CBM_GOOD_SIZE" ]; then
+            (( _cbm_ok++ )) || true
+        else
+            warn "codebase-memory-mcp $u size=$sz (want $_CBM_GOOD_SIZE)"
+            (( _cbm_bad++ )) || true
+        fi
+    done
+    if [ "$_cbm_bad" -eq 0 ]; then
+        ok "codebase-memory-mcp: $_cbm_ok homes match good size $_CBM_GOOD_SIZE"
+    else
+        fail "codebase-memory-mcp: $_cbm_bad BAD / $_cbm_ok GOOD (copy from /home/smart/.local/bin/codebase-memory-mcp)"
+    fi
+else
+    info "skip CBM fleet check (need root/sudo)"
+fi
+echo ""
+
 # --- Users ---
 echo -e "${BOLD}Users${NC}"
 if [ "$EUID" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then

@@ -90,8 +90,11 @@ if ($rawTail) {
     $realOut = & $gitBash $scriptFileBashPath 2>&1
     Write-Host "  INFO  real bash output:`n$($realOut -join "`n" | ForEach-Object { "    $_" })" -ForegroundColor DarkGray
 
-    $outMountHash = (($realOut | Where-Object { $_ -match '^MOUNT_HASH:' } | Select-Object -First 1) -replace '^MOUNT_HASH:', '').Trim()
-    $outGitHash = (($realOut | Where-Object { $_ -match '^GIT_HASH:' } | Select-Object -First 1) -replace '^GIT_HASH:', '').Trim()
+    # Same [string](... + '') guard as connect.ps1: when bash emits no hash line the
+    # Where-Object is empty and -replace over it yields an empty Object[], whose .Trim()
+    # is a terminating error - that would crash the runner instead of failing the assert.
+    $outMountHash = (([string](($realOut | Where-Object { $_ -match '^MOUNT_HASH:' } | Select-Object -First 1) + '')) -replace '^MOUNT_HASH:', '').Trim()
+    $outGitHash = (([string](($realOut | Where-Object { $_ -match '^GIT_HASH:' } | Select-Object -First 1) + '')) -replace '^GIT_HASH:', '').Trim()
 
     Assert ($outMountHash -eq $expectMountHash) "real MOUNT_HASH ($outMountHash) matches the real sha256sum of the dummy claude-mount file ($expectMountHash) - hash-check logic survived the merge intact"
     Assert ($outGitHash -eq $expectGitHash) "real GIT_HASH ($outGitHash) matches the real sha256sum of the dummy claude-git-setup file ($expectGitHash) - hash-check logic survived the merge intact"

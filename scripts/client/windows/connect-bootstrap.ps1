@@ -175,9 +175,42 @@ function Write-BootLog {
     }
 }
 
+function Resolve-VersionedSrcUnderRoot {
+    param([string]$Root)
+    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return $null }
+    if ((Split-Path -Leaf $Root) -ne 'Claude-Connect') { return $null }
+    $ver = ''
+    if (Get-Command Get-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+        $ver = Get-ConnectInstallCurrent -Root $Root
+    }
+    if ($ver -notmatch '^\d{8}\.\d+$') {
+        try {
+            $cf = Join-Path $Root 'current.txt'
+            if (Test-Path -LiteralPath $cf) {
+                $ver = (Get-Content -LiteralPath $cf -Raw -ErrorAction SilentlyContinue).Trim()
+            }
+        } catch { $ver = '' }
+    }
+    if ($ver -notmatch '^\d{8}\.\d+$') {
+        Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d{8}\.\d+$' } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1 |
+            ForEach-Object { $ver = $_.Name }
+    }
+    if ($ver -notmatch '^\d{8}\.\d+$') { return $null }
+    return (Join-Path $Root (Join-Path $ver 'src'))
+}
+
 function Test-GoodClientDir {
     param([string]$Dir)
     if ([string]::IsNullOrWhiteSpace($Dir) -or -not (Test-Path -LiteralPath $Dir)) { return $false }
+    if ((Split-Path -Leaf $Dir) -eq 'Claude-Connect') {
+        $vs = Resolve-VersionedSrcUnderRoot -Root $Dir
+        if ($vs -and (Test-Path -LiteralPath (Join-Path $vs 'connect.ps1'))) {
+            return (Test-GoodClientDir -Dir $vs)
+        }
+    }
     foreach ($n in @('connect.bat', 'connect.ps1', 'connect-update.ps1', 'cursor-proxy-sidecar.ps1', 'connect-version.txt', 'connect-heal.ps1')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Dir $n))) { return $false }
     }
@@ -191,6 +224,15 @@ function Test-GoodClientDir {
 function Get-DirVersion {
     param([string]$Dir)
     try {
+        if ($Dir -and (Split-Path -Leaf $Dir) -eq 'Claude-Connect') {
+            $vs = Resolve-VersionedSrcUnderRoot -Root $Dir
+            if ($vs) { return (Get-DirVersion -Dir $vs) }
+            $cf = Join-Path $Dir 'current.txt'
+            if (Test-Path -LiteralPath $cf) {
+                $cv = (Get-Content -LiteralPath $cf -Raw -ErrorAction SilentlyContinue).Trim()
+                if ($cv -match '^\d{8}\.\d+$') { return $cv }
+            }
+        }
         $vf = Join-Path $Dir 'connect-version.txt'
         if (-not (Test-Path -LiteralPath $vf)) { return '0' }
         $v = (Get-Content -LiteralPath $vf -TotalCount 1 -ErrorAction Stop).Trim()
@@ -371,10 +413,38 @@ or:
 
 
 function Copy-DirFiles {
-    param([string]$Src, [string]$Dst)
+    param([string]$Src, [string]$Dst, [string]$PreferVer = '')
+    # Versioned root: install into Claude-Connect\{ver}\src — never flat-dump scripts at root.
+    if ($Dst -and (Split-Path -Leaf $Dst) -eq 'Claude-Connect') {
+        $ver = $PreferVer
+        if ($ver -notmatch '^\d{8}\.\d+$') {
+            try {
+                $vf = Join-Path $Src 'connect-version.txt'
+                if (Test-Path -LiteralPath $vf) {
+                    $ver = (Get-Content -LiteralPath $vf -Raw -ErrorAction SilentlyContinue).Trim()
+                }
+            } catch { $ver = '' }
+        }
+        if ($ver -match '^\d{8}\.\d+$') {
+            $verDir = Join-Path $Dst $ver
+            $srcDir = Join-Path $verDir 'src'
+            New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
+            $Dst = $srcDir
+            try {
+                $rootForPtr = Split-Path -Parent (Split-Path -Parent $srcDir)
+                if (Get-Command Set-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+                    Set-ConnectInstallCurrent -Root $rootForPtr -Ver $ver
+                }
+            } catch {}
+        } else {
+            $vs = Resolve-VersionedSrcUnderRoot -Root $Dst
+            if ($vs) { $Dst = $vs }
+        }
+    }
     New-Item -ItemType Directory -Force -Path $Dst | Out-Null
     $n = 0
     foreach ($name in $PullNames) {
+        if ($name -eq 'Claude-Connect.exe') { continue }
         $s = Join-Path $Src $name
         if (Test-Path -LiteralPath $s) {
             Copy-Item -LiteralPath $s -Destination (Join-Path $Dst $name) -Force
@@ -498,8 +568,29 @@ try {
                 exit 1
             }
         }
-        $n = Copy-DirFiles -Src $stage -Dst $Canon
-        Write-BootLog ("canon refreshed files=$n ver=$remoteVer")
+        $n = Copy-DirFiles -Src $stage -Dst $Canon -PreferVer $remoteVer
+        Write-BootLog ("canon refreshed files=$n ver=$remoteVer dst=versioned_src")
+        # Place EXE under VerDir + root alias; keep root clean.
+        try {
+            $verDir = Join-Path $Canon $remoteVer
+            $destExe = Join-Path $verDir ("Claude-Connect-{0}.exe" -f $remoteVer)
+            $stageExe = Join-Path $stage 'Claude-Connect.exe'
+            New-Item -ItemType Directory -Force -Path $verDir | Out-Null
+            if (Test-Path -LiteralPath $stageExe) {
+                Copy-Item -LiteralPath $stageExe -Destination $destExe -Force -ErrorAction SilentlyContinue
+                Copy-Item -LiteralPath $stageExe -Destination (Join-Path $Canon 'Claude-Connect.exe') -Force -ErrorAction SilentlyContinue
+            }
+            if (Get-Command Set-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+                Set-ConnectInstallCurrent -Root $Canon -Ver $remoteVer
+            }
+            if (Get-Command Repair-ConnectRootLayout -ErrorAction SilentlyContinue) {
+                [void](Repair-ConnectRootLayout -Root $Canon -Ver $remoteVer)
+            } elseif (Get-Command Repair-ConnectAllVerDirLayouts -ErrorAction SilentlyContinue) {
+                [void](Repair-ConnectAllVerDirLayouts -Root $Canon -Quiet)
+            }
+        } catch {
+            Write-BootLog ("root_layout_warn $($_.Exception.Message)" -replace '[\r\n]', ' ') 'WARN'
+        }
         if ($Here -and -not [string]::Equals($Here, $Canon, [StringComparison]::OrdinalIgnoreCase)) {
             if ($legacy -or $hereBad) {
                 $stageExe = Join-Path $stage 'Claude-Connect.exe'

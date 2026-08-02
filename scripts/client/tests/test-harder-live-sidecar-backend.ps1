@@ -142,6 +142,7 @@ try {
 
     function Write-GitModeLog { param($m, $lvl) }
     function Get-CursorProxySettingsPath { return $script:TmpSettingsPath }
+    function Get-CursorProxySettingsPathsForClear { return @($script:TmpSettingsPath) }
     function Test-CursorProxyBackendOpen { return $false }
     function Get-CursorProfileProcesses { return @() }
     function Test-CursorProxySidecarListening { param([int]$Port) return ($Port -eq 18998) }

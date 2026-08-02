@@ -27,13 +27,17 @@ Assert ($build -match "AppLaunched=wscript\.exe //B //Nologo setup-run-hidden\.v
 Assert (-not ($build -match '(?i)AppLaunched=powershell\.exe|AppendLine\(''AppLaunched=powershell')) `
     'AppLaunched is not powershell Bypass+Hidden (Defender SFX heuristic)'
 
-# 3) setup-claude-connect.cmd in the hidden chain
+# 3) setup-claude-connect.cmd still staged (manual recovery only; VBS must not call it)
 Assert ($build -match 'setup-claude-connect\.cmd') `
-    'IExpress stage ships setup-claude-connect.cmd'
+    'IExpress stage ships setup-claude-connect.cmd (recovery only)'
 
-# 4) sh.Run window style 0
-Assert ($build -match 'sh\.Run cmd, 0, True') `
-    'setup-run-hidden.vbs uses sh.Run style 0 (no console flash)'
+# 4) VBS launches powershell directly with style 0 (no cmd.exe flash)
+Assert ($build -match 'sh\.Run ps, 0, True') `
+    'setup-run-hidden.vbs uses sh.Run style 0 on powershell (no console flash)'
+Assert ($build -match 'setup-launch\.ps1') `
+    'setup-run-hidden.vbs targets setup-launch.ps1'
+Assert ($build -notmatch 'cmd\.exe /c') `
+    'setup-run-hidden.vbs must not spawn cmd.exe /c (visible flash)'
 
 # 5) Versioned tree Claude-Connect\{ver}\src
 Assert ($launch -match 'Join-Path \$verDir ''src''') `

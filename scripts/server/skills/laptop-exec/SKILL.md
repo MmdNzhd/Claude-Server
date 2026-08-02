@@ -75,6 +75,7 @@ Never `laptop-exec read` / `rg` while the mount is healthy.
 | `laptop-exec git status -p P` | `laptop-exec git -p P -- status` (`-p` **before** subcommand) |
 | `git log -p` wrongly DIE | Allow; use `laptop-exec git -p P -- log -p` or `--patch`; never `git status -p P` |
 | MCP `FileSystem` write of `*.sh` then `bash -n` fails `$'\r'` | Prefer LF; LE `write` auto-strips CR for `.sh`/`.py`; never ship CRLF hooks |
+| Extra blank lines / mojibake after Windows write | MCP write must use `newline=''` (Connect patches windows-mcp). Never `Set-Content -Encoding UTF8` on PS 5.1 (BOM) — use `[IO.File]::WriteAllText(..., UTF8Encoding($false))` or `laptop-exec write` (binary scp). |
 | Invented verbs (`rpath`, `pathspec`) | Real verbs: `status|health|list|read|write|rg|git|run|test` |
 
 ## Failover / circuit breaker
@@ -108,6 +109,8 @@ Never `laptop-exec read` / `rg` while the mount is healthy.
 ```text
 ✅ user-windows-mcp FileSystem mode=write  path=<abs Windows>
 ✅ if MCP down → Cursor Write on /mounts/... then LE write
+✅ fidelity-critical UTF-8 / exact newlines → laptop-exec write (binary scp) or mount Write
+❌ PowerShell Set-Content -Encoding UTF8  (PS 5.1 writes UTF-8 BOM → mojibake)
 ```
 
 **Content search for `Foo`:**

@@ -16,7 +16,8 @@ $policyPath = Join-Path $RepoRoot 'scripts\server\client-update-policy.json'
 Assert (Test-Path -LiteralPath $policyPath) 'client-update-policy.json exists'
 $policy = Get-Content -LiteralPath $policyPath -Raw | ConvertFrom-Json
 Assert ([string]$policy.mode -eq 'optional') 'policy mode is optional'
-Assert ([string]$policy.latest -eq '20260722.40') 'policy latest is 20260722.40'
+$verTxt = (Get-Content (Join-Path $RepoRoot 'scripts\client\windows\connect-version.txt') -Raw).Trim()
+Assert ([string]$policy.latest -eq $verTxt) "policy latest matches connect-version.txt ($verTxt)"
 $minRaw = $null
 try { $minRaw = $policy.force_min_version } catch { $minRaw = $null }
 $minStr = if ($null -eq $minRaw) { '' } else { [string]$minRaw }
@@ -40,9 +41,15 @@ Assert ($upd -notmatch 'function Test-UpdateDeferActive') 'Test-UpdateDeferActiv
 # Quiet + optional never UPDATE_FORCE / applied_ok unless force mode AND force_min
 Assert ($upd.Contains('Test-UpdateForceRequired')) 'connect-update still uses Test-UpdateForceRequired'
 Assert ($upd.Contains('$forceApply = ($mode -eq ''force'') -and $forceReq')) 'UPDATE_FORCE gated on mode force AND force_min (forceReq)'
-Assert ($upd.Contains('UPDATE_OPTIONAL_SKIP reason=silent')) 'Quiet optional path logs UPDATE_OPTIONAL_SKIP'
+# reason= is now built dynamically (silent for -Quiet, update_ui_0 for headless
+# CLAUDE_CONNECT_UPDATE_UI=0 - added so automation with redirected stdin never blocks on
+# [Console]::ReadLine) instead of a literal "reason=silent" string.
+Assert (
+    $upd.Contains('UPDATE_OPTIONAL_SKIP reason={0}') -and
+    $upd.Contains("if (`$script:Quiet) { 'silent' } else { 'update_ui_0' }")
+) 'Quiet optional path logs UPDATE_OPTIONAL_SKIP'
 Assert ($upd.Contains('$autoYes = ($env:CLAUDE_CONNECT_UPDATE_YES -eq ''1'')')) 'Quiet path defines autoYes from UPDATE_YES'
-Assert ($upd.Contains('if ($script:Quiet -and -not $autoYes)')) 'Quiet skip requires no UPDATE_YES'
+Assert ($upd.Contains('if (($script:Quiet -or $uiOff) -and -not $autoYes)')) 'Quiet/UI-off skip requires no UPDATE_YES'
 Assert ($upd.Contains('if (-not $forceApply)')) 'optional/Quiet path uses -not forceApply (no force without min)'
 
 # Hard-refuse: sepidz path / .70 on Smart

@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 # Session-fresh probe skips (spawn-TTL / reverse-SSH / GIT_MODE=off mount check).
 #   A) Test-TunnelUp spawn-TTL (#8)
 #   B) Ensure-LaptopReverseSshCached session-fresh skip (#3)

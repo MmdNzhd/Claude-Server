@@ -34,7 +34,7 @@ $syncFn = Get-FunctionSource -Content $updSrc -Name 'Sync-ConnectExeBesideClient
 Assert (
     $syncFn -and
     ($syncFn -match 'foreign_verdir') -and
-    ($syncFn -match 'if \(\$dirLeaf -ne \$verLabel\)')
+    ($syncFn -match '\$dirLeaf -ne \$verLabel')
 ) 'Sync still skips foreign_verdir (no NEW.exe into OLD VerDir)'
 
 # --- Extract real helpers ---

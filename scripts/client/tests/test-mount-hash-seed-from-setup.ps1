@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 # RED contracts: Server setup MOUNT_HASH must seed ClaudeMountSyncVerifiedHash
 # so Prepare-ServerSessionParallel can skip the sha256sum SshX round trip.
 # Plan: docs/superpowers/plans/2026-07-25-connect-speed-stability-logging.md Task 3

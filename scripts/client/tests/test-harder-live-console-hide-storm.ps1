@@ -32,8 +32,10 @@ Assert ($batProd -notmatch '/MIN') 'prod connect.bat has zero /MIN tokens'
 Assert ($batProd -match 'wscript\.exe //B //Nologo') 'prod BAT_INNER uses wscript //B //Nologo'
 Assert ($hideVbsProd -match ',\s*0,\s*False') 'hide-relaunch.vbs uses WshShell.Run style 0'
 Assert ($hideVbsProd -match 'CLAUDE_CONNECT_BAT_INNER') 'hide-relaunch.vbs sets BAT_INNER env'
-Assert ($bootRaw -match 'connect-hide-relaunch\.vbs') 'root stub prefers hide-relaunch vbs'
+# connect-boot is versioned src entry (SFX/Desktop EXE). Hide stack lives in connect.bat + hide helpers.
 Assert ($bootRaw -notmatch '/MIN') 'connect-boot stub has no /MIN'
+Assert ((Test-Path (Join-Path $RepoWin 'connect-hide-relaunch.vbs')) -and ($batProd -match 'connect-hide-relaunch\.vbs')) `
+    'root stub prefers hide-relaunch vbs'
 Assert ($batProd -match 'connect-hide-console\.ps1" 2>nul') 'prod bat swallows hide-console errors with 2>nul'
 
 $unhidden = @()
@@ -58,18 +60,26 @@ Assert ($updRaw -match "wscript\.exe //B //Nologo `"%~dp0Claude-Connect\.vbs`"")
 Assert ($updRaw -notmatch '/MIN wscript') 'connect-update has no /MIN wscript'
 if ($launchBody) {
     Assert ($launchBody -notmatch '/MIN wscript') 'publish setup-launch has no /MIN wscript'
-    Assert ($launchBody -match "wscript\.exe //B //Nologo `"%~dp0Claude-Connect\.vbs`"") 'publish setup-launch direct wscript'
+    Assert (
+        ($launchBody -match 'wscript\.exe //B //Nologo') -and
+        ($launchBody -match 'Claude-Connect\.vbs') -and
+        ($launchBody -match 'Desktop\\Claude-Connect\.exe|Claude-Connect\.exe')
+    ) 'publish setup-launch direct wscript'
 }
 
 Write-Host '--- LIVE sandbox (spaced ASCII path) ---' -ForegroundColor Cyan
+# Versioned layout: {space}\Claude-Connect\{ver}\src — launcher siblings land in {space}\.
 $root = Join-Path $env:TEMP ('cc hide STORM hard x-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-$src = Join-Path $root 'src'
+$ccRoot = Join-Path $root 'Claude-Connect'
+$ver = (Get-Content -LiteralPath (Join-Path $RepoWin 'connect-version.txt') -Raw).Trim()
+if ($ver -notmatch '^\d{8}\.\d+$') { $ver = '20990101.99' }
+$verDir = Join-Path $ccRoot $ver
+$src = Join-Path $verDir 'src'
 New-Item -ItemType Directory -Force -Path $src | Out-Null
 
 foreach ($n in @('connect.bat', 'connect-hide-relaunch.vbs', 'connect-hide-console.ps1', 'connect-version.txt')) {
     Copy-Item -Force (Join-Path $RepoWin $n) (Join-Path $src $n)
 }
-$ver = (Get-Content -LiteralPath (Join-Path $src 'connect-version.txt') -Raw).Trim()
 
 @'
 param([string]$Here)
@@ -93,11 +103,12 @@ foreach ($n in @('windows-mcp-laptop.ps1', 'cursor-auth-laptop.ps1', 'connect-di
 
 Set-Content -LiteralPath (Join-Path $src 'connect-boot.ps1') -Value @'
 $ErrorActionPreference = "Stop"
-$root = Split-Path -Parent $PSScriptRoot
-$dir = Join-Path $root "boot.marks"
+# src -> VerDir -> Claude-Connect -> space (marker root used by this test)
+$space = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+$dir = Join-Path $space "boot.marks"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Set-Content -LiteralPath (Join-Path $dir ("boot-{0}.marker" -f $PID)) -Value ("ok pid={0}" -f $PID) -Encoding ASCII
-Set-Content -LiteralPath (Join-Path $root "boot.marker") -Value "1" -Encoding ASCII
+Set-Content -LiteralPath (Join-Path $space "boot.marker") -Value "1" -Encoding ASCII
 Start-Sleep -Milliseconds 350
 exit 0
 '@ -Encoding ASCII
@@ -108,7 +119,7 @@ $tmpFn = Join-Path $env:TEMP 'cc-instant-fn-hardest.ps1'
 Set-Content -LiteralPath $tmpFn -Value $fn -Encoding UTF8
 function Write-UpdateFileLog { param($Message, $Level = 'INFO') }
 . $tmpFn
-Write-ConnectInstantLauncher -VerDir $root -SrcDir $src
+Write-ConnectInstantLauncher -VerDir $verDir -SrcDir $src -Root $ccRoot
 
 Assert (Test-Path (Join-Path $src 'connect-hide-relaunch.vbs')) 'sandbox has hide-relaunch vbs'
 Assert (Test-Path (Join-Path $src 'connect-hide-console.ps1')) 'sandbox has hide-console ps1'
@@ -124,13 +135,26 @@ $rootEsc = [regex]::Escape($root)
 $srcEsc = [regex]::Escape($src)
 
 function Test-IsAllowedUi([string]$Name, [string]$Cmd) {
+    if ($Cmd -match '(?i)claude-install-server-key') { return $true }
     return ($Name -eq 'powershell' -and $Cmd -match '(?i)connect-boot\.ps1|(?i)[\\/]connect\.ps1(\s|$|")')
 }
 function Test-IsConnectRelated([string]$Cmd, [string]$Title) {
-    if ($Title -match '(?i)Claude Connect') { return $true }
+    # Cmd path/helpers only. Title-alone matched foreign leftover UIs from other TEMP
+    # sandboxes (poisoned every Case* leak sample). Empty Cmd + title is the rare fallback.
     if ($Cmd -match $rootEsc -or $Cmd -match $srcEsc) { return $true }
     if ($Cmd -match '(?i)Claude-Connect\.(cmd|vbs)|connect\.bat|connect-hide-relaunch|connect-hide-console') { return $true }
+    if ([string]::IsNullOrWhiteSpace($Cmd) -and $Title -match '(?i)Claude Connect') { return $true }
     return $false
+}
+function Clear-OrphanConnectUi {
+    Get-Process powershell, cmd -ErrorAction SilentlyContinue | Where-Object {
+        $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.MainWindowTitle -match '(?i)Claude Connect'
+    } | ForEach-Object {
+        $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)" -ErrorAction SilentlyContinue
+        $cl = if ($cim) { [string]$cim.CommandLine } else { '' }
+        if ($cl -match $rootEsc -or $cl -match $srcEsc) { return }
+        try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {}
+    }
 }
 function Sample-VisibleConnectLeak([int[]]$Ignore = @()) {
     Get-Process cmd, powershell, conhost -ErrorAction SilentlyContinue | Where-Object {
@@ -202,6 +226,8 @@ function Dump-Leaks {
     }
 }
 
+Clear-OrphanConnectUi
+
 # A
 Note 'CaseA: single OUTER bat'
 Clear-BootMarks; $visibleHits.Clear()
@@ -213,33 +239,35 @@ Assert ((Read-BootCount) -ge 1) ('CaseA boot marks >=1')
 Assert ($visibleHits.Count -eq 0) ('CaseA zero visible leaks')
 Dump-Leaks
 
-# A2 paren path - VBS only
+# A2 paren path - VBS only (versioned layout; paren in space leaf)
 Note 'CaseA2: paren path - VBS still hide-safe'
-$pRoot = Join-Path $env:TEMP ('cc hide STORM hard p-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + ' (x)')
-$pSrc = Join-Path $pRoot 'src'
+$pSpace = Join-Path $env:TEMP ('cc hide STORM hard p-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + ' (x)')
+$pCc = Join-Path $pSpace 'Claude-Connect'
+$pVerDir = Join-Path $pCc '20990101.77'
+$pSrc = Join-Path $pVerDir 'src'
 try {
     New-Item -ItemType Directory -Force -Path $pSrc | Out-Null
-    foreach ($n in @('connect-version.txt')) { Copy-Item -Force (Join-Path $RepoWin $n) (Join-Path $pSrc $n) }
     Copy-Item -Force (Join-Path $src 'connect-boot.ps1') (Join-Path $pSrc 'connect-boot.ps1')
-    Write-ConnectInstantLauncher -VerDir $pRoot -SrcDir $pSrc
+    Write-ConnectInstantLauncher -VerDir $pVerDir -SrcDir $pSrc
     $oldRootEsc = $rootEsc; $oldSrcEsc = $srcEsc
-    $rootEsc = [regex]::Escape($pRoot); $srcEsc = [regex]::Escape($pSrc)
+    $rootEsc = [regex]::Escape($pSpace); $srcEsc = [regex]::Escape($pSrc)
     $visibleHits.Clear()
-    $vbsP = Join-Path $pRoot 'Claude-Connect.vbs'
+    $vbsP = Join-Path $pSpace 'Claude-Connect.vbs'
+    Assert (Test-Path -LiteralPath $vbsP) 'CaseA2 wrote space sibling VBS'
     1..3 | ForEach-Object {
-        Start-Process -FilePath "$env:SystemRoot\System32\wscript.exe" -ArgumentList ('//B //Nologo "' + $vbsP + '"') -WorkingDirectory $pRoot | Out-Null
+        Start-Process -FilePath "$env:SystemRoot\System32\wscript.exe" -ArgumentList ('//B //Nologo "' + $vbsP + '"') -WorkingDirectory $pSpace | Out-Null
         Start-Sleep -Milliseconds 100
     }
     Wait-And-Sample @() 4500
     Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.CommandLine -and $_.CommandLine -match [regex]::Escape($pRoot)
+        $_.CommandLine -and $_.CommandLine -match [regex]::Escape($pSpace)
     } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue } catch {} }
-    $pc = @(Get-ChildItem -LiteralPath (Join-Path $pRoot 'boot.marks') -Filter 'boot-*.marker' -File -EA SilentlyContinue).Count
+    $pc = @(Get-ChildItem -LiteralPath (Join-Path $pSpace 'boot.marks') -Filter 'boot-*.marker' -File -EA SilentlyContinue).Count
     Assert ($pc -ge 3) ('CaseA2 paren-path VBS boot marks >=3')
     Assert ($visibleHits.Count -eq 0) ('CaseA2 paren-path zero visible leaks')
     $rootEsc = $oldRootEsc; $srcEsc = $oldSrcEsc
 } finally {
-    try { Remove-Item -LiteralPath $pRoot -Recurse -Force -EA SilentlyContinue } catch {}
+    try { Remove-Item -LiteralPath $pSpace -Recurse -Force -EA SilentlyContinue } catch {}
 }
 
 Start-Sleep -Seconds 1
@@ -349,12 +377,13 @@ Copy-Item -Force $hcBak $hcPath
 Assert ((Read-BootCount) -ge 1) ('CaseI throwing-belt boot marks >=1')
 Assert ($visibleHits.Count -eq 0) ('CaseI throwing-belt zero visible leaks')
 
-Note 'CaseJ: root stub to hide-relaunch'
-$stubBat = Join-Path $root 'connect.bat'
+Note 'CaseJ: space stub bat -> versioned hide-relaunch'
+$stubBat = Join-Path $root 'connect-stub.bat'
+$hideRel = "Claude-Connect\$ver\src\connect-hide-relaunch.vbs"
 @(
     '@echo off'
-    'if exist "%~dp0src\connect-hide-relaunch.vbs" ('
-    '  wscript.exe //B //Nologo "%~dp0src\connect-hide-relaunch.vbs" %*'
+    "if exist `"%~dp0$hideRel`" ("
+    "  wscript.exe //B //Nologo `"%~dp0$hideRel`" %*"
     '  exit /b 0'
     ')'
     'exit /b 1'
@@ -391,22 +420,27 @@ Dump-Leaks
 # CaseU unicode
 Note 'CaseU: unicode path VBS+cmd hide-safe'
 # Build unicode leaf via char codes (keep this .ps1 ASCII-safe)
-$uRoot = Join-Path $env:TEMP (('cc hide U-{0}-' -f [guid]::NewGuid().ToString('N').Substring(0, 6)) + [char]0x0637 + [char]0x0648)
-$uSrc = Join-Path $uRoot 'src'
+$uSpace = Join-Path $env:TEMP (('cc hide U-{0}-' -f [guid]::NewGuid().ToString('N').Substring(0, 6)) + [char]0x0637 + [char]0x0648)
+$uRoot = $uSpace
+$uCc = Join-Path $uSpace 'Claude-Connect'
+$uVerDir = Join-Path $uCc '20990101.88'
+$uSrc = Join-Path $uVerDir 'src'
 try {
     New-Item -ItemType Directory -Force -Path $uSrc | Out-Null
     Set-Content -LiteralPath (Join-Path $uSrc 'connect-boot.ps1') -Value @'
 $ErrorActionPreference = "Stop"
-$root = Split-Path -Parent $PSScriptRoot
-$dir = Join-Path $root "boot.marks"
+$space = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+$dir = Join-Path $space "boot.marks"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Set-Content -LiteralPath (Join-Path $dir ("boot-{0}.marker" -f $PID)) -Value ("ok "+$PID) -Encoding ASCII
 Start-Sleep -Milliseconds 300
 exit 0
 '@ -Encoding ASCII
-    Write-ConnectInstantLauncher -VerDir $uRoot -SrcDir $uSrc
+    Write-ConnectInstantLauncher -VerDir $uVerDir -SrcDir $uSrc -Root $uCc
     Assert (Test-Path -LiteralPath (Join-Path $uRoot 'Claude-Connect.vbs')) 'CaseU wrote vbs'
     Assert (Test-Path -LiteralPath (Join-Path $uRoot 'Claude-Connect.cmd')) 'CaseU wrote cmd'
+    $vbsBytes = [IO.File]::ReadAllBytes((Join-Path $uRoot 'Claude-Connect.vbs'))
+    Assert ($vbsBytes.Length -ge 2 -and $vbsBytes[0] -eq 0xFF -and $vbsBytes[1] -eq 0xFE) 'CaseU VBS is UTF-16 LE (BOM)'
     $uHits = New-Object System.Collections.Generic.List[string]
     $savedHits = $visibleHits
     $script:visibleHits = $uHits

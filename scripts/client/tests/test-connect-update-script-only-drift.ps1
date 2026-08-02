@@ -1,4 +1,4 @@
-﻿# test-connect-update-script-only-drift.ps1 - script-only deploy must not flag EXE content drift
+# test-connect-update-script-only-drift.ps1 - script-only deploy must not flag EXE content drift
 # when local version matches remote and no local Claude-Connect.exe is present.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '_paths.ps1')

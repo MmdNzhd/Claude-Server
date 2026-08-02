@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 # RED contracts (Task 7): log-sync fast mkdir must not embed find -mtime retention;
 # Complete-ConnectLogAsyncDrain must preserve/restore ConnectLogSyncNeeded when Force sync fails.
 # Plan: docs/superpowers/plans/2026-07-25-connect-speed-stability-logging.md Task 7

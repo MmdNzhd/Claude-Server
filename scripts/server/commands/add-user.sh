@@ -274,6 +274,27 @@ runuser -l "$USERNAME" -c "curl -fsSL https://raw.githubusercontent.com/DeusData
     && ok "codebase-memory-mcp installed for $USERNAME" \
     || warn "codebase-memory-mcp install failed for $USERNAME - see /tmp/cbm-install-$USERNAME.log, or run manually: runuser -l $USERNAME -c \"curl -fsSL https://raw.githubusercontent.com/DeusData/codebase-memory-mcp/main/install.sh | bash\""
 
+# Guard: never leave a CRLF-corrupted ELF (fleet BAD size 270249937 = good after CR strip).
+_cbm_bin="/home/$USERNAME/.local/bin/codebase-memory-mcp"
+_cbm_good_ref="/home/smart/.local/bin/codebase-memory-mcp"
+_cbm_good_size=270253064
+if [ -f "$_cbm_bin" ]; then
+    _cbm_sz=$(stat -c%s "$_cbm_bin" 2>/dev/null || echo 0)
+    _cbm_magic=$(head -c4 "$_cbm_bin" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    _cbm_help_ec=0
+    runuser -l "$USERNAME" -c "timeout 5 $_cbm_bin --help >/dev/null 2>&1" || _cbm_help_ec=$?
+    if [ "$_cbm_sz" != "$_cbm_good_size" ] || [ "$_cbm_magic" != "7f454c46" ] || [ "$_cbm_help_ec" = "132" ]; then
+        if [ -f "$_cbm_good_ref" ] && [ "$(stat -c%s "$_cbm_good_ref" 2>/dev/null)" = "$_cbm_good_size" ]; then
+            install -m 755 -o "$USERNAME" -g "$USERNAME" "$_cbm_good_ref" "$_cbm_bin"
+            warn "codebase-memory-mcp for $USERNAME looked corrupt (size=$_cbm_sz magic=$_cbm_magic help_ec=$_cbm_help_ec) - copied good binary from smart"
+        else
+            warn "codebase-memory-mcp for $USERNAME looks corrupt (size=$_cbm_sz magic=$_cbm_magic help_ec=$_cbm_help_ec) - no good reference at $_cbm_good_ref"
+        fi
+    else
+        ok "codebase-memory-mcp ELF/size/--help gate passed for $USERNAME"
+    fi
+fi
+
 if [ -x /usr/local/bin/claude-auth-sync ]; then
     if [ -f /etc/claude-code/oauth.env ] || grep -q '^CLAUDE_CODE_OAUTH_TOKEN=' /etc/environment 2>/dev/null; then
         claude-auth-sync "$USERNAME"
@@ -306,6 +327,14 @@ if [ -x /usr/local/bin/cursor-remote-proxy-sync ]; then
     cursor-remote-proxy-sync --user "$USERNAME" || warn "cursor-remote-proxy-sync failed for $USERNAME (non-fatal)"
 else
     warn "cursor-remote-proxy-sync not installed - run: sudo claude-server install"
+fi
+
+if [ -f /usr/local/lib/claude-server/commands/fix-cursor-ecc-hooks.sh ]; then
+    bash /usr/local/lib/claude-server/commands/fix-cursor-ecc-hooks.sh "$USERNAME" \
+        || warn "fix-cursor-ecc-hooks failed for $USERNAME (non-fatal)"
+elif [ -f "$(dirname "$0")/fix-cursor-ecc-hooks.sh" ]; then
+    bash "$(dirname "$0")/fix-cursor-ecc-hooks.sh" "$USERNAME" \
+        || warn "fix-cursor-ecc-hooks failed for $USERNAME (non-fatal)"
 fi
 
 step "5 - SSH"

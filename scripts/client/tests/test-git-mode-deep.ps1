@@ -246,7 +246,9 @@ Assert ($mount -match 'recover: off restore done') 'claude-mount recover-if-need
 Assert ($gitModePs1 -match 'off_mode_apply') 'git-mode.ps1 recover applies off when mount ok'
 
 $dle = Get-Content (Get-ServerFile 'server\commands\deploy-laptop-exec.sh') -Raw
-Assert ($dle -match 'CLIENT_BUNDLE/server/laptop-exec') 'deploy-laptop-exec prefers bundle over user home'
+# Client bundle strips server/; SoT is REPO_ROOT/scripts/server (laptop stage), not CLIENT_BUNDLE/server.
+Assert ($dle -match 'Do NOT use \$CLIENT_BUNDLE/server') 'deploy-laptop-exec refuses stripped CLIENT_BUNDLE/server'
+Assert ($dle -match 'REPO_ROOT/scripts/server/laptop-exec') 'deploy-laptop-exec syncs laptop-exec from REPO_ROOT'
 Assert ($dle -match 'GIT_MODE="off".*fail') 'deploy-laptop-exec fails if GIT_MODE not off'
 Assert ($dle -match 'claude-mount.sh') 'deploy-laptop-exec deploys claude-mount'
 $dcb = Get-Content (Get-ServerFile 'server\commands\deploy-client-bundle.sh') -Raw

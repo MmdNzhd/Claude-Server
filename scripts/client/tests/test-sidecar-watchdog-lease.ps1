@@ -180,7 +180,12 @@ Assert ($connect -notmatch 'CreateJobObject|AssignProcessToJobObject') 'connect.
 Write-Host '--- MUST-NOT: no -ForceUnfreeze / Sepidz paths in this feature ---' -ForegroundColor Cyan
 Assert ($sidecar -notmatch '-ForceUnfreeze') 'cursor-proxy-sidecar.ps1 has no -ForceUnfreeze flag'
 Assert ($connect -notmatch '-ForceUnfreeze') 'connect.ps1 has no -ForceUnfreeze flag'
-Assert ($sidecar -notmatch '(?i)sepidz') 'cursor-proxy-sidecar.ps1 has no Sepidz-specific paths'
+# Strip full-line comments before checking: a comment explaining that a substring match
+# is intentionally generic across "...-Smart/-Sepidz" profile-name suffixes (so it does
+# NOT need to special-case Sepidz) is the opposite of a Sepidz-specific code path - only
+# flag the word appearing in actual code.
+$sidecarCodeOnly = ($sidecar -split "`r?`n" | Where-Object { $_.Trim() -notmatch '^#' }) -join "`n"
+Assert ($sidecarCodeOnly -notmatch '(?i)sepidz') 'cursor-proxy-sidecar.ps1 has no Sepidz-specific code paths'
 
 Write-Host ''
 if ($fail -gt 0) {

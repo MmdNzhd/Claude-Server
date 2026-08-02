@@ -100,7 +100,9 @@ try {
     Assert $okDiff 'different content: Copy-ExeAtomicSwap returns true'
     Assert ((Get-SafeFileSha256 -Path $dest) -eq $altHash) 'different content: destination SHA256 matches new source'
 
-    # --- FileShare.None lock: rename-swap still succeeds; dest must end on source hash ---
+    # --- Running-EXE-like lock (Read|Delete share): rename-swap MUST succeed ---
+    # Windows maps running images with FILE_SHARE_DELETE; FileShare.None is stricter
+    # and blocks rename too — that case returns false (asserted separately below).
     Copy-Item -LiteralPath $seedExe -Destination $dest -Force
     $lockFs = $null
     $plainDenied = $false
@@ -111,17 +113,35 @@ try {
             $dest,
             [System.IO.FileMode]::Open,
             [System.IO.FileAccess]::Read,
-            [System.IO.FileShare]::None)
+            [System.IO.FileShare]::Read -bor [System.IO.FileShare]::Delete)
         try { Copy-Item -LiteralPath $altExe -Destination $dest -Force -ErrorAction Stop }
         catch { $plainDenied = $true }
-        Assert $plainDenied 'FileShare.None lock: plain Copy-Item denied while destination exclusive-locked'
+        Assert $plainDenied 'share-delete lock: plain Copy-Item denied while destination mapped'
         $swapLockedOk = Copy-ExeAtomicSwap -Source $altExe -Destination $dest
         $lockedAfterHash = Get-SafeFileSha256 -Path $dest
     } finally {
         if ($lockFs) { try { $lockFs.Dispose() } catch { } }
     }
-    Assert $swapLockedOk 'FileShare.None lock: Copy-ExeAtomicSwap returns true (rename-swap path)'
-    Assert ($lockedAfterHash -eq $altHash) 'FileShare.None lock: destination SHA256 matches source after true return (hard assert)'
+    Assert $swapLockedOk 'share-delete lock: Copy-ExeAtomicSwap returns true (rename-swap path)'
+    Assert ($lockedAfterHash -eq $altHash) 'share-delete lock: destination SHA256 matches source after true return'
+
+    # --- FileShare.None: harder than running EXE; rename blocked — must fail clean ---
+    Copy-Item -LiteralPath $seedExe -Destination $dest -Force
+    $seedHashBeforeNone = Get-SafeFileSha256 -Path $dest
+    $noneFs = $null
+    $noneOk = $true
+    try {
+        $noneFs = [System.IO.File]::Open(
+            $dest,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::None)
+        $noneOk = Copy-ExeAtomicSwap -Source $altExe -Destination $dest
+    } finally {
+        if ($noneFs) { try { $noneFs.Dispose() } catch { } }
+    }
+    Assert (-not $noneOk) 'FileShare.None lock: Copy-ExeAtomicSwap returns false (cannot rename-swap)'
+    Assert ((Get-SafeFileSha256 -Path $dest) -eq $seedHashBeforeNone) 'FileShare.None lock: destination bytes unchanged'
 
     # --- spaced destination path ---
     $spaceDir = Join-Path $root 'folder with spaces'

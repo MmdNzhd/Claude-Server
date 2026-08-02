@@ -53,20 +53,26 @@ port_open()  { nc -zw3 "$1" "$2" 2>/dev/null; }
 novnc_open() { nc -zw2 127.0.0.1 "$NOVNC_PORT" 2>/dev/null; }
 
 
-# Share Global Connect lock with main connect (one UI per machine).
+# Share Connect lock slots with main connect (up to 10 UIs; connect-0..9.lock).
 enter_connect_single_instance() {
     local lockdir="${HOME}/.config/claude-connect"
-    local lockfile="${lockdir}/connect.lock"
+    local i lockfile
     mkdir -p "$lockdir" 2>/dev/null || true
-    exec 9>"$lockfile" || return 1
-    if ! flock -n 9; then
-        _designer_log "SINGLE_INSTANCE: blocked pid=$$" ERROR
-        printf '\n  [X] Another Claude Connect is already running.\n\n' >&2
-        return 1
-    fi
-    CONNECT_LOCK_HELD=1
-    _designer_log "SINGLE_INSTANCE: acquired pid=$$" INFO
-    return 0
+    for i in 0 1 2 3 4 5 6 7 8 9; do
+        lockfile="${lockdir}/connect-${i}.lock"
+        exec 9>"$lockfile" || continue
+        if flock -n 9 2>/dev/null; then
+            CONNECT_LOCK_HELD=1
+            CLAUDE_CONNECT_UI_SLOT="$i"
+            export CLAUDE_CONNECT_UI_SLOT
+            _designer_log "MULTI_INSTANCE: acquired pid=$$ slot=$i" INFO
+            return 0
+        fi
+        exec 9>&- 2>/dev/null || true
+    done
+    _designer_log "MULTI_INSTANCE: blocked pid=$$ reason=all_slots_busy max=10" ERROR
+    printf '\n  [X] 10 Claude Connect windows already open - close one, then retry.\n\n' >&2
+    return 1
 }
 exit_connect_single_instance() {
     if [ "${CONNECT_LOCK_HELD:-0}" = 1 ]; then

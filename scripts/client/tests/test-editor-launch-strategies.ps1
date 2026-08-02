@@ -67,14 +67,15 @@ Assert ($null -ne $folderUri) 'folder-uri fallback strategy exists'
 Assert ($folderUri.Args -contains "--folder-uri=$uri") 'folder-uri fallback uses combined --folder-uri=<uri>'
 Assert (-not ($folderUri.Args -contains '--folder-uri')) 'folder-uri fallback does NOT pass a lone --folder-uri flag'
 
-# Warm handoff: ONLY --remote. Cascading folder-uri/classic within seconds of the first IPC
-# handoff interrupts Cursor mid-connect (live 2026-07-25: connect LAUNCH_FAIL, then a single
-# manual --remote opened the project).
+# Warm handoff: --remote then remote-classic. Cascading folder-uri within seconds of the first
+# IPC handoff interrupts Cursor mid-connect (live 2026-07-25). P0.4: single-strategy warm left
+# no recovery when --remote alone did not settle on_folder.
 $warmStrategies = @(Get-RemoteEditorLaunchStrategies -EditorCmd 'cursor' -Alias $alias -RemotePath $path -Uri $uri -NewWindow -WarmHandoff)
-Assert ($warmStrategies.Count -eq 1) 'warm handoff uses exactly 1 strategy (remote only)'
-Assert ($warmStrategies[0].Name -eq 'remote') 'warm handoff strategy is remote'
+Assert ($warmStrategies.Count -eq 2) 'warm handoff uses remote + remote-classic (no folder-uri)'
+Assert ($warmStrategies[0].Name -eq 'remote') 'warm handoff first strategy is remote'
+Assert ($warmStrategies[1].Name -eq 'remote-classic') 'warm handoff second strategy is remote-classic'
 Assert ($warmStrategies[0].Args -contains '--remote') 'warm handoff includes --remote'
-Assert (-not ($warmStrategies[0].Args | Where-Object { $_ -like '--folder-uri*' })) 'warm handoff does NOT use --folder-uri'
+Assert (-not ($warmStrategies.Args | Where-Object { $_ -like '--folder-uri*' })) 'warm handoff does NOT use --folder-uri'
 
 $codeStrategies = @(Get-RemoteEditorLaunchStrategies -EditorCmd 'code' -Alias $alias -RemotePath $path -Uri $uri -NewWindow)
 Assert ($codeStrategies.Count -eq 2) 'code has 2 launch strategies'

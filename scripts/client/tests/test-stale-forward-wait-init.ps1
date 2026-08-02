@@ -103,13 +103,23 @@ try {
     }
     function Sanitize-SshAliasConfig { param([string]$CfgPath, [string]$AliasName) }
     function Clear-LegacyDynamicSocksTunnels { param($ProtectPid, $SocksPort) }
-    function Test-RemoteXraySocksOpen { param([string]$Alias, [string]$SshCfgPath = '') $false }
+    function Test-RemoteXraySocksOpen { param([string]$Alias, [string]$SshCfgPath = '', [switch]$ForceProbe) $false }
     function Claim-CursorProxyOwner { $true }
     function Wait-ForTunnelUp { param($TunnelProc, [switch]$Quiet) $true }
     function Add-CursorProxySidecarJobProcess { param($Process) }
     function Stop-TunnelProcessWithExitLog {
         param([int]$ProcessId, [string]$Reason = '')
     }
+    # Refuse-path case: Acquire cannot find another free slot (no_rebind).
+    function Acquire-TunnelPort {
+        param([string]$UidStr, $CurrentBgTunnel = $null, $ProtectedProcessIds = @())
+        return $false
+    }
+    function Get-SocksProxyPort { 18999 }
+    function Get-HttpProxyPort { 18998 }
+    function Test-LocalPortFree { param([int]$PortNum) $true }
+    function Test-LocalPortOpen { param([int]$PortNum) $false }
+    function Add-TunnelHttpProxyLeg { param($SshArgs, [string]$Alias, [string]$SshCfgPath = '') }
     function Start-Process {
         param(
             [Parameter(Position = 0)][string]$FilePath,
@@ -140,7 +150,9 @@ try {
         'still-busy: Ensure returns false OR Port rebinds away from busy port'
     Assert ($spawnOnBusy -eq 0) 'still-busy: spawn_count on old port = 0 (D4)'
     Assert ($logText -match 'stale_port_busy') 'still-busy: logs stale_port_busy'
-    Assert ($script:spawn_count -eq 0) 'still-busy: total spawn_count=0 on refuse path'
+    # Acquire stubbed false => no_rebind refuse path (rebind covered by test-stale-forward-rebind-streak).
+    Assert ($script:spawn_count -eq 0) 'still-busy: total spawn_count=0 on no_rebind refuse path'
+    Assert ($logText -match 'stale_port_busy_no_rebind|refuse_spawn') 'still-busy: logs no_rebind or refuse'
 
     # Positive control: markers cleared => spawn allowed
     $script:LastStaleForwardStillBusyPort = $null

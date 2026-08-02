@@ -1,8 +1,7 @@
-# test-logsync-fast-timeout.ps1 - #P7 Sync-ConnectLogToServer was observed blocking the
-# interactive boot path 30-60s+ (session start -> "Laptop SSH key", and again around
-# "Server setup") because its mkdir/scp/cat probe chain ran fully sequentially with
-# multi-second-to-20s per-call SSH timeouts. Non-Force syncs are best-effort telemetry and
-# must fail fast; -Force syncs (day rollover, unhandled-error flush, exit) keep long budgets.
+# test-logsync-fast-timeout.ps1 - #P7 / P0.5 Sync-ConnectLogToServer budgets.
+# Non-Force syncs must clear the 8s SSH ConnectTimeout with margin (old 2.5s/3s/4s
+# caps false-failed under normal latency). -Force keeps longer budgets for ERROR /
+# session-end / stall escape.
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot '_paths.ps1')
 $fail = 0
@@ -11,7 +10,7 @@ function Assert($cond, $msg) {
     else { Write-Host "  FAIL  $msg" -ForegroundColor Red; $script:fail++ }
 }
 Write-Host ''
-Write-Host '=== Log-sync fast-timeout budget #P7 (static) ===' -ForegroundColor Cyan
+Write-Host '=== Log-sync fast-timeout budget #P7/P0.5 (static) ===' -ForegroundColor Cyan
 
 $s = Get-Content (Get-ClientFile 'connect-ui.ps1') -Raw
 
@@ -19,9 +18,13 @@ Assert ($s -match 'LogSyncFastProbeMs') 'fast probe budget variable defined'
 Assert ($s -match 'LogSyncFastMkdirMs') 'fast mkdir budget variable defined'
 Assert ($s -match 'LogSyncFastScpMs') 'fast scp budget variable defined'
 Assert ($s -match 'LogSyncFastCatMs') 'fast cat budget variable defined'
-Assert ($s -match [regex]::Escape('if ($Force) { 10000 } else { 2500 }')) 'probe budget is short (2.5s) unless -Force'
-Assert ($s -match [regex]::Escape('if ($Force) { 12000 } else { 3000 }')) 'mkdir budget is short (3s) unless -Force'
-Assert ($s -match [regex]::Escape('if ($Force) { 20000 } else { 4000 }')) 'scp budget is short (4s) unless -Force'
+Assert ($s -match [regex]::Escape('if ($Force) { 10000 } else { 8000 }')) 'probe budget >= ConnectTimeout (8s) unless -Force'
+Assert ($s -match [regex]::Escape('if ($Force) { 12000 } else { 10000 }')) 'mkdir budget >= ConnectTimeout+margin unless -Force'
+Assert ($s -match [regex]::Escape('if ($Force) { 20000 } else { 16000 }')) 'scp budget raised vs ConnectTimeout unless -Force'
+Assert ($s -match [regex]::Escape('if ($Force) { 12000 } else { 10000 }')) 'cat budget >= ConnectTimeout+margin unless -Force'
+# Old false-fail budgets must stay gone.
+Assert ($s -notmatch [regex]::Escape('if ($Force) { 12000 } else { 3000 }')) 'old 3s non-Force mkdir budget removed'
+Assert ($s -notmatch [regex]::Escape('if ($Force) { 20000 } else { 4000 }')) 'old 4s non-Force scp budget removed'
 
 Assert ($s -match 'function Get-ConnectRemoteLogByteSize') 'Get-ConnectRemoteLogByteSize defined'
 $probeIdx = $s.IndexOf('function Get-ConnectRemoteLogByteSize')

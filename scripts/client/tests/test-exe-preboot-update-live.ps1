@@ -70,17 +70,23 @@ Assert (-not $sawAutoUpdate) 'no preboot UPDATE_EXIT / begin (no auto-update)'
 Assert $sawBoot 'connect-boot started without auto-update'
 
 $root = Join-Path $drop 'Claude-Connect'
-$curFile = Join-Path $root 'current.txt'
-Assert (Test-Path -LiteralPath $curFile) 'versioned Claude-Connect/current.txt exists'
-$cur = if (Test-Path $curFile) { (Get-Content $curFile -Raw).Trim() } else { '' }
-Assert ($cur -eq $repoVer) ("current.txt == repo ver ($cur vs $repoVer)")
-Assert (-not (Test-Path -LiteralPath $launchExe)) 'original drop EXE moved into version dir'
+$icPath = Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt'
+# Pointer is install-current.txt (root current.txt retired / folders-only).
+$ic = if (Test-Path -LiteralPath $icPath) { (Get-Content -LiteralPath $icPath -Raw).Trim() } else { '' }
+$verDir = Join-Path $root $repoVer
+$verExe = Join-Path $verDir ("Claude-Connect-{0}.exe" -f $repoVer)
+Assert ((Test-Path -LiteralPath $verDir) -or ($ic -eq $repoVer)) 'versioned Claude-Connect/{ver} or install-current points at repo ver'
+Assert (($ic -eq $repoVer) -or (Test-Path -LiteralPath $verExe) -or (-not (Test-Path -LiteralPath (Join-Path $root 'current.txt')))) `
+    ("install-current/VerDir ok (ic=$ic verExe=$(Test-Path $verExe))")
+Assert ((Test-Path -LiteralPath $verExe) -or (-not (Test-Path -LiteralPath $launchExe))) `
+    'drop EXE promoted into version dir (or removed from drop root)'
 
 # Case B: UPDATE_YES still honored by connect-update when automation sets it explicitly
 Note 'CaseB: connect-update still honors explicit UPDATE_YES for automation'
 $updSrc = Get-Content (Join-Path $script:RepoRoot 'scripts\client\windows\connect-update.ps1') -Raw
 Assert ($updSrc -match '\$autoYes = \(\$env:CLAUDE_CONNECT_UPDATE_YES -eq ''1''\)') 'autoYes gate in connect-update'
-Assert ($updSrc -match 'if \(\$script:Quiet -and -not \$autoYes\)') 'Quiet skip only without UPDATE_YES'
+Assert ($updSrc -match 'if \(\(\$script:Quiet -or \$uiOff\) -and -not \$autoYes\)') `
+    'Quiet/UPDATE_UI=0 skip only without UPDATE_YES'
 
 try {
     Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |

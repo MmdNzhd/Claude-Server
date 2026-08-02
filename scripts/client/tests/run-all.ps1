@@ -20,6 +20,8 @@ $suites = @(
     @{ Name = 'connect-update-script-only-drift'; Script = 'test-connect-update-script-only-drift.ps1' }
     @{ Name = 'baseline-connect-working-invariants'; Script = 'test-baseline-connect-working-invariants.ps1' }
     @{ Name = 'ssh-user-fix-retry';  Script = 'test-ssh-user-fix-retry.ps1' }
+    @{ Name = 'ssh-config-multi-writer-hard'; Script = 'test-ssh-config-multi-writer-hard.ps1' }
+    @{ Name = 'connect-auth-key-install-hard'; Script = 'test-connect-auth-key-install-hard.ps1' }
     @{ Name = 'auth-stamp-skip';      Script = 'test-auth-stamp-skip.ps1' }
     @{ Name = 'auth-stamp-prefetch-no-block'; Script = 'test-auth-stamp-prefetch-no-block.ps1' }
     @{ Name = 'laptop-ssh-ready';     Script = 'test-laptop-ssh-ready.ps1' }
@@ -38,9 +40,11 @@ $suites = @(
     @{ Name = 'server-setup-step-progress'; Script = 'test-server-setup-step-progress.ps1' }
     @{ Name = 'tunnel-tcp-state-cache'; Script = 'test-tunnel-tcp-state-cache.ps1' }
     @{ Name = 'xray-http-leg-resilience'; Script = 'test-xray-http-leg-resilience.ps1' }
+    @{ Name = 'xray-socks-leg-resilience'; Script = 'test-xray-socks-leg-resilience.ps1' }
     @{ Name = 'launch-fresh-project-windows-open'; Script = 'test-launch-fresh-project-windows-open.ps1' }
     @{ Name = 'title-project-match';    Script = 'test-title-project-match.ps1' }
     @{ Name = 'agent-home-launch-gate'; Script = 'test-agent-home-launch-gate.ps1' }
+    @{ Name = 'launch-success-confirm-unify'; Script = 'test-launch-success-confirm-unify.ps1' }
     @{ Name = 'parse-connect-perf';     Script = 'test-parse-connect-perf.ps1' }
     @{ Name = 'verify-perf-gates';      Script = 'test-verify-perf-gates.ps1' }
     @{ Name = 'launch-perf-live';       Script = 'test-launch-perf-live.ps1' }
@@ -62,6 +66,8 @@ $suites = @(
     @{ Name = 'log-sync-contracts';     Script = 'test-log-sync-contracts.ps1' }
     @{ Name = 'log-sync-forbid-shrink'; Script = 'test-log-sync-forbid-shrink.ps1' }
     @{ Name = 'log-sync-mkdir-no-find-on-fast-path'; Script = 'test-log-sync-mkdir-no-find-on-fast-path.ps1' }
+    @{ Name = 'log-sync-nullsafe';      Script = 'test-log-sync-nullsafe.ps1' }
+    @{ Name = 'log-sync-delivery-nonerror'; Script = 'test-log-sync-delivery-nonerror.ps1' }
     @{ Name = 'error-flush-contract';   Script = 'test-error-flush-contract.ps1' }
     @{ Name = 'mount-failfast'; Script = 'test-mount-failfast.ps1' }
     @{ Name = 'session-fresh-probe-skips'; Script = 'test-session-fresh-probe-skips.ps1' }
@@ -82,12 +88,14 @@ $suites = @(
     @{ Name = 'designer-connect-hard-batch'; Script = 'test-designer-connect-hard-batch.ps1' }
     @{ Name = 'mount-active-hard-batch'; Script = 'test-mount-active-hard-batch.ps1' }
     @{ Name = 'windows-mcp-hard-batch'; Script = 'test-windows-mcp-hard-batch.ps1' }
+    @{ Name = 'hard-utf8-mojibake-fleet'; Script = 'test-hard-utf8-mojibake-fleet.ps1' }
     @{ Name = 'sidecar-xray-hard-batch'; Script = 'test-sidecar-xray-hard-batch.ps1' }
     @{ Name = 'editor-auth-hard-batch'; Script = 'test-editor-auth-hard-batch.ps1' }
     @{ Name = 'tunnel-proxy-skip-hard'; Script = 'test-tunnel-proxy-skip-hard.ps1' }
     @{ Name = 'tunnel-proxy-skip-harder'; Script = 'test-tunnel-proxy-skip-harder.ps1' }
     @{ Name = 'logging-runid-hard-batch'; Script = 'test-logging-runid-hard-batch.ps1' }
     @{ Name = 'bat-preflight-heal-hard-batch'; Script = 'test-bat-preflight-heal-hard-batch.ps1' }
+    @{ Name = 'connect-heal-downloads-stale'; Script = 'test-connect-heal-downloads-stale.ps1' }
     @{ Name = 'publish-iexpress-hard-batch'; Script = 'test-publish-iexpress-hard-batch.ps1' }
     @{ Name = 'elevate-ssh-hard-batch'; Script = 'test-elevate-ssh-hard-batch.ps1' }
     @{ Name = 'update-relaunch-hard-batch'; Script = 'test-update-relaunch-hard-batch.ps1' }
@@ -129,6 +137,7 @@ $suites = @(
     @{ Name = 'client-update-policy-optional'; Script = 'test-client-update-policy-optional.ps1' }
     @{ Name = 'smartscreen-docs-contract'; Script = 'test-smartscreen-docs-contract.ps1' }
     @{ Name = 'never-again-ship-gates'; Script = 'test-never-again-ship-gates.ps1' }
+    @{ Name = 'bundle-deploy-cohesion'; Script = 'test-bundle-deploy-cohesion.ps1' }
     @{ Name = 'harder-adversarial'; Script = 'test-harder-adversarial.ps1' }
     @{ Name = 'versioned-layout'; Script = 'test-versioned-layout.ps1' }
     @{ Name = 'boot-flat-migrate-live'; Script = 'test-boot-flat-migrate-live.ps1' }
@@ -143,6 +152,7 @@ $suites = @(
     @{ Name = 'banner-probe-interval'; Script = 'test-banner-probe-interval.ps1' }
     @{ Name = 'sidecar-watchdog-lease'; Script = 'test-sidecar-watchdog-lease.ps1' }
     @{ Name = 'pushconf-am-only'; Script = 'test-pushconf-am-only.ps1' }
+    @{ Name = 'pushconf-primary-liveness'; Script = 'test-pushconf-primary-liveness.ps1' }
     @{ Name = 'agent-path-diag-logs'; Script = 'test-agent-path-diag-logs.ps1' }
     @{ Name = 'connect-scorecard'; Script = 'test-connect-scorecard.ps1' }
     @{ Name = 'editor-opened-script-scope'; Script = 'test-editor-opened-script-scope.ps1' }
@@ -202,6 +212,9 @@ $suites = @(
     @{ Name = 'reseed-canbindl-gate'; Script = 'test-reseed-canbindl-gate.ps1' }
     @{ Name = 'wait-local-r-ownership'; Script = 'test-wait-local-r-ownership.ps1' }
     @{ Name = 'stale-forward-wait-init'; Script = 'test-stale-forward-wait-init.ps1' }
+    @{ Name = 'stale-forward-rebind-streak'; Script = 'test-stale-forward-rebind-streak.ps1' }
+    @{ Name = 'tunnel-banner-transport'; Script = 'test-tunnel-banner-transport.ps1' }
+    @{ Name = 'tunnel-wait-backoff-fanout'; Script = 'test-tunnel-wait-backoff-fanout.ps1' }
     @{ Name = 'proxy-owner-service-coupling'; Script = 'test-proxy-owner-service-coupling.ps1' }
     @{ Name = 'local-tunnel-ssh-pids'; Script = 'test-local-tunnel-ssh-pids.ps1' }
     @{ Name = 'incident-gap-replay-contract'; Script = 'test-incident-gap-replay-contract.ps1' }

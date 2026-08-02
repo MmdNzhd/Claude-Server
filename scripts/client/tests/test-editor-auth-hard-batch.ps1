@@ -48,6 +48,13 @@ Assert (
 Assert ($elSrc -match 'Personal Cursor \(%APPDATA%\\Cursor\) is never touched') `
     'Get-CursorRemoteProfileDir documents personal Cursor is never touched'
 
+# 2b) One-time legacy profile migrate ships (history restore after Smart/Sepidz split)
+Assert (
+    ($elSrc -match 'function Ensure-CursorRemoteProfileMigrated') -and
+    ($elSrc -match 'ClaudeServerCursorProfile\.bak-keep-') -and
+    ($elSrc -match '\.claude-connect-profile-migrated')
+) 'Ensure-CursorRemoteProfileMigrated one-time legacy->site profile migrate present'
+
 # 3) editor.conf uses Path.Combine (Join-Path pipeline ChildPath bug)
 Assert (
     ($elSrc -match '\[System\.IO\.Path\]::Combine\(\$CfgDir,\s*''editor\.conf''\)') -and

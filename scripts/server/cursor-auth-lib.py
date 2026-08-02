@@ -28,7 +28,7 @@ QUARANTINE_REASON_PATH = Path("/etc/cursor-auth/golden.quarantine-reason")
 # Never restore golden from a personal-email quarantine directory.
 QUARANTINE_DIR = Path("/etc/cursor-auth/golden.quarantined-personal")
 
-# Consumer / personal mailbox domains â€” default deny for shared golden export.
+# Consumer / personal mailbox domains - default deny for shared golden export.
 PERSONAL_EMAIL_DOMAIN_DENYLIST = frozenset({
     "gmail.com",
     "googlemail.com",
@@ -326,7 +326,7 @@ def apply_golden_permissions() -> None:
         os.chmod(GOLDEN_DIR, 0o750)
     except OSError:
         pass
-    # Best-effort group (cursorauth) â€” ignore if group missing (unit tests / non-root).
+    # Best-effort group (cursorauth) - ignore if group missing (unit tests / non-root).
     try:
         import grp
 
@@ -395,7 +395,7 @@ def write_golden_bundle(
     require_profile_metadata: bool = False,
 ) -> None:
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
-    # Do not chmod 0700/0600 here â€” apply_golden_permissions() sets install.sh modes.
+    # Do not chmod 0700/0600 here - apply_golden_permissions() sets install.sh modes.
 
     auth_payload = {
         "accessToken": state_values.get("cursorAuth/accessToken", ""),
@@ -745,7 +745,7 @@ def _sync_global_dir(
     wal_path = Path(str(db_path) + "-wal")
     if db_path.is_file() and wal_path.is_file() and not force:
         print(
-            f"cursor-auth-sync: warning: {wal_path} exists — reload Cursor window after sync",
+            f"cursor-auth-sync: warning: {wal_path} exists - reload Cursor window after sync",
             file=sys.stderr,
         )
         _checkpoint_wal(db_path)
@@ -812,7 +812,7 @@ def _chown_cursor_tree(home: Path, user: str) -> None:
 def sync_user_home(home: Path, owner: str | None = None, force: bool = False) -> None:
     if not golden_complete():
         raise SystemExit(
-            "cursor-auth-sync: golden bundle missing — run: sudo cursor-auth-export --from-user <name>"
+            "cursor-auth-sync: golden bundle missing - run: sudo cursor-auth-export --from-user <name>"
         )
 
     values = state_values_from_golden()

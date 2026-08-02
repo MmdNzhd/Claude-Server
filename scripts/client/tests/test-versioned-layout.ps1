@@ -24,8 +24,8 @@ Assert ($launch -match 'Keep = 3') 'setup-launch keeps 3 versions'
 Assert ($launch -match 'setup fast_path') 'setup-launch logs fast_path'
 Assert ($launch -match 'fast_path direct_boot') 'setup-launch boots UI directly on fast path (no worker/network)'
 Assert ($launch -match 'Write-ConnectInstantLauncher') 'setup-launch writes instant launcher'
-Assert ($launch -match 'Claude-Connect\.vbs') 'setup-launch writes Claude-Connect.vbs (no orphan cmd console)'
-Assert ($launch -match 'Claude-Connect\.cmd') 'setup-launch still writes Claude-Connect.cmd trampoline'
+Assert ($launch -match 'Write-ConnectRootInstantLauncher|Claude-Connect\.exe') 'setup-launch prefers Desktop EXE / root instant launcher'
+Assert ($launch -match 'folders-only|Repair-ConnectRootLayout') 'setup-launch enforces folders-only root'
 Assert ($launch -match 'Move-LaunchExeIntoVerDir') 'setup-launch moves EXE into version dir'
 Assert ($launch -notmatch 'SHOW_INSTALL_NOTICE = ''1''' -and ($launch -match 'Remove-Item Env:CLAUDE_CONNECT_SHOW_INSTALL_NOTICE' -or $launch -match 'fast_path direct_boot')) 'setup-launch has no install confirm notice'
 Assert ($launch -notmatch 'SHOW_INSTALL_NOTICE = ''1''') 'setup-launch does not enable install notice'
@@ -72,13 +72,14 @@ try {
     $src = Join-Path $root 'src-test'
     New-Item -ItemType Directory -Force -Path $src | Out-Null
     Assert (-not (Test-VersionSrcComplete -SrcDir $src -Version '20260101.15')) 'incomplete src => false'
-    foreach ($n in @('connect.bat', 'connect.ps1', 'connect-boot.ps1', 'connect-update.ps1')) {
+    foreach ($n in @('connect.bat', 'connect.ps1', 'connect-boot.ps1', 'connect-update.ps1', 'editor-launch.ps1', 'connect-ui.ps1', 'connect-env-repair.ps1')) {
         Set-Content (Join-Path $src $n) -Value 'x'
     }
     Set-Content (Join-Path $src 'connect-version.txt') -Value '20260101.15' -NoNewline
     Assert (Test-VersionSrcComplete -SrcDir $src -Version '20260101.15') 'complete src => true'
-    # Stamp may lag folder leaf (leaf_wins): Complete is structural + stamp present, not stamp==Version.
-    Assert (Test-VersionSrcComplete -SrcDir $src -Version '20260101.99') 'stamp mismatch still structural-complete'
+    # Fast-path requires stamp == package version (mismatch => reinstall/repair).
+    Assert (-not (Test-VersionSrcComplete -SrcDir $src -Version '20260101.99')) 'stamp mismatch => not complete'
+    Assert (Test-VersionSrcStructural -SrcDir $src) 'stamp mismatch still structural-complete'
     Assert (-not (Test-VersionSrcStructural -SrcDir (Join-Path $root 'missing-src'))) 'missing src => structural false'
 } finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue

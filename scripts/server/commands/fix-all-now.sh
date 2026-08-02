@@ -95,6 +95,14 @@ else
 fi
 echo ""
 
+echo -e "${BOLD}5b. Cursor ECC Claude-hooks neutralize${NC}"
+if [ -f "$COMMANDS_DIR/fix-cursor-ecc-hooks.sh" ]; then
+    bash "$COMMANDS_DIR/fix-cursor-ecc-hooks.sh"
+else
+    warn "fix-cursor-ecc-hooks.sh missing"
+fi
+echo ""
+
 echo -e "${BOLD}6. aria / mehrdad${NC}"
 for u in aria mehrdad; do
     id "$u" >/dev/null 2>&1 || continue

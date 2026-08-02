@@ -79,7 +79,7 @@ function Set-ConnectVersionInRepo {
             Path    = Join-Path $ProjectRoot 'scripts\client\windows\connect.ps1'
             Pattern = "ConnectVersion = '[^']+'"
             Replace = "ConnectVersion = '$Version'"
-            Utf8Bom = $true
+            Utf8Bom = $false
         },
         @{
             Path    = Join-Path $ProjectRoot 'scripts\client\mac\connect.sh'
@@ -144,6 +144,14 @@ function Set-ConnectVersionInRepo {
     Write-BumpedFile -Path $verFile -NewText $Version
     $macVerFile = Join-Path $ProjectRoot 'scripts\client\mac\connect-version.txt'
     Write-BumpedFile -Path $macVerFile -NewText $Version
+
+    # Lockstep with bundle: stale policy.latest breaks client checksum verify after deploy.
+    $policyPath = Join-Path $ProjectRoot 'scripts\server\client-update-policy.json'
+    if (Test-Path -LiteralPath $policyPath) {
+        Invoke-BumpFileReplacement -Path $policyPath `
+            -Pattern '("latest"\s*:\s*")[^"]*(")' `
+            -Replace "`${1}$Version`${2}"
+    }
 }
 
 function Set-ConnectBuildIdInRepo {
@@ -152,9 +160,13 @@ function Set-ConnectBuildIdInRepo {
     # for update/newer-than logic (unlike $Version above). Purely so a specific running
     # session's log can be tied back to the exact build that produced it. A fresh GUID
     # every publish; the user never sees it change.
+    # Also stamped into git-mode.ps1 as GitModeBuildId so connect.bat / connect.ps1 can
+    # detect split-generation installs (same version string, mixed file generations).
     $buildId = [guid]::NewGuid().ToString()
     Invoke-BumpFileReplacement -Path (Join-Path $ProjectRoot 'scripts\client\windows\connect.ps1') `
         -Pattern "ConnectBuildId = '[^']+'" -Replace "ConnectBuildId = '$buildId'" -Utf8Bom
+    Invoke-BumpFileReplacement -Path (Join-Path $ProjectRoot 'scripts\client\git-mode.ps1') `
+        -Pattern "GitModeBuildId = '[^']+'" -Replace "GitModeBuildId = '$buildId'"
     return $buildId
 }
 

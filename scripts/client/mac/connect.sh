@@ -14,15 +14,27 @@ if [ -z "${CLAUDE_CONNECT_RUN_ID:-}" ]; then
 fi
 export CLAUDE_CONNECT_RUN_ID
 
-# Early single-instance (before update): same lockfile as enter_connect_single_instance.
+# Early multi-instance (before update): slots connect-0.lock .. connect-9.lock
+# (same as enter_connect_single_instance / Windows ClaudeConnect#0..#9).
 _lockdir_early="$HOME/.config/claude-connect"
 mkdir -p "$_lockdir_early" 2>/dev/null || true
-exec 9>"$_lockdir_early/connect.lock" || true
-if ! flock -n 9 2>/dev/null; then
-    printf '\n  [i] Claude Connect is already running - use the existing window.\n\n' >&2
-    exit 0
+CONNECT_LOCK_HELD=0
+_slot_early=""
+for _i_early in 0 1 2 3 4 5 6 7 8 9; do
+    if exec 9>"$_lockdir_early/connect-${_i_early}.lock" 2>/dev/null && flock -n 9 2>/dev/null; then
+        CONNECT_LOCK_HELD=1
+        _slot_early="$_i_early"
+        break
+    fi
+    exec 9>&- 2>/dev/null || true
+done
+if [ "$CONNECT_LOCK_HELD" != 1 ]; then
+    printf '\n  [X] 10 Claude Connect windows already open - close one, then retry.\n\n' >&2
+    exit 1
 fi
-CONNECT_LOCK_HELD=1
+CLAUDE_CONNECT_UI_SLOT="$_slot_early"
+export CLAUDE_CONNECT_UI_SLOT
+unset _i_early _slot_early
 
 _bootstrap_log_dir="$HOME/.config/claude-connect/logs"
 _bootstrap_log_file="$_bootstrap_log_dir/connect-$(date +%Y%m%d).log"
@@ -38,7 +50,7 @@ _update_script="$(cd "$(dirname "$0")" && pwd)/connect-update.sh"
 # Manual-only updates: skip auto-update on start (user presses u in the menu).
 # connect-update.sh remains available for invoke_connect_manual_update.
 
-CONNECT_VERSION='20260729.15'
+CONNECT_VERSION='20260801.10'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).
@@ -260,13 +272,17 @@ sshx() {
             _ssh_level=ERROR
         elif [ "$ec" -ne 0 ]; then
             # #18: expected need_mount from check before up is TRACE, not WARN.
-            if printf '%s' "$trunc_out" | grep -Eqi 'need_mount'                 && ! printf '%s' "$trunc_out" | grep -Eqi 'Permission denied|Connection refused|Could not resolve|No route to host|Connection timed out|error:'; then
+            if printf '%s' "$trunc_out" | grep -Eqi 'need_mount'                 && ! printf '%s' "$trunc_out" | grep -Eqi 'Permission denied|Connection refused|Could not resolve|No route to host|Connection timed out|Unknown error|error:'; then
                 _ssh_level=TRACE
             else
                 _ssh_level=WARN
             fi
         fi
         connect_log "SSH_END exit=$ec ms=$ms out=$trunc_out" "$_ssh_level"
+        # Escalate sustained transport failures (parity with Windows SshX FAIL SSH_END).
+        if [ "$ec" -ne 0 ] && [ "$ec" -ne 124 ] && printf '%s' "$trunc_out" | grep -Eqi 'Permission denied|Connection refused|Could not resolve|No route to host|Connection timed out|Unknown error'; then
+            connect_log "FAIL SSH_END: exit=$ec cmd=$trunc_cmd" 'ERROR'
+        fi
     fi
     _ssh_ms_sample_add "$ms" || true
     printf '%s' "$out"
@@ -349,6 +365,9 @@ fi
 [ -f "$_EDITOR_SH" ] || die "editor-launch.sh not found - re-copy the full mac package"
 # shellcheck source=../editor-launch.sh
 . "$_EDITOR_SH"
+if ! declare -F resolve_editor_choice >/dev/null 2>&1; then
+    die "editor-launch.sh incomplete (resolve_editor_choice missing) - press u to update, or re-copy mac/"
+fi
 # Boot-once: kill sticky fronts that listen without -L backends (Win HealBlackhole parity).
 if declare -F heal_cursor_proxy_sidecar_blackhole >/dev/null 2>&1; then
   heal_cursor_proxy_sidecar_blackhole || true
@@ -492,8 +511,12 @@ if [ -n "$needs_key" ]; then
         if command -v ssh-copy-id >/dev/null 2>&1; then
             ssh-copy-id -o StrictHostKeyChecking=accept-new -i "$HOME/.ssh/id_ed25519.pub" "$REMOTE_USER@$SERVER_IP"
         else
+            # Same newline guard ssh-copy-id applies on the branch above (and windows/connect.ps1
+            # $installKeyCmd): appending onto an authorized_keys that does not end in a newline
+            # glues our key onto the previous entry, breaking both, while ssh still exits 0.
+            # Key still arrives on stdin, so no shell quoting of the pubkey is needed here.
             ssh -o StrictHostKeyChecking=accept-new "$REMOTE_USER@$SERVER_IP" \
-                "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" \
+                "umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh; chmod go-w ~ 2>/dev/null; touch ~/.ssh/authorized_keys; if [ -s ~/.ssh/authorized_keys ] && [ \$(tail -c1 ~/.ssh/authorized_keys | wc -l) -eq 0 ]; then echo >> ~/.ssh/authorized_keys; fi; cat >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys" \
                 < "$HOME/.ssh/id_ed25519.pub"
         fi
         step "Verifying connection"

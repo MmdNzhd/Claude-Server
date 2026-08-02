@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 # RED contracts: Cursor/editor launch must isolate Electron console from the connect parent.
 # Start-EditorProcessDirect must set ELECTRON_NO_ATTACH_CONSOLE, redirect stdio to cursor-launch
 # day logs, AND hard-detach (DETACHED_PROCESS / CREATE_NEW_PROCESS_GROUP or equivalent).

@@ -56,9 +56,10 @@ Assert (
 Assert ($winNeeds -match 'SSH_USER_FIX') 'windows prompts with SSH_USER_FIX tag'
 Assert (
     ($winNeeds -match 'Get-SshConfigUserForServer') -and
-    ($winNeeds -match 'Remove-SshHostBlock') -and
-    ($winNeeds -match 'Sanitize-SshAliasConfig') -and
-    ($winNeeds -match 'User \$sshCfgUser')
+    (
+        ($winNeeds -match 'Set-SshHostBlock') -or
+        (($winNeeds -match 'Remove-SshHostBlock') -and ($winNeeds -match 'Sanitize-SshAliasConfig') -and ($winNeeds -match 'User \$sshCfgUser'))
+    )
 ) 'windows rewrites Host block with Get-SshConfigUserForServer after FIX'
 Assert ($winNeeds -match 'REMOTE_USER=\$') 'windows rewrites connect.conf REMOTE_USER after FIX'
 Assert ($winNeeds -match 'RemoteUser\s*=') 'windows sets RemoteUser from FIX'

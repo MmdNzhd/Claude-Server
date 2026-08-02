@@ -4,7 +4,7 @@
 # This unsigned IExpress EXE is an OPTIONAL fallback and may trip SmartScreen/Defender FP.
 # Never disable Defender in this script. EXE installs to Desktop\Claude-Connect + connect.bat.
 # FP guidance: Unblock/MOTW, scoped exclusion Desktop\Claude-Connect only, WDSI submission,
-# future Authenticode OV+timestamp â€” docs/client-connect.md "SmartScreen / Defender".
+# future Authenticode OV+timestamp - docs/client-connect.md "SmartScreen / Defender".
 
 param(
     [Parameter(Mandatory)][string]$WindowsDir,
@@ -68,7 +68,7 @@ Do NOT run connect.bat from a publish\windows folder.
 That folder is for the publisher/admin only.
 
 First run: enter server username / project path when asked.
-Later updates: press u (or automatic) — files update in this same folder.
+Later updates: press u (or automatic) - files update in this same folder.
 '@
     [System.IO.File]::WriteAllText(
         (Join-Path $stage 'READ-ME-USERS.txt'),
@@ -76,8 +76,8 @@ Later updates: press u (or automatic) — files update in this same folder.
         [System.Text.UTF8Encoding]::new($false)
     )
 
-    # Silent .cmd: no echo/pause (console is Hidden via VBS AppLaunched). Failures
-    # surface via setup-launch.ps1 MessageBox + %TEMP%\claude-connect-setup.log.
+    # Optional .cmd kept for manual recovery only — AppLaunched VBS must NOT call cmd.exe
+    # (cmd still flashes a console on some Windows builds even with WScript style 0).
     $setupCmd = @'
 @echo off
 setlocal EnableExtensions
@@ -88,16 +88,15 @@ exit /b %ERRORLEVEL%
     $setupPath = Join-Path $stage 'setup-claude-connect.cmd'
     [System.IO.File]::WriteAllText($setupPath, ($setupCmd -replace "`n", "`r`n"), [System.Text.UTF8Encoding]::new($false))
 
-    # Hide the cmd console completely. AppLaunched must NOT be
-    # "powershell -ExecutionPolicy Bypass -WindowStyle Hidden" (Defender SFX heuristic).
-    # Chain stays: wscript (hidden) -> cmd /c setup.cmd -> Hidden powershell setup-launch.
+    # Zero-flash chain: AppLaunched = wscript (never raw powershell — Defender SFX heuristic).
+    # VBS Run style 0 launches Hidden powershell setup-launch.ps1 directly (no cmd.exe hop).
     $setupVbs = @(
-        "' Claude Connect - hide setup console (IExpress AppLaunched)"
+        "' Claude Connect - zero-flash setup (IExpress AppLaunched; no cmd.exe)"
         'Set sh = CreateObject("WScript.Shell")'
         'Set fso = CreateObject("Scripting.FileSystemObject")'
         'dir = fso.GetParentFolderName(WScript.ScriptFullName)'
-        'cmd = "cmd.exe /c """ & dir & "\setup-claude-connect.cmd"""'
-        'sh.Run cmd, 0, True'
+        'ps = "powershell.exe -NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File """ & dir & "\setup-launch.ps1"""'
+        'sh.Run ps, 0, True'
     ) -join "`r`n"
     $vbsPath = Join-Path $stage 'setup-run-hidden.vbs'
     [System.IO.File]::WriteAllText($vbsPath, $setupVbs + "`r`n", [System.Text.Encoding]::ASCII)
@@ -134,8 +133,8 @@ exit /b %ERRORLEVEL%
     [void]$sb.AppendLine(("FriendlyName={0}" -f $FriendlyName))
     # IMPORTANT (AV regression): do NOT put "powershell -ExecutionPolicy Bypass -WindowStyle Hidden"
     # on the IExpress AppLaunched line. That exact pattern is a classic Defender/SmartScreen
-    # heuristic for unsigned SFX droppers. Hidden console uses wscript -> cmd -> setup.cmd
-    # (style 0). Fast-exit + detached worker still live inside setup-launch.ps1.
+    # heuristic for unsigned SFX droppers. Hidden console uses wscript -> powershell (style 0),
+    # never cmd.exe. Fast-exit + detached worker still live inside setup-launch.ps1.
     [void]$sb.AppendLine('AppLaunched=wscript.exe //B //Nologo setup-run-hidden.vbs')
     [void]$sb.AppendLine('PostInstallCmd=<None>')
     [void]$sb.AppendLine('AdminQuietInstCmd=')

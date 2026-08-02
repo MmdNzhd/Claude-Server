@@ -51,6 +51,7 @@ if (-not (Test-Path -LiteralPath $pubExe)) {
 Note 'extract setup-launch + update prune helpers'
 $needLaunch = @(
     'Resolve-VersionedTree',
+    'Test-VersionSrcStructural',
     'Test-VersionSrcComplete',
     'Copy-PayloadToSrc',
     'Move-LaunchExeIntoVerDir',
@@ -81,9 +82,18 @@ $null = New-Item -ItemType Directory -Force -Path $spacedDrop, $extract
 
 try {
     $winSrc = Join-Path $script:RepoRoot 'scripts\client\windows'
-    foreach ($rel in @('connect.bat', 'connect.ps1', 'connect-boot.ps1', 'connect-update.ps1', 'connect-version.txt')) {
+    foreach ($rel in @(
+        'connect.bat', 'connect.ps1', 'connect-boot.ps1', 'connect-update.ps1',
+        'connect-version.txt', 'connect-env-repair.ps1'
+    )) {
         $from = Join-Path $winSrc $rel
         if (Test-Path $from) { Copy-Item $from (Join-Path $extract $rel) -Force }
+    }
+    $clientRoot = Join-Path $script:RepoRoot 'scripts\client'
+    foreach ($rel in @('editor-launch.ps1', 'connect-ui.ps1')) {
+        $from = Join-Path $clientRoot $rel
+        if (Test-Path $from) { Copy-Item $from (Join-Path $extract $rel) -Force }
+        else { Set-Content -LiteralPath (Join-Path $extract $rel) -Value 'x' }
     }
     Set-Content -LiteralPath (Join-Path $extract 'connect-version.txt') -Value $testVer -Encoding ASCII -NoNewline
 
@@ -123,12 +133,16 @@ try {
     ) 'Move-LaunchExeIntoVerDir moved EXE into VerDir and removed drop copy'
     Assert (-not $again) 'Move-LaunchExeIntoVerDir idempotent when src already equals DestExe'
 
-    # 7-9: install batch — current.txt + no EXE leak
-    Note 'install batch: current.txt + no EXE in src or root'
+    # 7-9: install batch — folders-only root + no EXE leak
+    Note 'install batch: folders-only root + no EXE in src or root'
     Copy-PayloadToSrc -ExtractSrc $extract -SrcDir $srcDirPath
-    Set-Content -LiteralPath (Join-Path $tDrop.Root 'current.txt') -Value $testVer -Encoding ASCII -NoNewline
-    Assert ((Get-Content (Join-Path $tDrop.Root 'current.txt') -Raw).Trim() -eq $testVer) `
-        'current.txt pointer matches installed version'
+    Remove-Item -LiteralPath (Join-Path $tDrop.Root 'current.txt') -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE '.config\claude-connect') | Out-Null
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt') -Value $testVer -Encoding ASCII -NoNewline
+    Assert (-not (Test-Path -LiteralPath (Join-Path $tDrop.Root 'current.txt'))) `
+        'no root current.txt (pointer is install-current.txt)'
+    Assert (((Get-Content (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt') -Raw).Trim()) -eq $testVer) `
+        'install-current pointer matches installed version'
     $srcExes = @(Get-ChildItem -LiteralPath $srcDirPath -Filter 'Claude-Connect*.exe' -File -ErrorAction SilentlyContinue)
     Assert ($srcExes.Count -eq 0) 'no EXE inside src\ after payload + move batch'
     $rootExes = @(Get-ChildItem -LiteralPath $tDrop.Root -Filter 'Claude-Connect*.exe' -File -ErrorAction SilentlyContinue)
@@ -185,6 +199,21 @@ try {
     Write-Host ("  FAIL  extra-hard batch exception: {0}" -f $_.Exception.Message) -ForegroundColor Red
     $Fail++
 } finally {
+    try {
+        $icRestore = Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt'
+        if ($null -ne $script:BakInstallCurrent) {
+            Set-Content -LiteralPath $icRestore -Value $script:BakInstallCurrent -Encoding ASCII -NoNewline
+        } elseif (Test-Path -LiteralPath $icRestore) {
+            # Prefer newest real VerDir on Desktop if we had no prior pointer
+            $deskCc = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
+            if (Test-Path -LiteralPath $deskCc) {
+                $best = Get-ChildItem -LiteralPath $deskCc -Directory -EA SilentlyContinue |
+                    Where-Object { $_.Name -match '^\d{8}\.\d+$' -and (Test-Path (Join-Path $_.FullName 'src\connect.ps1')) } |
+                    Sort-Object Name -Descending | Select-Object -First 1
+                if ($best) { Set-Content -LiteralPath $icRestore -Value $best.Name -Encoding ASCII -NoNewline }
+            }
+        }
+    } catch {}
     try { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue } catch {}
 }
 

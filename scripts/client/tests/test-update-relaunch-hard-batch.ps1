@@ -65,15 +65,18 @@ Assert (
     ($manual -match 'Never fall through to a stale in-memory Wait-ConnectExit')
 ) 'Invoke-ConnectManualUpdate flags manual update and forbids stale Press Enter fallthrough'
 
-# --- 7–8: Quiet optional policy + UPDATE_YES automation apply ---
+# --- 7–8: Quiet / UPDATE_UI=0 optional policy + UPDATE_YES automation apply ---
 Assert (
     ($upd -match '\$autoYes = \(\$env:CLAUDE_CONNECT_UPDATE_YES -eq ''1''\)') -and
-    ($upd -match 'if \(\$script:Quiet -and -not \$autoYes\)') -and
+    ($upd -match '\$uiOff = \(\$env:CLAUDE_CONNECT_UPDATE_UI -eq ''0''\)') -and
+    ($upd -match 'if \(\(\$script:Quiet -or \$uiOff\) -and -not \$autoYes\)') -and
     ($upd -match 'UPDATE_OPTIONAL_ANSWER source=CLAUDE_CONNECT_UPDATE_YES')
 ) 'Quiet mid-session skips optional unless CLAUDE_CONNECT_UPDATE_YES auto-applies'
 
 Assert (
-    ($upd -match 'UPDATE_OPTIONAL_SKIP reason=silent') -and
+    ($upd -match 'UPDATE_OPTIONAL_SKIP reason=\{0\}') -and
+    ($upd -match "'silent'") -and
+    ($upd -match "'update_ui_0'") -and
     ($upd -match '\$forceApply = \(\$mode -eq ''force''\) -and \$forceReq')
 ) 'optional Quiet logs silent skip; force apply gated on mode=force AND force_min'
 
@@ -89,14 +92,15 @@ $syncFn = Get-FunctionSource -Content $upd -Name 'Sync-ConnectExeBesideClient'
 Assert (
     $syncFn -and
     ($syncFn -match 'foreign_verdir') -and
-    ($syncFn -match 'if \(\$dirLeaf -ne \$verLabel\)')
+    ($syncFn -match '\$dirLeaf -ne \$verLabel')
 ) 'Sync-ConnectExeBesideClient skips foreign_verdir (no NEW.exe into OLD VerDir)'
 
 Assert (
-    $upd.Contains("Set-Content -LiteralPath (Join-Path `$verLayoutApply.Root 'current.txt')") -and
+    ($upd -match 'Set-ConnectInstallCurrent -Root \$versionedRoot -Ver \$remoteVer') -and
+    ($upd -match 'Remove-Item -LiteralPath \(Join-Path \$versionedRoot ''current\.txt''\)') -and
     $upd.Contains('$env:CLAUDE_CONNECT_VER_DIR = $newVerDir') -and
     ($upd -match 'versioned_apply ok remote=\{0\} src=\{1\}')
-) 'versioned_apply writes current.txt, sets CLAUDE_CONNECT_VER_DIR, logs versioned_apply ok'
+) 'versioned_apply sets install-current + CLAUDE_CONNECT_VER_DIR, logs versioned_apply ok'
 
 $swapFn = Get-FunctionSource -Content $upd -Name 'Swap-LiveDir'
 Assert (

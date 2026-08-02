@@ -38,7 +38,13 @@ function Test-ConnectBootPresent {
     param([string]$Dir)
     if (-not $Dir) { return $false }
     try {
-        return (Test-Path -LiteralPath (Join-Path ([IO.Path]::GetFullPath($Dir)) 'connect-boot.ps1'))
+        $d = [IO.Path]::GetFullPath($Dir)
+        # Usable ScriptDir must have boot + editor-launch (flat SFX dumps often lack editor-launch).
+        return (
+            (Test-Path -LiteralPath (Join-Path $d 'connect-boot.ps1')) -and
+            (Test-Path -LiteralPath (Join-Path $d 'editor-launch.ps1')) -and
+            (Test-Path -LiteralPath (Join-Path $d 'connect.ps1'))
+        )
     } catch { return $false }
 }
 
@@ -91,6 +97,14 @@ function Resolve-ConnectWorkerDest {
         $rootHint = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
     }
 
+    # Config pointer (preferred) then legacy current.txt
+    if (Get-Command Get-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+        $cv0 = Get-ConnectInstallCurrent -Root $rootHint
+        if ($cv0 -match '^\d{8}\.\d+$') {
+            $cand0 = Join-Path (Join-Path $rootHint $cv0) 'src'
+            if (Test-ConnectBootPresent -Dir $cand0) { return $cand0 }
+        }
+    }
     $curFile = Join-Path $rootHint 'current.txt'
     if (Test-Path -LiteralPath $curFile) {
         $cv = (Get-Content -LiteralPath $curFile -Raw -ErrorAction SilentlyContinue).Trim()
@@ -98,24 +112,17 @@ function Resolve-ConnectWorkerDest {
         if ($cv -and (Test-ConnectBootPresent -Dir $cand)) { return $cand }
     }
 
-    if ($dest) { return $dest }
-
     $newest = Find-NewestVersionedSrc -Root $rootHint
     if ($newest) { return $newest }
 
-    if (Test-ConnectBootPresent -Dir $rootHint) { return $rootHint }
+    if ($dest -and (Test-ConnectBootPresent -Dir $dest)) { return $dest }
 
+    # NEVER boot from flat Claude-Connect\ root when any versioned tree exists
+    # (old IExpress SFX dumps incomplete scripts there and breaks editor-launch).
     $desk = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
-    if ($rootHint -ne $desk) {
-        $cur2 = Join-Path $desk 'current.txt'
-        if (Test-Path -LiteralPath $cur2) {
-            $cv2 = (Get-Content -LiteralPath $cur2 -Raw -ErrorAction SilentlyContinue).Trim()
-            $cand2 = Join-Path (Join-Path $desk $cv2) 'src'
-            if ($cv2 -and (Test-ConnectBootPresent -Dir $cand2)) { return $cand2 }
-        }
-        $n2 = Find-NewestVersionedSrc -Root $desk
+    foreach ($rootTry in @($rootHint, $desk) | Select-Object -Unique) {
+        $n2 = Find-NewestVersionedSrc -Root $rootTry
         if ($n2) { return $n2 }
-        if (Test-ConnectBootPresent -Dir $desk) { return $desk }
     }
     return $null
 }

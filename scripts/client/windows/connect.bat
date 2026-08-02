@@ -257,6 +257,10 @@ if exist "%HERE%connect-version.txt" (
 )
 if not defined EXPECT_VER set "OUTDATED=1"
 if defined EXPECT_VER findstr /C:"ConnectVersion = '!EXPECT_VER!'" "%HERE%connect.ps1" >nul 2>&1 || set "OUTDATED=1"
+REM Co-origination: ConnectBuildId in connect.ps1 must match GitModeBuildId in git-mode.ps1
+REM (same version string can cover mixed generations - P1.2 residual / 2026-08-02 / BUNDLE_COHESION).
+powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "try { $here='%HERE_NOTRAIL%'; $c=Get-Content -LiteralPath (Join-Path $here 'connect.ps1') -Raw -EA Stop; $g=Get-Content -LiteralPath (Join-Path $here 'git-mode.ps1') -Raw -EA Stop; $cb=''; $gb=''; if($c -match 'ConnectBuildId = ''([^'']+)'''){ $cb=$Matches[1] }; if($g -match 'GitModeBuildId = ''([^'']+)'''){ $gb=$Matches[1] }; if(-not $cb -or -not $gb -or $cb -ne $gb){ exit 1 }; exit 0 } catch { exit 1 }" 2>nul
+if errorlevel 1 set "OUTDATED=1"
 
 if "%OUTDATED%"=="1" (
     powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "try { $d=Join-Path $env:USERPROFILE '.config\claude-connect\logs'; New-Item -ItemType Directory -Force -Path $d|Out-Null; $f=Join-Path $d ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd')); $ts=Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'; $sid=$env:CLAUDE_CONNECT_RUN_ID; if (-not $sid) { $sid='-' }; $here='%HERE%'; $line=('[{0}] [ERROR] [{1}] FAIL OUTDATED_SCRIPTS: folder incomplete or mismatched version here={2}' -f $ts, $sid, $here); [IO.File]::AppendAllText($f, $line+[Environment]::NewLine, [Text.UTF8Encoding]::new($false)) } catch {}" 2>nul

@@ -52,14 +52,20 @@ Assert (
     ($setupSrc -match 'HOOK_MATCHER="Grep\|Glob\|Read\|Write\|Edit\|EditNotebook\|StrReplace\|Delete\|Task"')
 ) 'preToolUse matcher excludes Shell (golden + setup)'
 
+# Wording moved from a static "Never pass .../Use pathspecs not --glob" hint to a
+# structured _RG_FORBIDDEN list + per-flag "not supported" _die + RG_FLAG_REJECTED audit
+# log line (laptop-exec.sh case block ~line 986). Assert the real current mechanism
+# instead of the retired literal strings - the behavioral end-to-end reject is also
+# covered by laptop-exec.sh's own "rg reject --glob" self-check (~line 1091).
 Assert (
-    ($leSrc -match '\|-i\|--ignore-case') -and
-    ($leSrc -match 'Never pass -i/-l/-n/--glob')
+    ($leSrc -match '-l\|--files-with-matches\|-i\|--ignore-case') -and
+    ($leSrc -match "rg: flag '") -and
+    ($leSrc -match 'not supported')
 ) 'laptop-exec rg rejects -i'
 
 Assert (
-    ($leSrc -match '--glob') -and
-    ($leSrc -match 'Use pathspecs not --glob')
+    ($leSrc -match '-A\|-B\|-C\|-g\|--glob\|--type') -and
+    ($leSrc -match '_RG_FORBIDDEN')
 ) 'laptop-exec rg rejects --glob'
 
 Assert (

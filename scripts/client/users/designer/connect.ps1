@@ -182,14 +182,49 @@ function PortOpen($ip, $port) {
 }
 
 function Remove-SshHostBlock($cfgPath, $alias) {
+    # Designer shares ~/.ssh/config with the main Connect UI, so it must take the same
+    # cross-process lock (Invoke-WithSshConfigLock / Write-AsciiFileRetry from git-mode.ps1).
     if (-not (Test-Path $cfgPath)) { return }
-    $out  = New-Object System.Collections.Generic.List[string]
-    $skip = $false
-    foreach ($ln in (Get-Content $cfgPath)) {
-        if ($ln -match '^\s*Host\s+(.+)$') { $skip = (($matches[1].Trim() -split '\s+') -contains $alias) }
-        if (-not $skip) { $out.Add($ln) }
+    Invoke-WithSshConfigLock -Action {
+        if (-not (Test-Path -LiteralPath $cfgPath)) { return }
+        $out  = New-Object System.Collections.Generic.List[string]
+        $skip = $false
+        foreach ($ln in @(Get-Content -LiteralPath $cfgPath -ErrorAction SilentlyContinue)) {
+            if ($ln -match '^\s*Host\s+(.+)$') { $skip = (($matches[1].Trim() -split '\s+') -contains $alias) }
+            if (-not $skip) { $out.Add($ln) }
+        }
+        Write-AsciiFileRetry -Path $cfgPath -Value $out
     }
-    Set-Content -Path $cfgPath -Value $out -Encoding ASCII
+}
+
+function Set-SshHostBlock {
+    # One locked read-modify-write; ExtraLines carries the designer RemoteForward legs.
+    param(
+        [Parameter(Mandatory)][string]$CfgPath,
+        [Parameter(Mandatory)][string]$AliasName,
+        [Parameter(Mandatory)][string]$HostName,
+        [Parameter(Mandatory)][string]$UserName,
+        [string[]]$ExtraLines = @()
+    )
+    Invoke-WithSshConfigLock -Action {
+        $out = New-Object System.Collections.Generic.List[string]
+        if (Test-Path -LiteralPath $CfgPath) {
+            $skip = $false
+            foreach ($ln in @(Get-Content -LiteralPath $CfgPath -ErrorAction SilentlyContinue)) {
+                if ($ln -match '^\s*Host\s+(.+)$') { $skip = (($matches[1].Trim() -split '\s+') -contains $AliasName) }
+                if (-not $skip) { $out.Add($ln) }
+            }
+        }
+        while ($out.Count -gt 0 -and [string]::IsNullOrWhiteSpace($out[$out.Count - 1])) { $out.RemoveAt($out.Count - 1) }
+        if ($out.Count -gt 0) { $out.Add('') }
+        $out.Add("Host $AliasName")
+        $out.Add("    HostName $HostName")
+        $out.Add("    User $UserName")
+        $out.Add('    IdentityFile ~/.ssh/id_ed25519')
+        $out.Add('    StrictHostKeyChecking accept-new')
+        foreach ($extra in @($ExtraLines)) { if ($extra) { $out.Add("    $extra") } }
+        Write-AsciiFileRetry -Path $CfgPath -Value $out
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $CfgDir | Out-Null
@@ -241,16 +276,7 @@ if (Test-Path $keyA) {
 } else { StepFail "could not create key"; Read-Host "    Press Enter to close" | Out-Null; exit 1 }
 
 $sshCfg = Join-Path $SshDir "config"
-if (-not (Test-Path $sshCfg)) { New-Item -ItemType File -Path $sshCfg | Out-Null }
-Remove-SshHostBlock $sshCfg $Alias
-@"
-
-Host $Alias
-    HostName $ServerIP
-    User $RemoteUser
-    IdentityFile ~/.ssh/id_ed25519
-    StrictHostKeyChecking accept-new
-"@ | Add-Content -Path $sshCfg -Encoding ASCII
+Set-SshHostBlock -CfgPath $sshCfg -AliasName $Alias -HostName $ServerIP -UserName $RemoteUser
 icacls $sshCfg /reset 2>$null | Out-Null
 icacls $sshCfg /inheritance:r /grant "$env:USERNAME`:F" 2>$null | Out-Null
 
@@ -287,7 +313,12 @@ if ($needsKey) {
     Write-Host ""
     ssh-keygen -R $ServerIP 2>$null | Out-Null
     Write-Host "    Enter designer password (one time only):" -ForegroundColor Yellow
-    $pubKeyContent = (Get-Content "$keyA.pub").Trim() -replace "'", "'\''"
+    # Must stay a single string: without -Raw a multi-line .pub is Object[] and interpolates
+    # space-joined into the remote command below, appending a corrupt authorized_keys entry.
+    # The try/catch covers a missing .pub, which -ErrorAction Stop would otherwise throw on.
+    $pubRaw = ''
+    try { $pubRaw = ((Get-Content -LiteralPath "$keyA.pub" -Raw -ErrorAction Stop) + '') } catch { $pubRaw = '' }
+    $pubKeyContent = ((($pubRaw -split "`r?`n" | Where-Object { $_.Trim() -ne '' } | Select-Object -First 1) + '').Trim()) -replace "'", "'\''"
     ssh -o StrictHostKeyChecking=accept-new "$RemoteUser@$ServerIP" `
         "mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\n' '$pubKeyContent' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     $keyCopyOk = ($LASTEXITCODE -eq 0)
@@ -319,17 +350,10 @@ Install-ServerKey $PubB
 StepOk
 
 Step "Configuring server"
-Remove-SshHostBlock $sshCfg $Alias
-@"
-
-Host $Alias
-    HostName $ServerIP
-    User $RemoteUser
-    IdentityFile ~/.ssh/id_ed25519
-    StrictHostKeyChecking accept-new
-    RemoteForward $Port localhost:22
-    ExitOnForwardFailure no
-"@ | Add-Content -Path $sshCfg -Encoding ASCII
+Set-SshHostBlock -CfgPath $sshCfg -AliasName $Alias -HostName $ServerIP -UserName $RemoteUser -ExtraLines @(
+    "RemoteForward $Port localhost:22",
+    'ExitOnForwardFailure no'
+)
 Repair-SshPerm $sshCfg "SSH config"
 Push-ServerConnectConf
 StepOk "laptop=$LaptopUser port=$Port git=$(Get-GitMode)"

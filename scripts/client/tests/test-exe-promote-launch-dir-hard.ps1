@@ -281,11 +281,32 @@ if (-not (Test-Path -LiteralPath $pub)) {
 if (-not (Test-Path -LiteralPath $live)) {
     Assert $false 'live Desktop\Claude-Connect missing'
 } else {
-    $liveVer = (Get-Content -LiteralPath (Join-Path $live 'connect-version.txt') -Raw).Trim()
+    # Versioned layout: scripts live in {ver}\src; pointer is install-current.txt
+    $icPath = Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt'
+    $liveVer = ''
+    if (Test-Path -LiteralPath $icPath) {
+        $liveVer = (Get-Content -LiteralPath $icPath -Raw -ErrorAction SilentlyContinue).Trim()
+    }
+    if ($liveVer -notmatch '^\d{8}\.\d+$' -or -not (Test-Path -LiteralPath (Join-Path $live (Join-Path $liveVer 'src\connect.ps1')))) {
+        # Numeric sort — string Descending picks 20260801.9 over 20260801.10.
+        $cand = Get-ChildItem -LiteralPath $live -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d{8}\.\d+$' -and (Test-Path (Join-Path $_.FullName 'src\connect.ps1')) } |
+            Sort-Object {
+                if ($_.Name -match '^(\d{8})\.(\d+)$') { [int64]$Matches[1] * 10000L + [int64]$Matches[2] } else { 0L }
+            } | Select-Object -Last 1
+        if ($cand) { $liveVer = $cand.Name }
+    }
+    if ($liveVer -notmatch '^\d{8}\.\d+$' -and (Test-Path -LiteralPath (Join-Path $live 'connect-version.txt'))) {
+        $liveVer = (Get-Content -LiteralPath (Join-Path $live 'connect-version.txt') -Raw).Trim()
+    }
     Assert ($liveVer -match '^\d{8}\.\d+$') "live version parseable ($liveVer)"
 
-    # Ensure live updater has promote helpers (scripts-only may lag if user skipped update)
-    $liveUpd = Join-Path $live 'connect-update.ps1'
+    $liveSrc = Join-Path $live (Join-Path $liveVer 'src')
+    $liveUpd = if (Test-Path -LiteralPath (Join-Path $liveSrc 'connect-update.ps1')) {
+        Join-Path $liveSrc 'connect-update.ps1'
+    } else {
+        Join-Path $live 'connect-update.ps1'
+    }
     $liveUpdRaw = if (Test-Path $liveUpd) { Get-Content -LiteralPath $liveUpd -Raw } else { '' }
     Assert ($liveUpdRaw -match 'Get-ConnectExePromoteDirs') 'live connect-update.ps1 has Get-ConnectExePromoteDirs'
 
@@ -306,13 +327,14 @@ if (-not (Test-Path -LiteralPath $live)) {
 
         $env:CLAUDE_CONNECT_LAUNCH_DIR = $pub
         $env:CLAUDE_CONNECT_UPDATE_UI = '0'
+        $env:CLAUDE_CONNECT_UPDATE_YES = '0'
         $env:CLAUDE_CONNECT_RUN_ID = ('hardprom' + [guid]::NewGuid().ToString('N').Substring(0, 8))
         $out = Join-Path $env:TEMP 'cc-hard-promote-out.txt'
         $err = Join-Path $env:TEMP 'cc-hard-promote-err.txt'
         $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass',
-            '-File', $liveUpd, '-ScriptDir', $live
-        ) -WorkingDirectory $live -Wait -PassThru -NoNewWindow `
+            '-File', $liveUpd, '-ScriptDir', $(if (Test-Path -LiteralPath $liveSrc) { $liveSrc } else { $live })
+        ) -WorkingDirectory $(if (Test-Path -LiteralPath $liveSrc) { $liveSrc } else { $live }) -Wait -PassThru -NoNewWindow `
             -RedirectStandardOutput $out -RedirectStandardError $err
 
         # 0 = up to date (+ promote), 2 = applied update need relaunch — both OK for handoff.
@@ -348,7 +370,7 @@ if (-not (Test-Path -LiteralPath $live)) {
         Assert ((Test-Path -LiteralPath $liveVerExe) -or (Test-Path -LiteralPath $liveVerExeInVer)) 'CaseLive wrote versioned EXE in VerDir or flat install root'
 
         $stdout = if (Test-Path $out) { Get-Content -LiteralPath $out -Raw } else { '' }
-        Assert ($stdout -match 'up to date|Updated to|Client update available') 'CaseLive updater produced expected status line'
+        Assert ([bool]([string]$stdout -match 'up to date|Updated to|Client update available|EXE ready:|out of sync|Update now')) 'CaseLive updater produced expected status line'
     } finally {
         if ($hadPubStamp) {
             Set-Content -LiteralPath $realStamp -Value $bakPubStamp -Encoding ASCII -NoNewline

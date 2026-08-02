@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 # Cross-cutting session-fresh TTL consistency + false-green guards.
 # Complements test-session-fresh-probe-skips*.ps1 with shared 30s family,
 # mount 60s isolation, boundary matrix, and Clear/recover invalidation.
@@ -50,7 +50,7 @@ Assert ($ensureCached -match 'reason=session_tunnel_fresh') `
     '1-guard: Ensure-LaptopReverseSshCached logs reason=session_tunnel_fresh'
 
 # =============================================================================
-# 2) Mount check TTL is 60s â€” must NOT share 30s with tunnel fresh
+# 2) Mount check TTL is 60s - must NOT share 30s with tunnel fresh
 # =============================================================================
 Write-Host '-- 2) Mount check TTL is 60 (not 30) --' -ForegroundColor White
 

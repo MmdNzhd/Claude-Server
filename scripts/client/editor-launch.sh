@@ -33,18 +33,50 @@ configure_editor_pref() {
     printf '    \033[0;32mSaved: %s\033[0m\n\n' "$val"
 }
 
+# Resolve absolute CLI path when `cursor`/`code` are not on PATH (common on Mac).
+_editor_cli_path() {
+    local name="$1" p
+    command -v "$name" >/dev/null 2>&1 && { command -v "$name"; return 0; }
+    case "$name" in
+        cursor)
+            for p in \
+                "$HOME/.local/bin/cursor" \
+                /usr/local/bin/cursor \
+                /opt/homebrew/bin/cursor \
+                "/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
+            do
+                [ -x "$p" ] && { printf '%s' "$p"; return 0; }
+            done
+            ;;
+        code)
+            for p in \
+                "$HOME/.local/bin/code" \
+                /usr/local/bin/code \
+                /opt/homebrew/bin/code \
+                "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+            do
+                [ -x "$p" ] && { printf '%s' "$p"; return 0; }
+            done
+            ;;
+    esac
+    return 1
+}
+
 resolve_editor_choice() {
-    local cfg="$1" pref have_cursor="" have_code=""
-    command -v cursor >/dev/null 2>&1 && have_cursor=1
-    command -v code   >/dev/null 2>&1 && have_code=1
+    # EDITOR_CMD stays logical (cursor|code) — Mac connect gates auth sync on
+    # exact "$EDITOR_CMD" = "cursor". Absolute CLI path goes in EDITOR_BIN only.
+    local cfg="$1" pref have_cursor="" have_code="" cursor_bin="" code_bin=""
+    EDITOR_BIN=""
+    cursor_bin="$(_editor_cli_path cursor)" && have_cursor=1
+    code_bin="$(_editor_cli_path code)" && have_code=1
     if [ -z "$have_cursor" ] && [ -z "$have_code" ]; then
         return 1
     fi
     if [ -n "$have_cursor" ] && [ -z "$have_code" ]; then
-        EDITOR_CMD=cursor; EDITOR_NAME=Cursor; return 0
+        EDITOR_CMD=cursor; EDITOR_BIN="${cursor_bin:-}"; EDITOR_NAME=Cursor; return 0
     fi
     if [ -z "$have_cursor" ] && [ -n "$have_code" ]; then
-        EDITOR_CMD=code; EDITOR_NAME="VS Code"; return 0
+        EDITOR_CMD=code; EDITOR_BIN="${code_bin:-}"; EDITOR_NAME="VS Code"; return 0
     fi
     pref="$(get_editor_pref "$cfg")"
     if [ "$pref" = "ask" ] || [ "$pref" != "cursor" ] && [ "$pref" != "code" ]; then
@@ -57,20 +89,37 @@ resolve_editor_choice() {
         printf '    \033[0;90m(Enter = %s)\033[0m\n' "$saved"
         read -r ed_choice
         case "$(printf '%s' "$ed_choice" | tr '[:upper:]' '[:lower:]')" in
-            1|cursor|c) EDITOR_CMD=cursor; EDITOR_NAME=Cursor ;;
-            2|code|vscode|v) EDITOR_CMD=code; EDITOR_NAME="VS Code" ;;
-            "") [ "$saved" = "code" ] && { EDITOR_CMD=code; EDITOR_NAME="VS Code"; } \
-                                      || { EDITOR_CMD=cursor; EDITOR_NAME=Cursor; } ;;
-            *) EDITOR_CMD=cursor; EDITOR_NAME=Cursor ;;
+            1|cursor|c) EDITOR_CMD=cursor; EDITOR_BIN="${cursor_bin:-}"; EDITOR_NAME=Cursor ;;
+            2|code|vscode|v) EDITOR_CMD=code; EDITOR_BIN="${code_bin:-}"; EDITOR_NAME="VS Code" ;;
+            "") [ "$saved" = "code" ] && { EDITOR_CMD=code; EDITOR_BIN="${code_bin:-}"; EDITOR_NAME="VS Code"; } \
+                                      || { EDITOR_CMD=cursor; EDITOR_BIN="${cursor_bin:-}"; EDITOR_NAME=Cursor; } ;;
+            *) EDITOR_CMD=cursor; EDITOR_BIN="${cursor_bin:-}"; EDITOR_NAME=Cursor ;;
         esac
         return 0
     fi
     if [ "$pref" = "code" ]; then
-        EDITOR_CMD=code; EDITOR_NAME="VS Code"
+        EDITOR_CMD=code; EDITOR_BIN="${code_bin:-}"; EDITOR_NAME="VS Code"
     else
-        EDITOR_CMD=cursor; EDITOR_NAME=Cursor
+        EDITOR_CMD=cursor; EDITOR_BIN="${cursor_bin:-}"; EDITOR_NAME=Cursor
     fi
     return 0
+}
+
+# Resolve runnable CLI: prefer EDITOR_BIN when it matches the logical cmd.
+_editor_run_cmd() {
+    local logical="$1"
+    if [ -n "${EDITOR_BIN:-}" ] && [ -x "${EDITOR_BIN}" ]; then
+        case "$EDITOR_BIN" in
+            */"$logical"|*/"$logical".*) printf '%s' "$EDITOR_BIN"; return 0 ;;
+        esac
+        # basename match (e.g. .../bin/cursor)
+        [ "$(basename "$EDITOR_BIN")" = "$logical" ] && { printf '%s' "$EDITOR_BIN"; return 0; }
+    fi
+    if command -v "$logical" >/dev/null 2>&1; then
+        command -v "$logical"
+        return 0
+    fi
+    _editor_cli_path "$logical"
 }
 
 get_cursor_remote_profile_site() {
@@ -91,7 +140,87 @@ get_cursor_remote_profile_site() {
     printf '%s' 'Smart'
 }
 
+_cursor_profile_dir_size_mb() {
+    local p="$1"
+    if [ ! -d "$p" ]; then
+        printf '%s' '0'
+        return 0
+    fi
+    # du -sm: size in MB (GNU/BSD). Fail-open to 0.
+    du -sm "$p" 2>/dev/null | awk '{print $1+0}' || printf '%s' '0'
+}
+
+_stop_cursor_profile_procs_soft() {
+    local line pid cmd
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        pid="${line%% *}"
+        cmd="${line#* }"
+        case "$cmd" in *ClaudeServerCursorProfile*) ;; *) continue ;; esac
+        kill "$pid" 2>/dev/null || true
+    done < <(ps ax -o pid=,command= 2>/dev/null || true)
+    sleep 2
+}
+
+ensure_cursor_remote_profile_migrated() {
+    # One-time: legacy ClaudeServerCursorProfile -> ClaudeServerCursorProfile-Smart|Sepidz
+    # Personal ~/Library/Application Support/Cursor is never touched.
+    if [ "${_CURSOR_PROFILE_MIGRATE_CHECKED:-0}" = "1" ]; then
+        return 0
+    fi
+    _CURSOR_PROFILE_MIGRATE_CHECKED=1
+    if [ "${CLAUDE_CONNECT_SKIP_PROFILE_MIGRATE:-}" = "1" ]; then
+        return 0
+    fi
+    local site legacy target stamp legacy_mb target_mb bak
+    site="$(get_cursor_remote_profile_site)"
+    legacy="$HOME/Library/Application Support/ClaudeServerCursorProfile"
+    target="$HOME/Library/Application Support/ClaudeServerCursorProfile-${site}"
+    stamp="$target/.claude-connect-profile-migrated"
+    [ -d "$legacy" ] || return 0
+    [ -f "$stamp" ] && return 0
+
+    legacy_mb="$(_cursor_profile_dir_size_mb "$legacy")"
+    target_mb="$(_cursor_profile_dir_size_mb "$target")"
+
+    if [ -d "$target" ] && [ "${target_mb:-0}" -ge 5 ] && [ "${target_mb:-0}" -ge "${legacy_mb:-0}" ]; then
+        _stop_cursor_profile_procs_soft
+        bak="$HOME/Library/Application Support/ClaudeServerCursorProfile.bak-keep-$(date +%Y%m%d)"
+        if [ ! -e "$bak" ]; then
+            mv "$legacy" "$bak" 2>/dev/null || true
+        fi
+        mkdir -p "$target"
+        printf 'ts=%s action=target_kept legacy_mb=%s target_mb=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$legacy_mb" "$target_mb" >"$stamp" 2>/dev/null || true
+        declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROFILE_MIGRATE action=target_kept site=$site legacy_mb=$legacy_mb target_mb=$target_mb" 'INFO'
+        return 0
+    fi
+
+    if [ -d "$target" ] && [ "${target_mb:-0}" -ge 5 ] && [ "${legacy_mb:-0}" -le "${target_mb:-0}" ]; then
+        return 0
+    fi
+
+    _stop_cursor_profile_procs_soft
+    if [ -d "$target" ]; then
+        bak="$HOME/Library/Application Support/ClaudeServerCursorProfile-${site}.bak-pre-migrate-$(date +%Y%m%d%H%M%S)"
+        mv "$target" "$bak" 2>/dev/null || true
+    fi
+    if mv "$legacy" "$target" 2>/dev/null; then
+        :
+    else
+        mkdir -p "$target"
+        # Best-effort copy+remove if rename across volumes fails
+        cp -a "$legacy/." "$target/" 2>/dev/null || true
+        rm -rf "$legacy" 2>/dev/null || true
+    fi
+    mkdir -p "$target"
+    target_mb="$(_cursor_profile_dir_size_mb "$target")"
+    printf 'ts=%s action=rename_legacy_to_target legacy_mb=%s final_mb=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$legacy_mb" "$target_mb" >"$stamp" 2>/dev/null || true
+    declare -F connect_log >/dev/null 2>&1 && connect_log "CURSOR_PROFILE_MIGRATE action=legacy_to_target site=$site legacy_mb=$legacy_mb final_mb=$target_mb" 'INFO'
+    return 0
+}
+
 get_cursor_server_profile_dir() {
+    ensure_cursor_remote_profile_migrated
     site="$(get_cursor_remote_profile_site)"
     if [ "$site" = "Sepidz" ]; then
         printf '%s' "$HOME/Library/Application Support/ClaudeServerCursorProfile-Sepidz"
@@ -222,13 +351,24 @@ PY
     [ "$changed_out" = "1" ]
 }
 
+cursor_proxy_settings_paths_for_clear() {
+    # Personal Cursor + server-profile settings (dead sticky 18998 in either tree).
+    local profile personal
+    profile="$(get_cursor_server_profile_dir)/User/settings.json"
+    personal="${HOME}/Library/Application Support/Cursor/User/settings.json"
+    printf '%s\n' "$profile"
+    if [ "$personal" != "$profile" ]; then
+        printf '%s\n' "$personal"
+    fi
+}
+
 clear_cursor_proxy_settings() {
-    local profile settings changed_out
+    local settings changed_out any=0
     command -v python3 >/dev/null 2>&1 || return 1
-    profile="$(get_cursor_server_profile_dir)"
-    settings="$profile/User/settings.json"
-    [ -f "$settings" ] || return 0
-    changed_out="$(python3 - "$settings" <<'PY'
+    while IFS= read -r settings; do
+        [ -n "$settings" ] || continue
+        [ -f "$settings" ] || continue
+        changed_out="$(python3 - "$settings" <<'PY'
 import json, sys
 path = sys.argv[1]
 keys = [
@@ -256,10 +396,14 @@ if changed:
     print("1")
 PY
 )"
-    if [ "$changed_out" = "1" ] && declare -F connect_log >/dev/null 2>&1; then
-        connect_log 'CURSOR_PROXY_CLEAR: removed proxy keys changed=1' 'INFO'
-    fi
-    [ "$changed_out" = "1" ]
+        if [ "$changed_out" = "1" ]; then
+            any=1
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "CURSOR_PROXY_CLEAR removed_18998_dead_proxy path=${settings}" 'WARN'
+            fi
+        fi
+    done < <(cursor_proxy_settings_paths_for_clear)
+    [ "$any" = "1" ]
 }
 
 remote_editor_running() {
@@ -354,6 +498,7 @@ stop_cursor_profile_soft() {
 launch_remote_editor() {
     local cmd="$1" alias="$2" remote_path="$3" known_on_folder="${4:-0}"
     local uri profile use_new=0 agent_home=0 on_folder=0 profile_main=0
+    local _cursor_bin _code_bin
     uri="vscode-remote://ssh-remote+${alias}${remote_path}"
 
     if [ "$cmd" = "cursor" ]; then
@@ -385,6 +530,8 @@ EOF
                 _launch_mode=sidecar
             fi
         else
+            declare -F connect_log >/dev/null 2>&1 && \
+                connect_log 'CURSOR_PROXY_CLEAR force reason=18998_down_or_unhealthy' 'WARN'
             if test_may_clear_cursor_proxy_settings 1; then
                 if clear_cursor_proxy_settings; then
                     declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR: no_windows (no soft-stop)' 'INFO'
@@ -433,31 +580,33 @@ EOF
             use_new=1
         fi
 
+        _cursor_bin="$(_editor_run_cmd cursor)" || _cursor_bin=cursor
         if [ "$use_new" -eq 1 ]; then
             declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_PLAN: --new-window'
             # Prefer classic+new-window, fall back to folder-uri
-            cursor --user-data-dir "$profile" "${_proxy_args[@]}" --new-window --classic --folder-uri "$uri" >/dev/null 2>&1 &
+            "$_cursor_bin" --user-data-dir "$profile" "${_proxy_args[@]}" --new-window --classic --folder-uri "$uri" >/dev/null 2>&1 &
             sleep 0.8
             if ! remote_editor_on_correct_folder cursor "$alias" "$remote_path"; then
-                cursor --user-data-dir "$profile" "${_proxy_args[@]}" --new-window --folder-uri "$uri" >/dev/null 2>&1 &
+                "$_cursor_bin" --user-data-dir "$profile" "${_proxy_args[@]}" --new-window --folder-uri "$uri" >/dev/null 2>&1 &
             fi
         else
             declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_PLAN: cold --reuse-window'
-            cursor --user-data-dir "$profile" "${_proxy_args[@]}" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
+            "$_cursor_bin" --user-data-dir "$profile" "${_proxy_args[@]}" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
         fi
         return 0
     fi
 
     profile="$(get_code_server_profile_dir)"
     mkdir -p "$profile/User" 2>/dev/null || true
+    _code_bin="$(_editor_run_cmd code)" || _code_bin=code
     if remote_editor_on_correct_folder code "$alias" "$remote_path"; then
         declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_SKIP: VS Code already on folder'
         return 0
     fi
     if remote_editor_window_open code "$alias" "$remote_path"; then
-        code --user-data-dir "$profile" --new-window --folder-uri "$uri" >/dev/null 2>&1 &
+        "$_code_bin" --user-data-dir "$profile" --new-window --folder-uri "$uri" >/dev/null 2>&1 &
     else
-        code --user-data-dir "$profile" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
+        "$_code_bin" --user-data-dir "$profile" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
     fi
 }
 

@@ -48,6 +48,7 @@ $seedHash = (Get-FileHash -LiteralPath $pubExe -Algorithm MD5).Hash
 Note 'extract setup-launch + update prune helpers'
 $needLaunch = @(
     'Resolve-VersionedTree',
+    'Test-VersionSrcStructural',
     'Test-VersionSrcComplete',
     'Copy-PayloadToSrc',
     'Move-LaunchExeIntoVerDir',
@@ -78,9 +79,15 @@ $null = New-Item -ItemType Directory -Force -Path $spacedDrop, $extract
 
 try {
     $winSrc = Join-Path $script:RepoRoot 'scripts\client\windows'
-    foreach ($rel in @('connect.bat', 'connect.ps1', 'connect-boot.ps1', 'connect-update.ps1', 'connect-version.txt')) {
+    foreach ($rel in @('connect.bat', 'connect.ps1', 'connect-boot.ps1', 'connect-update.ps1', 'connect-version.txt', 'connect-env-repair.ps1')) {
         $from = Join-Path $winSrc $rel
         if (Test-Path $from) { Copy-Item $from (Join-Path $extract $rel) -Force }
+    }
+    $clientRoot = Join-Path $script:RepoRoot 'scripts\client'
+    foreach ($rel in @('editor-launch.ps1', 'connect-ui.ps1')) {
+        $from = Join-Path $clientRoot $rel
+        if (Test-Path $from) { Copy-Item $from (Join-Path $extract $rel) -Force }
+        else { Set-Content -LiteralPath (Join-Path $extract $rel) -Value 'x' }
     }
     Set-Content -LiteralPath (Join-Path $extract 'connect-version.txt') -Value $testVer -Encoding ASCII -NoNewline
 

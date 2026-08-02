@@ -68,11 +68,10 @@ Assert (
     ($deployBundles -match 'connect-boot\.ps1')
 ) 'client-bundle-manifest (or deploy-client-bundles) ships connect-boot.ps1'
 Assert (
-    ($uiSh -match 'connect\.lock') -or
-    ($uiSh -match 'Another Claude Connect is already running') -or
-    ($uiSh -match 'SINGLE_INSTANCE: acquired') -or
+    ($uiSh -match 'connect-[0-9]\.lock') -or
+    ($uiSh -match '10 Claude Connect windows already open') -or
     ($uiSh -match 'MULTI_INSTANCE')
-) 'Mac: enter_connect_single_instance uses flock or instance message'
+) 'Mac: enter_connect_single_instance uses 10-slot flock (Windows parity)'
 Assert ($desPs -match 'Enter-ConnectSingleInstance') 'Designer Win: shares main instance gate'
 Assert ($desPs -match '(?s)Enter-ConnectSingleInstance[\s\S]{0,200}-not \(Enter-ConnectSingleInstance\)') 'Designer Win: honors mutex false (exits)'
 Assert ($desPs -notmatch '\$null = Enter-ConnectSingleInstance') 'Designer Win: must not discard mutex result'
@@ -125,7 +124,7 @@ Assert ($win -match '(?s)if \(\$DeferredServerSetupOnly\)[\s\S]{0,900}elseif \(-
 Assert ($win -match 'inherit_slot') 'Win: deferred setup logs/preserves parent UI_SLOT for tunnel acquire'
 Write-Host '--- B) Ensure-ConnectRunId define-before-use ---' -ForegroundColor Cyan
 $defLine = Get-LineIndex $upd 'function Ensure-ConnectRunId'
-# first call after param/setup (not inside function body) â€" find "$null = Ensure-ConnectRunId"
+# first call after param/setup (not inside function body) -- find "$null = Ensure-ConnectRunId"
 $callLine = Get-LineIndex $upd '$null = Ensure-ConnectRunId'
 Assert ($defLine -gt 0) 'connect-update.ps1 defines Ensure-ConnectRunId'
 Assert ($callLine -gt 0) 'connect-update.ps1 seeds Ensure-ConnectRunId early'

@@ -34,6 +34,9 @@ $winSrc = Get-Content -LiteralPath $winPath -Raw
 # Dependency chain for the three API functions under test (exact shipped bodies, isolated load).
 $extractOrder = @(
     'Get-CursorRemoteProfileSite',
+    'Get-CursorRemoteProfileDirSizeMB',
+    'Stop-CursorRemoteProfileProcesses',
+    'Ensure-CursorRemoteProfileMigrated',
     'Get-CursorRemoteProfileDir',
     'Get-CursorWindowTitleTag',
     'Test-CursorWindowTitleMatchesProject',
@@ -114,9 +117,10 @@ Assert $folderUriLiveOk 'LIVE Get-RemoteEditorLaunchStrategies emits combined --
 
 $warmStrats = @(Get-RemoteEditorLaunchStrategies -EditorCmd 'cursor' -Alias $alias -RemotePath $remotePath -Uri $uri -NewWindow -WarmHandoff)
 Assert (
-    ($warmStrats.Count -eq 1) -and ($warmStrats[0].Name -eq 'remote') -and
-    (@($warmStrats[0].Args | Where-Object { $_ -like '--folder-uri=*' }).Count -eq 0)
-) 'LIVE WarmHandoff returns remote-only strategy (no folder-uri cascade)'
+    ($warmStrats.Count -eq 2) -and ($warmStrats[0].Name -eq 'remote') -and
+    ($warmStrats[1].Name -eq 'remote-classic') -and
+    (@($warmStrats.Args | Where-Object { $_ -like '--folder-uri=*' }).Count -eq 0)
+) 'LIVE WarmHandoff returns remote + remote-classic (no folder-uri cascade)'
 
 # --- STATIC: Path.Combine for editor.conf ----------------------------------------------------
 $resolveFn = Get-FunctionSource -Content $elSrc -Name 'Resolve-EditorChoice'

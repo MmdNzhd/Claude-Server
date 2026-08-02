@@ -3,28 +3,23 @@
 # Live dual-UI skipped: cursor-proxy-owner.json held zombie Connect pid with backends down;
 # mitigation = close that Connect window (do not force-kill unrelated work).
 
-[2026-07-29 18:37:59.630] [HARNESS] [task8gap] === S6 Gap replay harness start (Step 2b; live dual-UI skipped: zombie owner pid holds lease) ===
-[2026-07-29 18:37:59.673] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL reused=1 pid=424242 port=20021 reason=tunnel_up
-[2026-07-29 18:37:59.684] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=424242 port=20021
-[2026-07-29 18:37:59.694] [HARNESS] [task8gap] ENSURE_TUNNEL bg_init_reseed_skip reason=foreign_owner_cannot_bind pid=424242 port=20021
-[2026-07-29 18:37:59.704] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL start port=20021 alias=claude-server had_bg=False
-[2026-07-29 18:37:59.709] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL skip_acquire port=20021 reason=already_set
-[2026-07-29 18:37:59.719] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL proxy_leg=-L local=19080 remote=10808
-[2026-07-29 18:37:59.741] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL refuse_spawn reason=stale_port_busy port=20021
-[2026-07-29 18:37:59.790] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=1 reason=local_r_not_owned port=20021 pid=41452 local_pids=
-[2026-07-29 18:37:59.820] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=2 reason=local_r_not_owned port=20021 pid=41452 local_pids=
-[2026-07-29 18:37:59.822] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=3 reason=local_r_not_owned port=20021 pid=41452 local_pids=
-[2026-07-29 18:37:59.824] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=4 reason=local_r_not_owned port=20021 pid=41452 local_pids=
-[2026-07-29 18:37:59.827] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=5 reason=local_r_not_owned port=20021 pid=41452 local_pids=
-[2026-07-29 18:37:59.829] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=6 reason=local_r_not_owned port=20021 pid=41452 local_pids=
-[2026-07-29 18:37:59.832] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=7 reason=local_r_not_owned port=20021 pid=41452 local_pids=
-[2026-07-29 18:37:59.836] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=8 reason=local_r_not_owned port=20021 pid=41452 local_pids=
-[2026-07-29 18:37:59.838] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=9 reason=local_r_not_owned port=20021 pid=41452 local_pids=
-[2026-07-29 18:37:59.841] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=10 reason=local_r_not_owned port=20021 pid=41452 local_pids=
-[2026-07-29 18:37:59.843] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=11 reason=local_r_not_owned port=20021 pid=41452 local_pids=
-[2026-07-29 18:37:59.846] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=12 reason=local_r_not_owned port=20021 pid=41452 local_pids=
-[2026-07-29 18:37:59.848] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT fail=1 reason=local_r_not_owned port=20021 pid=41452
-[2026-07-29 18:37:59.873] [HARNESS] [task8gap] GITMODE: CURSOR_PROXY_OWNER: service_dead age_sec=60 threshold=60
-[2026-07-29 18:37:59.875] [HARNESS] [task8gap] GITMODE: CURSOR_PROXY_OWNER: released reason=service_dead pid=41452
-[2026-07-29 18:37:59.877] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL proxy_leg=-L local=19080 remote=1080 healthy_control=1
-[2026-07-29 18:37:59.879] [HARNESS] [task8gap] === S6 Gap replay harness end ===
+[2026-08-02 14:07:06.453] [HARNESS] [task8gap] === S6 Gap replay harness start (Step 2b; live dual-UI skipped: zombie owner pid holds lease) ===
+[2026-08-02 14:07:06.555] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL reused=1 pid=424242 port=20021 reason=tunnel_up
+[2026-08-02 14:07:06.581] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=424242 port=20021
+[2026-08-02 14:07:06.609] [HARNESS] [task8gap] ENSURE_TUNNEL bg_init_reseed_skip reason=foreign_owner_cannot_bind pid=424242 port=20021
+[2026-08-02 14:07:06.633] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL start port=20021 alias=claude-server had_bg=False
+[2026-08-02 14:07:06.641] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL skip_acquire port=20021 reason=already_set
+[2026-08-02 14:07:06.674] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL proxy_leg=-L local=19080 remote=10808
+[2026-08-02 14:07:06.719] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL refuse_spawn reason=stale_port_busy port=20021
+[2026-08-02 14:07:06.729] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL refuse_spawn reason=stale_port_busy_no_rebind port=20021 streak=1
+[2026-08-02 14:07:06.799] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=1 reason=local_r_not_owned port=20021 pid=40520 local_pids=
+[2026-08-02 14:07:06.830] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=2 reason=local_r_not_owned port=20021 pid=40520 local_pids=
+[2026-08-02 14:07:06.832] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=3 reason=local_r_not_owned port=20021 pid=40520 local_pids=
+[2026-08-02 14:07:06.834] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=4 reason=local_r_not_owned port=20021 pid=40520 local_pids=
+[2026-08-02 14:07:06.838] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=5 reason=local_r_not_owned port=20021 pid=40520 local_pids=
+[2026-08-02 14:07:06.844] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT ok=0 attempt=6 reason=local_r_not_owned port=20021 pid=40520 local_pids=
+[2026-08-02 14:07:06.846] [HARNESS] [task8gap] GITMODE: TUNNEL_WAIT fail=1 reason=local_r_not_owned port=20021 pid=40520
+[2026-08-02 14:07:06.885] [HARNESS] [task8gap] GITMODE: CURSOR_PROXY_OWNER: service_dead age_sec=60 threshold=60
+[2026-08-02 14:07:06.891] [HARNESS] [task8gap] GITMODE: CURSOR_PROXY_OWNER: released reason=service_dead pid=40520
+[2026-08-02 14:07:06.898] [HARNESS] [task8gap] GITMODE: ENSURE_TUNNEL proxy_leg=-L local=19080 remote=1080 healthy_control=1
+[2026-08-02 14:07:06.901] [HARNESS] [task8gap] === S6 Gap replay harness end ===

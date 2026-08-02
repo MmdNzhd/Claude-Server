@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 # LIVE GREEN (Plan Task 4 / P0-L1): Mount BG day-log under parent FileStream mutex contention.
 # Write-MountBgLog uses Global\ClaudeConnectDayLogWrite-<dayTag> (same as Get-ConnectLogWriteMutex),
 # Seek End before write, and .mount-bg sidecar fallback so MOUNT_BG_* survives parent FileStream hold.

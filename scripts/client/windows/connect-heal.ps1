@@ -157,12 +157,53 @@ function Compare-ClientVersion {
     return [string]::CompareOrdinal($A, $B)
 }
 
+function Resolve-VersionedSrcUnderRoot {
+    # Desktop\Claude-Connect\{ver}\src when versioned layout is in use.
+    param([string]$Root)
+    if (-not $Root -or -not (Test-Path -LiteralPath $Root)) { return $null }
+    if ((Split-Path -Leaf $Root) -ne 'Claude-Connect') { return $null }
+    $ver = ''
+    if (Get-Command Get-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+        $ver = Get-ConnectInstallCurrent -Root $Root
+    }
+    if ($ver -notmatch '^\d{8}\.\d+$') {
+        try {
+            $cf = Join-Path $Root 'current.txt'
+            if (Test-Path -LiteralPath $cf) {
+                $ver = (Get-Content -LiteralPath $cf -Raw -ErrorAction SilentlyContinue).Trim()
+            }
+        } catch { $ver = '' }
+    }
+    if ($ver -notmatch '^\d{8}\.\d+$') {
+        Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d{8}\.\d+$' } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1 |
+            ForEach-Object { $ver = $_.Name }
+    }
+    if ($ver -notmatch '^\d{8}\.\d+$') { return $null }
+    $src = Join-Path $Root (Join-Path $ver 'src')
+    if (Test-Path -LiteralPath (Join-Path $src 'connect.ps1')) { return $src }
+    return $src
+}
+
 function Test-GoodClientDir {
     param([string]$Dir)
     if ([string]::IsNullOrWhiteSpace($Dir)) { return $false }
     if (-not (Test-Path -LiteralPath $Dir)) { return $false }
+    # Versioned Claude-Connect root: judge by {ver}\src, not flat root dump.
+    if ((Split-Path -Leaf $Dir) -eq 'Claude-Connect') {
+        $vs = Resolve-VersionedSrcUnderRoot -Root $Dir
+        if ($vs -and (Test-Path -LiteralPath (Join-Path $vs 'connect.ps1'))) {
+            return (Test-GoodClientDir -Dir $vs)
+        }
+    }
     foreach ($n in @('connect.bat', 'connect.ps1', 'connect-update.ps1', 'cursor-proxy-sidecar.ps1', 'connect-version.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Dir $n))) { return $false }
+    }
+    foreach ($n in @('connect-diagnostic.ps1', 'connect-ui.ps1')) {
+        $fp = Join-Path $Dir $n
+        if ((Test-Path -LiteralPath $fp) -and (Test-IsStaleShadowClientFile -Path $fp)) { return $false }
     }
     try {
         $raw = Get-Content -LiteralPath (Join-Path $Dir 'connect-update.ps1') -Raw -ErrorAction Stop
@@ -171,16 +212,46 @@ function Test-GoodClientDir {
     return $true
 }
 
+function Test-IsStaleShadowClientFile {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $false }
+    try {
+        $head = Get-Content -LiteralPath $Path -TotalCount 5 -ErrorAction Stop | Out-String
+        return ($head -match 'STALE-SHADOW REPLACED')
+    } catch { return $false }
+}
+
 function Copy-ClientFiles {
     param([string]$Src, [string]$Dst)
+    # Never dump a flat script tree onto Desktop\Claude-Connect root when versioned layout exists.
+    if ($Dst -and (Split-Path -Leaf $Dst) -eq 'Claude-Connect') {
+        $vs = Resolve-VersionedSrcUnderRoot -Root $Dst
+        if ($vs) { $Dst = $vs }
+        else {
+            # No versioned src yet — refuse flat root dump (folders-only contract).
+            Write-HealLog ("HEAL_REFUSE_FLAT_ROOT dst=$Dst") 'WARN'
+            return 0
+        }
+    }
     New-Item -ItemType Directory -Force -Path $Dst | Out-Null
     $n = 0
     foreach ($name in $Essential) {
         $s = Join-Path $Src $name
-        if (Test-Path -LiteralPath $s) {
-            Copy-Item -LiteralPath $s -Destination (Join-Path $Dst $name) -Force
-            $n++
+        if (-not (Test-Path -LiteralPath $s)) { continue }
+        # Never copy repo windows/ STALE-SHADOW wrappers into a live install.
+        if (Test-IsStaleShadowClientFile -Path $s) {
+            Write-HealLog ("HEAL_SKIP_SHADOW file=$name from=$Src") 'WARN'
+            continue
         }
+        $dest = Join-Path $Dst $name
+        if ((Test-Path -LiteralPath $dest) -and -not (Test-IsStaleShadowClientFile -Path $dest)) {
+            # Keep existing canon; do not overwrite with unknown smaller junk.
+            $srcLen = (Get-Item -LiteralPath $s).Length
+            $dstLen = (Get-Item -LiteralPath $dest).Length
+            if ($dstLen -gt 2000 -and $srcLen -lt [Math]::Max(500, [int]($dstLen * 0.25))) { continue }
+        }
+        Copy-Item -LiteralPath $s -Destination $dest -Force
+        $n++
     }
     return $n
 }
@@ -206,6 +277,8 @@ function Get-CandidateDirs {
         foreach ($d in @($CanonSmart, $StableSmart, $Here)) {
             if ($d -and (Test-Path -LiteralPath $d)) { [void]$list.Add($d) }
         }
+        $vs = Resolve-VersionedSrcUnderRoot -Root $CanonSmart
+        if ($vs -and (Test-Path -LiteralPath $vs)) { [void]$list.Add($vs) }
         $pub = Join-Path $env:USERPROFILE 'Desktop\claude-publish'
         if (Test-Path -LiteralPath $pub) {
             Get-ChildItem -LiteralPath $pub -Directory -ErrorAction SilentlyContinue | ForEach-Object {
@@ -227,6 +300,12 @@ try {
     $hereIsCanon = [string]::Equals($Here, $Canon, [StringComparison]::OrdinalIgnoreCase)
     $isLegacyDated = ($Here -match '(?i)claude-code-client-\d{8}') -or ($Here -match '(?i)claude-code-sepidz-\d{8}')
     $isPublishTree = ($Here -match '(?i)[\\/]claude-publish[\\/]')
+    # Portable/manually-extracted runner left in Downloads\Claude-Connect\{ver}\ (or any
+    # Downloads subtree). Heal only ever writes the canonical Desktop tree, so a running
+    # process launched from a stale Downloads copy never sees pushed updates on its own -
+    # it must be detected here and handed off. See docs/connect-fix-evidence/
+    # FLEET-PROBLEMS-20260801.md "Product debt" (2026-08-01).
+    $isUnderDownloads = ($Here -match '(?i)[\\/]Downloads[\\/]')
     $hereGood = Test-GoodClientDir -Dir $Here
 
     # Sepidz: stay on Sepidz site. Never redirect to Smart Desktop\Claude-Connect.
@@ -280,33 +359,69 @@ try {
     }
 
     if ($best) {
-        $canonGood = Test-GoodClientDir -Dir $CanonSmart
-        $canonVer = Get-ClientDirVersion -Dir $CanonSmart
+        $canonScript = Resolve-VersionedSrcUnderRoot -Root $CanonSmart
+        if (-not $canonScript) { $canonScript = $CanonSmart }
+        $canonGood = Test-GoodClientDir -Dir $canonScript
+        $canonVer = Get-ClientDirVersion -Dir $canonScript
         if (-not $canonGood -or ((Compare-ClientVersion -A $bestVer -B $canonVer) -gt 0)) {
-            $copied = Copy-ClientFiles -Src $best -Dst $CanonSmart
-            Write-HealLog ("HEAL_CANON from={0} ver={1} files={2}" -f $best, $bestVer, $copied)
+            $copied = Copy-ClientFiles -Src $best -Dst $canonScript
+            Write-HealLog ("HEAL_CANON from={0} ver={1} files={2} dst={3}" -f $best, $bestVer, $copied, $canonScript)
         }
     }
 
-    $canonGood = Test-GoodClientDir -Dir $CanonSmart
+    $canonScript = Resolve-VersionedSrcUnderRoot -Root $CanonSmart
+    if (-not $canonScript) { $canonScript = $CanonSmart }
+    $canonGood = Test-GoodClientDir -Dir $canonScript
     if (-not $hereGood -and $canonGood) {
-        $copied = Copy-ClientFiles -Src $CanonSmart -Dst $Here
-        Write-HealLog ("HEAL_HERE from=Claude-Connect into={0} files={1}" -f $Here, $copied)
+        $copied = Copy-ClientFiles -Src $canonScript -Dst $Here
+        Write-HealLog ("HEAL_HERE from={0} into={1} files={2}" -f $canonScript, $Here, $copied)
         $hereGood = Test-GoodClientDir -Dir $Here
+    }
+
+    # Keep Desktop\Claude-Connect root = version folders + launchers only.
+    if (Get-Command Repair-ConnectRootLayout -ErrorAction SilentlyContinue) {
+        try {
+            $cv = ''
+            try {
+                $cv = (Get-Content -LiteralPath (Join-Path $CanonSmart 'current.txt') -Raw -ErrorAction SilentlyContinue).Trim()
+            } catch { $cv = '' }
+            [void](Repair-ConnectRootLayout -Root $CanonSmart -Ver $cv)
+            Write-HealLog 'HEAL_ROOT_LAYOUT ok' 'INFO'
+        } catch {
+            Write-HealLog ("HEAL_ROOT_LAYOUT_WARN " + ($_.Exception.Message -replace '[\r\n]', ' ')) 'WARN'
+        }
+    }
+
+    # Downloads runner older than the canonical Desktop install: heal/push (Task 6 /
+    # deploy-client-bundle) only ever writes Desktop\Claude-Connect, so a process still
+    # running out of a portable Downloads\Claude-Connect\{oldver}\ tree would otherwise
+    # stay on the old version forever. Force handoff once canon is strictly newer.
+    $downloadsStale = $false
+    $hereVer = '0'
+    $canonVerNow = '0'
+    if ($isUnderDownloads -and $canonGood -and -not $hereIsCanon) {
+        $hereVer = Get-ClientDirVersion -Dir $Here
+        $canonVerNow = Get-ClientDirVersion -Dir $canonScript
+        if ((Compare-ClientVersion -A $hereVer -B $canonVerNow) -lt 0) { $downloadsStale = $true }
     }
 
     $shouldRedirect = $false
     if ($canonGood -and -not $hereIsCanon) {
         if ($isLegacyDated -or $isPublishTree) { $shouldRedirect = $true }
         elseif (-not $hereGood) { $shouldRedirect = $true }
+        elseif ($downloadsStale) { $shouldRedirect = $true }
     }
 
     if ($shouldRedirect) {
         Set-Content -LiteralPath $RelaunchMarker -Value $CanonSmart -Encoding ASCII
-        Write-HealLog ("HEAL_REDIRECT from={0} to={1} legacy={2} publish={3}" -f $Here, $CanonSmart, $isLegacyDated, $isPublishTree)
+        Write-HealLog ("HEAL_REDIRECT from={0} to={1} legacy={2} publish={3} downloads_stale={4} here_ver={5} canon_ver={6}" -f $Here, $CanonSmart, $isLegacyDated, $isPublishTree, $downloadsStale, $hereVer, $canonVerNow)
         if (-not $Quiet) {
             Write-Host ""
-            Write-Host "  [!] Old/publish folder detected - switching to Desktop\Claude-Connect ..." -ForegroundColor Yellow
+            if ($downloadsStale) {
+                Write-Host "  [!] Older Downloads copy detected (ver=$hereVer < $canonVerNow) - switching to Desktop\Claude-Connect ..." -ForegroundColor Yellow
+            } else {
+                Write-Host "  [!] Old/publish folder detected - switching to Desktop\Claude-Connect ..." -ForegroundColor Yellow
+            }
             Write-Host ""
         }
         exit 2

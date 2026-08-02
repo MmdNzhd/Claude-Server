@@ -45,7 +45,7 @@ $syncFn = Get-FunctionSource -Content $updSrc -Name 'Sync-ConnectExeBesideClient
 Assert ($null -ne $syncFn) 'extracted Sync-ConnectExeBesideClient'
 Assert ($syncFn -match 'foreign_verdir') 'Sync function body has foreign_verdir skip'
     Assert ($syncFn -match 'if \(\$isVerDir(\)| -and)') 'Sync treats VerDir specially'
-Assert ($syncFn -match 'if \(-not \$isVerDir\)') 'bare Claude-Connect.exe promote only when NOT VerDir'
+Assert ($syncFn -match 'if \(-not \$isVerDir -and \$dirLeaf -ne ''Claude-Connect''\)') 'bare Claude-Connect.exe promote only outside VerDir and versioned root'
 
 $instantFn = Get-FunctionSource -Content $launchSrc -Name 'Write-ConnectInstantLauncher'
 Assert ($null -ne $instantFn) 'extracted Write-ConnectInstantLauncher'
@@ -196,7 +196,7 @@ try {
 # ---------------------------------------------------------------------------
 # Part 2: instant launcher — REAL Write-ConnectInstantLauncher + orphan cmd proof
 # ---------------------------------------------------------------------------
-Note 'Part2: instant launcher VBS/cmd — no orphan cmd console'
+Note 'Part2: instant launcher Desktop sibling VBS/cmd — no orphan cmd console'
 try {
     $launchChunk = New-Object System.Text.StringBuilder
     [void]$launchChunk.AppendLine('$ErrorActionPreference = ''Continue''')
@@ -206,12 +206,12 @@ try {
     [void]$launchChunk.AppendLine($wif)
     Invoke-Expression $launchChunk.ToString()
 
-    $instRoot = Join-Path $root 'instant'
+    $instRoot = Join-Path $root 'Claude-Connect'
     $instVerDir = Join-Path $instRoot '20990101.30'
     $instSrc = Join-Path $instVerDir 'src'
     $null = New-Item -ItemType Directory -Force -Path $instSrc
     # Marker file so we can prove boot ran without opening real Connect UI.
-    $marker = Join-Path $instRoot 'boot-ran.txt'
+    $marker = Join-Path $root 'boot-ran.txt'
     $bootBody = @"
 `$ErrorActionPreference = 'Stop'
 Set-Content -LiteralPath '$($marker -replace "'", "''")' -Value ('booted ' + (Get-Date -Format o)) -Encoding ASCII
@@ -219,11 +219,14 @@ Start-Sleep -Seconds 2
 "@
     Set-Content -LiteralPath (Join-Path $instSrc 'connect-boot.ps1') -Value $bootBody -Encoding ASCII
 
-    Write-ConnectInstantLauncher -VerDir $instVerDir -SrcDir $instSrc
-    $vbs = Join-Path $instVerDir 'Claude-Connect.vbs'
-    $cmd = Join-Path $instVerDir 'Claude-Connect.cmd'
-    Assert (Test-Path -LiteralPath $vbs) 'CaseC wrote Claude-Connect.vbs'
-    Assert (Test-Path -LiteralPath $cmd) 'CaseC wrote Claude-Connect.cmd'
+    Write-ConnectInstantLauncher -VerDir $instVerDir -SrcDir $instSrc -Root $instRoot
+    $desk = $root
+    $vbs = Join-Path $desk 'Claude-Connect.vbs'
+    $cmd = Join-Path $desk 'Claude-Connect.cmd'
+    Assert ([bool](Test-Path -LiteralPath $vbs)) 'CaseC wrote Desktop Claude-Connect.vbs'
+    Assert ([bool](Test-Path -LiteralPath $cmd)) 'CaseC wrote Desktop Claude-Connect.cmd'
+    Assert (-not (Test-Path -LiteralPath (Join-Path $instRoot 'current.txt'))) 'CaseC root has no current.txt'
+    Assert (-not (Test-Path -LiteralPath (Join-Path $instVerDir 'Claude-Connect.vbs'))) 'CaseC VerDir has no VBS'
     $cmdText = Get-Content -LiteralPath $cmd -Raw
     $vbsText = Get-Content -LiteralPath $vbs -Raw
     Assert ($cmdText -match 'wscript\.exe //B //Nologo') 'CaseC cmd hands off to wscript //B'
@@ -238,7 +241,7 @@ Start-Sleep -Seconds 2
     # Launch via .cmd (Explorer-equivalent host: cmd /c).
     $pCmd = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList @(
         '/d', '/c', "`"$cmd`""
-    ) -WorkingDirectory $instVerDir -PassThru -WindowStyle Normal
+    ) -WorkingDirectory $desk -PassThru -WindowStyle Normal
     Assert ($null -ne $pCmd) 'CaseC started cmd /c Claude-Connect.cmd'
 
     $deadline = [datetime]::UtcNow.AddSeconds(8)
@@ -247,7 +250,7 @@ Start-Sleep -Seconds 2
         if (Test-Path -LiteralPath $marker) { $bootOk = $true; break }
         Start-Sleep -Milliseconds 150
     }
-    Assert $bootOk 'CaseC connect-boot actually ran (marker written)'
+    Assert ([bool]$bootOk) 'CaseC connect-boot actually ran (marker written)'
 
     # Give trampoline time to exit; then prove no orphan cmd still hosting the launcher.
     Start-Sleep -Milliseconds 800
@@ -269,7 +272,7 @@ Start-Sleep -Seconds 2
     Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
     $pVbs = Start-Process -FilePath "$env:SystemRoot\System32\wscript.exe" -ArgumentList @(
         '//B', '//Nologo', "`"$vbs`""
-    ) -WorkingDirectory $instVerDir -PassThru -WindowStyle Hidden
+    ) -WorkingDirectory $desk -PassThru -WindowStyle Hidden
     Assert ($null -ne $pVbs) 'CaseD started wscript Claude-Connect.vbs'
     $deadline2 = [datetime]::UtcNow.AddSeconds(8)
     $bootOk2 = $false

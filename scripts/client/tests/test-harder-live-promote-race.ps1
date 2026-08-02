@@ -89,7 +89,10 @@ Assert ($chunkText -match '\$script:TestPromoteStamp') 'extracted helpers use is
 
 $syncFn = Get-FunctionSource -Content $updSrc -Name 'Sync-ConnectExeBesideClient'
 Assert (
-    $syncFn -and ($syncFn -match 'foreign_verdir') -and ($syncFn -match 'if \(\$dirLeaf -ne \$verLabel\)')
+    $syncFn -and ($syncFn -match 'foreign_verdir') -and (
+        ($syncFn -match '\$dirLeaf -ne \$verLabel') -or
+        ($syncFn -match 'if \(\$dirLeaf -ne \$verLabel\)')
+    )
 ) 'Sync-ConnectExeBesideClient ships foreign_verdir guard'
 
 $root = Join-Path $env:TEMP ("cc-promote-race-{0}" -f [guid]::NewGuid().ToString('N').Substring(0, 8))

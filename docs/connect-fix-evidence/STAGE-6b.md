@@ -10,21 +10,21 @@
 - Live fingerprint (pre-fix force update still present until reconnect / policy flip on laptop):
   - session=`b3ef3f44f713` `@18:25:09.775` `UPDATE: UPDATE_FORCE applying local=20260722.36 remote=20260722.38 min=20260722.24`
   - same session `@18:25:13.001` `UPDATE: applied_ok need_relaunch exit=2`
-  - same session `@18:25:09.185` `UPDATE_POLICY â€¦ mode=force` then `@18:25:09.775` `UPDATE_POLICY source=remote_bundle` (policy was **force** with `force_min_version=20260722.24` at live time).
+  - same session `@18:25:09.185` `UPDATE_POLICY ... mode=force` then `@18:25:09.775` `UPDATE_POLICY source=remote_bundle` (policy was **force** with `force_min_version=20260722.24` at live time).
 - Server share freeze (untouched this stage):
   - `/usr/local/share/claude-client` **ABSENT**
-  - `/usr/local/share/claude-client.FROZEN` present (`SEPIDZ/SMART client auto-update FROZENâ€¦ do_not_restore_without_explicit_user_unfreeze`)
+  - `/usr/local/share/claude-client.FROZEN` present (`SEPIDZ/SMART client auto-update FROZEN... do_not_restore_without_explicit_user_unfreeze`)
   - disabled dir `claude-client.disabled-20260722-164945`
 - Repo policy now `mode=optional`, `latest=20260722.40`, `force_min_version=null` (Quiet cannot force).
 - still_live=yes for old force signature until client relaunch with optional policy + no remote force bundle.
 
 ## RESEARCH
-1. https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-7.6 â€” Quiet/non-interactive defaults must not surprise-apply updates
-2. https://learn.microsoft.com/en-us/windows/security/operating-system-security/virus-and-threat-protection/ â€” folder-primary install reduces SmartScreen/EXE-only trust friction vs stripped EXE trees
-3. https://man.openbsd.org/ssh.1 â€” site IP / reverse-tunnel identity; refuse Sepidz `.70` contamination on Smart clients
+1. https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_preference_variables?view=powershell-7.6 - Quiet/non-interactive defaults must not surprise-apply updates
+2. https://learn.microsoft.com/en-us/windows/security/operating-system-security/virus-and-threat-protection/ - folder-primary install reduces SmartScreen/EXE-only trust friction vs stripped EXE trees
+3. https://man.openbsd.org/ssh.1 - site IP / reverse-tunnel identity; refuse Sepidz `.70` contamination on Smart clients
 
 What this changes:
-- Smart `client-update-policy.json` â†’ `mode=optional`, `latest=20260722.40`, `force_min_version=null`
+- Smart `client-update-policy.json` -> `mode=optional`, `latest=20260722.40`, `force_min_version=null`
 - Quiet never auto-applies optional; prompt default N; Smart hard-refuse Sepidz path/IP
 - Docs freeze Sepidz forever; publish EXE-only strip gated
 
@@ -32,13 +32,13 @@ What we will NOT do:
 - Deploy/publish; restore server `claude-client`; ForceUnfreeze Sepidz
 ## RED_TEST
 ```
-test-client-update-policy-optional.ps1 â†’ Passed: 9 Failed: 13
+test-client-update-policy-optional.ps1 -> Passed: 9 Failed: 13
 (pre-patch; policy still force / catch default Y / no hard-refuse / strip ungated)
 ```
 
 ## IMPLEMENT
 - `scripts/server/client-update-policy.json`: mode optional, latest 20260722.40, force_min_version null
-- `scripts/client/windows/connect-update.ps1`: Assert-SmartNotSepidzContaminated; forceApply gate; prompt catch/empty â†’ N
+- `scripts/client/windows/connect-update.ps1`: Assert-SmartNotSepidzContaminated; forceApply gate; prompt catch/empty -> N
 - `scripts/client/windows/connect.ps1`: Test-PathLooksSepidz + Die REFUSE on Smart contamination
 - `publish/publish.ps1`: keep full Smart windows\ tree unless CLAUDE_PUBLISH_STRIP_WINDOWS_EXE_ONLY=1
 - `docs/client-connect.md`: Sepidz publish freeze + Smart folder layout + optional-forever policy
@@ -48,7 +48,7 @@ test-client-update-policy-optional.ps1 â†’ Passed: 9 Failed: 13
 
 ## GREEN_TEST
 ```
-test-client-update-policy-optional.ps1 â†’ Passed: 24 Failed: 0
+test-client-update-policy-optional.ps1 -> Passed: 24 Failed: 0
 CONNECT_VERSION still 20260722.40
 deploy_ran=no; server share still ABSENT + FROZEN marker present; SEPIDZ_PUBLISH_FROZEN present
 ```

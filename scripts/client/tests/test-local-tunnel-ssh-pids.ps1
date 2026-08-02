@@ -104,7 +104,11 @@ if (-not $bashOk) {
 set -u
 SCRIPT="__SCRIPT__"
 TARGET_PORT="__PORT__"
-FUNC_SRC="$(sed -n '/^test_local_tunnel_ssh_command()/,/^}/p' "$SCRIPT")"
+# git-mode.sh is read straight off disk here (not through git's clean/smudge filters), so on
+# a Windows checkout with core.autocrlf=true it legitimately has CRLF line endings even though
+# the committed blob is LF-only. Strip \r before eval - a bare CRLF before "{" is a bash syntax
+# error ("unexpected token $'{\r'").
+FUNC_SRC="$(sed -n '/^test_local_tunnel_ssh_command()/,/^}/p' "$SCRIPT" | tr -d '\r')"
 [ -n "$FUNC_SRC" ] || { echo HARNESS_FAIL extract; exit 1; }
 eval "$FUNC_SRC"
 run_case() {

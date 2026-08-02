@@ -320,6 +320,14 @@ if [ -f "$SERVER_DIR/laptop-exec-setup.sh" ]; then
     done
     ok "laptop-exec-setup --user + --all-projects -> all users"
 fi
+# Neutralize Claude-format ECC hooks under ~/.cursor/plugins (observe preToolUse JSON break).
+if [ -f "$SERVER_DIR/commands/fix-cursor-ecc-hooks.sh" ]; then
+    mkdir -p /usr/local/lib/claude-server/commands
+    install -m 755 "$SERVER_DIR/commands/fix-cursor-ecc-hooks.sh" \
+        /usr/local/lib/claude-server/commands/fix-cursor-ecc-hooks.sh
+    bash /usr/local/lib/claude-server/commands/fix-cursor-ecc-hooks.sh || warn "fix-cursor-ecc-hooks failed (non-fatal)"
+    ok "fix-cursor-ecc-hooks -> all users"
+fi
 if [ -f "$SERVER_DIR/sudo-from-laptop.sh" ]; then
     install -m 755 "$SERVER_DIR/sudo-from-laptop.sh" /usr/local/bin/sudo-from-laptop
     install -m 755 "$SERVER_DIR/sudo-from-laptop.sh" /usr/local/lib/claude-server/sudo-from-laptop.sh 2>/dev/null || true
@@ -518,6 +526,23 @@ CRON
     ok "claude-connect-logs-cleanup + cron"
 else
     warn "claude-connect-logs-cleanup.sh missing in repo (skip cron; sync server checkout)"
+fi
+
+# Permission-drift watchdog (2026-08-02 incident hardening): catches the "top-level dir
+# lost its execute bit" failure class across every real mountpoint, not just /, before it
+# escalates into a full login lockout again.
+if [ -f "$SERVER_DIR/claude-perm-drift-check.sh" ]; then
+    install -m 755 "$SERVER_DIR/claude-perm-drift-check.sh" /usr/local/bin/claude-perm-drift-check
+    cat > /etc/cron.d/claude-perm-drift <<'CRON'
+# Detect any real mountpoint directory missing its execute/search bit (every 15 min)
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+*/15 * * * * root /usr/local/bin/claude-perm-drift-check >/dev/null 2>&1
+CRON
+    chmod 644 /etc/cron.d/claude-perm-drift
+    ok "claude-perm-drift-check + cron (every 15 min, log: /var/log/claude-perm-drift.log, journal tag: claude-perm-drift)"
+else
+    warn "claude-perm-drift-check.sh missing in repo (skip cron; sync server checkout)"
 fi
 
 # Stuck sshfs/sftp mount-helper reaper (every 10 min) - see script header for why

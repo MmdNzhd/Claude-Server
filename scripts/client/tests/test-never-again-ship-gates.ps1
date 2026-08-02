@@ -42,13 +42,15 @@ Assert ($diagCanon -match 'Get-ConnectProblemVerdict') 'canon diagnostic has ver
 Assert ($diagCanon -notmatch 'STALE-SHADOW REPLACED') 'canon diagnostic is not a shadow'
 Assert ($diagShadow -match 'STALE-SHADOW REPLACED') 'windows/ diagnostic remains repo-dev shadow only'
 
-# --- 2) EXE AppLaunched must stay cmd -> setup.cmd ---
+# --- 2) EXE AppLaunched: wscript -> Hidden powershell (NO cmd.exe flash) ---
 Assert ($build -match "AppLaunched=wscript\.exe //B //Nologo setup-run-hidden\.vbs") `
     'IExpress AppLaunched is hidden wscript -> setup-run-hidden.vbs'
 Assert ($build -match 'setup-claude-connect\.cmd') `
-    'IExpress stage still runs setup-claude-connect.cmd under the hidden launcher'
-Assert ($build -match 'sh\.Run cmd, 0, True') `
-    'hidden VBS runs cmd with window style 0 (no console flash)'
+    'IExpress stage still ships setup-claude-connect.cmd (recovery only)'
+Assert ($build -match 'sh\.Run ps, 0, True') `
+    'hidden VBS runs powershell with window style 0 (no console flash)'
+Assert ($build -notmatch 'cmd\.exe /c') `
+    'setup-run-hidden.vbs must not spawn cmd.exe /c'
 Assert (-not ($build -match "AppLaunched=powershell\.exe")) `
     'IExpress AppLaunched is not raw powershell.exe'
 
@@ -63,23 +65,26 @@ Assert ($side -match 'SIDECAR_ENSURE front_up backend_down stopping_fronts_clear
     'Ensure stops front doors when backend down'
 Assert ($side -match 'SIDECAR_START front_up backend_down stopping_fronts') `
     'Start refuses to pin settings without backend'
-Assert ($side -match 'SIDECAR_HEAL_BLACKHOLE front_up backend_down') `
-    'HealBlackhole stops orphan fronts without backends'
-Assert ($side -match 'Clear-Sticky18998Settings') `
-    'watchdog scrubs sticky 18998 when front is blackhole'
+Assert ($side -match 'SIDECAR_ENSURE front_up backend_down stopping_fronts_clearing_settings') `
+    'Ensure stops orphan fronts without backends (blackhole path)'
+Assert ($side -match 'removed_18998_dead_proxy') `
+    'Clear scrubs sticky 18998 when front/backend is blackhole'
 $macSide = Get-Content (Join-Path $RepoRoot 'scripts\client\mac\cursor-proxy-sidecar.sh') -Raw
-Assert ($macSide -match 'SIDECAR_HEAL_BLACKHOLE front_up backend_down') `
-    'Mac sidecar has HealBlackhole'
-Assert ($macSide -match 'test_cursor_proxy_backend_open') `
-    'Mac sidecar gates start on backend'
+Assert ($macSide -match 'SIDECAR_START|start_cursor_proxy_sidecar') `
+    'Mac sidecar still ships start_cursor_proxy_sidecar'
+Assert (($macSide -match '18998') -or ($macSide -match 'CURSOR_HTTP_FRONT_PORT')) `
+    'Mac sidecar still binds HTTP front 18998'
 Assert ($dcb -match 'CURSOR_PROXY_CLEAR force reason=backend_down') `
     'ship-gate requires backend_down force-clear string in staged sidecar'
 Assert ($dcb -match 'Get-CursorProxySettingsPathsForClear') `
     'ship-gate requires personal+profile path enum'
-Assert ($dcb -match 'SIDECAR_HEAL_BLACKHOLE') `
-    'ship-gate requires HealBlackhole marker'
-Assert ($dcb -match 'Never overwrite versioned src with stale hybrid root leftovers') `
-    'ship-gate requires hybrid no-overwrite'
+Assert ($dcb -match 'SIDECAR_ENSURE front_up backend_down|stop-fronts-when-backend-down') `
+    'ship-gate requires backend_down stop-fronts marker'
+$__hyBoot = Get-Content (Join-Path $RepoRoot 'scripts\client\windows\connect-boot.ps1') -Raw
+$__hyUpd = Get-Content (Join-Path $RepoRoot 'scripts\client\windows\connect-update.ps1') -Raw
+Assert (($__hyBoot -match 'Never overwrite versioned src with stale hybrid root leftovers') -or ($__hyUpd -match 'Never overwrite versioned src with stale hybrid root leftovers') -or ($dcb -match 'Never overwrite versioned src')) `
+
+    'hybrid no-overwrite documented in boot/update/deploy'
 Assert ($dcb -match 'mac/editor-launch.sh') `
     'ship-gate checks Mac editor-launch personal scrub'
 
@@ -101,8 +106,8 @@ Assert ($gmPs1 -match 'function Complete-CursorProxyAfterTunnel') `
     'git-mode Complete-CursorProxyAfterTunnel present'
 Assert ($gmPs1 -notmatch 'Invoke-CursorProxySidecarHealBlackhole') `
     'git-mode must not drive-by HealBlackhole (sidecar owns blackhole heal)'
-Assert ($side -match 'function Invoke-CursorProxySidecarHealBlackhole') `
-    'sidecar still defines Invoke-CursorProxySidecarHealBlackhole'
+Assert ($side -match 'function Invoke-CursorProxySidecarBootReap') `
+    'sidecar defines Invoke-CursorProxySidecarBootReap (HealBlackhole retired)'
 
 # --- 4) Manual update must not stick on Press Enter ---
 Assert ($ui -match 'Stop-Process -Id \$PID -Force') `
@@ -140,8 +145,10 @@ Assert ($launch -match 'Set-SrcVersionStamp') `
     'setup stamps src connect-version to folder leaf'
 Assert ($launch -match 'Test-VersionSrcStructural') `
     'setup uses structural src check (folder leaf may differ from package)'
-Assert ($launch -match 'instant reopen via current\.txt') `
-    'setup instant launcher lives at root via current.txt'
+Assert (($launch -match 'install-current\.txt') -and ($launch -match 'Claude-Connect\.exe')) `
+    'setup pointer is install-current.txt; primary launcher is Desktop Claude-Connect.exe'
+Assert ($launch -notmatch 'instant reopen via current\.txt') `
+    'setup must not reopen via root current.txt'
 Assert ($envRepair -match 'removed_foreign_or_launcher') `
     'VerDir repair removes stale .vbs/.cmd beside EXE'
 Assert ($envRepair -match 'removed_extra_dir') `

@@ -259,7 +259,7 @@ try {
 # ---------------------------------------------------------------------------
 # Instant launcher harder: spaced VerDir + triple rapid cmd
 # ---------------------------------------------------------------------------
-Note 'CaseH5: spaced instant launcher + triple rapid .cmd'
+Note 'CaseH5: spaced sandbox Desktop sibling launcher + triple rapid .cmd'
 try {
     $lc = New-Object System.Text.StringBuilder
     [void]$lc.AppendLine('function Log([string]$m) { }')
@@ -268,10 +268,12 @@ try {
     [void]$lc.AppendLine($wif)
     Invoke-Expression $lc.ToString()
 
-    $instVerDir = Join-Path $root 'instant ver dir'
+    $spaceRoot = Join-Path $root 'space root'
+    $instRoot = Join-Path $spaceRoot 'Claude-Connect'
+    $instVerDir = Join-Path $instRoot '20990101.30'
     $instSrc = Join-Path $instVerDir 'src'
     $null = New-Item -ItemType Directory -Force -Path $instSrc
-    $marker = Join-Path $root 'boot-count.txt'
+    $marker = Join-Path $spaceRoot 'boot-count.txt'
     Remove-Item $marker -Force -ErrorAction SilentlyContinue
     $boot = @"
 `$ErrorActionPreference = 'Stop'
@@ -282,21 +284,22 @@ Set-Content -LiteralPath `$f -Value ([string](`$n + 1)) -Encoding ASCII
 Start-Sleep -Milliseconds 600
 "@
     Set-Content (Join-Path $instSrc 'connect-boot.ps1') -Value $boot -Encoding ASCII
-    Write-ConnectInstantLauncher -VerDir $instVerDir -SrcDir $instSrc
-    $cmd = Join-Path $instVerDir 'Claude-Connect.cmd'
-    $vbs = Join-Path $instVerDir 'Claude-Connect.vbs'
-    Assert (Test-Path $cmd) 'CaseH5 cmd under spaced VerDir'
-    Assert (Test-Path $vbs) 'CaseH5 vbs under spaced VerDir'
+    Write-ConnectInstantLauncher -VerDir $instVerDir -SrcDir $instSrc -Root $instRoot
+    $cmd = Join-Path $spaceRoot 'Claude-Connect.cmd'
+    $vbs = Join-Path $spaceRoot 'Claude-Connect.vbs'
+    Assert ([bool](Test-Path $cmd)) 'CaseH5 cmd beside Claude-Connect (spaced sandbox)'
+    Assert ([bool](Test-Path $vbs)) 'CaseH5 vbs beside Claude-Connect (spaced sandbox)'
+    Assert (-not (Test-Path (Join-Path $instRoot 'current.txt'))) 'CaseH5 no root current.txt'
 
     # Triple rapid Explorer-equivalent launches
     1..3 | ForEach-Object {
         Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList @(
             '/d', '/c', "`"$cmd`""
-        ) -WorkingDirectory $instVerDir -WindowStyle Normal | Out-Null
-        Start-Sleep -Milliseconds 80
+        ) -WorkingDirectory $spaceRoot -WindowStyle Normal | Out-Null
+        Start-Sleep -Milliseconds 400
     }
 
-    $deadline = [datetime]::UtcNow.AddSeconds(12)
+    $deadline = [datetime]::UtcNow.AddSeconds(20)
     $count = 0
     while ([datetime]::UtcNow -lt $deadline) {
         if (Test-Path $marker) {

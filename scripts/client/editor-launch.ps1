@@ -23,11 +23,116 @@ function Get-CursorRemoteProfileDir {
     # Isolated Cursor profile for server Remote-SSH. Smart and Sepidz use
     # separate dirs so each site's golden Cursor account cannot overwrite
     # the other. Personal Cursor (%APPDATA%\Cursor) is never touched.
+    Ensure-CursorRemoteProfileMigrated
     $site = Get-CursorRemoteProfileSite
     if ($site -eq 'Sepidz') {
         return (Join-Path $env:LOCALAPPDATA 'ClaudeServerCursorProfile-Sepidz')
     }
     return (Join-Path $env:LOCALAPPDATA 'ClaudeServerCursorProfile-Smart')
+}
+
+function Get-CursorRemoteProfileDirSizeMB {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return 0.0 }
+    $sum = (Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue |
+        Measure-Object -Property Length -Sum).Sum
+    if (-not $sum) { return 0.0 }
+    return [math]::Round(($sum / 1MB), 1)
+}
+
+function Stop-CursorRemoteProfileProcesses {
+    # Soft-stop only server-profile Cursor (legacy or -Smart/-Sepidz). Never touches personal Cursor.
+    $procs = @(Get-CimInstance Win32_Process -Filter "Name='Cursor.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $c = [string]$_.CommandLine
+        $c -and ($c -match 'ClaudeServerCursorProfile')
+    })
+    foreach ($p in $procs) {
+        try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch {}
+    }
+    if ($procs.Count -gt 0) { Start-Sleep -Seconds 2 }
+    return $procs.Count
+}
+
+function Ensure-CursorRemoteProfileMigrated {
+    # One-time: legacy %LOCALAPPDATA%\ClaudeServerCursorProfile -> ClaudeServerCursorProfile-Smart|Sepidz
+    # so chat history / golden merge survive the site-split rename. Personal %APPDATA%\Cursor untouched.
+    if ($script:CursorProfileMigrateChecked) { return }
+    $script:CursorProfileMigrateChecked = $true
+    if ($env:CLAUDE_CONNECT_SKIP_PROFILE_MIGRATE -eq '1') { return }
+    if (-not $env:LOCALAPPDATA) { return }
+
+    $site = Get-CursorRemoteProfileSite
+    $legacy = Join-Path $env:LOCALAPPDATA 'ClaudeServerCursorProfile'
+    $targetName = "ClaudeServerCursorProfile-$site"
+    $target = Join-Path $env:LOCALAPPDATA $targetName
+    $stamp = Join-Path $target '.claude-connect-profile-migrated'
+
+    if (-not (Test-Path -LiteralPath $legacy)) { return }
+    if ((Test-Path -LiteralPath $stamp)) { return }
+
+    $legacyMb = Get-CursorRemoteProfileDirSizeMB -Path $legacy
+    $targetMb = Get-CursorRemoteProfileDirSizeMB -Path $target
+    # Target already has more data than legacy: keep target, archive legacy once.
+    if ((Test-Path -LiteralPath $target) -and $targetMb -ge 5 -and $targetMb -ge $legacyMb) {
+        try {
+            [void](Stop-CursorRemoteProfileProcesses)
+            $bakName = "ClaudeServerCursorProfile.bak-keep-$(Get-Date -Format yyyyMMdd)"
+            $bak = Join-Path $env:LOCALAPPDATA $bakName
+            if (-not (Test-Path -LiteralPath $bak)) {
+                Rename-Item -LiteralPath $legacy -NewName $bakName -ErrorAction Stop
+            }
+            New-Item -ItemType Directory -Force -Path $target | Out-Null
+            Set-Content -LiteralPath $stamp -Value ("ts={0} action=target_kept legacy_mb={1} target_mb={2}" -f (Get-Date -Format o), $legacyMb, $targetMb) -Encoding ASCII
+            if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+                Write-GitModeLog ("CURSOR_PROFILE_MIGRATE action=target_kept site={0} legacy_mb={1} target_mb={2}" -f $site, $legacyMb, $targetMb) 'INFO'
+            }
+        } catch {
+            if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+                Write-GitModeLog ("CURSOR_PROFILE_MIGRATE_SKIP reason=target_kept_locked err={0}" -f $_.Exception.Message) 'WARN'
+            }
+        }
+        return
+    }
+
+    # Migrate when target missing, tiny, or clearly smaller than legacy (fresh -Smart after rename).
+    $shouldMigrate = (-not (Test-Path -LiteralPath $target)) -or ($targetMb -lt 5) -or ($legacyMb -gt $targetMb)
+    if (-not $shouldMigrate) { return }
+
+    try {
+        [void](Stop-CursorRemoteProfileProcesses)
+        if (Test-Path -LiteralPath $target) {
+            $bakSmartName = "$targetName.bak-pre-migrate-$(Get-Date -Format yyyyMMddHHmmss)"
+            $bakSmart = Join-Path $env:LOCALAPPDATA $bakSmartName
+            try {
+                Rename-Item -LiteralPath $target -NewName $bakSmartName -ErrorAction Stop
+            } catch {
+                New-Item -ItemType Directory -Force -Path $bakSmart | Out-Null
+                cmd /c "robocopy `"$target`" `"$bakSmart`" /E /MOVE /R:2 /W:1 /NFL /NDL /NJH /NJS /NC /NS" | Out-Null
+                if (Test-Path -LiteralPath $target) {
+                    Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        try {
+            Rename-Item -LiteralPath $legacy -NewName $targetName -ErrorAction Stop
+        } catch {
+            New-Item -ItemType Directory -Force -Path $target | Out-Null
+            cmd /c "robocopy `"$legacy`" `"$target`" /E /MOVE /R:3 /W:2 /NFL /NDL /NJH /NJS /NC /NS" | Out-Null
+            if (Test-Path -LiteralPath $legacy) {
+                Remove-Item -LiteralPath $legacy -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+        $finalMb = Get-CursorRemoteProfileDirSizeMB -Path $target
+        Set-Content -LiteralPath $stamp -Value ("ts={0} action=rename_legacy_to_target legacy_mb={1} final_mb={2}" -f (Get-Date -Format o), $legacyMb, $finalMb) -Encoding ASCII
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("CURSOR_PROFILE_MIGRATE action=legacy_to_target site={0} legacy_mb={1} final_mb={2}" -f $site, $legacyMb, $finalMb) 'INFO'
+        }
+    } catch {
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("CURSOR_PROFILE_MIGRATE_FAIL err={0}" -f $_.Exception.Message) 'WARN'
+        }
+    }
 }
 
 function Get-CursorWindowTitleTag {
@@ -898,6 +1003,8 @@ function Confirm-RemoteEditorLaunchVisible {
     # Project-scoped only. Never treat "any Cursor MainWindowHandle on the profile" as
     # confirmation - that false-positive skipped Launch-RemoteEditor (known_on_folder) while
     # the user only had Agents / another project / personal Cursor visible (live 2026-07-28).
+    # Success bar is on_folder only - MUST match Launch-RemoteEditor (P0.4: window-count-alone
+    # used to return true from Launch while Confirm rejected it -> false "elevated launch failed").
     if (Get-Command Clear-CursorProcessCache -ErrorAction SilentlyContinue) { Clear-CursorProcessCache }
     if (Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath) { return $true }
     if ($WaitMs -gt 0) {
@@ -906,6 +1013,50 @@ function Confirm-RemoteEditorLaunchVisible {
         if (Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath) { return $true }
     }
     return $false
+}
+
+function Get-RemoteEditorLaunchFailMessage {
+    param([Parameter(Mandatory)][string]$EditorName)
+    # Reflect the actual shell elevation. Hardcoding "elevated launch failed" misled users
+    # on non-elevated Connect (all 11 Aug-1 false fails logged elevated=False).
+    $elevated = $false
+    try { $elevated = [bool](Test-IsElevatedShell) } catch { $elevated = $false }
+    if ($elevated) {
+        return "elevated launch failed - no $EditorName window on project folder (try non-elevated Connect or check $EditorName install)"
+    }
+    return "$EditorName launch did not show the project folder window (check $EditorName install or press O to retry)"
+}
+
+function Stop-EditorLaunchAttemptOrphans {
+    param(
+        [int[]]$KeepPids = @(),
+        [int[]]$CandidatePids = @()
+    )
+    # Reap Cursor.exe PIDs spawned by losing launch strategies once a winner is confirmed.
+    # Never touch baseline / keep-list PIDs (shared-profile windows must stay alive).
+    $keepSet = @{}
+    foreach ($k in @($KeepPids)) {
+        if ($k -gt 0) { $keepSet[[int]$k] = $true }
+    }
+    $reaped = 0
+    foreach ($cand in @($CandidatePids | Select-Object -Unique)) {
+        $pidNum = [int]$cand
+        if ($pidNum -le 0) { continue }
+        if ($keepSet.ContainsKey($pidNum)) { continue }
+        try {
+            $proc = Get-Process -Id $pidNum -ErrorAction SilentlyContinue
+            if (-not $proc) { continue }
+            Stop-Process -Id $pidNum -Force -ErrorAction SilentlyContinue
+            $reaped++
+            Write-EditorLaunchLog ("LAUNCH_REAP_ORPHAN: pid={0} name={1}" -f $pidNum, $proc.ProcessName) 'INFO'
+        } catch {
+            Write-EditorLaunchLog ("LAUNCH_REAP_ORPHAN_FAIL: pid={0} ex={1}" -f $pidNum, $_.Exception.Message) 'DEBUG'
+        }
+    }
+    if ($reaped -gt 0) {
+        Write-EditorLaunchLog ("LAUNCH_REAP_ORPHAN_DONE: count={0}" -f $reaped) 'INFO'
+    }
+    return $reaped
 }
 
 function Get-CursorLaunchDayLogPath {
@@ -1079,6 +1230,7 @@ function Start-ProcessAsInteractiveUser {    param(
         [Parameter(Mandatory)][string]$FilePath,
         [string[]]$ArgumentList = @()
     )
+    $script:LastEditorStartPid = 0
     $argPreview = Format-ProcessArgumentString -ArgumentList $ArgumentList
     if (-not (Test-IsElevatedShell)) {
         Write-EditorLaunchLog "PROC_START: mode=non_elevated_direct exe=$FilePath args=$argPreview" 'DEBUG'
@@ -1088,6 +1240,7 @@ function Start-ProcessAsInteractiveUser {    param(
                 Write-EditorLaunchLog 'PROC_START_FAIL: mode=non_elevated_direct Start-Process returned null' 'ERROR'
                 return $false
             }
+            $script:LastEditorStartPid = [int]$p.Id
             Write-EditorLaunchLog ("PROC_START_OK: mode=non_elevated_direct pid={0}" -f $p.Id) 'DEBUG'
             return $true
         } catch {
@@ -1973,12 +2126,12 @@ function Get-RemoteEditorLaunchStrategies {
         [Parameter(Mandatory)][string]$RemotePath,
         [Parameter(Mandatory)][string]$Uri,
         [switch]$NewWindow,
-        # When the shared profile already has windows open, ONLY try --remote. Live 2026-07-25:
-        # cascading to remote-classic / folder-uri / folder-uri-classic within ~5s of the first
-        # --remote IPC handoff interrupts Cursor mid-connect; the folder never settles, connect
-        # reports LAUNCH_FAIL, then a SINGLE later --remote (manual) opens the project fine.
-        # Warm handoff also often navigates the EXISTING window (title changes, window-count does
-        # not) - folder-uri warm paths are known to land on Welcome and only make that worse.
+        # When the shared profile already has windows open, try --remote then one --remote-classic
+        # fallback. Live 2026-07-25: cascading to folder-uri / folder-uri-classic within ~5s of the
+        # first --remote IPC handoff interrupts Cursor mid-connect (Welcome trap; forum #153009).
+        # P0.4 (2026-08-02): a single all-or-nothing warm strategy left no recovery when --remote
+        # alone did not settle on_folder - remote-classic is a safe sibling (same --remote IPC,
+        # not folder-uri). Still avoid folder-uri on warm.
         [switch]$WarmHandoff
     )
     $path = $RemotePath.TrimEnd('/')
@@ -2004,6 +2157,13 @@ function Get-RemoteEditorLaunchStrategies {
     # the real folder never loaded (project "smart"/"deploy" "did not open" reports 2026-07-25).
     # folder-uri variants are kept only as cold-start fallbacks. --classic is not needed for the
     # folder to open (the verified working invocation had no --classic) and is demoted to fallback.
+    #
+    # Order decision 2026-08-02 (Cursor 3.13.10, one cold session): folder-uri-classic eventually
+    # won after remote/remote-classic/folder-uri exhausted a short 3s/strategy budget. That does
+    # NOT overturn --remote-first: (1) warm evidence for --remote is deliberate and screenshot-
+    # verified; (2) premature cold cascade was a poll-budget bug (3s << cold boot), not proof
+    # folder-uri-classic should lead; (3) putting folder-uri earlier would re-arm the warm Welcome
+    # trap. Keep --remote first; give cold attempt-1 a longer poll instead of reordering.
     $folderUriArg = "--folder-uri=$Uri"
 
     if ($EditorCmd -eq 'cursor') {
@@ -2016,7 +2176,11 @@ function Get-RemoteEditorLaunchStrategies {
             Args = $common + @('--remote', $remoteArg, $path)
         }
         if ($WarmHandoff) {
-            # One strategy, long poll outside - do NOT cascade folder-uri / classic (interrupts IPC).
+            # remote + remote-classic only. Do NOT cascade folder-uri (Welcome / IPC interrupt).
+            $strategies += [PSCustomObject]@{
+                Name = 'remote-classic'
+                Args = $common + @('--classic', '--remote', $remoteArg, $path)
+            }
             return $strategies
         }
         $strategies += [PSCustomObject]@{
@@ -2195,7 +2359,7 @@ function Stop-RemoteEditor {
         [Parameter(Mandatory)][string]$Alias,
         [Parameter(Mandatory)][string]$RemotePath
     )
-    # Path/alias scoped only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â never kills the whole ClaudeServerCursorProfile tree.
+    # Path/alias scoped only - never kills the whole ClaudeServerCursorProfile tree.
     $procs = @(Get-RemoteEditorProcesses -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)
     Write-EditorLaunchLog (
         "STOP_REMOTE_EDITOR: path_scoped_only alias=$Alias path=$RemotePath matched=$($procs.Count)"
@@ -2513,8 +2677,8 @@ function Launch-RemoteEditor {
     }
 
     $swPlan = [System.Diagnostics.Stopwatch]::StartNew()
-    # Warm = profile already has activity (windows or helpers). Use --remote ONLY so we do not
-    # barrage Cursor's IPC with folder-uri retries that interrupt the in-flight handoff.
+    # Warm = profile already has activity (windows or helpers). Prefer --remote (+ remote-classic
+    # fallback); never barrage with folder-uri retries that interrupt the in-flight handoff.
     $warmHandoff = ($useNewWindow -and $profileProcCount -gt 0)
     $strategies = @(Get-RemoteEditorLaunchStrategies -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -Uri $uri -NewWindow:$useNewWindow -WarmHandoff:$warmHandoff)
     $swPlan.Stop()
@@ -2524,10 +2688,20 @@ function Launch-RemoteEditor {
     $attempt = 0
     $anyStarted = $false
     $script:LastLaunchAttempts = @()
+    # Baseline profile PIDs before any strategy starts - used to reap losing-strategy orphans
+    # without touching windows that were already open (shared ClaudeServerCursorProfile).
+    $baselineProfilePids = @()
+    if ($EditorCmd -eq 'cursor') {
+        try {
+            $baselineProfilePids = @((Get-CursorProfileProcesses) | ForEach-Object { [int]$_.ProcessId } | Where-Object { $_ -gt 0 })
+        } catch { $baselineProfilePids = @() }
+    }
+    $failedAttemptPids = @()
     foreach ($strategy in $strategies) {
         $attempt++
         if ($attempt -gt 1 -and $EditorCmd -eq 'cursor') {
-            # Do not wipe the profile on strategy retry -- other open projects must stay alive.
+            # Do not wipe the profile tree on strategy retry -- other open projects must stay alive.
+            # Losing-attempt orphan PIDs are reaped only after a confirmed on_folder winner.
             Write-EditorLaunchLog "LAUNCH_RETRY_NO_KILL: strategy=$($strategy.Name) preserving profile windows" 'DEBUG'
         }
 
@@ -2552,7 +2726,8 @@ function Launch-RemoteEditor {
         # request, not just whatever text happens to be in a window's title at the instant we
         # look. Scoped to the handoff scenario only ($useNewWindow -and $profileProcCount -gt 0)
         # so cold-start launches (own fresh process, title/URI detection already reliable) are
-        # unaffected.
+        # unaffected. Window-count is PROMISING only - it must NOT return Launch success alone
+        # (Confirm requires on_folder; P0.4 false "elevated launch failed").
         $preAttemptWindowCounts = @{}
         if ($EditorCmd -eq 'cursor') {
             foreach ($p in @(Get-CursorMainProfileProcesses)) {
@@ -2569,34 +2744,37 @@ function Launch-RemoteEditor {
         Write-LaunchPerfLog -Mark 'start_process' -Ms $swStart.ElapsedMilliseconds -Extra "strategy=$($strategy.Name)"
         $anyStarted = $true
 
+        # Track PIDs this attempt introduced (for orphan reap after a later winner).
+        $thisAttemptPids = @()
+        if ($EditorCmd -eq 'cursor') {
+            if ($script:LastEditorStartPid -gt 0) { $thisAttemptPids += [int]$script:LastEditorStartPid }
+            try {
+                Clear-CursorProcessCache
+                $nowPids = @((Get-CursorProfileProcesses -ForceRefresh) | ForEach-Object { [int]$_.ProcessId } | Where-Object { $_ -gt 0 })
+                foreach ($np in $nowPids) {
+                    if ($baselineProfilePids -contains $np) { continue }
+                    if ($failedAttemptPids -contains $np) { continue }
+                    if ($thisAttemptPids -contains $np) { continue }
+                    $thisAttemptPids += $np
+                }
+            } catch {}
+        }
+
         $afterFolder = $false
         $afterAgent = $true
-        # Poll every 250ms instead of sleeping a full 1s between checks (same 3s total
-        # ceiling as before, @(1,2,3)) - a ready window is typically detected within one
-        # tick of becoming ready instead of up to ~900ms late, cutting real perceived
-        # launch latency without changing the worst-case per-strategy timeout.
+        $windowCountIncreased = $false
+        # Poll every 250ms instead of sleeping a full 1s between checks - a ready window is
+        # typically detected within one tick of becoming ready instead of up to ~900ms late.
         $pollMs = 250
-        # H11_multi_window_enum: the first strategy always gets the full budget - it is the
-        # one most likely to succeed and the one the window-enum fix above targets directly.
-        # Strategies 2-4 are just different CLI arg spellings (--classic/--folder-uri vs
-        # --remote) aimed at the SAME already-running shared-profile process via the SAME
-        # single-instance IPC channel (preserve_open_windows scenario: profileProcCount>0
-        # and useNewWindow). If the now-fixed detection still finds nothing for strategy 1
-        # within a shorter window, it is very unlikely a differently-spelled retry against
-        # that identical busy target succeeds ~2s later where the previous one did not -
-        # shortening only these retries cuts real wasted time (measured ~8s/strategy x 3
-        # retries) without touching the important first attempt or genuine cold-start
-        # launches (no existing profile window), which still get the full 12-tick budget.
-        # Warm handoff: Cursor often navigates the EXISTING profile window to the new folder
-        # (title changes, window-count does NOT increase - live 2026-07-25 dakhl). Remote-SSH
-        # title update routinely takes 8-15s. The old 5s ceiling (20 ticks) exhausted before
-        # on_folder became true, then cascaded into folder-uri retries that interrupted IPC and
-        # reported LAUNCH_FAIL even though a single later --remote would open the project.
-        # Warm attempt 1 now waits up to 20s (80 ticks); success still returns on the first tick
-        # that sees on_folder / window-count, so the happy path pays nothing extra.
+        # Warm attempt 1: up to 20s (80 ticks) for Remote-SSH title settle on existing window.
+        # Warm retries: short (folder-uri cascade removed; remote-classic is the only warm #2).
+        # Cold attempt 1: was 12 ticks/3s - far too short for Cursor cold boot (Aug 2 needed
+        # ~40s across 4 strategies). Give cold first strategy 48 ticks (12s) so --remote can
+        # finish before we spawn orphan retries. Cold retries keep 12 ticks.
         $pollMaxTicks =
             if ($attempt -gt 1 -and $useNewWindow -and $profileProcCount -gt 0) { 6 }
             elseif ($attempt -eq 1 -and $useNewWindow -and $profileProcCount -gt 0) { 80 }
+            elseif ($attempt -eq 1) { 48 }
             else { 12 }
         for ($pollTick = 1; $pollTick -le $pollMaxTicks; $pollTick++) {
             Start-Sleep -Milliseconds $pollMs
@@ -2604,10 +2782,7 @@ function Launch-RemoteEditor {
             $afterFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
             $afterAgent = if ($EditorCmd -eq 'cursor') { Test-RemoteEditorInAgentHome -RemotePath $RemotePath } else { $false }
 
-            # Bug 2 secondary signal (see comment above the baseline capture): a real window-count
-            # increase on a known main profile pid during the IPC-handoff scenario, independent of
-            # title text. Corroborating only - always ORed with the handoff scenario gate itself,
-            # never trusted alone outside preserve-open-windows/new-window territory.
+            # Promising secondary signal only (see comment above). Never return true on this alone.
             $windowCountIncreased = $false
             if ($EditorCmd -eq 'cursor' -and $useNewWindow -and $profileProcCount -gt 0) {
                 foreach ($p in @(Get-CursorMainProfileProcesses)) {
@@ -2623,25 +2798,27 @@ function Launch-RemoteEditor {
             ) 'DEBUG'
             Write-LaunchPerfLog -Mark "poll_${elapsedMs}ms" -Ms $elapsedMs -Extra "on_folder=$afterFolder strategy=$($strategy.Name)"
 
-            # Success model (2026-07-25, "opening matters, not the title"):
-            #   1) $afterFolder  -> the target project window is detected (title/URI/cmd for THIS
-            #      project). This is authoritative and is NOT vetoed by the global agent_home flag: a
-            #      standalone "Cursor Agents" window coexisting with the project window is normal in
-            #      Cursor 3.x and must not turn a real success into a failure.
-            #   2) $windowCountIncreased -> a brand-new top-level window materialized for our launch
-            #      (the reliable --remote-handoff signal). Only this fallback stays gated by
-            #      -not $afterAgent, to guard the rare folder-uri case where a NEW window lands on the
-            #      agents splash instead of the folder.
-            $launchOk = $false
-            $okReason = ''
-            if ($afterFolder) { $launchOk = $true; $okReason = 'on_folder' }
-            elseif ($windowCountIncreased -and -not $afterAgent) { $launchOk = $true; $okReason = 'window_count_increased_no_title_match' }
-            if ($launchOk) {
-                Write-EditorLaunchLog "LAUNCH_OK: strategy=$($strategy.Name) attempt=$attempt reason=$okReason agent_home=$afterAgent" 'INFO'
+            # Unified success bar with Confirm-RemoteEditorLaunchVisible: on_folder ONLY.
+            # window_count_increased is promising (keep polling) but must not return true -
+            # that disagreement produced false StepFail "elevated launch failed" (P0.4).
+            if ($afterFolder) {
+                Write-EditorLaunchLog "LAUNCH_OK: strategy=$($strategy.Name) attempt=$attempt reason=on_folder agent_home=$afterAgent" 'INFO'
                 $script:LastLaunchAttempts += "${attempt}:$($strategy.Name):folder=$afterFolder:agent=$afterAgent:wincount=$windowCountIncreased"
+                if ($EditorCmd -eq 'cursor' -and $failedAttemptPids.Count -gt 0) {
+                    $keepPids = @($baselineProfilePids + $thisAttemptPids)
+                    try {
+                        $keepPids += @((Get-CursorMainProfileProcesses) | ForEach-Object { [int]$_.ProcessId })
+                    } catch {}
+                    [void](Stop-EditorLaunchAttemptOrphans -KeepPids $keepPids -CandidatePids $failedAttemptPids)
+                }
                 $script:LaunchPerfSw.Stop()
                 Write-LaunchPerfLog -Mark 'launch_total' -Ms $script:LaunchPerfSw.ElapsedMilliseconds -Extra "path=ok strategy=$($strategy.Name)"
                 return $true
+            }
+            if ($windowCountIncreased -and -not $afterAgent) {
+                Write-EditorLaunchLog (
+                    "LAUNCH_PROMISING: strategy=$($strategy.Name) reason=window_count_increased_no_title_match - waiting for on_folder"
+                ) 'DEBUG'
             }
 
             if ($script:VerboseLaunch -and $pollTick -eq $pollMaxTicks) {
@@ -2654,6 +2831,9 @@ function Launch-RemoteEditor {
             "window_count_increased=$windowCountIncreased $(Get-RemoteEditorLaunchDiag -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath)"
         ) 'INFO'
         $script:LastLaunchAttempts += "${attempt}:$($strategy.Name):folder=$afterFolder:agent=$afterAgent:wincount=$windowCountIncreased"
+        if ($thisAttemptPids.Count -gt 0) {
+            $failedAttemptPids = @($failedAttemptPids + $thisAttemptPids | Select-Object -Unique)
+        }
         if ($script:VerboseLaunch) {
             Write-EditorLaunchVerboseState -Label "RESULT_$($strategy.Name)" -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
         }
@@ -2672,6 +2852,13 @@ function Launch-RemoteEditor {
             if (Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath) {
                 Write-EditorLaunchLog ("LAUNCH_OK: strategy=grace attempt=post reason=on_folder elapsed={0}ms" -f ($g * 250)) 'INFO'
                 $script:LastLaunchAttempts += "grace:on_folder"
+                if ($EditorCmd -eq 'cursor' -and $failedAttemptPids.Count -gt 0) {
+                    $keepPids = @($baselineProfilePids)
+                    try {
+                        $keepPids += @((Get-CursorMainProfileProcesses) | ForEach-Object { [int]$_.ProcessId })
+                    } catch {}
+                    [void](Stop-EditorLaunchAttemptOrphans -KeepPids $keepPids -CandidatePids $failedAttemptPids)
+                }
                 $script:LaunchPerfSw.Stop()
                 Write-LaunchPerfLog -Mark 'launch_total' -Ms $script:LaunchPerfSw.ElapsedMilliseconds -Extra 'path=ok strategy=grace'
                 return $true

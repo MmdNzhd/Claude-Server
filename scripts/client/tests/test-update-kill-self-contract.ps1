@@ -65,7 +65,11 @@ $fastIdx = if ($wait) { $wait.IndexOf('session end (update_relaunch)') } else { 
 $drainIdx = if ($wait) { $wait.IndexOf('Complete-ConnectLogAsyncDrain -Force') } else { -1 }
 Assert ($fastIdx -ge 0 -and $drainIdx -gt $fastIdx) 'update_relaunch fast path before Force log drain'
 
-Assert ($ui -match "Wait-ConnectExit -Reason 'update_relaunch'") 'silent update path calls Wait-ConnectExit update_relaunch'
+# Mid-session Quiet auto-update retired (manual_only). Wait-ConnectExit update_relaunch
+# remains for apply/relaunch handoff; silent path must NOT call it.
+Assert ($ui -match 'UPDATE_SILENT skip reason=manual_only') 'silent update path is manual_only (no mid-session Quiet apply)'
+Assert ($ui -notmatch "Invoke-ConnectSilentUpdateCheck[\s\S]{0,400}Wait-ConnectExit -Reason 'update_relaunch'") `
+    'silent update path does not call Wait-ConnectExit update_relaunch'
 
 Write-Host ''
 if ($Fail -eq 0) {

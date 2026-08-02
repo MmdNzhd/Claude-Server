@@ -23,10 +23,17 @@ Assert ($src -match 'calledFromLiveUi|Wait-ConnectExit') 'detects same-process l
 Assert ($src -match '\[Environment\]::Exit\(2\)') 'uses Environment.Exit(2) so caller cannot resume'
 Assert ($src -notmatch 'if \(Test-UpdateDeferActive') 'no longer skips apply because of defer stamp'
 
-$live = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
+# Desktop\Claude-Connect is the versioned-layout root (CLAUDE.md "Client Script
+# Invariants": "Root must stay version-folders only") - real connect-update.ps1 lives
+# under {ver}\src\, not flat at the root. Resolve it the same way production does, via
+# the install-current.txt pointer written by Set-ConnectInstallCurrent.
+. (Get-ClientFile 'windows\connect-env-repair.ps1')
+$liveRoot = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
+$liveVer = Get-ConnectInstallCurrent -Root $liveRoot
+$live = if ($liveVer -match '^\d{8}\.\d+$') { Join-Path $liveRoot (Join-Path $liveVer 'src') } else { $liveRoot }
 $liveUpd = Join-Path $live 'connect-update.ps1'
 if (-not (Test-Path -LiteralPath $liveUpd)) {
-    Write-Host '  FAIL  live connect-update.ps1 missing' -ForegroundColor Red
+    Write-Host "  FAIL  live connect-update.ps1 missing (resolved live=$live)" -ForegroundColor Red
     exit 1
 }
 # Ensure live has the new kill_self code under test (copy from repo)

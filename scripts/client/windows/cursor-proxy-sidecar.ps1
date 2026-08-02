@@ -326,9 +326,22 @@ function Get-CursorProxySettingsPath {
     $profileDir = if (Get-Command Get-CursorRemoteProfileDir -ErrorAction SilentlyContinue) {
         Get-CursorRemoteProfileDir
     } else {
-        Join-Path $env:LOCALAPPDATA 'ClaudeServerCursorProfile'
+        # Match editor-launch site split (Smart default). Never use unsuffixed legacy path.
+        Join-Path $env:LOCALAPPDATA 'ClaudeServerCursorProfile-Smart'
     }
     return (Join-Path (Join-Path $profileDir 'User') 'settings.json')
+}
+
+function Get-CursorProxySettingsPathsForClear {
+    # Personal Cursor + server-profile: dead sticky 18998 in either tree blackholes chat.
+    $paths = New-Object System.Collections.Generic.List[string]
+    $profilePath = Get-CursorProxySettingsPath
+    if ($profilePath) { [void]$paths.Add($profilePath) }
+    if ($env:APPDATA) {
+        $personal = Join-Path $env:APPDATA 'Cursor\User\settings.json'
+        if ($personal -and -not ($paths -contains $personal)) { [void]$paths.Add($personal) }
+    }
+    return @($paths)
 }
 
 function Repair-CursorProxySettingsToSidecar {
@@ -408,37 +421,40 @@ function Clear-CursorProxySettingsSidecar {
             Write-GitModeLog ("CURSOR_PROXY_CLEAR force reason=18998_down_windows_open profile_count={0}" -f $nOpen) 'WARN'
         }
     }
-    $settingsPath = Get-CursorProxySettingsPath
-    if (-not (Test-Path -LiteralPath $settingsPath)) { return $false }
-    try {
-        $obj = Get-Content -LiteralPath $settingsPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    } catch { return $false }
-    if (-not $obj) { return $false }
-    $changed = $false
-    foreach ($name in @('http.proxy', 'https.proxy')) {
-        $prop = $obj.PSObject.Properties[$name]
-        if ($prop -and ("$($prop.Value)" -like "*127.0.0.1:18998*")) {
-            $obj.PSObject.Properties.Remove($name)
+    $anyChanged = $false
+    foreach ($settingsPath in @(Get-CursorProxySettingsPathsForClear)) {
+        if (-not $settingsPath -or -not (Test-Path -LiteralPath $settingsPath)) { continue }
+        try {
+            $obj = Get-Content -LiteralPath $settingsPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        } catch { continue }
+        if (-not $obj) { continue }
+        $changed = $false
+        foreach ($name in @('http.proxy', 'https.proxy')) {
+            $prop = $obj.PSObject.Properties[$name]
+            if ($prop -and ("$($prop.Value)" -like "*127.0.0.1:18998*")) {
+                $obj.PSObject.Properties.Remove($name)
+                $changed = $true
+            }
+        }
+        $support = $obj.PSObject.Properties['http.proxySupport']
+        if ($support -and ("$($support.Value)" -eq 'override')) {
+            $support.Value = 'off'
             $changed = $true
         }
-    }
-    $support = $obj.PSObject.Properties['http.proxySupport']
-    if ($support -and ("$($support.Value)" -eq 'override')) {
-        $support.Value = 'off'
-        $changed = $true
-    }
-    $mode = $obj.PSObject.Properties['cursor.general.proxyMode']
-    if ($mode -and ("$($mode.Value)" -eq 'custom')) {
-        $mode.Value = 'system'
-        $changed = $true
-    }
-    if ($changed) {
-        ($obj | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $settingsPath -Encoding UTF8
-        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
-            Write-GitModeLog 'CURSOR_PROXY_CLEAR removed_18998_dead_proxy' 'WARN'
+        $mode = $obj.PSObject.Properties['cursor.general.proxyMode']
+        if ($mode -and ("$($mode.Value)" -eq 'custom')) {
+            $mode.Value = 'system'
+            $changed = $true
+        }
+        if ($changed) {
+            ($obj | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $settingsPath -Encoding UTF8
+            if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+                Write-GitModeLog ("CURSOR_PROXY_CLEAR removed_18998_dead_proxy path={0}" -f $settingsPath) 'WARN'
+            }
+            $anyChanged = $true
         }
     }
-    return $changed
+    return $anyChanged
 }
 
 function Start-CursorProxySidecar {
@@ -795,7 +811,8 @@ function Start-LegacyCursorProxyRelays {
     # If running Cursor still has --proxy-server on an old per-slot port, listen there and forward to 19080.
     # CIM process enumeration can hang for tens of seconds under load - bound it so
     # Ensure-CursorProxySidecar cannot freeze Connect after SIDECAR_ENSURE.
-    $prof = Join-Path $env:LOCALAPPDATA 'ClaudeServerCursorProfile'
+    # Substring matches legacy + ClaudeServerCursorProfile-Smart/-Sepidz.
+    $prof = 'ClaudeServerCursorProfile'
     $ports = @()
     try {
         $job = Start-Job -ScriptBlock {

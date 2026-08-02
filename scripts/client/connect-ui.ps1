@@ -13,6 +13,7 @@ $script:ConnectLogAsyncDrainerRunning = $false
 $script:ConnectLogAsyncTimer = $null
 $script:ConnectLogAsyncTimerSubId = $null
 $script:ConnectLogAsyncStallSince = $null
+$script:ConnectLogAsyncLastPumpAt = $null
 # Bug 6: TRACE/DEBUG hot-loop lines accumulate here (in-process only) instead of the
 # long-lived StreamWriter's own internal buffer - see Write-ConnectLogSynced for why the
 # actual physical write no longer goes through that stream's cached position.
@@ -187,7 +188,7 @@ function Test-ConnectRemoteLogNeedsRebuild {
     # Stage 9: never replace remote day log with a smaller local file (forbid shrink).
     if ($RemoteSize -lt 0) { return $false }
     if ($LocalSize -lt $RemoteSize) { return $false }
-    # Prior "bloated remote" triggers all required remote > local Ã¢â‚¬â€ forbidden above.
+    # Prior "bloated remote" triggers all required remote > local ," forbidden above.
     # Rebuild remains available only when local >= remote (no shrink); currently unused.
     return $false
 }
@@ -354,6 +355,7 @@ function Initialize-ConnectLog {
     $script:ConnectLogWarnPendingUntil = $null
     $script:ConnectLogAsyncDrainerRunning = $false
     $script:ConnectLogAsyncStallSince = $null
+    $script:ConnectLogAsyncLastPumpAt = $null
     try {
         # FileShare.ReadWrite: second connect (or leftover session) must not silently disable logging.
         $fs = [System.IO.FileStream]::new(
@@ -391,6 +393,42 @@ function Initialize-ConnectLog {
 }
 
 
+function Format-ConnectLogProcArguments {
+    # Prefer the shared editor-launch.ps1 helper, but keep log sync self-contained: designer
+    # and connect-design dot-source connect-ui.ps1 on its own, and there every sync attempt
+    # would otherwise hard-fail on CommandNotFound before a single byte reached the server.
+    # Resolved once: non-Force sync runs on a 1.5s timer, and Get-Command on the boot path is
+    # exactly the kind of per-call cost #P7 was about. Both branches behave identically, so
+    # caching the fallback is safe even if editor-launch.ps1 loads later.
+    param([string[]]$ArgumentList)
+    if ($null -eq $script:ConnectLogHasSharedArgFormatter) {
+        $script:ConnectLogHasSharedArgFormatter = [bool](Get-Command Format-ProcessArgumentString -ErrorAction SilentlyContinue)
+    }
+    if ($script:ConnectLogHasSharedArgFormatter) {
+        return [string](Format-ProcessArgumentString -ArgumentList $ArgumentList)
+    }
+    return (($ArgumentList | ForEach-Object {
+        if ($null -eq $_) { return '' }
+        $s = [string]$_
+        if ($s -match '\s') { '"' + ($s -replace '"', '\"') + '"' } else { $s }
+    }) -join ' ')
+}
+
+function Get-ConnectLogProcFailReason {
+    # Compact "why did the ssh/scp leg fail" tail for LOG_SYNC_FAIL breadcrumbs.
+    param($Result)
+    if (-not $Result) { return 'rc=no_result' }
+    $bits = @()
+    if ($Result.TimedOut) { $bits += 'rc=timeout' } else { $bits += ('rc=' + [string]$Result.ExitCode) }
+    $detail = ''
+    if ($Result.Error) { $detail = [string]$Result.Error }
+    elseif ($Result.StdErr) { $detail = [string]$Result.StdErr }
+    $detail = (($detail -replace '[\r\n]+', ' ').Trim())
+    if ($detail.Length -gt 120) { $detail = $detail.Substring(0, 120) }
+    if ($detail) { $bits += ('err=' + $detail) }
+    return ($bits -join ' ')
+}
+
 function Invoke-ConnectLogProcTimed {
     param(
         [Parameter(Mandatory)][string]$Exe,
@@ -404,18 +442,31 @@ function Invoke-ConnectLogProcTimed {
     # `$ec` here silently stayed at its 0 default forever, so every log-sync mkdir/scp/cat
     # always reported Ok=true regardless of whether it actually succeeded (only an outright
     # timeout was ever detected as failure).
+    # This helper is the only call inside Sync-ConnectLogToServer that is not already
+    # internally fail-soft, so anything it throws aborts the whole sync mid-flight and
+    # surfaces as the opaque "LOG_SYNC_FAIL detail=exception". Every failure mode must come
+    # back as a well-formed result hashtable instead: Process.Start is documented to return
+    # null when no new process resource is started, Kill/WaitForExit/ExitCode can throw when
+    # the child exits underneath them, and Format-ProcessArgumentString lives in
+    # editor-launch.ps1 which designer/connect-design do not dot-source. Log delivery is
+    # best-effort telemetry - it must degrade to "retry later", never to an exception.
     $id = [guid]::NewGuid().ToString('N').Substring(0, 8)
-    $outFile = Join-Path $env:TEMP ("claude-logsync-$id.out")
-    $errFile = Join-Path $env:TEMP ("claude-logsync-$id.err")
+    $tmpDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+    $outFile = Join-Path $tmpDir ("claude-logsync-$id.out")
+    $errFile = Join-Path $tmpDir ("claude-logsync-$id.err")
+    $p = $null
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $Exe
-        $psi.Arguments = (Format-ProcessArgumentString -ArgumentList $ArgumentList)
+        $psi.Arguments = [string](Format-ConnectLogProcArguments -ArgumentList $ArgumentList)
         $psi.UseShellExecute = $false
         $psi.CreateNoWindow = $true
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $p = [System.Diagnostics.Process]::Start($psi)
+        if (-not $p) {
+            return @{ Ok = $false; TimedOut = $false; ExitCode = -1; StdOut = ''; StdErr = ''; Error = 'process_start_null' }
+        }
         $outTask = $p.StandardOutput.ReadToEndAsync()
         $errTask = $p.StandardError.ReadToEndAsync()
         if (-not $p.WaitForExit($TimeoutMs)) {
@@ -430,7 +481,14 @@ function Invoke-ConnectLogProcTimed {
         try { [System.IO.File]::WriteAllText($outFile, $stdout) } catch { }
         try { [System.IO.File]::WriteAllText($errFile, $stderr) } catch { }
         return @{ Ok = ($ec -eq 0); TimedOut = $false; ExitCode = $ec; StdOut = $stdout; StdErr = $stderr }
+    } catch {
+        $why = ''
+        try { $why = (([string]$_.Exception.Message) -replace '[\r\n]+', ' ').Trim() } catch { }
+        if (-not $why) { $why = 'proc_exception' }
+        if ($why.Length -gt 120) { $why = $why.Substring(0, 120) }
+        return @{ Ok = $false; TimedOut = $false; ExitCode = -1; StdOut = ''; StdErr = ''; Error = $why }
     } finally {
+        if ($p) { try { $p.Dispose() } catch { } }
         foreach ($f in @($outFile, $errFile)) {
             if (-not $f) { continue }
             try {
@@ -462,22 +520,15 @@ function Sync-ConnectLogToServer {
     $target = Get-ConnectLogSyncTarget
     if (-not $target) { return }
 
-    # #P7: this function was observed blocking the interactive boot path for 30-60s+ when
-    # the mkdir/scp/cat probe chain below hit real (not just theoretical) SSH timeouts back
-    # to back - each sub-call had its own multi-second-to-20s timeout and they run strictly
-    # sequentially, so a single degraded-network sync attempt could eat a minute of wall
-    # clock before "Connecting..."/"Server setup" even had a chance to run. Best-effort log
-    # delivery must never cost more than a small, bounded slice of boot time: non-Force
-    # attempts now use short per-call timeouts (defer + retry later via the existing async
-    # timer is always safe - it is telemetry, not functional state). -Force keeps the
-    # original longer budgets since it only fires at rare, important moments (day rollover,
-    # unhandled-error flush, final exit) where actually landing the bytes matters more than
-    # speed.
-    $script:LogSyncFastProbeMs = if ($Force) { 10000 } else { 2500 }
-    $script:LogSyncFastChunkMs = if ($Force) { 12000 } else { 2500 }
-    $script:LogSyncFastMkdirMs = if ($Force) { 12000 } else { 3000 }
-    $script:LogSyncFastScpMs   = if ($Force) { 20000 } else { 4000 }
-    $script:LogSyncFastCatMs   = if ($Force) { 12000 } else { 3000 }
+    # #P7 / P0.5: non-Force budgets must clear the 8s SSH ConnectTimeout with margin.
+    # The prior 2.5s/3s/4s caps false-failed under normal latency (mkdir timed out before
+    # the TCP handshake itself could). Still bounded so a dead link cannot freeze boot for
+    # a full minute; -Force keeps the longer budgets for ERROR / session-end / stall escape.
+    $script:LogSyncFastProbeMs = if ($Force) { 10000 } else { 8000 }
+    $script:LogSyncFastChunkMs = if ($Force) { 12000 } else { 8000 }
+    $script:LogSyncFastMkdirMs = if ($Force) { 12000 } else { 10000 }
+    $script:LogSyncFastScpMs   = if ($Force) { 20000 } else { 16000 }
+    $script:LogSyncFastCatMs   = if ($Force) { 12000 } else { 10000 }
 
     # Bug 72: serialize overlapping syncs (in-process + cross-process lock file).
     if ($script:ConnectLogSyncInProgress -and -not $Force) {
@@ -551,7 +602,9 @@ function Sync-ConnectLogToServer {
         } finally {
             if ($fsRead) { try { $fsRead.Dispose() } catch { } }
         }
-        $tmpLocal = Join-Path $env:TEMP ("claude-connect-chunk-{0}.log" -f $PID)
+        $tmpDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+        $tmpLocal = Join-Path $tmpDir ("claude-connect-chunk-{0}.log" -f $PID)
+        if ($null -eq $chunk -or $take -le 0) { $script:LastConnectLogSyncOk = $true; return }
         [System.IO.File]::WriteAllBytes($tmpLocal, $chunk)
         $day = if ($path -match 'connect-(\d{8})\.log$') { $Matches[1] } else { Get-Date -Format 'yyyyMMdd' }
         $remoteTmp = ".claude/logs/.connect-buf-$PID.tmp"
@@ -573,11 +626,11 @@ function Sync-ConnectLogToServer {
             $replace = 'cat "$HOME/' + $remoteTmp + '" > "$HOME/' + $remoteDay + '"; ec=$?; rm -f "$HOME/' + $remoteTmp + '"; chmod 600 "$HOME/' + $remoteDay + '" 2>/dev/null; exit $ec'
             $mkRb = 'mkdir -p "$HOME/.claude/logs" && chmod 700 "$HOME/.claude" "$HOME/.claude/logs" 2>/dev/null; find "$HOME/.claude/logs" -type f -mtime +1 -delete 2>/dev/null; true'
             $mkResRb = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $mkRb)) -TimeoutMs 12000
-            if ($mkResRb.Ok) {
+            if ($mkResRb -and $mkResRb.Ok) {
                 $scpFull = Invoke-ConnectLogProcTimed -Exe 'scp' -ArgumentList (@('-o','BatchMode=yes','-o','ConnectTimeout=20','-o','ControlMaster=no','-q', $path, "${target}:$remoteTmp")) -TimeoutMs 60000
-                if ($scpFull.Ok) {
+                if ($scpFull -and $scpFull.Ok) {
                     $repRes = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $replace)) -TimeoutMs 20000
-                    if ($repRes.Ok) {
+                    if ($repRes -and $repRes.Ok) {
                         Write-ConnectLogSyncWatermark -Offset $fileLen -LogPath $path
                         if (-not $LogPath -or $LogPath -eq $script:ConnectLogPath) {
                             $script:ConnectLogSyncOffset = [int]$fileLen
@@ -591,6 +644,7 @@ function Sync-ConnectLogToServer {
                             $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                             $sid = Get-ConnectSessionId
                             if ($script:ConnectLogWriter) {
+                                Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_OK off=$fileLen take=$fileLen force=$([int][bool]$Force) mode=rebuild"
                                 Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_REBUILD local=$fileLen remote_was=$remoteBeforeProbe off=$off (replaced remote day log)"
                             }
                         } catch { }
@@ -618,6 +672,7 @@ function Sync-ConnectLogToServer {
                     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                     $sid = Get-ConnectSessionId
                     if ($script:ConnectLogWriter) {
+                        Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_OK off=$newOff take=$take force=$([int][bool]$Force) mode=reconcile_pending"
                         Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_RECONCILE pending_ok off=$off take=$take remote=$rNow (skipped re-append)"
                     }
                 } catch { }
@@ -639,6 +694,7 @@ function Sync-ConnectLogToServer {
                 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                 $sid = Get-ConnectSessionId
                 if ($script:ConnectLogWriter) {
+                    Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_OK off=$newOff take=$take force=$([int][bool]$Force) mode=reconcile_hash"
                     Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_RECONCILE tail_hash_match off=$off take=$take (skipped re-append)"
                 }
             } catch { }
@@ -655,19 +711,22 @@ function Sync-ConnectLogToServer {
         # Bug 11: cat must surface append failure (no trailing true).
         $cat = 'cat "$HOME/' + $remoteTmp + '" >> "$HOME/' + $remoteDay + '"; ec=$?; rm -f "$HOME/' + $remoteTmp + '"; chmod 600 "$HOME/' + $remoteDay + '" 2>/dev/null; exit $ec'
         $mkRes = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $mk)) -TimeoutMs $script:LogSyncFastMkdirMs
-        if ($Force -and $mkRes.Ok) {
+        if ($Force -and $mkRes -and $mkRes.Ok) {
             try {
                 Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $retain)) -TimeoutMs $script:LogSyncFastMkdirMs | Out-Null
             } catch { }
         }
-        if (-not $mkRes.Ok) {
+        if (-not $mkRes -or -not $mkRes.Ok) {
             if (-not $script:ConnectLogSyncFailLogged) {
                 $script:ConnectLogSyncFailLogged = $true
                 try {
                     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                     $sid = Get-ConnectSessionId
                     if ($script:ConnectLogWriter) {
-                        Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=mkdir_timeout_or_fail (local kept; retry later)"
+                        # rc/err come from the proc helper so a repeat failure says WHY
+                        # (auth, DNS, refused) instead of only "mkdir_timeout_or_fail".
+                        $why = Get-ConnectLogProcFailReason -Result $mkRes
+                        Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=mkdir_timeout_or_fail $why (local kept; retry later)"
                     }
                 } catch { }
             }
@@ -685,11 +744,11 @@ function Sync-ConnectLogToServer {
         $scpRes = Invoke-ConnectLogProcTimed -Exe 'scp' -ArgumentList (@('-o','BatchMode=yes','-o','ConnectTimeout=12','-o','ControlMaster=no','-q', $tmpLocal, "${target}:$remoteTmp")) -TimeoutMs $script:LogSyncFastScpMs
         # appendOk/scpOk := remote append succeeded (scp + cat). Watermark ONLY inside this gate.
         $appendOk = $false
-        if ($scpRes.Ok) {
+        if ($scpRes -and $scpRes.Ok) {
             $catRes = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $cat)) -TimeoutMs $script:LogSyncFastCatMs
-            if ($catRes.Ok) { $appendOk = $true }
+            if ($catRes -and $catRes.Ok) { $appendOk = $true }
         }
-        # Even if the timed wait says fail, the remote cat may have succeeded Ã¢â‚¬â€ verify by size.
+        # Even if the timed wait says fail, the remote cat may have succeeded ," verify by size.
         if (-not $appendOk) {
             $remoteAfter = Get-ConnectRemoteLogByteSize -Target $target -Day $day -SshOpts $sshOpts -TimeoutMs $script:LogSyncFastProbeMs
             if ($remoteAfter -ge 0 -and $remoteAfter -ge ($remoteBefore + [int64]$take)) {
@@ -717,6 +776,13 @@ function Sync-ConnectLogToServer {
             Clear-ConnectLogSyncPending -LogPath $path
             $script:LastConnectLogSyncOk = $true
             $script:ConnectLogSyncFailLogged = $false
+            try {
+                $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+                $sid = Get-ConnectSessionId
+                if ($script:ConnectLogWriter) {
+                    Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_OK off=$newOff take=$take force=$([int][bool]$Force) mode=append"
+                }
+            } catch { }
             if ($newOff -lt $fileLen -and (-not $LogPath -or $LogPath -eq $script:ConnectLogPath)) {
                 $script:ConnectLogLinesSinceSync = 25
             }
@@ -750,11 +816,12 @@ function Sync-ConnectLogToServer {
                     } finally {
                         if ($fs2) { try { $fs2.Dispose() } catch { } }
                     }
+                    if ($null -eq $chunk2 -or $take2 -le 0) { break }
                     [System.IO.File]::WriteAllBytes($tmpLocal, $chunk2)
                     $scp2 = Invoke-ConnectLogProcTimed -Exe 'scp' -ArgumentList (@('-o','BatchMode=yes','-o','ConnectTimeout=12','-o','ControlMaster=no','-q', $tmpLocal, "${target}:$remoteTmp")) -TimeoutMs 20000
-                    if (-not $scp2.Ok) { break }
+                    if (-not $scp2 -or -not $scp2.Ok) { break }
                     $cat2 = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $cat)) -TimeoutMs 12000
-                    if (-not $cat2.Ok) { break }
+                    if (-not $cat2 -or -not $cat2.Ok) { break }
                     $newOff = $newOff + $take2
                     Write-ConnectLogSyncWatermark -Offset $newOff -LogPath $path
                     if (-not $LogPath -or $LogPath -eq $script:ConnectLogPath) {
@@ -769,7 +836,8 @@ function Sync-ConnectLogToServer {
                 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                 $sid = Get-ConnectSessionId
                 if ($script:ConnectLogWriter) {
-                    Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=scp_or_append_fail (local kept; retry later)"
+                    $why = Get-ConnectLogProcFailReason -Result $(if ($scpRes -and $scpRes.Ok) { $catRes } else { $scpRes })
+                    Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=scp_or_append_fail $why (local kept; retry later)"
                 }
             } catch { }
         }
@@ -789,14 +857,25 @@ function Sync-ConnectLogToServer {
             try {
                 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                 $sid = Get-ConnectSessionId
-                $ex = $_.Exception.Message
-                if ($ex) { $ex = ($ex -replace '[
-]+', ' ').Substring(0, [Math]::Min(160, $ex.Length)) }
+                $ex = [string]($_.Exception.Message)
+                if (-not $ex) { $ex = [string]$_ }
+                $ex = (($ex -replace '[\r\n]+', ' ').Trim())
+                if ($ex.Length -gt 160) { $ex = $ex.Substring(0, 160) }
+                # A bare message ("Object reference not set to an instance of an object.")
+                # is not actionable: carry the type and the throwing line so a recurrence
+                # names its own site instead of costing another archaeology pass.
+                $exType = 'unknown'
+                try { if ($_.Exception) { $exType = $_.Exception.GetType().Name } } catch { }
+                $atLine = 0
+                try { if ($_.InvocationInfo) { $atLine = [int]$_.InvocationInfo.ScriptLineNumber } } catch { }
                 if ($script:ConnectLogWriter) {
-                    Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=exception err=$ex (local kept; retry later)"
+                    Write-ConnectLogSynced -Line ("[$ts] [WARN] [$sid] LOG_SYNC_FAIL target={0} detail=exception type={1} at={2} err={3} (local kept; retry later)" -f $(if ($target) { $target } else {'(none)'}), $exType, $atLine, $(if ($ex) { $ex } else { '(null)' }))
                 }
             } catch { }
         }
+        # Zero-loss: the local day log and its watermark are untouched, so the bytes ship on
+        # the next attempt. Only the transient chunk copy is dropped.
+        if ($tmpLocal) { try { Remove-Item -LiteralPath $tmpLocal -Force -ErrorAction SilentlyContinue } catch { } }
         if (-not $LogPath -or $LogPath -eq $script:ConnectLogPath) { $script:ConnectLogSyncNeeded = $true }
     }
     finally {
@@ -808,10 +887,63 @@ function Sync-ConnectLogToServer {
     }
 }
 
+function Invoke-ConnectLogAsyncPump {
+    # Explicit drain for WinPS 5.1: Register-ObjectEvent Actions are NOT serviced while
+    # the interactive session loop blocks in [Console]::ReadKey / Start-Sleep. Call this
+    # from the menu loop (and share the body with the Timer Elapsed Action) so routine
+    # non-ERROR sync actually delivers. Local day-log writes never wait on this path.
+    param([switch]$IgnoreRateLimit)
+    if ($script:ConnectLogSyncInProgress) { return }
+    if (-not $IgnoreRateLimit -and $script:ConnectLogAsyncLastPumpAt) {
+        try {
+            if (((Get-Date) - $script:ConnectLogAsyncLastPumpAt).TotalMilliseconds -lt 1400) { return }
+        } catch { }
+    }
+    $needed = [bool]$script:ConnectLogSyncNeeded
+    $warnUntil = $script:ConnectLogWarnPendingUntil
+    $now = Get-Date
+    $warnActive = ($warnUntil -and $now -lt $warnUntil)
+    if (-not $needed -and -not $warnActive) { return }
+    $script:ConnectLogAsyncLastPumpAt = $now
+    try {
+        $unsynced = [int64]0
+        if (Get-Command Get-ConnectLogUnsyncedByteCount -ErrorAction SilentlyContinue) {
+            $unsynced = Get-ConnectLogUnsyncedByteCount
+        }
+        if ($unsynced -gt 8192) {
+            if (-not $script:ConnectLogAsyncStallSince) { $script:ConnectLogAsyncStallSince = Get-Date }
+            elseif (((Get-Date) - $script:ConnectLogAsyncStallSince).TotalSeconds -ge 60) {
+                if (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue) {
+                    Sync-ConnectLogToServer -Force | Out-Null
+                }
+                $script:ConnectLogAsyncStallSince = $null
+            }
+        } else { $script:ConnectLogAsyncStallSince = $null }
+        if (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue) {
+            Sync-ConnectLogToServer | Out-Null
+        }
+        if ($script:ConnectLogWarnPendingUntil -and (Get-Date) -ge $script:ConnectLogWarnPendingUntil) {
+            $script:ConnectLogWarnPendingUntil = $null
+        }
+        # Only clear Needed when caught up (was clearing on lock/fail -> stalled drain).
+        $left = [int64]0
+        if (Get-Command Get-ConnectLogUnsyncedByteCount -ErrorAction SilentlyContinue) {
+            $left = Get-ConnectLogUnsyncedByteCount
+        }
+        if ($left -le 0) {
+            $script:ConnectLogSyncNeeded = $false
+            $script:ConnectLogAsyncStallSince = $null
+        } else {
+            $script:ConnectLogSyncNeeded = $true
+        }
+    } catch { }
+}
+
 function Ensure-ConnectLogAsyncTimer {
     # Coalescing background drain for Request-ConnectLogSync (non-Force).
     # Register-ObjectEvent (not Start-Job / raw runspace) so the Elapsed handler
-    # runs pumped through this same session's event queue - safe on WinPS 5.1.
+    # runs pumped through this same session's event queue when the engine is idle.
+    # During ReadKey/Sleep the Action never fires - Invoke-ConnectLogAsyncPump covers that.
     if ($script:ConnectLogAsyncDrainerRunning -and $script:ConnectLogAsyncTimer) { return }
     try {
         if (-not $script:ConnectLogAsyncTimer) {
@@ -820,41 +952,8 @@ function Ensure-ConnectLogAsyncTimer {
             $sub = Register-ObjectEvent -InputObject $timer -EventName Elapsed `
                 -SourceIdentifier 'ConnectLogAsyncTimerElapsed' -Action {
                 try {
-                    if ($script:ConnectLogSyncInProgress) { return }
-                    $needed = [bool]$script:ConnectLogSyncNeeded
-                    $warnUntil = $script:ConnectLogWarnPendingUntil
-                    $now = Get-Date
-                    $warnActive = ($warnUntil -and $now -lt $warnUntil)
-                    if (-not $needed -and -not $warnActive) { return }
-                    $unsynced = [int64]0
-                    if (Get-Command Get-ConnectLogUnsyncedByteCount -ErrorAction SilentlyContinue) {
-                        $unsynced = Get-ConnectLogUnsyncedByteCount
-                    }
-                    if ($unsynced -gt 8192) {
-                        if (-not $script:ConnectLogAsyncStallSince) { $script:ConnectLogAsyncStallSince = Get-Date }
-                        elseif (((Get-Date) - $script:ConnectLogAsyncStallSince).TotalSeconds -ge 60) {
-                            if (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue) {
-                                Sync-ConnectLogToServer -Force | Out-Null
-                            }
-                            $script:ConnectLogAsyncStallSince = $null
-                        }
-                    } else { $script:ConnectLogAsyncStallSince = $null }
-                    if (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue) {
-                        Sync-ConnectLogToServer | Out-Null
-                    }
-                    if ($script:ConnectLogWarnPendingUntil -and (Get-Date) -ge $script:ConnectLogWarnPendingUntil) {
-                        $script:ConnectLogWarnPendingUntil = $null
-                    }
-                    # Only clear Needed when caught up (was clearing on lock/fail ÃƒÂ¢Ã¢â€šÂ¬" stalled drain).
-                    $left = [int64]0
-                    if (Get-Command Get-ConnectLogUnsyncedByteCount -ErrorAction SilentlyContinue) {
-                        $left = Get-ConnectLogUnsyncedByteCount
-                    }
-                    if ($left -le 0) {
-                        $script:ConnectLogSyncNeeded = $false
-                        $script:ConnectLogAsyncStallSince = $null
-                    } else {
-                        $script:ConnectLogSyncNeeded = $true
+                    if (Get-Command Invoke-ConnectLogAsyncPump -ErrorAction SilentlyContinue) {
+                        Invoke-ConnectLogAsyncPump
                     }
                 } catch { }
             }
@@ -881,13 +980,27 @@ function Request-ConnectLogSync {
     $script:ConnectLogSyncNeeded = $true
     if (Get-Command Get-ConnectLogUnsyncedByteCount -ErrorAction SilentlyContinue) {
         $u = Get-ConnectLogUnsyncedByteCount
-        # Stall Force after 60s if backlog > 8KB (was 256KB/120s ÃƒÂ¢Ã¢â€šÂ¬" never tripped).
+        # Stall Force after 60s if backlog > 8KB (was 256KB/120s -> never tripped).
         if ($u -gt 8192 -and -not $script:ConnectLogAsyncStallSince) { $script:ConnectLogAsyncStallSince = Get-Date }
         elseif ($u -le 8192) { $script:ConnectLogAsyncStallSince = $null }
     }
     Ensure-ConnectLogAsyncTimer
-    # -NoInline: schedule timer only (never block UI / SshX). Used by StepOk and
-    # Write-ConnectLog INFO so Loading projects cannot freeze on log scp/ssh.
+    # P0.5: stall/Force escape MUST run before -NoInline returns. Every production caller
+    # uses -NoInline; the prior early-return skipped the only path that Force-synced a
+    # stalled backlog, and WinPS 5.1 never pumps the timer Action during ReadKey/Sleep.
+    if (Get-Command Get-ConnectLogUnsyncedByteCount -ErrorAction SilentlyContinue) {
+        $uStall = Get-ConnectLogUnsyncedByteCount
+        if ($uStall -gt 8192 -and $script:ConnectLogAsyncStallSince -and (((Get-Date) - $script:ConnectLogAsyncStallSince).TotalSeconds -ge 60)) {
+            try { Sync-ConnectLogToServer -Force | Out-Null } catch { }
+            $script:ConnectLogAsyncStallSince = $null
+            try {
+                if ((Get-ConnectLogUnsyncedByteCount) -le 0) { $script:ConnectLogSyncNeeded = $false }
+            } catch { }
+        }
+    }
+    # -NoInline: schedule timer + stall escape only (never block UI / SshX on routine sync).
+    # Used by StepOk and Write-ConnectLog INFO so Loading projects cannot freeze on log scp/ssh.
+    # Delivery during the interactive menu is driven by Invoke-ConnectLogAsyncPump.
     if ($NoInline) {
         if (-not $alreadyNeeded -and (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue)) {
             try { Write-ConnectLog 'LOG_SYNC_ASYNC scheduled=1' 'DEBUG' } catch { }
@@ -896,7 +1009,7 @@ function Request-ConnectLogSync {
     }
     # WinPS often does not pump Register-ObjectEvent during ReadKey/Sleep - sync inline
     # only for small backlogs. A multi-MB day log inline-sync stalls the UI for tens of
-    # seconds (looked like Preparing tunnel / Checking SSH hung). Large backlog = timer only.
+    # seconds (looked like Preparing tunnel / Checking SSH hung). Large backlog = timer/pump.
     $inlineOk = $true
     if (Get-Command Get-ConnectLogUnsyncedByteCount -ErrorAction SilentlyContinue) {
         try {
@@ -908,10 +1021,6 @@ function Request-ConnectLogSync {
     }
     if (Get-Command Get-ConnectLogUnsyncedByteCount -ErrorAction SilentlyContinue) {
         $u2 = Get-ConnectLogUnsyncedByteCount
-        if ($u2 -gt 8192 -and $script:ConnectLogAsyncStallSince -and (((Get-Date) - $script:ConnectLogAsyncStallSince).TotalSeconds -ge 60)) {
-            try { Sync-ConnectLogToServer -Force | Out-Null } catch { }
-            $script:ConnectLogAsyncStallSince = $null
-        }
         if ($u2 -le 0) { $script:ConnectLogSyncNeeded = $false }
     }
     if (-not $alreadyNeeded -and (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue)) {
@@ -1273,7 +1382,7 @@ function Wait-ConnectExit {
     # Successful update relaunch already spawned a new Connect window. Must exit FAST:
     # Force log-sync over SSH can hang for tens of seconds and leaves the old UI stuck on
     # "Update applied - relaunching...". Skip blocking drain/Close-ConnectLog here.
-    # Also skip Read-Host for ANY update_* reason (even non-zero) — Press Enter after a
+    # Also skip Read-Host for ANY update_* reason (even non-zero) - Press Enter after a
     # successful "Update applied" is always wrong UX.
     $skipEnter = (
         $Reason -eq 'update_manual_relaunch' -or
@@ -1367,7 +1476,7 @@ function Invoke-ConnectBatRelaunch {
         $relaunchRunId = [guid]::NewGuid().ToString('N').Substring(0, 12)
         $marker = Join-Path $ScriptDir '.client-update-relaunch'
         Set-Content -LiteralPath $marker -Value $relaunchRunId -Encoding ASCII -NoNewline -ErrorAction Stop
-        # Inherit env into a single visible Connect window ÃƒÂ¢Ã¢â€šÂ¬" do NOT cmd/c start (spawns extra consoles).
+        # Inherit env into a single visible Connect window s" do NOT cmd/c start (spawns extra consoles).
         $prevDepth = $env:CLAUDE_CONNECT_UPDATE_DEPTH
         $prevRun = $env:CLAUDE_CONNECT_RUN_ID
         $prevRelaunch = $env:CLAUDE_CONNECT_IS_RELAUNCH
@@ -1589,7 +1698,7 @@ function Write-ConnectScorecard {
     param(
         [Parameter(Mandatory)][ValidateSet('boot', 'end')][string]$Phase
     )
-    # #19: always-on day-log INFO Ã¢â‚¬â€ not gated by CLAUDE_CONNECT_PERF_LOG.
+    # #19: always-on day-log INFO ," not gated by CLAUDE_CONNECT_PERF_LOG.
     if (-not (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue)) { return }
     $ver = if ($script:ConnectVersion) { $script:ConnectVersion } else { 'unknown' }
     $am = 'none'

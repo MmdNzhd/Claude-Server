@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 # RED contracts: BG mount "up" path must skip sync mount health check.
 # Plan: docs/superpowers/plans/2026-07-25-connect-speed-stability-logging.md Task 1
 

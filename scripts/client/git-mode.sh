@@ -36,6 +36,7 @@ get_git_mode_label() {
 _TUNNEL_BANNER_CACHE_AT=0
 _TUNNEL_BANNER_CACHE_BANNER=''
 _TUNNEL_BANNER_CACHE_UP=0
+_TUNNEL_BANNER_CACHE_NEGATIVE=0
 _TUNNEL_BANNER_CACHE_INVALID=0
 _LAST_FORWARD_PROBE_AT=0
 _TUNNEL_FORWARD_PROBE_INTERVAL_SEC=45
@@ -49,6 +50,11 @@ _LAST_TUNNEL_SPAWN_PID=
 STILL_BUSY_WINDOW_SEC=15
 _LAST_STALE_FORWARD_STILL_BUSY_PORT=
 _LAST_STALE_FORWARD_STILL_BUSY_AT=0
+# Still-busy refuse_spawn streak cap. Locked by test-stale-forward-rebind-streak.
+REFUSE_SPAWN_STREAK_CAP=5
+_REFUSE_SPAWN_STREAK=0
+# Wait/poll iteration cap (was 12). Locked by test-tunnel-wait-backoff-fanout.
+TUNNEL_WAIT_MAX_ATTEMPTS=6
 # Owner/service coupling: release empty lease after backends-down + xray-expected.
 # Locked by test-proxy-owner-service-coupling (S3 SERVICE_DEAD_SEC=60).
 SERVICE_DEAD_SEC=60
@@ -66,7 +72,16 @@ clear_tunnel_banner_cache() {
     _TUNNEL_BANNER_CACHE_AT=0
     _TUNNEL_BANNER_CACHE_BANNER=''
     _TUNNEL_BANNER_CACHE_UP=0
+    _TUNNEL_BANNER_CACHE_NEGATIVE=0
     _TUNNEL_BANNER_CACHE_INVALID=1
+}
+
+# Transport/timeout strings are NOT SSH banners (real banners start with SSH-2.0-).
+tunnel_banner_is_transport_noise() {
+    local banner="${1:-}"
+    [ -n "$banner" ] || return 1
+    printf '%s' "$banner" | grep -q '^SSH-2\.0-' && return 1
+    printf '%s' "$banner" | grep -Eqi 'Unknown error|Connection timed out|Connection refused|Could not resolve|No route to host|Network is unreachable|Connection reset|Operation timed out|banner exchange|Connection closed|^ssh:|timed out|Name or service not known'
 }
 
 wait_pid_timeout() {
@@ -789,15 +804,22 @@ tunnel_tcp_open() {
 tunnel_fetch_banner() {
     local now age_ms banner
     [ -n "${PORT:-}" ] || return 1
-    # Positive cache only - never poison with empty banner for 3s.
-    if [ "$_TUNNEL_BANNER_CACHE_INVALID" -eq 0 ] && [ "$_TUNNEL_BANNER_CACHE_AT" -gt 0 ] && [ "$_TUNNEL_BANNER_CACHE_UP" -eq 1 ]; then
+    # Positive cache (3s) OR brief negative cache (2s) — never re-probe a dead link every tick.
+    if [ "$_TUNNEL_BANNER_CACHE_INVALID" -eq 0 ] && [ "$_TUNNEL_BANNER_CACHE_AT" -gt 0 ]; then
         now="$(date +%s 2>/dev/null || printf '0')"
         age_ms=$(( (now - _TUNNEL_BANNER_CACHE_AT) * 1000 ))
-        if [ "$age_ms" -lt 3000 ]; then
+        if [ "$_TUNNEL_BANNER_CACHE_UP" -eq 1 ] && [ "$age_ms" -lt 3000 ]; then
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "TUNNEL_BANNER cache hit age_ms=$age_ms banner=$_TUNNEL_BANNER_CACHE_BANNER" 'TRACE'
             fi
             printf '%s' "$_TUNNEL_BANNER_CACHE_BANNER"
+            return 0
+        fi
+        if [ "${_TUNNEL_BANNER_CACHE_NEGATIVE:-0}" -eq 1 ] && [ "$_TUNNEL_BANNER_CACHE_UP" -eq 0 ] && [ "$age_ms" -lt 2000 ]; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "TUNNEL_BANNER negative_cache hit age_ms=$age_ms port=$PORT" 'TRACE'
+            fi
+            printf ''
             return 0
         fi
     fi
@@ -811,14 +833,30 @@ tunnel_fetch_banner() {
             banner=""
             ;;
     esac
+    if [ -n "$banner" ] && tunnel_banner_is_transport_noise "$banner"; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "TUNNEL_BANNER transport_fail port=$PORT detail=$banner" 'DEBUG'
+        fi
+        banner=""
+        _TUNNEL_BANNER_CACHE_AT="$(date +%s 2>/dev/null || printf '0')"
+        _TUNNEL_BANNER_CACHE_BANNER=""
+        _TUNNEL_BANNER_CACHE_UP=0
+        _TUNNEL_BANNER_CACHE_NEGATIVE=1
+        printf ''
+        return 0
+    fi
     if [ -n "$banner" ] && tunnel_banner_is_this_laptop "$banner"; then
         _TUNNEL_BANNER_CACHE_AT="$(date +%s 2>/dev/null || printf '0')"
         _TUNNEL_BANNER_CACHE_BANNER="$banner"
         _TUNNEL_BANNER_CACHE_UP=1
+        _TUNNEL_BANNER_CACHE_NEGATIVE=0
     else
+        # Do NOT negative-cache ordinary empty/miss (poisoned DROP1 recovery).
+        # Transport failures already set _TUNNEL_BANNER_CACHE_NEGATIVE above.
         _TUNNEL_BANNER_CACHE_AT=0
         _TUNNEL_BANNER_CACHE_BANNER=""
         _TUNNEL_BANNER_CACHE_UP=0
+        _TUNNEL_BANNER_CACHE_NEGATIVE=0
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "TUNNEL_BANNER miss port=$PORT banner=$banner" 'DEBUG'
         fi
@@ -1047,7 +1085,8 @@ sync_session_tunnel_forward() {
 
 wait_for_tunnel_up() {
     local pid="${1:-}" i sleep_s local_r_not_owned=0 local_pids="" p owned=0
-    for i in $(seq 1 12); do
+    local max_attempts="${TUNNEL_WAIT_MAX_ATTEMPTS:-6}"
+    for i in $(seq 1 "$max_attempts"); do
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "TUNNEL_WAIT fail=1 attempt=$i reason=ssh_died pid=$pid" 'WARN'
@@ -1082,7 +1121,7 @@ wait_for_tunnel_up() {
                 connect_log "TUNNEL_WAIT ok=0 attempt=$i port=$PORT" 'TRACE'
             fi
         fi
-        if [ "$i" -ge 12 ]; then
+        if [ "$i" -ge "$max_attempts" ]; then
             break
         fi
         sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
@@ -1101,7 +1140,8 @@ wait_for_tunnel_up() {
 
 poll_tunnel_with_progress() {
     local pid="${1:-}" i sleep_s up="" local_r_not_owned=0 local_pids="" p owned=0
-    for i in $(seq 1 12); do
+    local max_attempts="${TUNNEL_WAIT_MAX_ATTEMPTS:-6}"
+    for i in $(seq 1 "$max_attempts"); do
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "TUNNEL_WAIT fail=1 attempt=$i reason=ssh_died pid=$pid" 'WARN'
@@ -1128,7 +1168,7 @@ poll_tunnel_with_progress() {
                 if [ "$i" -eq 1 ]; then
                     printf '    Tunnel check... port %d is open\n' "$PORT"
                 else
-                    printf '    Tunnel check %d/12... port %d is open\n' "$i" "$PORT"
+                    printf '    Tunnel check %d/%d... port %d is open\n' "$i" "$max_attempts" "$PORT"
                 fi
                 return 0
             fi
@@ -1136,14 +1176,14 @@ poll_tunnel_with_progress() {
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "TUNNEL_WAIT ok=0 attempt=$i reason=local_r_not_owned port=$PORT pid=$pid local_pids=$local_pids" 'WARN'
             fi
-            printf '    Tunnel check %d/12... port %d open but not owned by this tunnel\n' "$i" "$PORT"
+            printf '    Tunnel check %d/%d... port %d open but not owned by this tunnel\n' "$i" "$max_attempts" "$PORT"
         else
-            printf '    Tunnel check %d/12... port %d not open yet\n' "$i" "$PORT"
+            printf '    Tunnel check %d/%d... port %d not open yet\n' "$i" "$max_attempts" "$PORT"
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "TUNNEL_WAIT ok=0 attempt=$i port=$PORT" 'TRACE'
             fi
         fi
-        if [ "$i" -ge 12 ]; then
+        if [ "$i" -ge "$max_attempts" ]; then
             break
         fi
         sleep_s="$(awk "BEGIN { s=0.25+($i-1)*0.2; print (s>1.5?1.5:s) }")"
@@ -1690,6 +1730,8 @@ complete_cursor_proxy_after_tunnel() {
     fi
     if [ "$health_ok" -eq 0 ]; then
         if [ "$front_up" -eq 0 ]; then
+            declare -F connect_log >/dev/null 2>&1 && \
+                connect_log 'CURSOR_PROXY_CLEAR force reason=18998_down_windows_open' 'WARN'
             if declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
                 if declare -F test_may_clear_cursor_proxy_settings >/dev/null 2>&1; then
                     if test_may_clear_cursor_proxy_settings 1; then
@@ -1703,6 +1745,8 @@ complete_cursor_proxy_after_tunnel() {
             fi
             declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail_front_down' 'WARN'
         else
+            declare -F connect_log >/dev/null 2>&1 && \
+                connect_log 'CURSOR_PROXY_CLEAR force reason=backend_down' 'WARN'
             if declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
                 if declare -F test_may_clear_cursor_proxy_settings >/dev/null 2>&1; then
                     if test_may_clear_cursor_proxy_settings 1; then
@@ -2072,14 +2116,44 @@ ensure_session_tunnel() {
         declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL proxy_leg=-L local=$socks_candidate remote=${XRAY_SERVER_SOCKS_PORT}" 'INFO'
         append_http_proxy_leg
     fi
-    # Still-busy abort: after clear logged "port still busy", never spawn -R on that port
-    # within STILL_BUSY_WINDOW_SEC while TCP is still open and we own no local -R.
+    # Still-busy: never spawn -R on sticky busy port (D4). Rebind to another free slot;
+    # cap consecutive refuse cycles so a renewing still-busy marker cannot self-deadlock.
     if stale_forward_still_busy_abort "$PORT"; then
+        local busy_port="$PORT" prev_port="$PORT" saved_slot="${TUNNEL_SLOT:-}" rebound=0
         if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "ENSURE_TUNNEL refuse_spawn reason=stale_port_busy port=$PORT" 'WARN'
+            connect_log "ENSURE_TUNNEL refuse_spawn reason=stale_port_busy port=$busy_port" 'WARN'
         fi
-        bg_pid=""
-        return 1
+        _REFUSE_SPAWN_STREAK=$(( ${_REFUSE_SPAWN_STREAK:-0} + 1 ))
+        if [ "$_REFUSE_SPAWN_STREAK" -ge "${REFUSE_SPAWN_STREAK_CAP:-5}" ]; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "ENSURE_TUNNEL refuse_spawn_streak_exhausted port=$busy_port streak=$_REFUSE_SPAWN_STREAK cap=${REFUSE_SPAWN_STREAK_CAP:-5}" 'ERROR'
+            fi
+            bg_pid=""
+            return 1
+        fi
+        if [ -n "${uid_str:-}" ] && declare -F acquire_tunnel_port >/dev/null 2>&1; then
+            if acquire_tunnel_port "$uid_str"; then
+                if [ -n "${PORT:-}" ] && [ "$PORT" != "$prev_port" ]; then
+                    rebound=1
+                fi
+            fi
+        fi
+        if [ "$rebound" -eq 1 ]; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "ENSURE_TUNNEL refuse_spawn reason=stale_port_busy_rebind from=$prev_port to=$PORT streak=$_REFUSE_SPAWN_STREAK" 'WARN'
+            fi
+            _LAST_STALE_FORWARD_STILL_BUSY_PORT=
+            _LAST_STALE_FORWARD_STILL_BUSY_AT=0
+            _REFUSE_SPAWN_STREAK=0
+        else
+            PORT="$prev_port"
+            TUNNEL_SLOT="$saved_slot"
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "ENSURE_TUNNEL refuse_spawn reason=stale_port_busy_no_rebind port=$busy_port streak=$_REFUSE_SPAWN_STREAK" 'WARN'
+            fi
+            bg_pid=""
+            return 1
+        fi
     fi
     ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=5 \
         -R "${PORT}:localhost:22" "${socks_args[@]}" "$ALIAS" 2>/dev/null &
@@ -2094,6 +2168,7 @@ ensure_session_tunnel() {
         _TUNNEL_SYNC_FAIL_COUNT=0
         TUNNEL_WAIT_FAIL_STREAK=0
         TUNNEL_WAIT_BACKOFF_SEC=2
+        _REFUSE_SPAWN_STREAK=0
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "ENSURE_TUNNEL ok=1 pid=$bg_pid" 'INFO'
         fi
@@ -2116,11 +2191,11 @@ ensure_session_tunnel() {
     fi
     if [ "$TUNNEL_WAIT_FAIL_STREAK" -ge 6 ]; then
         declare -F connect_log >/dev/null 2>&1 && connect_log 'ENSURE_TUNNEL wait_timeout_budget_exhausted surfacing_ui' 'ERROR'
-    else
-        sleep "$TUNNEL_WAIT_BACKOFF_SEC" 2>/dev/null || sleep 2
-        if [ "$TUNNEL_WAIT_BACKOFF_SEC" -lt 60 ]; then
-            TUNNEL_WAIT_BACKOFF_SEC=$(( TUNNEL_WAIT_BACKOFF_SEC * 2 ))
-        fi
+    fi
+    # Monotonic capped backoff — never skip sleep at high streak.
+    sleep "$TUNNEL_WAIT_BACKOFF_SEC" 2>/dev/null || sleep 2
+    if [ "$TUNNEL_WAIT_BACKOFF_SEC" -lt 60 ]; then
+        TUNNEL_WAIT_BACKOFF_SEC=$(( TUNNEL_WAIT_BACKOFF_SEC * 2 ))
     fi
     kill "$bg_pid" 2>/dev/null || true
     bg_pid=""
@@ -2305,6 +2380,12 @@ release_stale_tunnel_port() {
         return 0
     fi
     if [ -n "$banner" ] && ! tunnel_banner_is_this_laptop "$banner"; then
+        if tunnel_banner_is_transport_noise "$banner"; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "STALE_FORWARD: transport_fail skip_foreign_clear port=$PORT banner=$banner" 'DEBUG'
+            fi
+            return 0
+        fi
         if tunnel_banner_is_windows "$banner"; then
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "STALE_FORWARD: skip_foreign_peer port=$PORT banner=$banner" 'INFO'
@@ -2768,7 +2849,9 @@ initialize_server_session() {
     local mount_pid="" git_pid="" mount_pushed=0 git_pushed=0
     INIT_SERVER_SESSION_ERROR=""
 
-    _init="$(sshx "id -u && (test -f \$HOME/.ssh/claude_laptop || ssh-keygen -t ed25519 -N "" -f \$HOME/.ssh/claude_laptop -q) && cat \$HOME/.ssh/claude_laptop.pub" 2>/dev/null)"
+    # Use -N '' (single quotes): -N "" inside this double-quoted sshx collapses to bare -N,
+    # so ssh-keygen sees -f as passphrase and fails with "Too many arguments" / empty pub key.
+    _init="$(sshx "id -u && (test -f \$HOME/.ssh/claude_laptop || ssh-keygen -t ed25519 -N '' -f \$HOME/.ssh/claude_laptop -q) && cat \$HOME/.ssh/claude_laptop.pub" 2>/dev/null)"
     uid_str="$(printf '%s\n' "$_init" | tr -d '\r' | grep -E '^[0-9]+$' | head -1 | tr -dc '0-9')"
     pub_b="$(printf '%s\n' "$_init" | tr -d '\r' | grep '^ssh-' | head -1)"
     if [ -z "$uid_str" ]; then

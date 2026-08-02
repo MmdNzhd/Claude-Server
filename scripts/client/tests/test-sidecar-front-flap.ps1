@@ -51,8 +51,9 @@ Assert ($macSide -match 'SIDECAR_HEAL_BLACKHOLE front_up backend_down') 'Mac sid
 Assert ($macSide -match 'heal_cursor_proxy_sidecar_blackhole') 'Mac sidecar defines heal_blackhole'
 
 Assert ($side -match 'SIDECAR_ENSURE front_up backend_down stopping_fronts_clearing_settings') 'Ensure stops fronts when backend down'
-Assert ($side -match 'SIDECAR_HEAL_BLACKHOLE front_up backend_down') 'HealBlackhole orphan front without backend'
-Assert ($side -match 'Clear-Sticky18998Settings') 'watchdog clears sticky settings on blackhole'
+# Win HealBlackhole retired (BootReap + Ensure/Start blackhole path). Sticky scrub is Clear-CursorProxySettingsSidecar.
+Assert ($side -match 'Clear-CursorProxySettingsSidecar') 'Ensure/Clear scrub sticky 18998 when backend down'
+Assert ($side -notmatch 'function Invoke-CursorProxySidecarHealBlackhole') 'Win HealBlackhole function retired'
 Assert ($side -match 'SIDECAR_START front_up backend_down stopping_fronts') 'Start refuses to pin settings without backend'
 Assert ($side -match '\$nOpen -gt 0 -and \$frontListening') 'CLEAR_SKIP gated on windows open AND front listening'
 

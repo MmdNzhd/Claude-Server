@@ -71,18 +71,21 @@ Assert ($src -notmatch "if \(\`\$cmd -notmatch 'folder-uri'\) \{\s*\r?\n\s*\`\$t
 # --- 4) on_folder has NO global agent-home short-circuit --------------------------------------------
 Assert ($src -notmatch 'if \(Test-RemoteEditorInAgentHome -RemotePath \$RemotePath\) \{ return \$false \}') 'on_folder no longer globally short-circuits on Test-RemoteEditorInAgentHome'
 
-# --- 5) success gate: $afterFolder is authoritative (NOT gated by agent_home) ------------------------
-Assert ($src -match 'if \(\$afterFolder\) \{ \$launchOk = \$true') '$afterFolder alone marks launch OK (standalone Agents window cannot veto a real folder open)'
-Assert ($src -match 'windowCountIncreased -and -not \$afterAgent') 'window-count fallback stays gated by -not $afterAgent (folder-uri splash guard)'
+# --- 5) success gate: on_folder ONLY (unified with Confirm; window-count is promising only) ---------
+Assert ($src -match 'if \(\$afterFolder\) \{') '$afterFolder alone marks launch OK (standalone Agents window cannot veto a real folder open)'
+Assert ($src -match 'LAUNCH_OK: strategy=.*reason=on_folder') 'LAUNCH_OK reason is on_folder'
+Assert ($src -match 'LAUNCH_PROMISING:.*window_count_increased_no_title_match') 'window-count is promising only (does not return true)'
+Assert ($src -notmatch '\$launchOk = \$true; \$okReason = ''window_count_increased_no_title_match''') 'Launch no longer returns true on window_count alone (P0.4)'
 Assert ($src -notmatch 'if \(\(\$afterFolder -or \$windowCountIncreased\) -and -not \$afterAgent\)') 'old combined gate (afterFolder OR wincount) AND not agent removed'
 
 # --- 6) entry skip gated on on_folder alone ---------------------------------------------------------
 Assert ($src -match 'if \(\$onFolder\) \{[\s\S]{0,700}LAUNCH_SKIP') 'entry skip gated on $onFolder alone'
 
-# --- 7) warm handoff: remote-only + long poll (same-window title update needs time) -----------------
+# --- 7) warm handoff: remote + remote-classic + long poll (same-window title update needs time) ------
 Assert ($src -match 'WarmHandoff') 'Get-RemoteEditorLaunchStrategies accepts -WarmHandoff'
-Assert ($src -match 'if \(\$WarmHandoff\)') 'warm handoff returns early (remote only, no folder-uri cascade)'
+Assert ($src -match 'if \(\$WarmHandoff\)') 'warm handoff returns early (no folder-uri cascade)'
 Assert ($src -match 'elseif \(\$attempt -eq 1 -and \$useNewWindow -and \$profileProcCount -gt 0\) \{ 80 \}') 'warm attempt-1 poll ceiling is 80 ticks (20s) for Remote-SSH title settle'
+Assert ($src -match 'elseif \(\$attempt -eq 1\) \{ 48 \}') 'cold attempt-1 poll ceiling is 48 ticks (12s; was 3s premature cascade)'
 Assert ($src -match 'LAUNCH_GRACE: warm handoff') 'post-exhaustion warm grace wait for late on_folder'
 
 # --- 8) session presence uses multi-window on_folder (not MainWindowTitle-only) ---------------------

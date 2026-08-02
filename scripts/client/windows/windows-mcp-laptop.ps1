@@ -1,4 +1,4 @@
-﻿# windows-mcp-laptop.ps1 - Ensure Windows-MCP on the laptop during connect.
+# windows-mcp-laptop.ps1 - Ensure Windows-MCP on the laptop during connect.
 # Dot-sourced by windows/connect.ps1 only (not Mac / not designer).
 # Fail-soft + background: never block/abort connect UI.
 #
@@ -40,12 +40,40 @@ function Test-WindowsMcpPortBindable {
     }
 }
 
+function Stop-WindowsMcpLegacyPort8000 {
+    # Legacy :8000 is Hyper-V-hostile. Never sticky-adopt it across reconnects
+    # (Get-WindowsMcpLocalPort used to prefer any already-listening candidate including 8000,
+    # so one stale task pinned the fleet on 8000 forever — hard-test 2026-08-01).
+    try {
+        $legacy = @(Get-NetTCPConnection -State Listen -LocalPort 8000 -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1', '0.0.0.0') })
+        foreach ($c in $legacy) {
+            try {
+                Stop-Process -Id ([int]$c.OwningProcess) -Force -ErrorAction SilentlyContinue
+                Write-WindowsMcpEnsureLog ("legacy_8000_killed pid={0}" -f $c.OwningProcess)
+            } catch { }
+        }
+        if ($legacy.Count -gt 0) {
+            Start-Sleep -Milliseconds 400
+            return $true
+        }
+    } catch { }
+    return $false
+}
+
 function Get-WindowsMcpLocalPort {
-    if ($script:WindowsMcpLocalPort -and $script:WindowsMcpLocalPort -gt 0) {
+    if ($env:WMCP_LPORT -match '^\d+$') {
+        $envPort = [int]$env:WMCP_LPORT
+        if ($envPort -ge 1024 -and $envPort -le 65535 -and $envPort -ne 8000) {
+            $script:WindowsMcpLocalPort = $envPort
+            return $envPort
+        }
+    }
+    if ($script:WindowsMcpLocalPort -and $script:WindowsMcpLocalPort -gt 0 -and $script:WindowsMcpLocalPort -ne 8000) {
         return [int]$script:WindowsMcpLocalPort
     }
-    # Prefer an already-listening windows-mcp port (survives reconnect without churn).
-    foreach ($cand in @($script:WindowsMcpLocalPortDefault, 18765, 17654, 19000, 19100, 8000)) {
+    # Prefer an already-listening preferred port (never adopt legacy 8000).
+    foreach ($cand in @($script:WindowsMcpLocalPortDefault, 18765, 17654, 19000, 19100)) {
         try {
             $c = @(Get-NetTCPConnection -State Listen -LocalPort $cand -ErrorAction SilentlyContinue |
                 Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1', '0.0.0.0') })
@@ -61,9 +89,9 @@ function Get-WindowsMcpLocalPort {
             return $cand
         }
     }
-    # Last resort: keep old default even if bind may fail (surface in logs).
-    $script:WindowsMcpLocalPort = 8000
-    return 8000
+    # Last resort: preferred default (not 8000).
+    $script:WindowsMcpLocalPort = [int]$script:WindowsMcpLocalPortDefault
+    return [int]$script:WindowsMcpLocalPortDefault
 }
 
 function Update-WindowsMcpPath {
@@ -442,6 +470,60 @@ function Install-WindowsMcpPackage {
     return $null
 }
 
+function Repair-WindowsMcpUtf8WriteNewline {
+    <#
+    .SYNOPSIS
+      Patch windows-mcp FileSystem write_file to use newline='' (no \n\r\n translation).
+    .NOTES
+      Upstream open(..., encoding=utf-8) without newline='' turns agent \r\n into \r\r\n
+      (extra blank lines) and mangles UTF-8 text edited across mount/MCP/LE. Idempotent.
+      Returns $true if any file was newly patched (caller should restart the server).
+    #>
+    $changed = $false
+    # Match the exact upstream write_file open() line (4-space indent inside try).
+    $needle = "        with open(file_path, mode, encoding=encoding) as f:"
+    $repl = "        with open(file_path, mode, encoding=encoding, newline='') as f:"
+    $roots = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in @(
+        (Join-Path $env:APPDATA 'uv\tools\windows-mcp\Lib\site-packages\windows_mcp\filesystem\service.py'),
+        (Join-Path $env:LOCALAPPDATA 'uv\tools\windows-mcp\Lib\site-packages\windows_mcp\filesystem\service.py'),
+        (Join-Path $env:USERPROFILE '.local\share\uv\tools\windows-mcp\Lib\site-packages\windows_mcp\filesystem\service.py')
+    )) {
+        if (Test-Path -LiteralPath $candidate) { [void]$roots.Add($candidate) }
+    }
+    # Also patch uv cache copies used by some installs
+    $cacheRoot = Join-Path $env:LOCALAPPDATA 'uv\cache'
+    if (Test-Path -LiteralPath $cacheRoot) {
+        Get-ChildItem -LiteralPath $cacheRoot -Recurse -Filter 'service.py' -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '[\\/]windows_mcp[\\/]filesystem[\\/]service\.py$' } |
+            ForEach-Object { [void]$roots.Add($_.FullName) }
+    }
+    foreach ($path in ($roots | Select-Object -Unique)) {
+        try {
+            $raw = [System.IO.File]::ReadAllText($path)
+        } catch {
+            Write-WindowsMcpEnsureLog ("utf8_write_patch_read_fail {0} {1}" -f $path, $_.Exception.Message) 'WARN'
+            continue
+        }
+        if ($raw -match "newline\s*=\s*''") {
+            continue
+        }
+        if ($raw -notlike "*$needle*") {
+            continue
+        }
+        $newRaw = $raw.Replace($needle, $repl)
+        if ($newRaw -eq $raw) { continue }
+        try {
+            [System.IO.File]::WriteAllText($path, $newRaw, [System.Text.UTF8Encoding]::new($false))
+            $changed = $true
+            Write-WindowsMcpEnsureLog ("utf8_write_patch_applied {0}" -f $path)
+        } catch {
+            Write-WindowsMcpEnsureLog ("utf8_write_patch_write_fail {0} {1}" -f $path, $_.Exception.Message) 'WARN'
+        }
+    }
+    return $changed
+}
+
 function Get-WindowsMcpAuthKeyFromToml {
     param([string]$TomlPath)
     if (-not (Test-Path -LiteralPath $TomlPath)) { return $null }
@@ -558,7 +640,7 @@ function Ensure-WindowsMcpTask {
     if (-not $needInstall) {
         if (Test-Path -LiteralPath $startCmd) {
             $raw = (Get-Content -LiteralPath $startCmd -Raw -ErrorAction SilentlyContinue) + ''
-            # Vendor cmd embeds --port; our hidden trampoline only calls wscript â€” port lives in VBS.
+            # Vendor cmd embeds --port; our hidden trampoline only calls wscript - port lives in VBS.
             $hasHidden = (Test-Path -LiteralPath $hideVbs) -and ($raw -match 'start-server-hidden\.vbs')
             $hasPort = ($raw -match [regex]::Escape("--port',$lport") -or $raw -match "--port['\s]+$lport")
             if (-not $hasHidden) {
@@ -569,9 +651,9 @@ function Ensure-WindowsMcpTask {
                     $needInstall = $true
                 }
             } else {
-                # Refresh VBS when port/exe drifted or file is corrupt
+                # Refresh VBS when port/exe drifted, still pins legacy 8000, or file is corrupt
                 $vbsRaw = (Get-Content -LiteralPath $hideVbs -Raw -ErrorAction SilentlyContinue) + ''
-                if ($vbsRaw -notmatch "--port\s+$lport" -or $vbsRaw -notmatch 'WScript\.Shell') {
+                if ($vbsRaw -match '--port\s+8000' -or $vbsRaw -notmatch "--port\s+$lport" -or $vbsRaw -notmatch 'WScript\.Shell') {
                     [void](Write-WindowsMcpHiddenLogonLauncher -WmExe $WmExe)
                 }
             }
@@ -583,7 +665,7 @@ function Ensure-WindowsMcpTask {
         Write-WindowsMcpHost ("      -> registering windows-mcp login task (port {0})..." -f $lport)
         Write-WindowsMcpEnsureLog ("registering scheduled task port={0}" -f $lport)
         # Native install writes stderr; under caller's $ErrorActionPreference=Stop that
-        # becomes a terminating error â€” never abort before hidden-launcher rewrite.
+        # becomes a terminating error - never abort before hidden-launcher rewrite.
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
@@ -684,7 +766,8 @@ function Restart-WindowsMcpServer {
     Start-Sleep -Milliseconds 400
     Write-WindowsMcpEnsureLog 'restart_direct_hidden'
     [void](Start-WindowsMcpProcessDirect)
-    for ($i = 0; $i -lt 8; $i++) {
+    # Busy laptops (uv/python cold start + port thrash) often need >8s; keep UI path direct/hidden.
+    for ($i = 0; $i -lt 20; $i++) {
         Start-Sleep -Seconds 1
         if (Test-WindowsMcpListening) {
             Stop-WindowsMcpOrphanCmdWrappers
@@ -697,6 +780,10 @@ function Restart-WindowsMcpServer {
 }
 
 function Start-WindowsMcpIfNeeded {
+    # Drop sticky legacy :8000 before any "already listening" short-circuit.
+    if (Stop-WindowsMcpLegacyPort8000) {
+        $script:WindowsMcpLocalPort = $null
+    }
     if (Test-WindowsMcpListening) {
         Stop-WindowsMcpOrphanCmdWrappers
         return $true
@@ -705,18 +792,27 @@ function Start-WindowsMcpIfNeeded {
     # blocked the Connect UI for up to 20s on the first maintain tick).
     Write-WindowsMcpHost '      -> starting windows-mcp (background)...'
     Write-WindowsMcpEnsureLog 'starting_direct_hidden'
-    [void](Start-WindowsMcpProcessDirect)
-    for ($i = 0; $i -lt 8; $i++) {
-        Start-Sleep -Seconds 1
-        if (Test-WindowsMcpListening) {
-            Stop-WindowsMcpOrphanCmdWrappers
-            return $true
+    $lportStart = Get-WindowsMcpLocalPort
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        if ($attempt -gt 1) {
+            Write-WindowsMcpEnsureLog 'start_direct_retry_after_no_listen'
+            try {
+                Get-NetTCPConnection -LocalPort $lportStart -State Listen -ErrorAction SilentlyContinue |
+                    ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
+            } catch { }
+            Start-Sleep -Milliseconds 500
+        }
+        [void](Start-WindowsMcpProcessDirect)
+        for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Seconds 1
+            if (Test-WindowsMcpListening) {
+                Stop-WindowsMcpOrphanCmdWrappers
+                return $true
+            }
         }
     }
-    $ok = Test-WindowsMcpListening
-    if ($ok) { Stop-WindowsMcpOrphanCmdWrappers }
-    else { Write-WindowsMcpEnsureLog 'start_direct_not_listening_after_wait' 'WARN' }
-    return $ok
+    Write-WindowsMcpEnsureLog 'start_direct_not_listening_after_wait' 'WARN'
+    return $false
 }
 
 function Sync-WindowsMcpAuthToServer {
@@ -772,7 +868,7 @@ function Sync-WindowsMcpAuthToServer {
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($py))
     # After writing env/mcp.json: start forward, then HTTP-probe through it.
     # WMCP_PROBE=200 means end-to-end OK; 000 means forward/laptop still broken
-    # (old bug: sync printed OK even when forward was dead â€” amir 2026-07-25).
+    # (old bug: sync printed OK even when forward was dead - amir 2026-07-25).
     $remote = "export WMCP_AUTH='$AuthKey' WMCP_LPORT='$lport'; echo $b64 | base64 -d | python3 -; " +
               'F="$HOME/.local/bin/windows-mcp-forward"; G=/usr/local/bin/windows-mcp-forward; ' +
               'FWD=""; if [ -x "$F" ]; then FWD="$F"; elif [ -x "$G" ]; then FWD="$G"; fi; ' +
@@ -830,6 +926,10 @@ function Ensure-WindowsMcp {
     try {
         Update-WindowsMcpPath
         Write-WindowsMcpEnsureLog ("ensure_begin admin={0}" -f [int](Test-WindowsMcpIsAdmin))
+        if (Stop-WindowsMcpLegacyPort8000) {
+            $script:WindowsMcpLocalPort = $null
+            Write-WindowsMcpEnsureLog 'ensure_migrating_off_legacy_8000'
+        }
         $cfgDir = Join-Path $env:USERPROFILE '.windows-mcp'
         if (-not (Test-Path -LiteralPath $cfgDir)) {
             New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
@@ -852,11 +952,13 @@ function Ensure-WindowsMcp {
             return $result
         }
         Ensure-WindowsMcpUserPathEntry
+        $patchedWrite = [bool](Repair-WindowsMcpUtf8WriteNewline)
         $auth = Ensure-WindowsMcpAuth -WmExe $exe -CfgDir $cfgDir
         $result.AuthKey = $auth
         $null = Ensure-WindowsMcpTask -WmExe $exe
         $listening = Start-WindowsMcpIfNeeded
-        if ($script:WindowsMcpAuthRotated) {
+        if ($patchedWrite -or $script:WindowsMcpAuthRotated) {
+            # Reload Python so write_file(newline='') is live.
             $listening = Restart-WindowsMcpServer
             $script:WindowsMcpAuthRotated = $false
         }
@@ -899,7 +1001,7 @@ function Ensure-WindowsMcp {
 function Maintain-WindowsMcpSession {
     # Lightweight mid-session heal: keep laptop listen + server forward alive.
     # Safe for live sessions (does not touch SSH tunnels / editor). Call every few minutes.
-    # Quiet on Connect UI â€” never print "starting windows-mcp..." on the session loop.
+    # Quiet on Connect UI - never print "starting windows-mcp..." on the session loop.
     $prevQuiet = $env:WINDOWS_MCP_ENSURE_QUIET
     $env:WINDOWS_MCP_ENSURE_QUIET = '1'
     try {
@@ -990,7 +1092,7 @@ try {
             '-ModulePath', $ModulePath,
             '-SshAlias', $SshAlias
         )
-        # Inherit elevation from connect.ps1 (already RunAs at start) â€” do NOT use -Verb RunAs here
+        # Inherit elevation from connect.ps1 (already RunAs at start) - do NOT use -Verb RunAs here
         # (would pop a second UAC and break non-interactive background).
         $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $argList `
             -WindowStyle Hidden -PassThru -ErrorAction Stop

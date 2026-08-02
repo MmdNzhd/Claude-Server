@@ -5,7 +5,7 @@
 # wrapper holds its own single-instance mutex for as long as this AppLaunched command runs.
 # First install: DETACHED setup-worker.ps1 (optional network update + boot).
 # Fast path (src already complete): direct connect-boot — no worker / no network.
-# Day-to-day instant reopen: Claude-Connect.vbs (+ .cmd trampoline) beside the versioned EXE.
+# Day-to-day: double-click Desktop\Claude-Connect.exe (SFX). Optional .vbs/.cmd beside it.
 #
 # VERSIONED LAYOUT (2026-07-27):
 #   {launchParent}\Claude-Connect\{ver}\Claude-Connect-{ver}.exe
@@ -104,6 +104,31 @@ function Resolve-ConnectLaunchExe {
         }
     } catch { }
 
+    # IExpress AppLaunched chain (wextract->wscript->cmd->powershell) often hides the
+    # original EXE from the parent chain — prefer known Desktop / publish EXEs.
+    foreach ($cand in @(
+            (Join-Path $env:USERPROFILE 'Desktop\Claude-Connect.exe'),
+            (Join-Path $env:USERPROFILE 'Desktop\claude-publish\Claude-Connect.exe'),
+            (Join-Path $FallbackRoot 'Claude-Connect.exe')
+        )) {
+        if ($cand -and (Test-Path -LiteralPath $cand)) {
+            try {
+                $dir = Split-Path -Parent $cand
+                if (-not (Test-IsBadInstallDir -Dir $dir -ExtractSrc $ExtractSrc)) {
+                    return @{ LaunchParent = [IO.Path]::GetFullPath($dir); Exe = [IO.Path]::GetFullPath($cand); How = 'known_path' }
+                }
+            } catch {}
+        }
+    }
+    try {
+        Get-ChildItem -LiteralPath (Join-Path $env:USERPROFILE 'Desktop\claude-publish') -Filter 'Claude-Connect-*.exe' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1 |
+            ForEach-Object {
+                return @{ LaunchParent = $_.DirectoryName; Exe = $_.FullName; How = 'publish_newest' }
+            }
+    } catch {}
+
     return @{ LaunchParent = [IO.Path]::GetFullPath((Split-Path -Parent $FallbackRoot)); Exe = $null; How = 'fallback_desktop' }
 }
 
@@ -151,20 +176,82 @@ function Resolve-VersionedTree {
     }
 }
 
+function Test-VersionSrcStructural {
+    # Structural src check (folder leaf may differ from package version stamp).
+    param([string]$SrcDir)
+    if (-not $SrcDir) { return $false }
+    foreach ($n in @('connect.bat', 'connect.ps1', 'connect-boot.ps1', 'connect-update.ps1', 'editor-launch.ps1', 'connect-ui.ps1', 'connect-env-repair.ps1')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $SrcDir $n))) { return $false }
+    }
+    return $true
+}
+
+function Set-SrcVersionStamp {
+    param([string]$SrcDir, [string]$Version)
+    if (-not $SrcDir -or $Version -notmatch '^\d{8}\.\d+$') { return }
+    try {
+        Set-Content -LiteralPath (Join-Path $SrcDir 'connect-version.txt') -Value $Version -Encoding ASCII -NoNewline
+    } catch {}
+}
+
 function Test-VersionSrcComplete {
     # Hot path: a few Test-Path + one tiny read. No hashing, no tree walk.
     param([string]$SrcDir, [string]$Version)
     if (-not $SrcDir -or -not $Version) { return $false }
-    if (-not (Test-Path -LiteralPath (Join-Path $SrcDir 'connect.bat'))) { return $false }
-    if (-not (Test-Path -LiteralPath (Join-Path $SrcDir 'connect.ps1'))) { return $false }
-    if (-not (Test-Path -LiteralPath (Join-Path $SrcDir 'connect-boot.ps1'))) { return $false }
-    if (-not (Test-Path -LiteralPath (Join-Path $SrcDir 'connect-update.ps1'))) { return $false }
+    if (-not (Test-VersionSrcStructural -SrcDir $SrcDir)) { return $false }
     $vf = Join-Path $SrcDir 'connect-version.txt'
     if (-not (Test-Path -LiteralPath $vf)) { return $false }
     try {
         $v = (Get-Content -LiteralPath $vf -Raw -ErrorAction Stop).Trim()
         return ($v -eq $Version)
     } catch { return $false }
+}
+
+function Repair-SetupVerDirContract {
+    # After install: VerDir = src + Claude-Connect-{ver}.exe only.
+    param([string]$Root, [string]$VerDir, [string]$SrcDir, [string]$Version)
+    if (-not $VerDir -or -not $Version) { return }
+    $leaf = Split-Path -Leaf $VerDir
+    # verdir_leaf_wins: DestExe / stamp always follow folder leaf when it is a version.
+    if ($leaf -match '^\d{8}\.\d+$' -and $leaf -ne $Version) {
+        $Version = $leaf
+    }
+    Set-SrcVersionStamp -SrcDir $SrcDir -Version $Version
+    $wantExe = Join-Path $VerDir ("Claude-Connect-{0}.exe" -f $Version)
+    Get-ChildItem -LiteralPath $VerDir -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.Name -match ('^(?i)Claude-Connect-' + [regex]::Escape($Version) + '\.exe$')) { return }
+        if ($_.Name -match '^(?i)Claude-Connect\.exe$') {
+            if (-not (Test-Path -LiteralPath $wantExe)) {
+                try { Move-Item -LiteralPath $_.FullName -Destination $wantExe -Force } catch {
+                    try { Copy-Item -LiteralPath $_.FullName -Destination $wantExe -Force } catch {}
+                }
+            }
+            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+            return
+        }
+        if ($_.Name -match '(?i)\.(vbs|cmd)$') {
+            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+            return
+        }
+        $dest = Join-Path $SrcDir $_.Name
+        if (-not (Test-Path -LiteralPath $dest)) {
+            try { Move-Item -LiteralPath $_.FullName -Destination $dest -Force } catch {
+                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+            }
+        } else {
+            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Get-ChildItem -LiteralPath $VerDir -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.Name -eq 'src') { return }
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($Root -and $Version -match '^\d{8}\.\d+$') {
+        if (Get-Command Set-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+            try { Set-ConnectInstallCurrent -Root $Root -Ver $Version } catch {}
+        }
+        Remove-Item -LiteralPath (Join-Path $Root 'current.txt') -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Test-ConnectUiOpen {
@@ -204,40 +291,95 @@ function Copy-PayloadToSrc {
 }
 
 function Write-ConnectInstantLauncher {
-    # Instant reopen beside the versioned EXE — no IExpress extract.
-    # Prefer .vbs (no console). .cmd is a thin wscript trampoline that exits
-    # immediately so Explorer double-click never leaves an orphan cmd window
-    # (old start "title" powershell form could leave a titled empty console).
-    param([string]$VerDir, [string]$SrcDir)
+    # Claude-Connect\ root = version folders ONLY.
+    # Desktop\Claude-Connect.exe is the primary launcher (rebuilt SFX). Optional .vbs/.cmd beside it.
+    param([string]$VerDir, [string]$SrcDir, [string]$Root = '')
     if (-not $VerDir -or -not $SrcDir) { return }
     try {
-        New-Item -ItemType Directory -Force -Path $VerDir | Out-Null
-        $vbsPath = Join-Path $VerDir 'Claude-Connect.vbs'
-        $vbs = @(
-            "' Claude Connect - instant reopen (no cmd console)"
-            'Set sh = CreateObject("WScript.Shell")'
-            'Set fso = CreateObject("Scripting.FileSystemObject")'
-            'dir = fso.GetParentFolderName(WScript.ScriptFullName)'
-            'src = dir & "\src"'
-            'boot = src & "\connect-boot.ps1"'
-            'If Not fso.FileExists(boot) Then'
-            '  MsgBox "Missing connect-boot.ps1 in:" & vbCrLf & src, vbCritical, "Claude Connect"'
-            '  WScript.Quit 1'
-            'End If'
-            'sh.CurrentDirectory = src'
-            'sh.Run "powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File """ & boot & """", 1, False'
-        ) -join "`r`n"
-        [IO.File]::WriteAllText($vbsPath, $vbs + "`r`n", [Text.UTF8Encoding]::new($false))
-
-        $cmdPath = Join-Path $VerDir 'Claude-Connect.cmd'
-        $cmd = @(
-            '@echo off'
-            'REM Instant reopen - hand off to VBS (hidden; no minimized taskbar console).'
-            'wscript.exe //B //Nologo "%~dp0Claude-Connect.vbs"'
-            'exit /b 0'
-        ) -join "`r`n"
-        [IO.File]::WriteAllText($cmdPath, $cmd + "`r`n", [Text.UTF8Encoding]::new($false))
-        Log ("instant_launcher ok vbs={0} cmd={1}" -f $vbsPath, $cmdPath)
+        if (-not $Root) { $Root = Split-Path -Parent $VerDir }
+        $ver = Split-Path -Leaf $VerDir
+        if ($ver -notmatch '^\d{8}\.\d+$') { return }
+        if (Get-Command Repair-SetupVerDirContract -ErrorAction SilentlyContinue) {
+            Repair-SetupVerDirContract -Root $Root -VerDir $VerDir -SrcDir $SrcDir -Version $ver
+        }
+        if (Get-Command Set-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+            Set-ConnectInstallCurrent -Root $Root -Ver $ver
+        } else {
+            # Same TEMP/sandbox guard as Set-ConnectInstallCurrent (do not poison live pointer).
+            $skipGlobal = $false
+            try {
+                $rf = [IO.Path]::GetFullPath($Root)
+                foreach ($tEnv in @($env:TEMP, $env:TMP)) {
+                    if (-not $tEnv) { continue }
+                    $tr = [IO.Path]::GetFullPath($tEnv).TrimEnd('\')
+                    if ($rf.StartsWith($tr + '\', [StringComparison]::OrdinalIgnoreCase) -or
+                        [string]::Equals($rf, $tr, [StringComparison]::OrdinalIgnoreCase)) {
+                        $skipGlobal = $true
+                        break
+                    }
+                }
+            } catch {}
+            if (-not $skipGlobal) {
+                try {
+                    $cfgDir = Join-Path $env:USERPROFILE '.config\claude-connect'
+                    New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+                    Set-Content -LiteralPath (Join-Path $cfgDir 'install-current.txt') -Value $ver -Encoding ASCII -NoNewline
+                } catch {}
+            }
+        }
+        if (Get-Command Write-ConnectRootInstantLauncher -ErrorAction SilentlyContinue) {
+            Write-ConnectRootInstantLauncher -Root $Root -Ver $ver
+        } else {
+            # Inline fallback (tests / thin extract without env-repair): Desktop sibling launchers.
+            $desk = Split-Path -Parent $Root
+            if (-not $desk) { $desk = [Environment]::GetFolderPath('Desktop') }
+            $cfgEsc = (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt') -replace '"', '""'
+            $rootEsc = $Root -replace '"', '""'
+            $vbsPath = Join-Path $desk 'Claude-Connect.vbs'
+            $vbs = @(
+                "' Claude Connect - Desktop sibling (folder root = version dirs only)"
+                'Set sh = CreateObject("WScript.Shell")'
+                'Set fso = CreateObject("Scripting.FileSystemObject")'
+                ('root = "' + $rootEsc + '"')
+                ('cfg = "' + $cfgEsc + '"')
+                # Prefer VerDir we were written for. install-current only wins when that
+                # tree exists under this root (sandbox/TEMP must not follow a foreign Desktop pointer).
+                ('ver = "' + $ver + '"')
+                'If fso.FileExists(cfg) Then'
+                '  Set tf = fso.OpenTextFile(cfg, 1)'
+                '  cfgVer = Trim(tf.ReadLine)'
+                '  tf.Close'
+                '  If cfgVer <> "" Then'
+                '    If fso.FileExists(root & "\" & cfgVer & "\src\connect-boot.ps1") Then ver = cfgVer'
+                '  End If'
+                'End If'
+                'boot = root & "\" & ver & "\src\connect-boot.ps1"'
+                'If Not fso.FileExists(boot) Then'
+                '  MsgBox "Missing connect-boot.ps1 for version " & ver, vbCritical, "Claude Connect"'
+                '  WScript.Quit 1'
+                'End If'
+                'src = fso.GetParentFolderName(boot)'
+                'sh.CurrentDirectory = src'
+                'sh.Run "powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File """ & boot & """", 1, False'
+            ) -join "`r`n"
+            # VBScript needs UTF-16 LE (BOM) for non-ASCII paths; UTF-8 mojibakes ط/و etc.
+            [IO.File]::WriteAllText($vbsPath, $vbs + "`r`n", [Text.Encoding]::Unicode)
+            $cmdPath = Join-Path $desk 'Claude-Connect.cmd'
+            $cmd = "@echo off`r`nwscript.exe //B //Nologo `"%~dp0Claude-Connect.vbs`"`r`nexit /b 0`r`n"
+            [IO.File]::WriteAllText($cmdPath, $cmd, [Text.UTF8Encoding]::new($false))
+            $verExe = Join-Path $VerDir ("Claude-Connect-{0}.exe" -f $ver)
+            if (Test-Path -LiteralPath $verExe) {
+                try { Copy-Item -LiteralPath $verExe -Destination (Join-Path $desk 'Claude-Connect.exe') -Force -ErrorAction SilentlyContinue } catch {}
+            }
+        }
+        if (Get-Command Repair-ConnectRootLayout -ErrorAction SilentlyContinue) {
+            [void](Repair-ConnectRootLayout -Root $Root -Ver $ver)
+        }
+        foreach ($stale in @('Claude-Connect.vbs', 'Claude-Connect.cmd', 'Claude-Connect.exe', 'connect.bat', 'current.txt')) {
+            Remove-Item -LiteralPath (Join-Path $Root $stale) -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (Join-Path $VerDir $stale) -Force -ErrorAction SilentlyContinue
+        }
+        Log ("instant_launcher ok root={0} ver={1} (folders-only)" -f $Root, $ver)
     } catch {
         Log ("instant_launcher_warn $($_.Exception.Message)")
     }
@@ -252,24 +394,20 @@ function Move-LaunchExeIntoVerDir {
     } catch { return $false }
     if ($srcFull -eq $dstFull) { return $false }
     New-Item -ItemType Directory -Force -Path $VerDir | Out-Null
-    # Prefer move (user asked); fall back to copy+delete if move fails (cross-volume / lock).
+    # Keep Desktop / claude-publish EXE in place so user can always double-click EXE.
+    $keepSrc = $false
     try {
-        if (Test-Path -LiteralPath $dstFull) {
-            Copy-Item -LiteralPath $srcFull -Destination $dstFull -Force
-            if ($srcFull -ne $dstFull) {
-                Remove-Item -LiteralPath $srcFull -Force -ErrorAction SilentlyContinue
-            }
-        } else {
-            Move-Item -LiteralPath $srcFull -Destination $dstFull -Force
+        $desk = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE 'Desktop'))
+        if ($srcFull.StartsWith($desk, [StringComparison]::OrdinalIgnoreCase)) { $keepSrc = $true }
+        if ($srcFull -match '(?i)[\\/]claude-publish[\\/]') { $keepSrc = $true }
+    } catch {}
+    try {
+        Copy-Item -LiteralPath $srcFull -Destination $dstFull -Force
+        if (-not $keepSrc -and $srcFull -ne $dstFull) {
+            Remove-Item -LiteralPath $srcFull -Force -ErrorAction SilentlyContinue
         }
         return $true
-    } catch {
-        try {
-            Copy-Item -LiteralPath $srcFull -Destination $dstFull -Force
-            Remove-Item -LiteralPath $srcFull -Force -ErrorAction SilentlyContinue
-            return $true
-        } catch { return $false }
-    }
+    } catch { return $false }
 }
 
 function Prune-OldVersionDirs {
@@ -327,14 +465,16 @@ try {
             $migSrc = Join-Path $migVerDir 'src'
             New-Item -ItemType Directory -Force -Path $migSrc | Out-Null
             Get-ChildItem -LiteralPath $Root -File -ErrorAction SilentlyContinue | ForEach-Object {
-                if ($_.Name -eq 'current.txt') { return }
                 Move-Item -LiteralPath $_.FullName -Destination (Join-Path $migSrc $_.Name) -Force -ErrorAction SilentlyContinue
             }
             $version = $flatVer
             $VerDir = $migVerDir
             $SrcDir = $migSrc
             $DestExe = Join-Path $VerDir ("Claude-Connect-{0}.exe" -f $version)
-            Set-Content -LiteralPath (Join-Path $Root 'current.txt') -Value $version -Encoding ASCII -NoNewline
+            if (Get-Command Set-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+                try { Set-ConnectInstallCurrent -Root $Root -Ver $version } catch {}
+            }
+            Remove-Item -LiteralPath (Join-Path $Root 'current.txt') -Force -ErrorAction SilentlyContinue
             Log ("setup flat_migrated ver={0} src={1}" -f $version, $SrcDir)
             $env:CLAUDE_CONNECT_RELOCATE = '1'
         } catch {
@@ -373,11 +513,30 @@ try {
         Prune-OldVersionDirs -Root $Root -Keep 3
     }
 
-    try {
-        Set-Content -LiteralPath (Join-Path $Root 'current.txt') -Value $version -Encoding ASCII -NoNewline
-    } catch { }
+    # verdir_leaf_wins: if EXE already lives under Claude-Connect\{ver}\, that leaf is authoritative.
+    $verDirLeaf = Split-Path -Leaf $VerDir
+    if ($verDirLeaf -match '^\d{8}\.\d+$') {
+        $version = $verDirLeaf
+        $DestExe = Join-Path $VerDir ("Claude-Connect-{0}.exe" -f $version)
+    }
 
-    Write-ConnectInstantLauncher -VerDir $VerDir -SrcDir $SrcDir
+    if (Get-Command Set-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+        try { Set-ConnectInstallCurrent -Root $Root -Ver $version } catch {}
+    }
+    Set-SrcVersionStamp -SrcDir $SrcDir -Version $version
+    Repair-SetupVerDirContract -Root $Root -VerDir $VerDir -SrcDir $SrcDir -Version $version
+
+    Write-ConnectInstantLauncher -VerDir $VerDir -SrcDir $SrcDir -Root $Root
+
+    # Root = version folders ONLY (no flat script dump from IExpress).
+    if (Get-Command Repair-ConnectRootLayout -ErrorAction SilentlyContinue) {
+        try {
+            [void](Repair-ConnectRootLayout -Root $Root -Ver $version)
+            Log ("setup root_layout_ok ver={0}" -f $version)
+        } catch {
+            Log ("setup root_layout_warn $($_.Exception.Message)")
+        }
+    }
 
     if ($env:CLAUDE_CONNECT_SETUP_NO_LAUNCH -eq '1') {
         Log 'setup skip reason=NO_LAUNCH=1 files-only'
@@ -419,7 +578,7 @@ try {
     }
 
     # FAST PATH: src already complete — boot UI directly (no worker, no network update).
-    # IExpress extract still costs time on *.exe clicks; use Claude-Connect.vbs for instant reopen.
+    # Spawn Connect UI as the only visible window (no intermediate cmd).
     if ($complete -and -not $didInstall) {
         $boot = Join-Path $SrcDir 'connect-boot.ps1'
         if (-not (Test-Path -LiteralPath $boot)) { throw "connect-boot.ps1 missing: $boot" }

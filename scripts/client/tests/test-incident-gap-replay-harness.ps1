@@ -187,6 +187,11 @@ try {
         return $false
     }
     function Test-TunnelUp { param([int]$Retries = 1) $false }
+    # Force no_rebind so this harness still locks the refuse path (rebind covered elsewhere).
+    function Acquire-TunnelPort {
+        param([string]$UidStr, $CurrentBgTunnel = $null, $ProtectedProcessIds = @())
+        return $false
+    }
     $bgBusy = $null
     $reusedBusy = $false
     $okBusy = Ensure-SessionTunnel -Alias 'claude-server' -SshCfgPath '' -BgTunnel ([ref]$bgBusy) -TunnelReused ([ref]$reusedBusy)

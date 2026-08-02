@@ -32,6 +32,9 @@ Assert ($push -match 'port_mismatch_keep') 'Remote body warns port_mismatch_keep
 Assert ($push -notmatch 'skip_non_primary') 'PushConf no longer bare-returns skip_non_primary'
 Assert ($push -match 'Test-IsPrimaryTunnelPublisher') 'Still gates on Test-IsPrimaryTunnelPublisher'
 Assert ($push -match 'PUSH_CONF_RESULT.*am_only') 'RESULT line includes am_only'
+# P1.3: am_only keeps slot preference, but remote body may port_takeover when published is dead.
+Assert ($push -match 'port_takeover') 'AM_ONLY body has P1.3 port_takeover liveness override'
+Assert ($push -match 'CUR_LIVE') 'AM_ONLY body probes published-port liveness (CUR_LIVE)'
 
 # #18 need_mount TRACE
 Assert ($connectPs1 -match "need_mount") 'connect.ps1 mentions need_mount'

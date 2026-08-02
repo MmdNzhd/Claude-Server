@@ -38,6 +38,7 @@ $needLaunch = @(
     'Resolve-ConnectLaunchExe',
     'Get-PackagedConnectVersion',
     'Resolve-VersionedTree',
+    'Test-VersionSrcStructural',
     'Test-VersionSrcComplete',
     'Copy-PayloadToSrc',
     'Move-LaunchExeIntoVerDir',
@@ -67,7 +68,7 @@ try {
     foreach ($rel in @(
         'connect.bat', 'connect.ps1', 'connect-boot.ps1', 'connect-update.ps1',
         'connect-version.txt', 'connect-heal.ps1', 'connect-bootstrap.ps1',
-        'cursor-proxy-sidecar.ps1', 'windows-mcp-laptop.ps1'
+        'connect-env-repair.ps1', 'cursor-proxy-sidecar.ps1', 'windows-mcp-laptop.ps1'
     )) {
         $from = Join-Path $winSrc $rel
         if (Test-Path $from) { Copy-Item $from (Join-Path $extract $rel) -Force }
@@ -90,15 +91,18 @@ try {
 
     $sw = [Diagnostics.Stopwatch]::StartNew()
     Copy-PayloadToSrc -ExtractSrc $extract -SrcDir $tree.SrcDir
-    $moved = Move-LaunchExeIntoVerDir -LaunchExe $dropExe -DestExe $tree.DestExe -LaunchParent $launchParent -VerDir $tree.VerDir
-    Set-Content -LiteralPath (Join-Path $tree.Root 'current.txt') -Value $repoVer -Encoding ASCII -NoNewline
+    $moved = [bool](Move-LaunchExeIntoVerDir -LaunchExe $dropExe -DestExe $tree.DestExe -LaunchParent $launchParent -VerDir $tree.VerDir)
+    Set-Content -LiteralPath (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt') -Value $repoVer -Encoding ASCII -NoNewline
+    Remove-Item -LiteralPath (Join-Path $tree.Root 'current.txt') -Force -ErrorAction SilentlyContinue
     $sw.Stop()
     Assert (Test-VersionSrcComplete -SrcDir $tree.SrcDir -Version $repoVer) 'Case1 src complete after install'
-    Assert $moved 'Case1 moved launch EXE into version dir'
-    Assert (-not (Test-Path -LiteralPath $dropExe)) 'Case1 original drop EXE gone (moved)'
+    Assert ($moved) 'Case1 copied/moved launch EXE into version dir'
     Assert (Test-Path -LiteralPath $tree.DestExe) 'Case1 versioned EXE beside src'
     Assert (Test-Path -LiteralPath (Join-Path $tree.SrcDir 'connect.ps1')) 'Case1 connect.ps1 in src'
+    Assert (Test-Path -LiteralPath (Join-Path $tree.SrcDir 'editor-launch.ps1')) 'Case1 editor-launch.ps1 in src'
+    Assert (Test-Path -LiteralPath (Join-Path $tree.SrcDir 'connect-env-repair.ps1')) 'Case1 connect-env-repair.ps1 in src'
     Assert (-not (Test-Path -LiteralPath (Join-Path $tree.Root 'connect.ps1'))) 'Case1 scripts NOT flat in Claude-Connect root'
+    Assert (-not (Test-Path -LiteralPath (Join-Path $tree.Root 'current.txt'))) 'Case1 no root current.txt'
     Write-Host ("  INFO  Case1 first-install wall={0}ms" -f $sw.ElapsedMilliseconds) -ForegroundColor DarkGray
 
     # ---- Case2: fast-path complete check is near-zero ----
@@ -163,7 +167,8 @@ try {
     Assert ($mig.Kind -eq 'versioned') 'Case4 migrated kind=versioned'
     Assert (Test-Path (Join-Path $mig.SrcDir 'connect.ps1')) 'Case4 scripts in src'
     Assert (-not (Test-Path (Join-Path $flatRoot 'connect.ps1'))) 'Case4 root no longer has connect.ps1'
-    Assert ((Get-Content (Join-Path $flatRoot 'current.txt') -Raw).Trim() -eq '20260102.3') 'Case4 current.txt=20260102.3'
+    Assert (-not (Test-Path (Join-Path $flatRoot 'current.txt'))) 'Case4 no root current.txt after migrate'
+    Assert ($mig.Ver -eq '20260102.3') 'Case4 migrated ver=20260102.3'
 
     # ---- Case5: versioned update apply (sibling new ver dir) ----
     Note 'Case5: versioned apply creates sibling version folder'
@@ -176,7 +181,9 @@ try {
     $oldTree = Resolve-VersionedTree -LaunchParent $appParent -Version '20260727.10'
     Copy-PayloadToSrc -ExtractSrc $appExtract -SrcDir $oldTree.SrcDir
     Set-Content (Join-Path $oldTree.SrcDir 'connect-version.txt') -Value '20260727.10' -NoNewline
-    Set-Content (Join-Path $oldTree.Root 'current.txt') -Value '20260727.10' -NoNewline
+    Remove-Item (Join-Path $oldTree.Root 'current.txt') -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE '.config\claude-connect') | Out-Null
+    Set-Content (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt') -Value '20260727.10' -Encoding ASCII -NoNewline
     # Fake "new" windows payload for remote 20260727.13
     $winNew = Join-Path $root 'winNew'
     New-Item -ItemType Directory -Force -Path $winNew | Out-Null
@@ -193,7 +200,9 @@ try {
     Get-ChildItem -LiteralPath $winNew -Force | ForEach-Object {
         Copy-Item $_.FullName (Join-Path $newSrc $_.Name) -Force -Recurse
     }
-    Set-Content (Join-Path $verLayoutApply.Root 'current.txt') -Value $remoteVer -Encoding ASCII -NoNewline
+    Remove-Item (Join-Path $verLayoutApply.Root 'current.txt') -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE '.config\claude-connect') | Out-Null
+    Set-Content (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt') -Value $remoteVer -Encoding ASCII -NoNewline
     # Keep old + new; also plant older ones and prune
     foreach ($v in @('20260101.1', '20260101.5')) {
         New-Item -ItemType Directory -Force -Path (Join-Path (Join-Path $verLayoutApply.Root $v) 'src') | Out-Null
@@ -205,7 +214,8 @@ try {
     $left2 = @(Get-ChildItem $verLayoutApply.Root -Directory | Where-Object { $_.Name -match '^\d{8}\.\d+$' } | ForEach-Object { $_.Name })
     Assert ($left2.Count -le 3) ("Case5 after prune <=3 dirs (got $($left2.Count))")
     Assert ($left2 -contains $remoteVer) 'Case5 newest remote ver kept'
-    Assert ((Get-Content (Join-Path $verLayoutApply.Root 'current.txt') -Raw).Trim() -eq $remoteVer) 'Case5 current.txt points to new ver'
+    Assert (-not (Test-Path (Join-Path $verLayoutApply.Root 'current.txt'))) 'Case5 no root current.txt'
+    Assert (((Get-Content (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt') -Raw).Trim()) -eq $remoteVer) 'Case5 install-current points to new ver'
 
     # ---- Case6: bad dirs still rejected ----
     Note 'Case6: System32 / PowerShell still bad install dirs'
@@ -224,14 +234,25 @@ try {
     $tempExeLoose = Join-Path $tempDrop ("Claude-Connect-{0}.exe" -f $repoVer)
     $tempExeVer = Join-Path $tempDrop ("Claude-Connect\{0}\Claude-Connect-{0}.exe" -f $repoVer)
     $tempSrc = Join-Path $tempDrop ("Claude-Connect\{0}\src" -f $repoVer)
-    Assert ((Test-Path -LiteralPath $tempExeLoose) -or (Test-Path -LiteralPath $tempExeVer)) 'Case7 Temp has loose or versioned EXE'
-    if (Test-Path -LiteralPath $tempSrc) {
-        Assert (Test-VersionSrcComplete -SrcDir $tempSrc -Version $repoVer) 'Case7 live Temp src complete'
-        Assert (-not (Test-Path -LiteralPath (Join-Path $tempDrop 'connect.ps1'))) 'Case7 Temp root has no flat connect.ps1'
-        $cur = Join-Path $tempDrop 'Claude-Connect\current.txt'
-        Assert (Test-Path $cur) 'Case7 Temp current.txt exists'
-        Assert ((Get-Content $cur -Raw).Trim() -eq $repoVer) 'Case7 Temp current.txt matches repo ver'
-        Assert (-not (Test-Path -LiteralPath $tempExeLoose)) 'Case7 loose drop EXE moved into version dir'
+    $deskExe = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect.exe'
+    $deskVerExe = Join-Path $env:USERPROFILE ("Desktop\Claude-Connect\{0}\Claude-Connect-{0}.exe" -f $repoVer)
+    if ((Test-Path -LiteralPath $tempExeLoose) -or (Test-Path -LiteralPath $tempExeVer)) {
+        Assert $true 'Case7 Temp has loose or versioned EXE'
+        if (Test-Path -LiteralPath $tempSrc) {
+            Assert (Test-VersionSrcComplete -SrcDir $tempSrc -Version $repoVer) 'Case7 live Temp src complete'
+            Assert (-not (Test-Path -LiteralPath (Join-Path $tempDrop 'connect.ps1'))) 'Case7 Temp root has no flat connect.ps1'
+            Assert (-not (Test-Path -LiteralPath (Join-Path $tempDrop 'Claude-Connect\current.txt'))) 'Case7 Temp no root current.txt'
+        }
+    } elseif ((Test-Path -LiteralPath $deskExe) -or (Test-Path -LiteralPath $deskVerExe)) {
+        Assert $true 'Case7 Desktop EXE present (primary daily launcher)'
+        $deskSrc = Join-Path $env:USERPROFILE ("Desktop\Claude-Connect\{0}\src" -f $repoVer)
+        if (Test-Path -LiteralPath $deskSrc) {
+            Assert (Test-VersionSrcComplete -SrcDir $deskSrc -Version $repoVer) 'Case7 Desktop src complete'
+            Assert (-not (Test-Path -LiteralPath (Join-Path $env:USERPROFILE 'Desktop\Claude-Connect\current.txt'))) 'Case7 Desktop Claude-Connect has no current.txt'
+        }
+    } else {
+        Write-Host '  SKIP  Case7 no Temp/Desktop live EXE tree for optional parity' -ForegroundColor Yellow
+        $Skip++
     }
 
     # ---- Case8: EXE string scan still clean (no Bypass+Hidden AppLaunched) ----

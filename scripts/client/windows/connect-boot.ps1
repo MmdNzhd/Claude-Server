@@ -14,37 +14,17 @@ $_connectEnvRepair = $null
 $maxUi = 10
 
 function Write-ConnectRootRedirectStub {
-    # Leave a tiny connect.bat at Claude-Connect\ root so old Desktop shortcuts
-    # keep working after scripts moved into {ver}\src.
+    # Root must stay version-folders only. Launcher is Desktop\Claude-Connect.vbs (beside folder).
     param([string]$Root, [string]$Ver)
-    if (-not $Root -or -not $Ver) { return }
-    $stub = @"
-@echo off
-setlocal EnableDelayedExpansion
-set "ROOT=%~dp0"
-set "VER="
-if exist "%ROOT%current.txt" (
-  for /f "usebackq delims=" %%V in ("%ROOT%current.txt") do set "VER=%%V"
-)
-if not defined VER set "VER=$Ver"
-set "SRC=%ROOT%!VER!\src"
-if not exist "%SRC%\connect.bat" (
-  echo.
-  echo   [X] Claude Connect scripts missing under %SRC%
-  echo.
-  pause
-  exit /b 1
-)
-if exist "%SRC%\connect-hide-relaunch.vbs" (
-  wscript.exe //B //Nologo "%SRC%\connect-hide-relaunch.vbs" %*
-) else (
-  powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%SRC%\connect.bat' -WorkingDirectory '%SRC%' -WindowStyle Hidden"
-)
-exit /b 0
-"@
-    try {
-        Set-Content -LiteralPath (Join-Path $Root 'connect.bat') -Value $stub -Encoding ASCII
-    } catch { }
+    if (-not $Root) { return }
+    if ($Ver -match '^\d{8}\.\d+$' -and (Get-Command Set-ConnectInstallCurrent -ErrorAction SilentlyContinue)) {
+        try { Set-ConnectInstallCurrent -Root $Root -Ver $Ver } catch {}
+    }
+    if (Get-Command Repair-ConnectRootLayout -ErrorAction SilentlyContinue) {
+        try { [void](Repair-ConnectRootLayout -Root $Root -Ver $Ver -Quiet) } catch {}
+    } elseif (Get-Command Write-ConnectRootInstantLauncher -ErrorAction SilentlyContinue) {
+        try { Write-ConnectRootInstantLauncher -Root $Root -Ver $Ver } catch {}
+    }
 }
 
 function Repair-ConnectVersionedLayoutAtBoot {
@@ -60,29 +40,115 @@ function Repair-ConnectVersionedLayoutAtBoot {
         $verName = Split-Path -Leaf $verDir
         $root = Split-Path -Parent $verDir
         if ($verName -match '^\d{8}\.\d+$' -and (Split-Path -Leaf $root) -eq 'Claude-Connect') {
-            if (Test-Path -LiteralPath (Join-Path $StartDir 'connect.ps1')) { return $StartDir }
+            if (Test-Path -LiteralPath (Join-Path $StartDir 'connect.ps1')) {
+                # Prefer connect-version when that tree exists (stamped src beats stale current.txt).
+                $stamp = ''
+                try {
+                    $stamp = (Get-Content -LiteralPath (Join-Path $StartDir 'connect-version.txt') -Raw -ErrorAction SilentlyContinue).Trim()
+                } catch { $stamp = '' }
+                if ($stamp -match '^\d{8}\.\d+$' -and $stamp -ne $verName) {
+                    $alt = Join-Path $root (Join-Path $stamp 'src')
+                    if ((Test-Path -LiteralPath (Join-Path $alt 'connect.ps1')) -and
+                        ((Get-Item -LiteralPath (Join-Path $alt 'connect.ps1')).Length -gt 2000)) {
+                        $verName = $stamp
+                        $verDir = Join-Path $root $stamp
+                        $StartDir = $alt
+                    }
+                }
+                if (Get-Command Repair-ConnectVerDirLayout -ErrorAction SilentlyContinue) {
+                    [void](Repair-ConnectVerDirLayout -VerDir $verDir -Quiet)
+                }
+                if (Get-Command Repair-ConnectAllVerDirLayouts -ErrorAction SilentlyContinue) {
+                    $best = Repair-ConnectAllVerDirLayouts -Root $root -Quiet
+                    if ($best -and (Get-Command Write-ConnectRootInstantLauncher -ErrorAction SilentlyContinue)) {
+                        Write-ConnectRootInstantLauncher -Root $root -Ver $best
+                    }
+                } else {
+                    if (Get-Command Set-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+                        try { Set-ConnectInstallCurrent -Root $root -Ver $verName } catch {}
+                    }
+                    if (Get-Command Write-ConnectRootInstantLauncher -ErrorAction SilentlyContinue) {
+                        Write-ConnectRootInstantLauncher -Root $root -Ver $verName
+                    }
+                }
+                Write-ConnectRootRedirectStub -Root $root -Ver $verName
+                # If all-repair retargeted current to a newer complete tree, prefer that src.
+                try {
+                    $cv = ''
+                    if (Get-Command Get-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+                        $cv = Get-ConnectInstallCurrent -Root $root
+                    }
+                    if ($cv -notmatch '^\d{8}\.\d+$') {
+                        $cf0 = Join-Path $root 'current.txt'
+                        if (Test-Path -LiteralPath $cf0) {
+                            $cv = (Get-Content -LiteralPath $cf0 -Raw -ErrorAction SilentlyContinue).Trim()
+                        }
+                    }
+                    if ($cv -match '^\d{8}\.\d+$') {
+                        $curSrc = Join-Path $root (Join-Path $cv 'src')
+                        if ((Test-Path -LiteralPath (Join-Path $curSrc 'connect.ps1')) -and
+                            ((Get-Item -LiteralPath (Join-Path $curSrc 'connect.ps1')).Length -gt 2000)) {
+                            return $curSrc
+                        }
+                    }
+                } catch {}
+                return $StartDir
+            }
         }
     }
 
     # Flat or hybrid Claude-Connect root
     if ($leaf -ne 'Claude-Connect') { return $StartDir }
+    $hasInstallPtr = $false
+    if (Get-Command Get-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+        $hasInstallPtr = ((Get-ConnectInstallCurrent -Root $StartDir) -match '^\d{8}\.\d+$')
+    }
     if (-not (Test-Path -LiteralPath (Join-Path $StartDir 'connect.ps1')) -and
-        -not (Test-Path -LiteralPath (Join-Path $StartDir 'current.txt'))) {
-        return $StartDir
+        -not (Test-Path -LiteralPath (Join-Path $StartDir 'current.txt')) -and
+        -not $hasInstallPtr) {
+        # Still try if any version folder exists
+        $anyVer = Get-ChildItem -LiteralPath $StartDir -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d{8}\.\d+$' } |
+            Select-Object -First 1
+        if (-not $anyVer) { return $StartDir }
     }
 
     $root = $StartDir
     $ver = ''
+    if (Get-Command Get-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+        $ver = Get-ConnectInstallCurrent -Root $root
+    }
+    # Prefer connect-version when that tree exists over a stale current.txt pointer.
     $vf = Join-Path $root 'connect-version.txt'
     if (Test-Path -LiteralPath $vf) {
-        try { $ver = (Get-Content -LiteralPath $vf -Raw -ErrorAction SilentlyContinue).Trim() } catch { $ver = '' }
+        try { $ver = (Get-Content -LiteralPath $vf -Raw -ErrorAction SilentlyContinue).Trim() } catch { }
+    }
+    if ($ver -match '^\d{8}\.\d+$') {
+        $stampSrc = Join-Path $root (Join-Path $ver 'src\connect.ps1')
+        if (-not (Test-Path -LiteralPath $stampSrc)) {
+            # stamped version file at root but tree missing — fall through
+        } elseif ((Get-Item -LiteralPath $stampSrc).Length -gt 2000) {
+            # keep $ver
+        } else {
+            $ver = ''
+        }
     }
     $cf = Join-Path $root 'current.txt'
-    if (Test-Path -LiteralPath $cf) {
+    if ($ver -notmatch '^\d{8}\.\d+$' -and (Test-Path -LiteralPath $cf)) {
         try {
             $cv = (Get-Content -LiteralPath $cf -Raw -ErrorAction SilentlyContinue).Trim()
             if ($cv -match '^\d{8}\.\d+$') { $ver = $cv }
         } catch { }
+    }
+    # If current.txt points at a missing/broken tree but a stamped complete tree exists, retarget.
+    if ($ver -match '^\d{8}\.\d+$') {
+        $probe = Join-Path $root (Join-Path $ver 'src\connect.ps1')
+        if (-not (Test-Path -LiteralPath $probe) -or ((Get-Item -LiteralPath $probe -EA SilentlyContinue).Length -le 2000)) {
+            if (Get-Command Repair-ConnectAllVerDirLayouts -ErrorAction SilentlyContinue) {
+                $best = Repair-ConnectAllVerDirLayouts -Root $root -Quiet
+                if ($best) { $ver = $best }
+            }
+        }
     }
     if ($ver -notmatch '^\d{8}\.\d+$') { return $StartDir }
 
@@ -91,16 +157,12 @@ function Repair-ConnectVersionedLayoutAtBoot {
     $srcPs1 = Join-Path $srcDir 'connect.ps1'
 
     # Hybrid: src already complete — sweep leftover root scripts, redirect.
+    # Never overwrite versioned src with stale hybrid root leftovers.
     if (Test-Path -LiteralPath $srcPs1) {
         try {
             $destExe = Join-Path $verDir ("Claude-Connect-{0}.exe" -f $ver)
             Get-ChildItem -LiteralPath $root -File -ErrorAction SilentlyContinue | ForEach-Object {
-                if ($_.Name -eq 'current.txt') { return }
-                if ($_.Name -eq 'connect.bat') {
-                    # Root stub rewritten below; don't move the live stub into src yet.
-                    return
-                }
-                if ($_.Name -match '^(?i)Claude-Connect(-[\d.]+)?\.exe$') {
+                if ($_.Name -match '^(?i)Claude-Connect-(\d{8}\.\d+)\.exe$') {
                     if (-not (Test-Path -LiteralPath $destExe)) {
                         try { Move-Item -LiteralPath $_.FullName -Destination $destExe -Force } catch {
                             try { Copy-Item -LiteralPath $_.FullName -Destination $destExe -Force } catch { }
@@ -110,9 +172,27 @@ function Repair-ConnectVersionedLayoutAtBoot {
                     }
                     return
                 }
-                Move-Item -LiteralPath $_.FullName -Destination (Join-Path $srcDir $_.Name) -Force -ErrorAction SilentlyContinue
+                if ($_.Name -match '^(?i)Claude-Connect\.(vbs|cmd|exe)$' -or $_.Name -eq 'current.txt' -or $_.Name -eq 'connect.bat') {
+                    Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                    return
+                }
+                $dest = Join-Path $srcDir $_.Name
+                if (Test-Path -LiteralPath $dest) {
+                    $srcLen = 0
+                    try { $srcLen = (Get-Item -LiteralPath $dest).Length } catch { $srcLen = 0 }
+                    if ($srcLen -gt 2000) {
+                        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                        return
+                    }
+                }
+                Move-Item -LiteralPath $_.FullName -Destination $dest -Force -ErrorAction SilentlyContinue
             }
-            Set-Content -LiteralPath $cf -Value $ver -Encoding ASCII -NoNewline
+            if (Get-Command Repair-ConnectVerDirLayout -ErrorAction SilentlyContinue) {
+                [void](Repair-ConnectVerDirLayout -VerDir $verDir -Quiet)
+            }
+            if (Get-Command Set-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+                Set-ConnectInstallCurrent -Root $root -Ver $ver
+            }
             Write-ConnectRootRedirectStub -Root $root -Ver $ver
         } catch { }
         return $srcDir
@@ -123,7 +203,14 @@ function Repair-ConnectVersionedLayoutAtBoot {
     try {
         New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
         Get-ChildItem -LiteralPath $root -File -ErrorAction SilentlyContinue | ForEach-Object {
-            if ($_.Name -eq 'current.txt') { return }
+            if ($_.Name -eq 'current.txt') {
+                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                return
+            }
+            if ($_.Name -match '^(?i)Claude-Connect\.(vbs|cmd|exe)$') {
+                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                return
+            }
             Move-Item -LiteralPath $_.FullName -Destination (Join-Path $srcDir $_.Name) -Force -ErrorAction SilentlyContinue
         }
         $win = Join-Path $root 'windows'
@@ -143,8 +230,14 @@ function Repair-ConnectVersionedLayoutAtBoot {
                 }
             }
         }
+        if (Get-Command Repair-ConnectVerDirLayout -ErrorAction SilentlyContinue) {
+            [void](Repair-ConnectVerDirLayout -VerDir $verDir -Quiet)
+        }
         Set-Content -LiteralPath $cf -Value $ver -Encoding ASCII -NoNewline
         Write-ConnectRootRedirectStub -Root $root -Ver $ver
+        if (Get-Command Write-ConnectRootInstantLauncher -ErrorAction SilentlyContinue) {
+            Write-ConnectRootInstantLauncher -Root $root -Ver $ver
+        }
         if (-not (Test-Path -LiteralPath (Join-Path $srcDir 'connect.ps1'))) { return $StartDir }
         try {
             $logDir = Join-Path $env:USERPROFILE '.config\claude-connect\logs'
@@ -219,11 +312,7 @@ try {
     $ec = 1
     Write-Host ("  [X] connect.ps1 failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
 } finally {
-    if ($global:ClaudeConnectBootMutex) {
-        try { $global:ClaudeConnectBootMutex.ReleaseMutex() } catch { }
-        try { $global:ClaudeConnectBootMutex.Dispose() } catch { }
-        $global:ClaudeConnectBootMutex = $null
-    }
-    $env:CLAUDE_CONNECT_BOOT_MUTEX = $null
+    try { $m.ReleaseMutex() } catch { }
+    try { $m.Dispose() } catch { }
 }
 exit $ec

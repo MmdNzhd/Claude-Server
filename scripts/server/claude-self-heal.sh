@@ -328,7 +328,7 @@ _heal_missing_user_bins() {
 }
 
 _heal_bin_crlf_all() {
-    local f
+    local f base magic
     mkdir -p "$HOME/.local/bin" 2>/dev/null || true
     for f in \
         "$HOME/.local/bin/laptop-exec" \
@@ -340,10 +340,17 @@ _heal_bin_crlf_all() {
         "$HOME/.local/bin/claude-watchdog"
     do
         [ -f "$f" ] || continue
+        base=$(basename "$f")
+        # Never sed ELF / known binary names (CRLF strip corrupted codebase-memory-mcp fleet-wide).
+        case "$base" in
+            codebase-memory-mcp|xray) continue ;;
+        esac
+        magic=$(head -c4 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+        [ "$magic" = "7f454c46" ] && continue
         if grep -q $'\r' "$f" 2>/dev/null; then
             sed -i 's/\r$//' "$f" 2>/dev/null || true
             chmod 755 "$f" 2>/dev/null || true
-            _log "stripped CRLF $(basename "$f")"
+            _log "stripped CRLF $base"
         fi
     done
 }

@@ -20,6 +20,13 @@ $ref = Get-Content (Get-ServerFile 'server\skills\laptop-exec\reference-windows-
 # --- Client: Hyper-V-safe local port ---
 Assert ($mcp -match 'WindowsMcpLocalPortDefault\s*=\s*18765') 'Client default local port is 18765'
 Assert ($mcp -match 'function\s+Get-WindowsMcpLocalPort') 'Get-WindowsMcpLocalPort exists'
+Assert ($mcp -match 'function\s+Stop-WindowsMcpLegacyPort8000') 'Legacy :8000 killer exists'
+Assert ($mcp -match 'never adopt legacy 8000|Never sticky-adopt') 'Port picker documents no sticky 8000 adopt'
+Assert ($mcp -match 'Stop-WindowsMcpLegacyPort8000') 'Ensure/start path can migrate off :8000'
+# Must not list 8000 in the already-listening adopt loop (sticky-adopt bug).
+$adoptBlock = [regex]::Match($mcp, '(?s)Prefer an already-listening.*?foreach\s*\(\s*\$cand\s+in\s*@\(([^)]+)\)')
+Assert ($adoptBlock.Success) 'Found already-listening candidate list'
+Assert ($adoptBlock.Groups[1].Value -notmatch '\b8000\b') 'Already-listening adopt list excludes 8000'
 Assert ($mcp -match 'function\s+Test-WindowsMcpPortBindable') 'Test-WindowsMcpPortBindable exists'
 Assert ($mcp -match '7916|Hyper-V|10013') 'Client documents Hyper-V / WinError 10013 risk'
 Assert ($mcp -match "WMCP_LPORT") 'Sync exports WMCP_LPORT to server'
