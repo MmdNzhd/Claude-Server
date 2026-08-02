@@ -168,7 +168,9 @@ function Get-ConnectRemoteLogByteSize {
         if ($SshOpts) { $argList += $SshOpts }
         $argList += @('-o', 'ConnectTimeout=6', $Target, $cmd)
         $res = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList $argList -TimeoutMs $TimeoutMs
-        if (-not $res.Ok) { return [int64](-1) }
+        # Proc helper is fail-soft, but a shadowed/stubbed caller (or a finally-escape
+        # regression) can still hand back $null — never dereference .Ok bare.
+        if (-not $res -or -not $res.Ok) { return [int64](-1) }
         $raw = ([string]$res.StdOut).Trim()
         $digits = ($raw -replace '[^0-9]', '')
         if (-not $digits) { return [int64](-1) }
@@ -228,7 +230,7 @@ function Test-ConnectLogChunkAlreadyRemote {
         if ($SshOpts) { $argList += $SshOpts }
         $argList += @('-o', 'ConnectTimeout=8', $Target, $cmd)
         $res = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList $argList -TimeoutMs $TimeoutMs
-        if (-not $res.Ok) { return $false }
+        if (-not $res -or -not $res.Ok) { return $false }
         $raw = ([string]$res.StdOut).Trim().ToLowerInvariant()
         $remoteHash = ($raw -replace '[^0-9a-f]', '')
         if ($remoteHash.Length -ge 64) { $remoteHash = $remoteHash.Substring(0, 64) }
@@ -488,23 +490,29 @@ function Invoke-ConnectLogProcTimed {
         if ($why.Length -gt 120) { $why = $why.Substring(0, 120) }
         return @{ Ok = $false; TimedOut = $false; ExitCode = -1; StdOut = ''; StdErr = ''; Error = $why }
     } finally {
-        if ($p) { try { $p.Dispose() } catch { } }
-        foreach ($f in @($outFile, $errFile)) {
-            if (-not $f) { continue }
-            try {
-                if (Test-Path -LiteralPath $f) {
-                    Remove-Item -LiteralPath $f -Force -ErrorAction Stop
-                }
-            } catch {
+        # A throw from finally replaces a successful return and surfaces as the opaque
+        # Sync-ConnectLogToServer detail=exception (bare NullReferenceException) — the
+        # residual gap behind fleet LOG_SYNC_FAIL type=NullReferenceException. Never let
+        # cleanup abort a classified proc result.
+        try {
+            if ($p) { try { $p.Dispose() } catch { } }
+            foreach ($f in @($outFile, $errFile)) {
+                if (-not $f) { continue }
                 try {
-                    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
-                    $sid = Get-ConnectSessionId
-                    if ($script:ConnectLogWriter) {
-                        Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] TEMP_CLEANUP_FAIL path=$f err=$($_.Exception.Message)"
+                    if (Test-Path -LiteralPath $f) {
+                        Remove-Item -LiteralPath $f -Force -ErrorAction Stop
                     }
-                } catch { }
+                } catch {
+                    try {
+                        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+                        $sid = Get-ConnectSessionId
+                        if ($script:ConnectLogWriter) {
+                            Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] TEMP_CLEANUP_FAIL path=$f err=$($_.Exception.Message)"
+                        }
+                    } catch { }
+                }
             }
-        }
+        } catch { }
     }
 }
 
@@ -562,6 +570,10 @@ function Sync-ConnectLogToServer {
         if (-not $lockStream) { return }
     }
     $script:ConnectLogSyncInProgress = $true
+    # Declare before the outer try so the catch/finally cleanup never touches an unset
+    # variable (StrictMode parent scopes) and so a mid-read failure can still remove the
+    # temp chunk if one was created.
+    $tmpLocal = $null
     try {
         if ($script:ConnectLogWriter -and (-not $LogPath -or $LogPath -eq $script:ConnectLogPath)) {
             try { $script:ConnectLogWriter.Flush() } catch { }
@@ -583,27 +595,69 @@ function Sync-ConnectLogToServer {
                 [System.IO.FileMode]::Open,
                 [System.IO.FileAccess]::Read,
                 [System.IO.FileShare]::ReadWrite)
+            if (-not $fsRead) { throw [System.IO.IOException]::new('chunk_read File.Open returned null') }
             $fileLen = [int64]$fsRead.Length
             if ($off -lt 0) { $off = 0 }
             if ($off -gt $fileLen) { $off = 0 }
             if ($off -ge $fileLen) { $script:LastConnectLogSyncOk = $true; return }
             $remain = $fileLen - $off
             $take = if ($remain -gt $maxChunk) { [int]$maxChunk } else { [int]$remain }
+            if ($take -le 0) { $script:LastConnectLogSyncOk = $true; return }
             $null = $fsRead.Seek([int64]$off, [System.IO.SeekOrigin]::Begin)
             $chunk = New-Object byte[] $take
-            $got = $fsRead.Read($chunk, 0, $take)
+            if ($null -eq $chunk) { throw [System.IO.IOException]::new('chunk_read New-Object byte[] returned null') }
+            $got = [int]$fsRead.Read($chunk, 0, $take)
             if ($got -le 0) { $script:LastConnectLogSyncOk = $true; return }
             if ($got -lt $take) {
                 $take = $got
+                if ($take -le 0) { $script:LastConnectLogSyncOk = $true; return }
                 $trimmed = New-Object byte[] $take
+                if ($null -eq $chunk -or $null -eq $trimmed) {
+                    throw [System.IO.IOException]::new('chunk_read trim buffers null')
+                }
                 [Array]::Copy($chunk, 0, $trimmed, 0, $take)
                 $chunk = $trimmed
             }
+        } catch {
+            # P0.5 guarded WriteAllBytes($chunk) but left this Open/Seek/Read/trim try with
+            # only a finally. Fleet 2026-08-02 parsa: detail=exception type=NullReferenceException
+            # at=<this block> 21ms after a LOG_SYNC_OK under dual-Connect day-log writers.
+            # Any failure here must stay fail-soft (named breadcrumb + local retry), never an
+            # opaque outer detail=exception.
+            if (-not $script:ConnectLogSyncFailLogged) {
+                $script:ConnectLogSyncFailLogged = $true
+                try {
+                    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+                    $sid = Get-ConnectSessionId
+                    $why = ''
+                    try {
+                        $root = $_.Exception
+                        if ($root -and $root.InnerException) { $root = $root.InnerException }
+                        if ($root) { $why = (([string]$root.Message) -replace '[\r\n]+', ' ').Trim() }
+                    } catch { }
+                    if (-not $why) { $why = 'chunk_read_fail' }
+                    if ($why.Length -gt 120) { $why = $why.Substring(0, 120) }
+                    $exType = 'unknown'
+                    try {
+                        if ($_.Exception) { $exType = $_.Exception.GetType().Name }
+                        if ($_.Exception -and $_.Exception.InnerException) {
+                            $exType = $exType + '/' + $_.Exception.InnerException.GetType().Name
+                        }
+                    } catch { }
+                    if ($script:ConnectLogWriter) {
+                        Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=chunk_read_fail type=$exType err=$why (local kept; retry later)"
+                    }
+                } catch { }
+            }
+            if (-not $LogPath -or $LogPath -eq $script:ConnectLogPath) { $script:ConnectLogSyncNeeded = $true }
+            return
         } finally {
             if ($fsRead) { try { $fsRead.Dispose() } catch { } }
         }
         $tmpDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
-        $tmpLocal = Join-Path $tmpDir ("claude-connect-chunk-{0}.log" -f $PID)
+        # Unique per attempt: dual Connect (same PID namespace across sessions is fine, but a
+        # Force retry overlapping a drained non-Force must not clobber the in-flight chunk).
+        $tmpLocal = Join-Path $tmpDir ("claude-connect-chunk-{0}-{1}.log" -f $PID, [guid]::NewGuid().ToString('N').Substring(0, 8))
         if ($null -eq $chunk -or $take -le 0) { $script:LastConnectLogSyncOk = $true; return }
         [System.IO.File]::WriteAllBytes($tmpLocal, $chunk)
         $day = if ($path -match 'connect-(\d{8})\.log$') { $Matches[1] } else { Get-Date -Format 'yyyyMMdd' }
@@ -799,20 +853,29 @@ function Sync-ConnectLogToServer {
                             [System.IO.FileMode]::Open,
                             [System.IO.FileAccess]::Read,
                             [System.IO.FileShare]::ReadWrite)
+                        if (-not $fs2) { break }
                         $fileLen = [int64]$fs2.Length
                         if ($newOff -ge $fileLen) { break }
                         $remain2 = $fileLen - $newOff
                         $take2 = if ($remain2 -gt $maxChunk) { [int]$maxChunk } else { [int]$remain2 }
+                        if ($take2 -le 0) { break }
                         $null = $fs2.Seek([int64]$newOff, [System.IO.SeekOrigin]::Begin)
                         $chunk2 = New-Object byte[] $take2
-                        $got2 = $fs2.Read($chunk2, 0, $take2)
+                        if ($null -eq $chunk2) { break }
+                        $got2 = [int]$fs2.Read($chunk2, 0, $take2)
                         if ($got2 -le 0) { break }
                         if ($got2 -lt $take2) {
                             $take2 = $got2
+                            if ($take2 -le 0) { break }
                             $trimmed2 = New-Object byte[] $take2
+                            if ($null -eq $trimmed2) { break }
                             [Array]::Copy($chunk2, 0, $trimmed2, 0, $take2)
                             $chunk2 = $trimmed2
                         }
+                    } catch {
+                        # Same class as the primary chunk_read_fail path: never let a Force
+                        # drain loop turn a share-violation/NRE into an outer detail=exception.
+                        break
                     } finally {
                         if ($fs2) { try { $fs2.Dispose() } catch { } }
                     }
@@ -865,11 +928,30 @@ function Sync-ConnectLogToServer {
                 # is not actionable: carry the type and the throwing line so a recurrence
                 # names its own site instead of costing another archaeology pass.
                 $exType = 'unknown'
-                try { if ($_.Exception) { $exType = $_.Exception.GetType().Name } } catch { }
+                try {
+                    if ($_.Exception) { $exType = $_.Exception.GetType().Name }
+                    # Prefer the root cause when PS wraps .NET (MethodInvocationException /
+                    # NullReferenceException) so the breadcrumb matches what ops grep for.
+                    if ($_.Exception -and $_.Exception.InnerException) {
+                        $exType = $exType + '/' + $_.Exception.InnerException.GetType().Name
+                        try {
+                            $innerMsg = (([string]$_.Exception.InnerException.Message) -replace '[\r\n]+', ' ').Trim()
+                            if ($innerMsg) { $ex = $innerMsg }
+                        } catch { }
+                    }
+                } catch { }
                 $atLine = 0
+                $atScript = ''
                 try { if ($_.InvocationInfo) { $atLine = [int]$_.InvocationInfo.ScriptLineNumber } } catch { }
+                try {
+                    if ($_.InvocationInfo -and $_.InvocationInfo.ScriptName) {
+                        $atScript = [System.IO.Path]::GetFileName([string]$_.InvocationInfo.ScriptName)
+                    }
+                } catch { }
+                if ($ex.Length -gt 160) { $ex = $ex.Substring(0, 160) }
                 if ($script:ConnectLogWriter) {
-                    Write-ConnectLogSynced -Line ("[$ts] [WARN] [$sid] LOG_SYNC_FAIL target={0} detail=exception type={1} at={2} err={3} (local kept; retry later)" -f $(if ($target) { $target } else {'(none)'}), $exType, $atLine, $(if ($ex) { $ex } else { '(null)' }))
+                    $atBit = if ($atScript) { '{0}:{1}' -f $atScript, $atLine } else { [string]$atLine }
+                    Write-ConnectLogSynced -Line ("[$ts] [WARN] [$sid] LOG_SYNC_FAIL target={0} detail=exception type={1} at={2} err={3} (local kept; retry later)" -f $(if ($target) { $target } else {'(none)'}), $exType, $atBit, $(if ($ex) { $ex } else { '(null)' }))
                 }
             } catch { }
         }

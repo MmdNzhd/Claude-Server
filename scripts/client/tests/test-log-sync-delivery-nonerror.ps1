@@ -38,6 +38,7 @@ Assert ($sync -match '\$null -eq \$chunk') 'nullref guard before WriteAllBytes(c
 Assert ($sync -match '\$null -eq \$chunk2') 'nullref guard before WriteAllBytes(chunk2) intact'
 Assert ($sync -match 'GetTempPath\(\)') 'chunk TEMP path has GetTempPath fallback'
 Assert ($ui -match 'detail=exception type=\{1\} at=\{2\}') 'typed exception breadcrumb intact'
+Assert ($ui -match 'detail=chunk_read_fail') 'chunk-read fail-soft breadcrumb present (parsa NRE residual)'
 Assert ($win -match 'Invoke-ConnectLogAsyncPump') 'connect.ps1 session loop calls Invoke-ConnectLogAsyncPump'
 
 # --- live: stubbed remote legs, real watermark + LOG_SYNC_OK via pump ----------

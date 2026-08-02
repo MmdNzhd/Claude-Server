@@ -67,6 +67,7 @@ $suites = @(
     @{ Name = 'log-sync-forbid-shrink'; Script = 'test-log-sync-forbid-shrink.ps1' }
     @{ Name = 'log-sync-mkdir-no-find-on-fast-path'; Script = 'test-log-sync-mkdir-no-find-on-fast-path.ps1' }
     @{ Name = 'log-sync-nullsafe';      Script = 'test-log-sync-nullsafe.ps1' }
+    @{ Name = 'log-sync-chunk-read-nullsafe'; Script = 'test-log-sync-chunk-read-nullsafe.ps1' }
     @{ Name = 'log-sync-delivery-nonerror'; Script = 'test-log-sync-delivery-nonerror.ps1' }
     @{ Name = 'error-flush-contract';   Script = 'test-error-flush-contract.ps1' }
     @{ Name = 'mount-failfast'; Script = 'test-mount-failfast.ps1' }

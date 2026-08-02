@@ -112,7 +112,8 @@ Write-Output ("PHASE1_REASON=" + [int]($phase1 -match 'detail=(mkdir_timeout_or_
 Invoke-SyncModes @('throw')
 try { $script:ConnectLogWriter.Flush() } catch { }
 $phase2 = Get-Content -LiteralPath $script:ConnectLogPath -Raw
-Write-Output ("PHASE2_TYPED=" + [int]($phase2 -match 'detail=exception type=NullReferenceException at=[1-9]\d*'))
+# at= may be "123" or "connect-ui.ps1:123" after the script-name breadcrumb upgrade.
+Write-Output ("PHASE2_TYPED=" + [int]($phase2 -match 'detail=exception type=NullReferenceException at=\S*[1-9]\d*'))
 
 # The real helper must also never throw / never return $null, even with no arg formatter.
 foreach ($spec in @(@('cmd', @('/c', 'exit', '0'), 3000), @('no-such-exe-xyz', @('a'), 1000), @('cmd', @('/c', 'exit', '1'), 1))) {
