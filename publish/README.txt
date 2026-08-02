@@ -3,7 +3,7 @@ Claude Code Server - Client Package (Smart)
 
 Site: Smart
 Server IP (baked into connect scripts): 192.168.210.240
-Current connect scripts: v20260802.2
+Current connect scripts: v20260802.3
 
 WINDOWS
 -------
@@ -46,7 +46,7 @@ Option A (folder / ZIP - primary):
    optionally set git mode (g) or IDE (c), Cursor or VS Code opens via Remote SSH.
 
    Header must show:
-     claude-server  |  192.168.210.240  |  v20260802.2
+     claude-server  |  192.168.210.240  |  v20260802.3
 
    Project menu must include:  g git
 
@@ -76,7 +76,7 @@ no /MIN. The only intended visible console is the Connect UI
 (connect-boot.ps1).
 
 If you still see a lasting "Claude Connect" cmd on the taskbar:
-  1. Confirm header version is current (v20260802.2+).
+  1. Confirm header version is current (v20260802.3+).
   2. Confirm the two hide helpers exist in Desktop\Claude-Connect\.
   3. Launch via Claude-Connect.vbs (not an old shortcut to /MIN bat).
   4. Re-copy from the latest claude-publish ZIP/EXE, or press u to update.
@@ -116,7 +116,7 @@ MAC
 3. Same flow as Windows (project table, git banner, session keys).
 
    Header must show:
-     claude-server  |  192.168.210.240  |  v20260802.2
+     claude-server  |  192.168.210.240  |  v20260802.3
 
    After disconnect: 10s countdown, default M = project menu.
 
@@ -148,7 +148,7 @@ ONE CONNECT PER PC (important)
 
 SINGLE PROJECT (important)
 --------------------------
-  Only ONE project is mounted per session. Requires connect scripts v20260802.2+
+  Only ONE project is mounted per session. Requires connect scripts v20260802.3+
   and server-side mount fix (admin deploys from repo - not included in this ZIP).
 
 SESSION KEYS
@@ -170,7 +170,7 @@ If selecting a project shows "Join-Path ChildPath" prompt:
   - connect.bat blocks outdated folders automatically
 
 If connect.bat says OUTDATED:
-  - Missing connect-ui.ps1 or version is not v20260802.2
+  - Missing connect-ui.ps1 or version is not v20260802.3
 
 Do NOT use old folders from previous ZIP dates or stale Desktop copies.
 Do NOT mix this Smart package with a Sepidz ZIP (different server IP).
@@ -199,7 +199,7 @@ TWO CURSOR PROFILES (no conflict)
 
 CURSOR AUTH: server golden tokens + profile machineid; use [Claude Server] window only.
 
-LOGS (durable on laptop + synced to server, v20260802.2+)
+LOGS (durable on laptop + synced to server, v20260802.3+)
 ------------------------------------------------------------
   Connect keeps a durable local day log on your laptop AND syncs it to the
   server account:

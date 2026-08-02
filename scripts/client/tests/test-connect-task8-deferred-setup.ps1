@@ -23,12 +23,18 @@ $connect = Get-Content (Get-ClientFile 'windows\connect.ps1') -Raw
 
 Assert ($connect -match 'function Start-DeferredServerSetup') 'Start-DeferredServerSetup defined'
 Assert ($connect -match 'function Wait-DeferredServerSetup') 'Wait-DeferredServerSetup defined'
+Assert ($connect -match 'function Get-DeferredServerSetupTimeoutMs') 'Get-DeferredServerSetupTimeoutMs defined'
 Assert ($connect -match 'function Ensure-ServerSessionReady') 'Ensure-ServerSessionReady defined'
 Assert ($connect -match 'DeferredServerSetupOnly') 'connect.ps1 supports DeferredServerSetupOnly child runner'
 Assert ($connect -match 'SERVER_SETUP deferred=1') 'deferred setup is logged'
+Assert ($connect -match 'SERVER_SETUP_TIMEOUT ms=') 'Wait-DeferredServerSetup has greppable timeout log'
 Assert ($connect -match 'deferred_setup_skip_mutex') 'deferred child skips UI mutex (multi-agent safe)'
 Assert ($connect -match '(?s)if \(\$DeferredServerSetupOnly\)[\s\S]{0,900}elseif \(-not \(Enter-ConnectSingleInstance\)\)') 'Enter-ConnectSingleInstance not called for deferred child'
 Assert ($connect -match 'inherit_slot') 'deferred start preserves parent UI_SLOT'
+Assert ($connect -match 'deferred_setup_ssh_dir_not_running_profile') `
+    'DeferredServerSetupOnly child pins IdentityFile when ssh dir rebound'
+Assert ($connect -match '(?s)DeferredServerSetupOnly\)[\s\S]+?ConnectSshIdentityFile[\s\S]+?Set-SshHostBlock[\s\S]+?Initialize-ServerSession') `
+    'Identity pin runs inside DeferredServerSetupOnly before Set-SshHostBlock / Initialize-ServerSession'
 
 $readyToMenu = [regex]::Match($connect, '(?s)Mark-BootstrapDone[\s\S]*?INTERACTIVE: project_menu_shown').Value
 Assert ($readyToMenu -and ($readyToMenu -notmatch 'Initialize-ServerSession')) 'no Initialize-ServerSession between bootstrap done and project_menu_shown'

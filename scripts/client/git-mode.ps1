@@ -3,7 +3,7 @@
 #
 # Bundle co-origination stamp: must match connect.ps1 ConnectBuildId (publish bumps both).
 # Detects split-generation installs where version string alone is unchanged (P1.2 residual).
-$script:GitModeBuildId = '4e2d46bc-2fd8-4cbb-94d8-452669a7ad4d'
+$script:GitModeBuildId = '3ba70694-6390-4dc2-9e35-aadfb29d628e'
 
 function Get-GitMode {
     # Site policy: GIT_MODE hide/server disabled. Always OFF (no .git rename).
@@ -4234,7 +4234,10 @@ printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s am_only=%s publish_port=%s
     $remoteBody = ($remoteBody -replace "`r`n", "`n") -replace "`r", "`n"
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remoteBody))
     $remote = "echo $b64 | base64 -d | bash"
-    $pushOut = @(SshX $remote 2>$null)
+    # NoRetryOnTimeout: a hung PUSH_CONF must not burn two full SshX hard-kill budgets
+    # (75s + 75s). Live 2026-08-02: deferred Server setup stuck with SSH_BEGIN PUSH_CONF
+    # and no SSH_END while Wait-DeferredServerSetup polled forever.
+    $pushOut = @(SshX $remote -NoRetryOnTimeout 2>$null)
     $pushExit = $global:LASTEXITCODE
     $pushRaw = ($pushOut | Where-Object { $_ -match 'PUSH_CONF_RESULT' } | Select-Object -Last 1)
     $pushLine = if ($null -eq $pushRaw -or "$pushRaw" -eq '') { '(no result line)' } else { ([string]$pushRaw -replace '\s+', ' ').Trim() }

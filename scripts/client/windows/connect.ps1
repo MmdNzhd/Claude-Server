@@ -179,10 +179,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260802.2'
+$script:ConnectVersion = '20260802.3'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = '4e2d46bc-2fd8-4cbb-94d8-452669a7ad4d'
+$script:ConnectBuildId = '3ba70694-6390-4dc2-9e35-aadfb29d628e'
 $script:SshMsSamples = [System.Collections.Generic.List[int]]::new()
 $script:SshMsSampleStartUnix = 0
 $script:LastSshRollupUnix = 0
@@ -1010,7 +1010,18 @@ function Initialize-ServerSession {
             if ($null -eq $job.Proc) {
                 throw "scp process object missing for $($job.Name)"
             }
-            $job.Proc.WaitForExit()
+            # Bound scp wait (ConnectTimeout=30 on the scp args is not always honored by
+            # Win32-OpenSSH). An unbounded WaitForExit here can pin deferred Server setup forever.
+            if (-not $job.Proc.WaitForExit(90000)) {
+                $pushOk = $false
+                $script:pendingFixes += 'server script push failed'
+                if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                    Write-ConnectLog "SCP_TIMEOUT: name=$($job.Name) ms=90000" 'ERROR'
+                }
+                try { $job.Proc.Kill() } catch {}
+                try { $null = $job.Proc.WaitForExit(3000) } catch {}
+                continue
+            }
             if ($job.Proc.ExitCode -ne 0) {
                 $pushOk = $false
                 $script:pendingFixes += 'server script push failed'
@@ -1147,6 +1158,18 @@ function Start-DeferredServerSetup {
     }
 }
 
+function Get-DeferredServerSetupTimeoutMs {
+    # Cap how long the UI may block on the background Server-setup worker. Default 120s
+    # covers one SshX hard-kill (75s) plus margin; override via env for tests/fleet tuning.
+    $ms = 120000
+    if ($env:CLAUDE_CONNECT_SERVER_SETUP_TIMEOUT_MS -match '^\d+$') {
+        $ms = [int]$env:CLAUDE_CONNECT_SERVER_SETUP_TIMEOUT_MS
+    }
+    # Floor 1000ms so LIVE timeout tests can use a short budget; production default stays 120s.
+    if ($ms -lt 1000) { $ms = 1000 }
+    return $ms
+}
+
 function Wait-DeferredServerSetup {
     if ($script:ServerSessionBoot) { return $script:ServerSessionBoot }
 
@@ -1157,11 +1180,46 @@ function Wait-DeferredServerSetup {
     if ($showStep) { Step "Server setup" }
 
     if ($script:DeferredSetupProc) {
+        $timeoutMs = Get-DeferredServerSetupTimeoutMs
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $lastBeatMs = 0
+        $timedOut = $false
         while (-not $script:DeferredSetupProc.HasExited) {
+            if ($sw.ElapsedMilliseconds -ge $timeoutMs) {
+                $timedOut = $true
+                break
+            }
+            if (($sw.ElapsedMilliseconds - $lastBeatMs) -ge 15000) {
+                $lastBeatMs = [int]$sw.ElapsedMilliseconds
+                if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                    Write-ConnectLog ("SERVER_SETUP_WAIT ms={0} pid={1}" -f $lastBeatMs, $script:DeferredSetupProc.Id) 'WARN'
+                }
+            }
             Start-Sleep -Milliseconds 50
+            try { $script:DeferredSetupProc.Refresh() } catch {}
         }
-        $boot = Import-DeferredServerSetupResult -ResultPath $script:DeferredSetupResultPath
-        try { Remove-Item -LiteralPath $script:DeferredSetupResultPath -Force -ErrorAction SilentlyContinue } catch {}
+        if ($timedOut) {
+            $bgPid = 0
+            try { $bgPid = [int]$script:DeferredSetupProc.Id } catch {}
+            if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                Write-ConnectLog ("SERVER_SETUP_TIMEOUT ms={0} pid={1}" -f $timeoutMs, $bgPid) 'ERROR'
+            }
+            try {
+                if (-not $script:DeferredSetupProc.HasExited) { $script:DeferredSetupProc.Kill() }
+            } catch {}
+            try { $null = $script:DeferredSetupProc.WaitForExit(5000) } catch {}
+            try { Remove-Item -LiteralPath $script:DeferredSetupResultPath -Force -ErrorAction SilentlyContinue } catch {}
+            $script:DeferredSetupProc = $null
+            $boot = @{
+                Ok     = $false
+                Error  = ("server setup timed out after {0}ms" -f $timeoutMs)
+                PubB   = ''
+                PushOk = $false
+            }
+        } else {
+            $boot = Import-DeferredServerSetupResult -ResultPath $script:DeferredSetupResultPath
+            try { Remove-Item -LiteralPath $script:DeferredSetupResultPath -Force -ErrorAction SilentlyContinue } catch {}
+        }
     } else {
         $boot = Initialize-ServerSession -ConnectScriptDir $script:DeferredSetupConnectScriptDir -Alias $script:DeferredSetupAlias -SshCfgPath $script:DeferredSetupSshCfgPath
     }
@@ -2012,9 +2070,25 @@ if ($DeferredServerSetupOnly) {
         $SshDir = [System.IO.Path]::Combine("C:\Users\$LaptopUser", '.ssh')
     }
     New-Item -ItemType Directory -Force -Path $SshDir | Out-Null
+    # Mirror the main-path IdentityFile pin: deferred child never runs the bootstrap
+    # block that sets ConnectSshIdentityFile, so without this an elevated Connect whose
+    # $SshDir was rebound to LAPTOP_USER would rewrite the alias with '~/.ssh/...' and
+    # offer the wrong key. Same-user elevation is a no-op (paths equal).
+    $keyA = [System.IO.Path]::Combine($SshDir, 'id_ed25519')
+    $script:ConnectSshIdentityFile = ''
+    $_profileKey = [System.IO.Path]::Combine(($env:USERPROFILE + ''), '.ssh', 'id_ed25519')
+    if ((Test-Path -LiteralPath $keyA) -and ($keyA -ne $_profileKey)) {
+        $script:ConnectSshIdentityFile = ($keyA -replace '\\', '/')
+        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+            Write-ConnectLog ("SSH_IDENTITY_PINNED path={0} reason=deferred_setup_ssh_dir_not_running_profile" -f $script:ConnectSshIdentityFile) 'WARN'
+        }
+    }
     $sshCfg = [System.IO.Path]::Combine($SshDir, 'config')
     $sshCfgUser = Get-SshConfigUserForServer -Ip $ServerIP -FallbackUser $RemoteUser
     Set-SshHostBlock -CfgPath $sshCfg -AliasName $Alias -HostName $ServerIP -UserName $sshCfgUser
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog 'SERVER_SETUP deferred_child begin' 'INFO'
+    }
     $boot = Initialize-ServerSession -ConnectScriptDir $script:ConnectScriptDir -Alias $Alias -SshCfgPath $sshCfg
     $result = [ordered]@{
         Ok                          = [bool]$boot.Ok
@@ -2031,6 +2105,9 @@ if ($DeferredServerSetupOnly) {
         try {
             ($result | ConvertTo-Json -Compress) | Set-Content -LiteralPath $DeferredSetupResultPath -Encoding UTF8
         } catch { }
+    }
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog ("SERVER_SETUP deferred_child end ok={0}" -f [int][bool]$boot.Ok) 'INFO'
     }
     exit $(if ($boot.Ok) { 0 } else { 1 })
 }

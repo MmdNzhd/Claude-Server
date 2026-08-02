@@ -3,5 +3,5 @@
     "message_force":  "Update required: Cursor profile history migrate (Smart/Sepidz), auth-sync, and connect fixes. Updating now.",
     "message_optional":  "A newer Claude Connect is available (profile history migrate + fixes). Update now?",
     "force_min_version":  null,
-    "latest":  "20260802.2"
+    "latest":  "20260802.3"
 }

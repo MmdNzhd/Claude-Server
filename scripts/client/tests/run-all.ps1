@@ -15,6 +15,7 @@ $suites = @(
     @{ Name = 'connect-preflight-skip-update'; Script = 'test-connect-preflight-skip-update.ps1' }
     @{ Name = 'connect-task7-prefetch-foreign-cache'; Script = 'test-connect-task7-prefetch-foreign-cache.ps1' }
     @{ Name = 'connect-task8-deferred-setup'; Script = 'test-connect-task8-deferred-setup.ps1' }
+    @{ Name = 'wait-deferred-server-setup-timeout-live'; Script = 'test-wait-deferred-server-setup-timeout-live.ps1' }
     @{ Name = 'empty-menu-manual-update'; Script = 'test-empty-menu-manual-update.ps1' }
     @{ Name = 'run-id-multi-ui'; Script = 'test-run-id-multi-ui.ps1' }
     @{ Name = 'connect-update-script-only-drift'; Script = 'test-connect-update-script-only-drift.ps1' }
@@ -108,6 +109,7 @@ $suites = @(
     @{ Name = 'harder-live-bat-boot-handoff'; Script = 'test-harder-live-bat-boot-handoff.ps1' }
     @{ Name = 'harder-live-daylog-hammer'; Script = 'test-harder-live-daylog-hammer.ps1' }
     @{ Name = 'harder-live-deferred-slot'; Script = 'test-harder-live-deferred-slot.ps1' }
+    @{ Name = 'harder-live-deferred-server-setup-timeout'; Script = 'test-harder-live-deferred-server-setup-timeout.ps1' }
     @{ Name = 'harder-live-editor-launch'; Script = 'test-harder-live-editor-launch.ps1' }
     @{ Name = 'harder-live-elevate-adminak'; Script = 'test-harder-live-elevate-adminak.ps1' }
     @{ Name = 'harder-live-exe-atomic-swap'; Script = 'test-harder-live-exe-atomic-swap.ps1' }
