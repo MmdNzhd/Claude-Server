@@ -90,6 +90,10 @@ $suites = @(
     @{ Name = 'mac-connect-hard-batch'; Script = 'test-mac-connect-hard-batch.ps1' }
     @{ Name = 'designer-connect-hard-batch'; Script = 'test-designer-connect-hard-batch.ps1' }
     @{ Name = 'mount-active-hard-batch'; Script = 'test-mount-active-hard-batch.ps1' }
+    @{ Name = 'mount-skew-align-hard-batch'; Script = 'test-mount-skew-align-hard-batch.ps1' }
+    @{ Name = 'orphan-reclaim-hard-batch'; Script = 'test-orphan-reclaim-hard-batch.ps1' }
+    @{ Name = 'keep-tunnel-marker-hard-batch'; Script = 'test-keep-tunnel-marker-hard-batch.ps1' }
+    @{ Name = 'cleanup-user-hard-batch'; Script = 'test-cleanup-user-hard-batch.ps1' }
     @{ Name = 'windows-mcp-hard-batch'; Script = 'test-windows-mcp-hard-batch.ps1' }
     @{ Name = 'hard-utf8-mojibake-fleet'; Script = 'test-hard-utf8-mojibake-fleet.ps1' }
     @{ Name = 'sidecar-xray-hard-batch'; Script = 'test-sidecar-xray-hard-batch.ps1' }
@@ -132,6 +136,14 @@ $suites = @(
     @{ Name = 'harder-live-slot-storm'; Script = 'test-harder-live-slot-storm.ps1' }
     @{ Name = 'harder-live-update-filelock'; Script = 'test-harder-live-update-filelock.ps1' }
     @{ Name = 'harder-live-versioned-prune'; Script = 'test-harder-live-versioned-prune.ps1' }
+    # Multi-Connect KEEP / skew HARDER L1–L7 (2026-08-03)
+    @{ Name = 'harder-live-keep-reclaim'; Script = 'test-harder-live-keep-reclaim.ps1' }
+    @{ Name = 'harder-live-keep-soft-race'; Script = 'test-harder-live-keep-soft-race.ps1' }
+    @{ Name = 'harder-live-pin-before-reclaim'; Script = 'test-harder-live-pin-before-reclaim.ps1' }
+    @{ Name = 'harder-live-acquire-keep-split'; Script = 'test-harder-live-acquire-keep-split.ps1' }
+    @{ Name = 'harder-live-slot-storm-keep'; Script = 'test-harder-live-slot-storm-keep.ps1' }
+    @{ Name = 'harder-adversarial-keep-mount'; Script = 'test-harder-adversarial-keep-mount.ps1' }
+    @{ Name = 'harder-live-mount-skew-gate'; Script = 'test-harder-live-mount-skew-gate.ps1' }
     @{ Name = 'hard-cmd-flash-fleet-push'; Script = 'test-hard-cmd-flash-fleet-push.ps1' }
     @{ Name = 'p0-connect-fixes'; Script = 'test-p0-connect-fixes.ps1' }
     @{ Name = 'windows-mcp-no-orphan-cmd'; Script = 'test-windows-mcp-no-orphan-cmd.ps1' }
@@ -139,6 +151,9 @@ $suites = @(
     @{ Name = 'figma-skills-pack'; Script = 'test-figma-skills-pack.ps1' }
     @{ Name = 'connect-bat-max-ps-starts'; Script = 'test-connect-bat-max-ps-starts.ps1' }
     @{ Name = 'client-update-policy-optional'; Script = 'test-client-update-policy-optional.ps1' }
+    @{ Name = 'verdir-content-integrity'; Script = 'test-verdir-content-integrity.ps1' }
+    @{ Name = 'setup-launch-exe-integrity'; Script = 'test-setup-launch-exe-integrity.ps1' }
+    @{ Name = 'no-stale-shadow-in-ship'; Script = 'test-no-stale-shadow-in-ship.ps1' }
     @{ Name = 'smartscreen-docs-contract'; Script = 'test-smartscreen-docs-contract.ps1' }
     @{ Name = 'never-again-ship-gates'; Script = 'test-never-again-ship-gates.ps1' }
     @{ Name = 'bundle-deploy-cohesion'; Script = 'test-bundle-deploy-cohesion.ps1' }

@@ -361,15 +361,20 @@ connect_log() {
     # - TRACE/DEBUG stay local-only during hot loops except TUNNEL_* TRACE (bug 36)
     # - WARN/ERROR flush now; INFO every 25 lines
     if [ "$level" = "TRACE" ] || [ "$level" = "DEBUG" ]; then
-        if [ "$level" = "TRACE" ] && printf '%s' "$msg" | grep -q 'TUNNEL_'; then
+        if { [ "$level" = "TRACE" ] && printf '%s' "$msg" | grep -q 'TUNNEL_'; } \
+            || [ "${CLAUDE_CONNECT_LOG_VERBOSE:-0}" = "1" ]; then
             CONNECT_LOG_LINES_SINCE_SYNC=$(( ${CONNECT_LOG_LINES_SINCE_SYNC:-0} + 1 ))
-            if printf '%s' "$msg" | grep -Eq 'soft_fail|TUNNEL_DROP|TUNNEL_EXIT' || [ "${CONNECT_LOG_LINES_SINCE_SYNC:-0}" -ge 25 ]; then
+            _sync_every=25
+            [ "${CLAUDE_CONNECT_LOG_VERBOSE:-0}" = "1" ] && _sync_every=10
+            if printf '%s' "$msg" | grep -Eq 'soft_fail|TUNNEL_DROP|TUNNEL_EXIT' \
+                || [ "${CONNECT_LOG_LINES_SINCE_SYNC:-0}" -ge "$_sync_every" ]; then
                 if declare -F request_connect_log_sync >/dev/null 2>&1; then
                     request_connect_log_sync || true
                 else
                     sync_connect_log_to_server || true
                 fi
             fi
+            unset _sync_every
         fi
         return 0
     fi
@@ -738,7 +743,7 @@ enter_connect_single_instance() {
     # parity with Windows Global\ClaudeConnect#0..#9.
     # connect.sh may already hold fd 9 (early flock before update).
     if [ "${CONNECT_LOCK_HELD:-0}" = 1 ]; then
-        connect_log "MULTI_INSTANCE: acquired pid=$$ via=early_flock slot=${CLAUDE_CONNECT_UI_SLOT:-0}" 'INFO'
+        connect_log "MULTI_INSTANCE: acquired pid=$$ via=early_flock slot=${CLAUDE_CONNECT_UI_SLOT:-?}" 'INFO'
         return 0
     fi
     local lockdir="${HOME}/.config/claude-connect"

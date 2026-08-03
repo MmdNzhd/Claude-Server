@@ -1,6 +1,6 @@
 #Requires -Version 5.1
-# Source contracts: skip BgAuthStampProc.WaitForExit(5000) when local stamp TTL already current.
-# Plan Task 2 (2026-07-25-connect-speed-stability-logging): AUTH_STAMP_WAIT_SKIPPED reason=local_ttl.
+# Source contracts: skip BgAuthStampProc.WaitForExit(5000) when stamp already known current.
+# AUTH_STAMP_WAIT_SKIPPED reason=stamp_current (was local_ttl; mtime-only TTL removed for account rotation).
 # Presence of WaitForExit alone is not enough — wait must be gated (cold path only).
 
 $ErrorActionPreference = 'Stop'
@@ -18,7 +18,7 @@ $connect = Get-Content (Get-ClientFile 'windows\connect.ps1') -Raw
 
 Assert ($connect -match 'AUTH_STAMP_WAIT_SKIPPED') 'connect.ps1 logs AUTH_STAMP_WAIT_SKIPPED when stamp already current'
 Assert ($connect -match 'WaitForExit\(5000\)') 'WaitForExit(5000) still present for cold prefetch path'
-Assert ($connect -match 'AUTH_STAMP_WAIT_SKIPPED reason=local_ttl') 'skip log uses reason=local_ttl'
+Assert ($connect -match 'AUTH_STAMP_WAIT_SKIPPED reason=stamp_current') 'skip log uses reason=stamp_current'
 
 # Harvest block before Syncing Cursor auth.
 $harvest = [regex]::Match(

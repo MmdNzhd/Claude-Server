@@ -78,17 +78,49 @@ function Repair-ConnectWindowsProfileTempEnv {
     }
 }
 
+function Get-ConnectPs1EmbeddedVersion {
+    # Parse $script:ConnectVersion / $ConnectVersion from connect.ps1. Empty = unreadable.
+    param([string]$ConnectPs1Path)
+    if (-not $ConnectPs1Path -or -not (Test-Path -LiteralPath $ConnectPs1Path)) { return '' }
+    try {
+        # Head-only: version is near the top; avoid slurping 200KB+ on every boot probe.
+        $head = Get-Content -LiteralPath $ConnectPs1Path -TotalCount 250 -ErrorAction Stop | Out-String
+        if ($head -match "(?m)ConnectVersion\s*=\s*'([^']+)'") { return $Matches[1].Trim() }
+    } catch {}
+    return ''
+}
+
+function Test-ConnectFileIsStaleShadow {
+    # windows/connect-ui.ps1 + connect-diagnostic.ps1 are intentional STALE-SHADOW stubs.
+    # A VerDir that shipped those stubs is not "complete" (fleet break 2026-08-03).
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $false }
+    try {
+        $head = (Get-Content -LiteralPath $Path -TotalCount 8 -ErrorAction Stop) -join "`n"
+        return [bool]($head -match 'STALE-SHADOW')
+    } catch { return $false }
+}
+
 function Test-ConnectVerSrcComplete {
+    # Complete = required files present AND folder name == connect-version.txt == connect.ps1 ConnectVersion
+    # AND no STALE-SHADOW canon replacements for ui/diagnostic when those files exist.
+    # Folder-only / txt-only match is NOT enough (2026-08-03: Repair stamped txt=.7 while ps1 still .1 → false "healthy").
     param([string]$SrcDir, [string]$Ver)
     if (-not $SrcDir -or -not (Test-Path -LiteralPath $SrcDir)) { return $false }
     foreach ($n in @('connect.ps1', 'connect-boot.ps1', 'connect-update.ps1', 'connect.bat', 'connect-version.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $SrcDir $n))) { return $false }
+    }
+    foreach ($n in @('connect-diagnostic.ps1', 'connect-ui.ps1')) {
+        $p = Join-Path $SrcDir $n
+        if ((Test-Path -LiteralPath $p) -and (Test-ConnectFileIsStaleShadow -Path $p)) { return $false }
     }
     if ($Ver -match '^\d{8}\.\d+$') {
         try {
             $v = (Get-Content -LiteralPath (Join-Path $SrcDir 'connect-version.txt') -Raw -ErrorAction Stop).Trim()
             if ($v -and $v -ne $Ver) { return $false }
         } catch { return $false }
+        $ps1Ver = Get-ConnectPs1EmbeddedVersion -ConnectPs1Path (Join-Path $SrcDir 'connect.ps1')
+        if (-not $ps1Ver -or $ps1Ver -ne $Ver) { return $false }
     }
     return $true
 }
@@ -161,9 +193,23 @@ function Repair-ConnectVerDirLayout {
         } catch {}
     }
 
-    try {
-        Set-Content -LiteralPath (Join-Path $srcDir 'connect-version.txt') -Value $ver -Encoding ASCII -NoNewline
-    } catch {}
+    # Never stamp connect-version.txt to the folder name when connect.ps1 disagrees.
+    # That lie made poisoned trees look "complete" and kept install-current on bad code.
+    $ps1Ver = Get-ConnectPs1EmbeddedVersion -ConnectPs1Path (Join-Path $srcDir 'connect.ps1')
+    if ($ps1Ver -match '^\d{8}\.\d+$' -and $ps1Ver -eq $ver) {
+        try {
+            Set-Content -LiteralPath (Join-Path $srcDir 'connect-version.txt') -Value $ver -Encoding ASCII -NoNewline
+        } catch {}
+    } elseif ($ps1Ver -match '^\d{8}\.\d+$' -and $ps1Ver -ne $ver) {
+        $script:ConnectVerDirRepairLast = ('content_version_mismatch folder={0} ps1={1}' -f $ver, $ps1Ver)
+        # Keep txt honest (embedded) so Test-ConnectVerSrcComplete fails vs folder name.
+        try {
+            Set-Content -LiteralPath (Join-Path $srcDir 'connect-version.txt') -Value $ps1Ver -Encoding ASCII -NoNewline
+        } catch {}
+        if (-not $Quiet) {
+            Write-Host ("WARN: VerDir content mismatch folder={0} connect.ps1={1} (not install-current)" -f $ver, $ps1Ver)
+        }
+    }
 
     foreach ($cand in @(
             (Join-Path $srcDir 'Claude-Connect.exe'),
@@ -177,6 +223,11 @@ function Repair-ConnectVerDirLayout {
             }
             Remove-Item -LiteralPath $cand -Force -ErrorAction SilentlyContinue
         }
+    }
+    # Foreign versioned SFX dropped into src (seen: Claude-Connect-20260803.1.exe inside .7\src).
+    Get-ChildItem -LiteralPath $srcDir -Filter 'Claude-Connect*.exe' -File -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+        $script:ConnectVerDirRepairLast = 'removed_src_exe_poison'
     }
 
     return $true
@@ -236,7 +287,23 @@ function Repair-ConnectAllVerDirLayouts {
 }
 
 function Get-ConnectInstallCurrentPath {
+    # Test seam: never let regression tests poison the live laptop pointer
+    # (hit live 2026-08-03: test wrote 20260803.88 into real install-current.txt).
+    $override = ''
+    try { $override = [string]$env:CLAUDE_CONNECT_TEST_INSTALL_CURRENT_PATH } catch { $override = '' }
+    if ($override -and $override.Trim().Length -gt 0) {
+        return $override.Trim()
+    }
     return (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt')
+}
+
+function Get-ConnectVersionSortKey {
+    # Numeric order for YYYYMMDD.N (same formula as Repair-ConnectAllVerDirLayouts).
+    param([string]$Ver)
+    if ($Ver -match '^(\d{8})\.(\d+)$') {
+        return ([int64]$Matches[1] * 10000L + [int64]$Matches[2])
+    }
+    return [int64](-1)
 }
 
 function Get-ConnectInstallCurrent {
@@ -248,6 +315,12 @@ function Get-ConnectInstallCurrent {
             $ver = (Get-Content -LiteralPath $p -Raw -ErrorAction SilentlyContinue).Trim()
         }
     } catch { $ver = '' }
+    # Normalize full-path poison (agents/scripts wrote absolute VerDir path). VBS joins
+    # root\cfgVer\src and fails unless cfgVer is VERSION ONLY.
+    if ($ver -and $ver -notmatch '^\d{8}\.\d+$') {
+        $leaf = [IO.Path]::GetFileName($ver.TrimEnd('\', '/'))
+        if ($leaf -match '^\d{8}\.\d+$') { $ver = $leaf }
+    }
     if ($ver -notmatch '^\d{8}\.\d+$' -and $Root) {
         try {
             $cf = Join-Path $Root 'current.txt'
@@ -256,21 +329,41 @@ function Get-ConnectInstallCurrent {
             }
         } catch { $ver = '' }
     }
-    # Reject poison/stale pointers (tests or races) that name a VerDir without connect.ps1.
+    # Reject poison/stale pointers: missing connect.ps1 OR content/version mismatch in that VerDir.
     if ($ver -match '^\d{8}\.\d+$' -and $Root -and (Test-Path -LiteralPath $Root)) {
-        $probe = Join-Path $Root (Join-Path $ver 'src\connect.ps1')
-        if (-not (Test-Path -LiteralPath $probe)) { $ver = '' }
+        $probeSrc = Join-Path $Root (Join-Path $ver 'src')
+        $probe = Join-Path $probeSrc 'connect.ps1'
+        if (-not (Test-Path -LiteralPath $probe)) {
+            $ver = ''
+        } elseif (-not (Test-ConnectVerSrcComplete -SrcDir $probeSrc -Ver $ver)) {
+            $ver = ''
+        }
     }
-    if ($ver -notmatch '^\d{8}\.\d+$' -and $Root -and (Test-Path -LiteralPath $Root)) {
+    # Prefer newest complete VerDir under Root when pointer is missing OR older than best
+    # (old Connect boot used to re-stamp install-current to its own older folder).
+    if ($Root -and (Test-Path -LiteralPath $Root)) {
         $bestKey = -1L
+        $bestVer = ''
         Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^\d{8}\.\d+$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'src\connect.ps1')) } |
             ForEach-Object {
-                if ($_.Name -match '^(\d{8})\.(\d+)$') {
-                    $key = [int64]$Matches[1] * 10000L + [int64]$Matches[2]
-                    if ($key -gt $bestKey) { $bestKey = $key; $ver = $_.Name }
+                $cand = $_.Name
+                $src = Join-Path $_.FullName 'src'
+                $ok = $true
+                if (Get-Command Test-ConnectVerSrcComplete -ErrorAction SilentlyContinue) {
+                    $ok = [bool](Test-ConnectVerSrcComplete -SrcDir $src -Ver $cand)
                 }
+                if (-not $ok) { return }
+                $key = Get-ConnectVersionSortKey -Ver $cand
+                if ($key -gt $bestKey) { $bestKey = $key; $bestVer = $cand }
             }
+        if ($bestVer) {
+            if ($ver -notmatch '^\d{8}\.\d+$') {
+                $ver = $bestVer
+            } elseif ((Get-ConnectVersionSortKey -Ver $bestVer) -gt (Get-ConnectVersionSortKey -Ver $ver)) {
+                $ver = $bestVer
+            }
+        }
     }
     if ($ver -match '^\d{8}\.\d+$') { return $ver }
     return ''
@@ -305,10 +398,40 @@ function Set-ConnectInstallCurrent {
         } catch {}
     }
     if (-not $skipGlobal) {
+        # Never stamp a Ver that is not content-complete under Root (folder/txt/ps1 + no STALE-SHADOW).
+        # Write-side poison was the .88 incident: pointer set to incomplete VerDir, read-side only healed.
+        if ($Root -and (Test-Path -LiteralPath $Root)) {
+            $wantSrc = Join-Path $Root (Join-Path $Ver 'src')
+            if (-not (Test-ConnectVerSrcComplete -SrcDir $wantSrc -Ver $Ver)) { return }
+        } else {
+            # No Root = cannot prove VerDir health; refuse machine-wide pointer write.
+            return
+        }
+        # Anti-downgrade: a live older Connect must not overwrite install-current after a newer
+        # versioned update landed (seen 2026-08-03: .4 update then .2.4 boot re-stamped pointer).
         try {
-            $dir = Join-Path $env:USERPROFILE '.config\claude-connect'
-            New-Item -ItemType Directory -Force -Path $dir | Out-Null
-            Set-Content -LiteralPath (Get-ConnectInstallCurrentPath) -Value $Ver -Encoding ASCII -NoNewline
+            $cur = ''
+            $pCur = Get-ConnectInstallCurrentPath
+            if (Test-Path -LiteralPath $pCur) {
+                $cur = (Get-Content -LiteralPath $pCur -Raw -ErrorAction SilentlyContinue).Trim()
+            }
+            if ($cur -match '^\d{8}\.\d+$' -and $Root -and (Test-Path -LiteralPath $Root)) {
+                $curSrc = Join-Path $Root (Join-Path $cur 'src')
+                $curProbe = Join-Path $curSrc 'connect.ps1'
+                # Only anti-downgrade against a HEALTHY newer tree (poisoned .7 with .1 ps1 must not block).
+                $curHealthy = (Test-Path -LiteralPath $curProbe) -and
+                    (Test-ConnectVerSrcComplete -SrcDir $curSrc -Ver $cur)
+                if ($curHealthy -and
+                    ((Get-ConnectVersionSortKey -Ver $cur) -gt (Get-ConnectVersionSortKey -Ver $Ver))) {
+                    return
+                }
+            }
+        } catch {}
+        try {
+            $ptrPath = Get-ConnectInstallCurrentPath
+            $dir = Split-Path -Parent $ptrPath
+            if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+            Set-Content -LiteralPath $ptrPath -Value $Ver -Encoding ASCII -NoNewline
         } catch {}
     }
     if ($Root) {
@@ -445,6 +568,10 @@ function Write-ConnectRootInstantLauncher {
             '  cfgVer = Trim(tf.ReadLine)'
             '  tf.Close'
             '  If cfgVer <> "" Then'
+            # install-current must be VERSION ONLY (20260803.6). A full path poison
+            # made VBS look for root\C:\Users\...\20260803.6\src and fall back forever.
+            '    If InStr(cfgVer, "\") > 0 Then cfgVer = Mid(cfgVer, InStrRev(cfgVer, "\") + 1)'
+            '    If InStr(cfgVer, "/") > 0 Then cfgVer = Mid(cfgVer, InStrRev(cfgVer, "/") + 1)'
             '    If fso.FileExists(root & "\" & cfgVer & "\src\connect-boot.ps1") Then ver = cfgVer'
             '  End If'
             'End If'

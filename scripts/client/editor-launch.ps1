@@ -1687,6 +1687,11 @@ function Get-RemoteFolderUri {
 
 function Get-CursorMainProfileProcesses {
     param([string]$ProfileDir = (Get-CursorRemoteProfileDir))
+    # Callers MUST @()-wrap before `.Count`: PowerShell unwraps a single-element
+    # `return @(...)` to a bare object, so bare `.Count` is $null and one live main
+    # looks like "no main" (orphan_helpers) -> LAUNCH_REAP kills the open Cursor window
+    # (hit live 20260803.5). Do not use Write-Output -NoEnumerate here - it breaks
+    # `@($result).Count` / foreach for multi-process trees.
     return @(Get-CursorProfileProcesses -ProfileDir $ProfileDir |
         Where-Object { $_.CommandLine -and ($_.CommandLine -notmatch '--type=') })
 }
@@ -2461,21 +2466,18 @@ function Close-CursorProjectWindows {
 }
 
 function Get-CursorLaunchWindowPlan {
-    # profile_all>0 with profile_main=False ("orphan helpers") means either helpers from
-    # an existing/half-dead profile session, OR another concurrent connect session's window
-    # that is still spinning up and not yet classified as "main" in this exact CIM snapshot.
-    # Treat this the same as profile_open and request --new-window too - otherwise a race is
-    # possible where a sibling connect session's window finishes appearing microseconds after
-    # our entry-time check, and Cursor's single-instance IPC silently reroutes our "open
-    # folder" request into THAT window instead of spawning ours (confirmed live: a launch can
-    # spend minutes retrying/recovering while actually pointed at someone else's project).
+    # profile_all>0 with profile_main=False ("orphan helpers") means helpers from a
+    # half-dead profile OR a sibling window still spinning up. Caller settles then
+    # reaps helpers-only (Stop-CursorServerProfileTree â†’ cold). Do NOT request
+    # --new-window for orphanHelpers alone â€” that amplified litter (amir V19).
+    # UseNewWindow = AgentHome OR HasProfileWindow ONLY.
     param(
         [Parameter(Mandatory)][bool]$AgentHome,
         [Parameter(Mandatory)][bool]$HasProfileWindow,
         [Parameter(Mandatory)][int]$ProfileProcCount
     )
     $orphanHelpers = ((-not $HasProfileWindow) -and ($ProfileProcCount -gt 0))
-    $useNewWindow = ($AgentHome -or $HasProfileWindow -or $orphanHelpers)
+    $useNewWindow = ($AgentHome -or $HasProfileWindow)
     $reason = if ($AgentHome) { 'agent_home' } elseif ($HasProfileWindow) { 'profile_open' } elseif ($orphanHelpers) { 'orphan_helpers' } else { 'cold_start' }
     return [pscustomobject]@{ UseNewWindow = $useNewWindow; Reason = $reason; OrphanHelpers = $orphanHelpers }
 }
@@ -2611,10 +2613,23 @@ function Launch-RemoteEditor {
     Write-LaunchPerfLog -Mark 'entry_agent_home' -Ms $swAgent.ElapsedMilliseconds -Extra "result=$agentHome"
 
     $swProfile = [System.Diagnostics.Stopwatch]::StartNew()
-    $hasProfileWindow = if ($EditorCmd -eq 'cursor') { (Get-CursorMainProfileProcesses).Count -gt 0 } else { $false }
-    $profileProcCount = if ($EditorCmd -eq 'cursor') { (Get-CursorProfileProcesses).Count } else { 0 }
+    # Always @()-wrap: one main process must not look like Count=$null (orphan false-positive).
+    $hasProfileWindow = if ($EditorCmd -eq 'cursor') { @(Get-CursorMainProfileProcesses).Count -gt 0 } else { $false }
+    $profileProcCount = if ($EditorCmd -eq 'cursor') { @(Get-CursorProfileProcesses).Count } else { 0 }
     $swProfile.Stop()
     Write-LaunchPerfLog -Mark 'entry_profile_counts' -Ms $swProfile.ElapsedMilliseconds -Extra "profile_main=$hasProfileWindow profile_all=$profileProcCount"
+
+    # B11 settle: mainCount==0 && allCount>0 â†’ wait â‰¤3Ã—~400ms for sibling spinup, re-query.
+    if ($EditorCmd -eq 'cursor' -and (-not $hasProfileWindow) -and ($profileProcCount -gt 0)) {
+        for ($settle = 1; $settle -le 3; $settle++) {
+            Start-Sleep -Milliseconds 400
+            Clear-CursorProcessCache
+            $hasProfileWindow = @(Get-CursorMainProfileProcesses).Count -gt 0
+            $profileProcCount = @(Get-CursorProfileProcesses).Count
+            Write-EditorLaunchLog ("LAUNCH_SETTLE attempt={0} profile_main={1} profile_all={2}" -f $settle, $hasProfileWindow, $profileProcCount) 'INFO'
+            if ($hasProfileWindow -or ($profileProcCount -eq 0)) { break }
+        }
+    }
 
     # NEVER soft-stop ClaudeServerCursorProfile for auth. main=1 was a false signal when
     # many windows share one profile (profile_count=24 but only one "main" detected) and
@@ -2628,6 +2643,9 @@ function Launch-RemoteEditor {
         "LAUNCH_BEGIN: exe=$cli editor=$EditorCmd alias=$Alias path=$RemotePath uri=$uri " +
         "on_folder=$onFolder agent_home=$agentHome profile_main=$hasProfileWindow profile_all=$profileProcCount " +
         "elevated=$(Test-IsElevatedShell) known_on_folder=$KnownOnFolder auth_relaunch=$AuthRelaunch"
+    ) 'INFO'
+    Write-EditorLaunchLog (
+        "LAUNCH_PROBE profile_all=$profileProcCount profile_main=$hasProfileWindow agent_home=$agentHome on_folder=$onFolder"
     ) 'INFO'
 
     # $onFolder is now a project-scoped title/URI/cmd check (it no longer globally short-circuits on a
@@ -2653,6 +2671,20 @@ function Launch-RemoteEditor {
     $orphanHelpers = $plan.OrphanHelpers
     $useNewWindow = $plan.UseNewWindow
     $planReason = $plan.Reason
+    # Still helpers-only after settle â†’ reap server-profile tree â†’ cold start (UseNewWindow=false).
+    if ($EditorCmd -eq 'cursor' -and $orphanHelpers) {
+        Write-EditorLaunchLog ("LAUNCH_REAP: orphan_helpers_reaped profile_all={0} - Stop-CursorServerProfileTree then cold" -f $profileProcCount) 'WARN'
+        try { Stop-CursorServerProfileTree } catch {
+            Write-EditorLaunchLog ("LAUNCH_REAP_FAIL: {0}" -f $_.Exception.Message) 'WARN'
+        }
+        Start-Sleep -Milliseconds 400
+        Clear-CursorProcessCache
+        $hasProfileWindow = $false
+        $profileProcCount = 0
+        $orphanHelpers = $false
+        $useNewWindow = $false
+        $planReason = 'orphan_helpers_reaped'
+    }
     Write-EditorLaunchLog "LAUNCH_PLAN: use_new_window=$useNewWindow reason=$planReason profile_all=$profileProcCount" 'INFO'
 
     if ($EditorCmd -eq 'code') {
@@ -2662,15 +2694,9 @@ function Launch-RemoteEditor {
         Write-LaunchPerfLog -Mark 'launch_init_profile' -Ms $swInit.ElapsedMilliseconds
     }
 
-    # Never force-kill the ClaudeServerCursorProfile tree before launch.
-    # Multiple remote projects share one profile -- killing the tree closes ALL Cursor windows.
-    # Prefer --new-window (already set via $useNewWindow) and keep other projects open.
-    # Bug 8 note: this guard intentionally keeps using the broader $useNewWindow (unlike the
-    # narrower $hasProfileWindow-based $preservedOpenWindows guard further down at the
-    # post-exhaustion LAUNCH_RECOVERY_SKIP check) - its purpose is only to avoid pre-emptively
-    # killing the profile tree before even TRYING the launch strategies, so it's fine/safe to be
-    # broad here (orphan helpers alone are reason enough not to kill before trying). Do not
-    # narrow this one to match the recovery guard - they protect against different things.
+    # Never force-kill the ClaudeServerCursorProfile tree before launch when a real
+    # main/agent-home window is open. Helpers-only was already reaped above (orphan_helpers_reaped).
+    # Prefer --new-window (via $useNewWindow = AgentHome -or HasProfileWindow) and keep other projects open.
     if ($EditorCmd -eq 'cursor' -and ($agentHome -or $useNewWindow) -and ($profileProcCount -gt 0)) {
         Write-EditorLaunchLog ("LAUNCH_KILL_SKIP: reason=preserve_open_windows profile_count={0} agent_home={1} use_new_window={2}" -f $profileProcCount, $agentHome, $useNewWindow) 'INFO'
         Write-LaunchPerfLog -Mark 'launch_kill_profile' -Ms 0 -Extra 'skipped=preserve_open_windows'

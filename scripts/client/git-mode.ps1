@@ -3,7 +3,7 @@
 #
 # Bundle co-origination stamp: must match connect.ps1 ConnectBuildId (publish bumps both).
 # Detects split-generation installs where version string alone is unchanged (P1.2 residual).
-$script:GitModeBuildId = '82c842cf-8db8-44f2-bffd-0955674a379c'
+$script:GitModeBuildId = '9f7260d8-4b4d-4b60-b68a-cc9edccbc074'
 
 function Get-GitMode {
     # Site policy: GIT_MODE hide/server disabled. Always OFF (no .git rename).
@@ -1110,6 +1110,331 @@ function Get-ConnectSessionSlotMarkers {
     return @($out.ToArray())
 }
 
+function Get-ConnectKeepTunnelMarkerPath {
+    param([Parameter(Mandatory)][int]$Port)
+    return (Join-Path (Get-ConnectSessionSlotMarkerDir) ("keep-tunnel-{0}.json" -f $Port))
+}
+
+function Write-ConnectKeepTunnelMarker {
+    param(
+        [Parameter(Mandatory)][int]$Port,
+        [int]$Slot = -1,
+        [int]$TunnelPid = 0,
+        [string]$ProjectId = '',
+        [string]$RemotePath = '',
+        [string]$Alias = '',
+        [string]$EditorCmd = ''
+    )
+    try {
+        $dir = Get-ConnectSessionSlotMarkerDir
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
+        if ($Slot -lt 0) { $Slot = -1 }
+        $obj = [ordered]@{
+            port       = [int]$Port
+            slot       = [int]$Slot
+            tunnelPid  = [int]$TunnelPid
+            projectId  = ($ProjectId + '').Trim()
+            remotePath = ($RemotePath + '').Trim()
+            alias      = ($Alias + '').Trim()
+            editorCmd  = ($EditorCmd + '').Trim()
+            keptAt     = (Get-Date).ToString('o')
+        }
+        $json = ($obj | ConvertTo-Json -Compress)
+        $path = Get-ConnectKeepTunnelMarkerPath -Port $Port
+        $tmp = "$path.write.$PID.$([guid]::NewGuid().ToString('N').Substring(0,8)).tmp"
+        [System.IO.File]::WriteAllText($tmp, $json, [System.Text.UTF8Encoding]::new($false))
+        try {
+            if (Test-Path -LiteralPath $path) {
+                [System.IO.File]::Replace($tmp, $path, [NullString]::Value, $true)
+            } else {
+                [System.IO.File]::Move($tmp, $path)
+            }
+        } catch {
+            try { Copy-Item -LiteralPath $tmp -Destination $path -Force -ErrorAction Stop } catch { throw }
+            try { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } catch { }
+        }
+        Write-GitModeLog ("KEEP_MARKER_WRITE port={0} slot={1} tunnelPid={2} projectId={3}" -f $Port, $Slot, $TunnelPid, $obj.projectId) 'INFO'
+    } catch {
+        Write-GitModeLog ("KEEP_MARKER_WRITE_FAIL port={0} err={1}" -f $Port, $_.Exception.Message) 'WARN'
+    }
+}
+
+function Clear-ConnectKeepTunnelMarker {
+    param([int]$Port = 0)
+    try {
+        if ($Port -gt 0) {
+            $p = Get-ConnectKeepTunnelMarkerPath -Port $Port
+            if (Test-Path -LiteralPath $p) {
+                Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+                Write-GitModeLog ("KEEP_MARKER_CLEAR port={0}" -f $Port) 'INFO'
+            }
+            return
+        }
+        $dir = Get-ConnectSessionSlotMarkerDir
+        if (-not (Test-Path -LiteralPath $dir)) { return }
+        foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'keep-tunnel-*.json' -ErrorAction SilentlyContinue)) {
+            Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+            Write-GitModeLog ("KEEP_MARKER_CLEAR file={0}" -f $f.Name) 'INFO'
+        }
+    } catch { }
+}
+
+function Get-ConnectKeepTunnelMarkers {
+    # Liveness = tunnelPid (not Connect UI pid). Dead tunnelPid markers are dropped.
+    $out = New-Object 'System.Collections.Generic.List[object]'
+    $dir = Get-ConnectSessionSlotMarkerDir
+    if (-not (Test-Path -LiteralPath $dir)) { return @() }
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'keep-tunnel-*.json' -ErrorAction SilentlyContinue)) {
+        try {
+            $raw = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop
+            $o = $raw | ConvertFrom-Json
+            $tunnelPid = [int]$o.tunnelPid
+            $alive = $false
+            if ($tunnelPid -gt 0) {
+                $pr = Get-Process -Id $tunnelPid -ErrorAction SilentlyContinue
+                if ($pr) {
+                    try { $alive = -not $pr.HasExited } catch { $alive = $true }
+                }
+            }
+            if (-not $alive) {
+                Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+                Write-GitModeLog ("KEEP_MARKER_CLEAR port={0} reason=dead_tunnelPid pid={1}" -f ([int]$o.port), $tunnelPid) 'INFO'
+                continue
+            }
+            [void]$out.Add([pscustomobject]@{
+                Port       = [int]$o.port
+                Slot       = [int]$o.slot
+                TunnelPid  = $tunnelPid
+                ProjectId  = [string]$o.projectId
+                RemotePath = [string]$o.remotePath
+                Alias      = [string]$o.alias
+                EditorCmd  = [string]$o.editorCmd
+                KeptAt     = [string]$o.keptAt
+            })
+        } catch { }
+    }
+    return @($out.ToArray())
+}
+
+function Test-ConnectKeepEditorProtect {
+    # Folder/window check for KEEP Soft/reclaim protect. Sticky <=15m if check throws and marker present.
+    param(
+        [string]$RemotePath = '',
+        [string]$ProjectId = '',
+        [string]$ProtectRemotePath = '',
+        [string]$ProtectProjectId = '',
+        [string]$Alias = 'claude-server',
+        $KeepMarker = $null
+    )
+    $path = ($RemotePath + '').Trim()
+    if (-not $path -and $KeepMarker) { $path = ([string]$KeepMarker.RemotePath).Trim() }
+    $proj = ($ProjectId + '').Trim()
+    if (-not $proj -and $KeepMarker) { $proj = ([string]$KeepMarker.ProjectId).Trim() }
+    $aliasUse = ($Alias + '').Trim()
+    if ((-not $aliasUse -or $aliasUse -eq 'claude-server') -and $KeepMarker -and $KeepMarker.Alias) {
+        $a = ([string]$KeepMarker.Alias).Trim()
+        if ($a) { $aliasUse = $a }
+    }
+    if (-not $aliasUse) { $aliasUse = 'claude-server' }
+    $rootName = ''
+    if ($path) {
+        $rootName = [System.IO.Path]::GetFileName(($path.TrimEnd('/','\')))
+    } elseif ($proj) {
+        $rootName = $proj
+    }
+    $keptAt = $null
+    if ($KeepMarker -and $KeepMarker.KeptAt) {
+        try { $keptAt = [datetime]::Parse([string]$KeepMarker.KeptAt) } catch { $keptAt = $null }
+    }
+    try {
+        if ($path -and (Get-Command Test-RemoteEditorWindowOpen -ErrorAction SilentlyContinue)) {
+            if (Test-RemoteEditorWindowOpen -EditorCmd 'cursor' -Alias $aliasUse -RemotePath $path) { return $true }
+        }
+        if ($path -and (Get-Command Test-RemoteEditorOnCorrectFolder -ErrorAction SilentlyContinue)) {
+            if (Test-RemoteEditorOnCorrectFolder -EditorCmd 'cursor' -Alias $aliasUse -RemotePath $path) { return $true }
+        }
+        if ($rootName -and (Get-Command Get-CursorMainProfileProcesses -ErrorAction SilentlyContinue) -and
+            (Get-Command Test-CursorWindowTitleMatchesProject -ErrorAction SilentlyContinue) -and
+            (Get-Command Get-ProcessTopLevelWindows -ErrorAction SilentlyContinue)) {
+            foreach ($p in @(Get-CursorMainProfileProcesses)) {
+                foreach ($win in @(Get-ProcessTopLevelWindows -ProcessId $p.ProcessId)) {
+                    $title = [string]$win.Title
+                    if (-not $title) { continue }
+                    if (Test-CursorWindowTitleMatchesProject -Title $title -RootName $rootName) { return $true }
+                }
+            }
+        }
+        return $false
+    } catch {
+        if ($KeepMarker) {
+            if ($keptAt) {
+                $ageMin = ((Get-Date) - $keptAt).TotalMinutes
+                if ($ageMin -ge 0 -and $ageMin -le 15) {
+                    Write-GitModeLog ("KEEP_PROTECT sticky=1 age_min={0:N1} reason=check_throw path={1}" -f $ageMin, $path) 'WARN'
+                    return $true
+                }
+            } else {
+                Write-GitModeLog ("KEEP_PROTECT sticky=1 reason=check_throw_no_keptAt path={0}" -f $path) 'WARN'
+                return $true
+            }
+        }
+        return $false
+    }
+}
+
+function Invoke-ConnectMountDownByPort {
+    # Soft/reclaim: down ALL sshfs mounts bound to Port P (shared -p). Fail-open if remote helper missing.
+    param([Parameter(Mandatory)][int]$Port)
+    if (-not (Get-Command SshX -ErrorAction SilentlyContinue)) {
+        Write-GitModeLog ("HYGIENE_SOFT_DOWN_BY_PORT skip port={0} reason=no_sshx" -f $Port) 'WARN'
+        return
+    }
+    $cm = if ($CM) { [string]$CM } else { '$HOME/.local/bin/claude-mount' }
+    try {
+        $out = SshX "timeout 20 $cm down-by-port $Port 2>&1 || true"
+        $one = (([string]$out) -replace '\s+', ' ').Trim()
+        if ($one.Length -gt 160) { $one = $one.Substring(0, 160) }
+        Write-GitModeLog ("HYGIENE_SOFT_DOWN_BY_PORT port={0} out={1}" -f $Port, $one) 'INFO'
+    } catch {
+        Write-GitModeLog ("HYGIENE_SOFT_DOWN_BY_PORT_FAIL port={0} err={1}" -f $Port, $_.Exception.Message) 'WARN'
+    }
+}
+
+function Invoke-ConnectMountDownDeadBoundPorts {
+    # Soft mount-only litter: sshfs still bound to -p but TCP listener on that port is dead
+    # (local -R already gone). Never tear mounts whose -p is still listening.
+    param([int[]]$ProtectPorts = @())
+    if (-not (Get-Command SshX -ErrorAction SilentlyContinue)) {
+        Write-GitModeLog 'HYGIENE_SOFT_DEAD_BOUND skip reason=no_sshx' 'WARN'
+        return
+    }
+    $cm = if ($CM) { [string]$CM } else { '$HOME/.local/bin/claude-mount' }
+    $protectList = (@($ProtectPorts | Where-Object { $_ -gt 0 }) -join ' ')
+    $remote = @"
+set +e
+CM='$cm'
+PROTECT='$protectList'
+downed=0
+seen=''
+for pid in `$(pgrep -u "`$(id -un)" -f '[s]shfs' 2>/dev/null); do
+  [ -r /proc/`$pid/cmdline ] || continue
+  cmd=`$(tr '\0' ' ' < /proc/`$pid/cmdline 2>/dev/null)
+  p=`$(printf '%s' "`$cmd" | sed -n 's/.* -p \([0-9][0-9]*\).*/\1/p; t; s/.* -p\([0-9][0-9]*\).*/\1/p')
+  [ -n "`$p" ] || continue
+  case " `$seen " in *" `$p "*) continue ;; esac
+  seen="`$seen `$p"
+  skip=0
+  for pp in `$PROTECT; do
+    [ "`$pp" = "`$p" ] && skip=1 && break
+  done
+  [ "`$skip" = "1" ] && continue
+  if timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/`$p" 2>/dev/null; then
+    continue
+  fi
+  echo "HYGIENE_SOFT_DEAD_BOUND port=`$p"
+  timeout 20 `$CM down-by-port `$p 2>&1 || true
+  downed=`$((downed + 1))
+done
+echo "HYGIENE_SOFT_DEAD_BOUND_DONE n=`$downed"
+"@
+    try {
+        $out = SshX (($remote -replace "`r`n", "`n") -replace "`r", "`n")
+        foreach ($ln in @(($out + '') -split "`r?`n" | Where-Object { $_ -match 'HYGIENE_SOFT_DEAD_BOUND' })) {
+            Write-GitModeLog $ln.Trim() 'INFO'
+            if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                Write-ConnectLog $ln.Trim() 'INFO'
+            }
+        }
+    } catch {
+        Write-GitModeLog ("HYGIENE_SOFT_DEAD_BOUND_FAIL err={0}" -f $_.Exception.Message) 'WARN'
+    }
+}
+
+function Invoke-ConnectMountVerify {
+    # C6: best-effort post-open health — timed ls + bound -p + shared-p. Never treat
+    # skip_remount_healthy / started_in_background / light_session_open alone as healthy.
+    param(
+        [Parameter(Mandatory)][string]$ProjectId,
+        [string]$MountOut = ''
+    )
+    $proj = ($ProjectId + '').Trim() -replace "'", '-'
+    if (-not $proj) { return }
+    if (-not (Get-Command SshX -ErrorAction SilentlyContinue)) {
+        Write-GitModeLog ("MOUNT_VERIFY skip project={0} reason=no_sshx mount_out={1}" -f $proj, (($MountOut + '') -replace '\s+', ' ')) 'WARN'
+        return
+    }
+    # NOTE: In @" "@, only ` escapes $. "\$LP" is WRONG (PowerShell expands $LP → empty → quote breakage
+    # → remote "unexpected EOF while looking for matching `'" / FAIL SSH_QUOTE). Always use `$LP.
+    $remote = @"
+set +e
+ID='$proj'
+LP="`$HOME/mounts/`$ID"
+ls_ok=0
+bound=''
+conf=''
+shared=0
+if [ -d "`$LP" ]; then
+  if timeout 3 ls -la "`$LP" >/dev/null 2>&1; then ls_ok=1; fi
+fi
+for p in /proc/[0-9]*; do
+  [ -r "`$p/cmdline" ] || continue
+  cmd=`$(tr '\0' ' ' < "`$p/cmdline" 2>/dev/null)
+  case "`$cmd" in
+    *sshfs*)
+      case "`$cmd" in
+        *"`$LP"*)
+          bound=`$(printf '%s' "`$cmd" | sed -n 's/.* -p \([0-9][0-9]*\).*/\1/p; t; s/.* -p\([0-9][0-9]*\).*/\1/p')
+          break
+          ;;
+      esac
+      ;;
+  esac
+done
+conf=`$(grep -E '^TUNNEL_PORT=' "`$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2- | tr -dc '0-9')
+if [ -n "`$bound" ]; then
+  shared=`$(ps -eo args 2>/dev/null | grep -F -- "-p `$bound" | grep -c '[s]shfs' || true)
+fi
+printf 'MOUNT_VERIFY ls_ok=%s bound_p=%s conf_p=%s shared_p=%s project=%s\n' "`$ls_ok" "`$bound" "`$conf" "`$shared" "`$ID"
+if [ "`$shared" -ge 2 ] 2>/dev/null; then
+  printf 'MOUNT_SHARED_P projects_on_port=%s port=%s\n' "`$shared" "`$bound"
+fi
+"@
+    try {
+        $out = SshX $remote
+        $lines = @(($out + '') -split "`r?`n" | Where-Object { $_ -match 'MOUNT_VERIFY|MOUNT_SHARED_P|DUAL_CONNECT' })
+        foreach ($ln in $lines) {
+            $lvl = if ($ln -match 'MOUNT_SHARED_P|DUAL_CONNECT|ls_ok=0') { 'WARN' } else { 'INFO' }
+            Write-GitModeLog $ln.Trim() $lvl
+            if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                Write-ConnectLog $ln.Trim() $lvl
+            }
+        }
+        if (-not $lines) {
+            Write-GitModeLog ("MOUNT_VERIFY empty project={0} mount_out={1}" -f $proj, (($MountOut + '') -replace '\s+', ' ')) 'WARN'
+        }
+        # S41: dual Connect / shared -p warn when shared_p>=2
+        $sharedN = 0
+        $boundP = ''
+        if ("$out" -match 'shared_p=(\d+)') { $sharedN = [int]$Matches[1] }
+        if ("$out" -match 'bound_p=(\d+)') { $boundP = $Matches[1] }
+        if ($sharedN -ge 2) {
+            $dualMsg = ("DUAL_CONNECT warn shared_p={0} port={1} project={2}" -f $sharedN, $(if ($boundP) { $boundP } else { '?' }), $proj)
+            Write-GitModeLog $dualMsg 'WARN'
+            if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                Write-ConnectLog $dualMsg 'WARN'
+            }
+        }
+        # Never promote skipRemount / BG alone to healthy
+        if ($MountOut -match 'skip_remount_healthy|started_in_background' -and ($out -notmatch 'ls_ok=1')) {
+            Write-GitModeLog ("MOUNT_VERIFY not_healthy_from_skip_alone project={0} out={1}" -f $proj, (($MountOut + '') -replace '\s+', ' ')) 'WARN'
+        }
+    } catch {
+        Write-GitModeLog ("MOUNT_VERIFY_FAIL project={0} err={1}" -f $proj, $_.Exception.Message) 'WARN'
+    }
+}
+
 function Get-ConnectHygieneReport {
     param(
         [string]$UidStr = '',
@@ -1127,6 +1452,10 @@ function Get-ConnectHygieneReport {
         $currentTunnelPid = [int]$script:SessionBgTunnel.Id
     }
     $markers = @(Get-ConnectSessionSlotMarkers)
+    $keepMarkers = @()
+    if (Get-Command Get-ConnectKeepTunnelMarkers -ErrorAction SilentlyContinue) {
+        $keepMarkers = @(Get-ConnectKeepTunnelMarkers)
+    }
     $tunnels = @()
     $orphanPids = @()
     $siblingEntries = @()
@@ -1142,8 +1471,10 @@ function Get-ConnectHygieneReport {
                 $class = 'sibling'
             }
             $mark = @($markers | Where-Object { $_.Port -eq $port -or $_.Pid -eq $uiPid } | Select-Object -First 1)
-            $projectId = if ($mark) { [string]$mark.ProjectId } else { '' }
-            $remotePath = if ($mark) { [string]$mark.RemotePath } else { '' }
+            $keep = @($keepMarkers | Where-Object { $_.Port -eq $port -or $_.TunnelPid -eq $sshPid } | Select-Object -First 1)
+            # Keep markers survive Connect UI exit; session-slot markers alone are insufficient post-KEEP.
+            $projectId = if ($mark -and $mark.ProjectId) { [string]$mark.ProjectId } elseif ($keep) { [string]$keep.ProjectId } else { '' }
+            $remotePath = if ($mark -and $mark.RemotePath) { [string]$mark.RemotePath } elseif ($keep) { [string]$keep.RemotePath } else { '' }
             $row = [pscustomobject]@{
                 Port       = $port
                 Slot       = $slot
@@ -1214,6 +1545,7 @@ echo SM_END
         ProtectRootName = $protectRoot
         ProtectRemotePath = ($ProtectRemotePath + '').Trim()
         Markers         = $markers
+        KeepMarkers     = $keepMarkers
         Tunnels         = $tunnels
         OrphanTunnelPids = @($orphanPids | Select-Object -Unique)
         Siblings        = $siblingEntries
@@ -1252,12 +1584,92 @@ function Invoke-ConnectHygieneClean {
     if ($Mode -eq 'Soft') {
         Write-GitModeLog 'HYGIENE_SOFT begin' 'INFO'
         $base = [int]$Report.PortBase
+        $keepMarkers = @()
+        if ($Report.KeepMarkers) {
+            $keepMarkers = @($Report.KeepMarkers)
+        } elseif (Get-Command Get-ConnectKeepTunnelMarkers -ErrorAction SilentlyContinue) {
+            $keepMarkers = @(Get-ConnectKeepTunnelMarkers)
+        }
         for ($slot = 0; $slot -lt 10; $slot++) {
             $port = $base + $slot
             $before = @(Get-LocalTunnelSshPids -TargetPort $port)
+            $portKeeps = @($keepMarkers | Where-Object { $_.Port -eq $port })
+            $skipProtect = $false
+
+            # Editor/keep protect first (also gates mount-only down).
+            foreach ($km in $portKeeps) {
+                if (Test-ConnectKeepEditorProtect -KeepMarker $km -RemotePath $km.RemotePath -ProjectId $km.ProjectId `
+                        -ProtectRemotePath $ProtectRemotePath -ProtectProjectId $ProtectProjectId) {
+                    Write-GitModeLog ("HYGIENE_SOFT_PORT port={0} action=skip reason=keep_editor project={1}" -f $port, $km.ProjectId) 'INFO'
+                    Write-GitModeLog ("PROTECT_ROOT path={0} hit=1 sticky=0" -f $km.RemotePath) 'INFO'
+                    $skipProtect = $true
+                    break
+                }
+            }
+            if (-not $skipProtect -and $protectRoot) {
+                $reportRows = @($Report.Tunnels | Where-Object { $_.Port -eq $port -and $_.Class -eq 'orphan' })
+                foreach ($row in $reportRows) {
+                    $root = ''
+                    if ($row.RemotePath) {
+                        $root = [System.IO.Path]::GetFileName(($row.RemotePath.TrimEnd('/','\')))
+                    } elseif ($row.ProjectId) {
+                        $root = [string]$row.ProjectId
+                    }
+                    if (-not $root -or ($root -ine $protectRoot)) { continue }
+                    if (Test-ConnectKeepEditorProtect -RemotePath $row.RemotePath -ProjectId $row.ProjectId `
+                            -ProtectRemotePath $ProtectRemotePath -ProtectProjectId $ProtectProjectId) {
+                        Write-GitModeLog ("HYGIENE_SOFT_PORT port={0} action=skip reason=protect_root root={1}" -f $port, $root) 'INFO'
+                        Write-GitModeLog ("PROTECT_ROOT path={0} hit=1 sticky=0" -f $row.RemotePath) 'INFO'
+                        $skipProtect = $true
+                        break
+                    }
+                }
+            }
+            if ($skipProtect) { continue }
+
+            # Mount-only litter: no local -R left but keep marker still present → clear + down-by-port.
+            if ($before.Count -eq 0) {
+                if ($portKeeps.Count -gt 0) {
+                    Write-GitModeLog ("HYGIENE_SOFT_PORT port={0} action=mount_only_down hint_project={1}" -f $port, $portKeeps[0].ProjectId) 'INFO'
+                    if (Get-Command Clear-ConnectKeepTunnelMarker -ErrorAction SilentlyContinue) {
+                        Clear-ConnectKeepTunnelMarker -Port $port
+                    }
+                    if (Get-Command Invoke-ConnectMountDownByPort -ErrorAction SilentlyContinue) {
+                        Invoke-ConnectMountDownByPort -Port $port
+                    }
+                }
+                continue
+            }
+
             $null = Remove-LocalOrphanTunnel -TargetPort $port -CurrentBgTunnel $script:SessionBgTunnel -ProtectedProcessIds @([int]$PID, [int]$Report.CurrentTunnelPid)
             $after = @(Get-LocalTunnelSshPids -TargetPort $port)
-            $result.OrphansKilled += [Math]::Max(0, $before.Count - $after.Count)
+            $killedN = [Math]::Max(0, $before.Count - $after.Count)
+            $result.OrphansKilled += $killedN
+            # Unprotected Soft kill of Port P: clear keep-marker + down ALL mounts bound to P.
+            # Marker projectId is hint/log only — not the sole down target. Unmarked Soft kill still port-downs.
+            if ($killedN -gt 0) {
+                $hintId = ''
+                if ($portKeeps.Count -gt 0) { $hintId = [string]$portKeeps[0].ProjectId }
+                Write-GitModeLog ("HYGIENE_SOFT_PORT port={0} action=kill killed={1} hint_project={2}" -f $port, $killedN, $hintId) 'INFO'
+                if (Get-Command Clear-ConnectKeepTunnelMarker -ErrorAction SilentlyContinue) {
+                    Clear-ConnectKeepTunnelMarker -Port $port
+                }
+                if (Get-Command Invoke-ConnectMountDownByPort -ErrorAction SilentlyContinue) {
+                    Invoke-ConnectMountDownByPort -Port $port
+                }
+            }
+        }
+        # Also down mounts whose bound -p has no TCP listener (tunnel already gone, no keep marker).
+        if (Get-Command Invoke-ConnectMountDownDeadBoundPorts -ErrorAction SilentlyContinue) {
+            $protectLive = @()
+            if ($Port) { $protectLive += [int]$Port }
+            if ($Report.CurrentTunnelPid -and (Get-Command Test-TunnelPortTcpOpen -ErrorAction SilentlyContinue)) {
+                # Prefer not to tear mounts still listening on session port.
+                try {
+                    if ($Port -and (Test-TunnelPortTcpOpen)) { $protectLive += [int]$Port }
+                } catch { }
+            }
+            Invoke-ConnectMountDownDeadBoundPorts -ProtectPorts $protectLive
         }
         if (Get-Command SshX -ErrorAction SilentlyContinue) {
             try {
@@ -1335,6 +1747,204 @@ echo MUX_DEAD_REMOVED=$n
     return $result
 }
 
+function Invoke-ConnectOrphanReclaim {
+    # Scan UID base+0..9; skip current/sibling; ProtectSet pins preferred Port if keep marker live.
+    param(
+        [string]$UidStr = '',
+        [int[]]$ProtectSet = @(),
+        [int]$PreferredPort = 0,
+        [System.Diagnostics.Process]$CurrentBgTunnel = $null,
+        [string]$ProtectRemotePath = '',
+        [string]$ProtectProjectId = ''
+    )
+    $result = [pscustomobject]@{
+        Killed           = 0
+        SkippedSibling   = 0
+        SkippedKeep      = 0
+        DownMounts       = 0
+    }
+    if (($env:CLAUDE_CONNECT_AUTO_RECLAIM + '').Trim() -eq '0') {
+        Write-GitModeLog 'RECLAIM_SKIP reason=AUTO_RECLAIM=0' 'INFO'
+        return $result
+    }
+    Write-GitModeLog 'RECLAIM_BEGIN' 'INFO'
+    $base = 20000
+    if ($UidStr -and (Get-Command Get-TunnelPortUserBase -ErrorAction SilentlyContinue)) {
+        $base = [int](Get-TunnelPortUserBase -UidStr $UidStr)
+    }
+    $protect = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($p in @($ProtectSet)) {
+        if ($null -ne $p -and [int]$p -gt 0) { [void]$protect.Add([int]$p) }
+    }
+    if ($PID) { [void]$protect.Add([int]$PID) }
+    if ($CurrentBgTunnel -and -not $CurrentBgTunnel.HasExited) { [void]$protect.Add([int]$CurrentBgTunnel.Id) }
+    if ($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) {
+        [void]$protect.Add([int]$script:SessionBgTunnel.Id)
+    }
+
+    $keeps = @()
+    if (Get-Command Get-ConnectKeepTunnelMarkers -ErrorAction SilentlyContinue) {
+        $keeps = @(Get-ConnectKeepTunnelMarkers)
+    }
+    # Pin preferred Port when keep marker is live (even if editor check is false).
+    if ($PreferredPort -gt 0) {
+        $prefKeep = @($keeps | Where-Object { $_.Port -eq $PreferredPort } | Select-Object -First 1)
+        if ($prefKeep) {
+            [void]$protect.Add([int]$prefKeep.TunnelPid)
+            Write-GitModeLog ("RECLAIM_PIN preferred_port={0} tunnelPid={1}" -f $PreferredPort, $prefKeep.TunnelPid) 'INFO'
+        }
+    }
+
+    for ($slot = 0; $slot -lt 10; $slot++) {
+        $port = $base + $slot
+        if ($port -le 20000 -or $port -gt 65535) { continue }
+        $sshPids = @(Get-LocalTunnelSshPids -TargetPort $port)
+        if ($sshPids.Count -eq 0) { continue }
+
+        $siblings = @()
+        if (Get-Command Get-SiblingConnectTunnelPids -ErrorAction SilentlyContinue) {
+            $siblings = @(Get-SiblingConnectTunnelPids -TargetPort $port -ProtectedProcessIds @($protect))
+            foreach ($s in $siblings) { [void]$protect.Add([int]$s) }
+        }
+
+        $portKeeps = @($keeps | Where-Object { $_.Port -eq $port })
+        $keepProtect = $false
+        if ($PreferredPort -gt 0 -and $port -eq $PreferredPort -and $portKeeps.Count -gt 0) {
+            $keepProtect = $true
+            Write-GitModeLog ("RECLAIM_SKIP_KEEP port={0} reason=preferred_pin" -f $port) 'INFO'
+        } else {
+            foreach ($km in $portKeeps) {
+                if (Test-ConnectKeepEditorProtect -KeepMarker $km -RemotePath $km.RemotePath -ProjectId $km.ProjectId `
+                        -ProtectRemotePath $ProtectRemotePath -ProtectProjectId $ProtectProjectId) {
+                    $keepProtect = $true
+                    [void]$protect.Add([int]$km.TunnelPid)
+                    Write-GitModeLog ("RECLAIM_SKIP_KEEP port={0} reason=keep_editor project={1}" -f $port, $km.ProjectId) 'INFO'
+                    break
+                }
+            }
+        }
+        if ($keepProtect) {
+            $result.SkippedKeep++
+            continue
+        }
+
+        $killedHere = 0
+        foreach ($processId in $sshPids) {
+            $processId = [int]$processId
+            if ($protect.Contains($processId)) {
+                if ($siblings -contains $processId) { $result.SkippedSibling++ }
+                continue
+            }
+            $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
+            if ($proc -and -not $proc.HasExited) {
+                Write-GitModeLog ("RECLAIM_KILL port={0} pid={1}" -f $port, $processId) 'INFO'
+                Stop-TunnelProcessWithExitLog -ProcessId $processId -Reason 'orphan_reclaim'
+                $killedHere++
+            }
+        }
+        if ($killedHere -gt 0) {
+            $result.Killed += $killedHere
+            if (Get-Command Clear-ConnectKeepTunnelMarker -ErrorAction SilentlyContinue) {
+                Clear-ConnectKeepTunnelMarker -Port $port
+            }
+            if (Get-Command Invoke-ConnectMountDownByPort -ErrorAction SilentlyContinue) {
+                Invoke-ConnectMountDownByPort -Port $port
+                $result.DownMounts++
+            }
+        }
+    }
+    Write-GitModeLog ("RECLAIM_END killed={0} skipped_sibling={1} skipped_keep={2} down_mounts={3}" -f `
+        $result.Killed, $result.SkippedSibling, $result.SkippedKeep, $result.DownMounts) 'INFO'
+    return $result
+}
+
+function Invoke-ConnectHygieneDeepClean {
+    # Soft follow-up: sibling stop + close server-profile windows not protectRoot + clear unmarked KEEP.
+    # Never touches personal %APPDATA%\Cursor.
+    param(
+        [Parameter(Mandatory)]$Report,
+        [string]$ProtectRemotePath = '',
+        [string]$ProtectProjectId = '',
+        [string]$Alias = 'claude-server'
+    )
+    Write-GitModeLog 'HYGIENE_DEEP begin' 'INFO'
+    $result = [pscustomobject]@{
+        SiblingTunnels  = 0
+        SiblingConnects = 0
+        CursorWindows   = 0
+        KeepCleared     = 0
+        OrphansKilled   = 0
+    }
+    $protectRoot = ($Report.ProtectRootName + '').Trim()
+    if (-not $protectRoot) {
+        if ($ProtectRemotePath) {
+            $protectRoot = [System.IO.Path]::GetFileName(($ProtectRemotePath.TrimEnd('/','\')))
+        } elseif ($ProtectProjectId) {
+            $protectRoot = $ProtectProjectId
+        }
+    }
+
+    # (a) Sibling-stop Connect UIs except current
+    if ($Report.SiblingCount -gt 0) {
+        $sib = Invoke-ConnectHygieneClean -Mode Sibling -Report $Report `
+            -ProtectRemotePath $ProtectRemotePath -ProtectProjectId $ProtectProjectId
+        $result.SiblingTunnels = [int]$sib.SiblingTunnels
+        $result.SiblingConnects = [int]$sib.SiblingConnects
+        $result.CursorWindows = [int]$sib.CursorWindows
+        Write-GitModeLog ("HYGIENE_DEEP_SIBLING tunnels={0} connects={1} cursor={2}" -f `
+            $result.SiblingTunnels, $result.SiblingConnects, $result.CursorWindows) 'INFO'
+    }
+
+    # (b) Close other server-profile project windows (never personal APPDATA\Cursor)
+    if ($protectRoot -and (Get-Command Close-CursorProjectWindows -ErrorAction SilentlyContinue)) {
+        $seenRoots = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($t in @($Report.Tunnels)) {
+            $root = ''
+            if ($t.RemotePath) {
+                $root = [System.IO.Path]::GetFileName(($t.RemotePath.TrimEnd('/','\')))
+            } elseif ($t.ProjectId) {
+                $root = [string]$t.ProjectId
+            }
+            if (-not $root -or ($root -ieq $protectRoot)) { continue }
+            if (-not $seenRoots.Add($root)) { continue }
+            try {
+                $n = Close-CursorProjectWindows -ProjectRootName $root -ProtectRootName $protectRoot -Alias $Alias
+                $result.CursorWindows += [int]$n
+                Write-GitModeLog ("HYGIENE_DEEP_CURSOR root={0} closed={1}" -f $root, $n) 'INFO'
+            } catch {
+                Write-GitModeLog ("HYGIENE_DEEP_CURSOR_FAIL root={0} err={1}" -f $root, $_.Exception.Message) 'WARN'
+            }
+        }
+    }
+
+    # (c) Clear unmarked KEEP (no editor protect) — kill -R + marker + down-by-port
+    $keeps = @()
+    if (Get-Command Get-ConnectKeepTunnelMarkers -ErrorAction SilentlyContinue) {
+        $keeps = @(Get-ConnectKeepTunnelMarkers)
+    }
+    foreach ($km in $keeps) {
+        $port = [int]$km.Port
+        if (Test-ConnectKeepEditorProtect -KeepMarker $km -RemotePath $km.RemotePath -ProjectId $km.ProjectId `
+                -ProtectRemotePath $ProtectRemotePath -ProtectProjectId $ProtectProjectId) {
+            Write-GitModeLog ("HYGIENE_DEEP_KEEP_SKIP port={0} reason=editor_protect project={1}" -f $port, $km.ProjectId) 'INFO'
+            continue
+        }
+        $tPid = [int]$km.TunnelPid
+        if ($tPid -gt 0 -and $tPid -ne [int]$Report.CurrentTunnelPid) {
+            Write-GitModeLog ("HYGIENE_DEEP_KEEP_KILL port={0} pid={1}" -f $port, $tPid) 'INFO'
+            Stop-TunnelProcessWithExitLog -ProcessId $tPid -Reason 'hygiene_deep_keep'
+            $result.OrphansKilled++
+        }
+        Clear-ConnectKeepTunnelMarker -Port $port
+        Invoke-ConnectMountDownByPort -Port $port
+        $result.KeepCleared++
+    }
+
+    Write-GitModeLog ("HYGIENE_DEEP done siblings_t={0} siblings_ui={1} cursor={2} keep_cleared={3} orphans={4}" -f `
+        $result.SiblingTunnels, $result.SiblingConnects, $result.CursorWindows, $result.KeepCleared, $result.OrphansKilled) 'INFO'
+    return $result
+}
+
 function Show-ConnectHygieneInteractive {
     param(
         [string]$UidStr = '',
@@ -1371,6 +1981,37 @@ function Show-ConnectHygieneInteractive {
     $soft = Invoke-ConnectHygieneClean -Mode Soft -Report $report -ProtectRemotePath $ProtectRemotePath -ProtectProjectId $ProtectProjectId
     Write-Host ("    Soft done: orphans_removed~{0} mux_dead={1}" -f $soft.OrphansKilled, $soft.MuxCleaned) -ForegroundColor Green
     $report2 = Get-ConnectHygieneReport -UidStr $UidStr -ProtectRemotePath $ProtectRemotePath -ProtectProjectId $ProtectProjectId -SkipServer
+
+    # Deep-clean offer: sibling litter / unmarked KEEP / high server-profile process count
+    $profileAll = 0
+    try {
+        if (Get-Command Get-CursorProfileProcesses -ErrorAction SilentlyContinue) {
+            $profileAll = @(Get-CursorProfileProcesses).Count
+        }
+    } catch { $profileAll = 0 }
+    $keepLeft = 0
+    try {
+        if ($report2.KeepMarkers) { $keepLeft = @($report2.KeepMarkers).Count }
+    } catch { $keepLeft = 0 }
+    $offerDeep = ($report2.SiblingCount -gt 0) -or ($keepLeft -gt 0) -or ($profileAll -ge 10)
+    if ($offerDeep) {
+        Write-Host ''
+        Write-Host ("    Deep-clean candidate: siblings={0} keep_markers={1} profile_all={2}" -f $report2.SiblingCount, $keepLeft, $profileAll) -ForegroundColor Yellow
+        Write-Host '    Stops sibling Connect UIs, closes other server-profile windows, clears unmarked KEEP.' -ForegroundColor DarkGray
+        Write-Host '    Never touches personal %APPDATA%\Cursor.' -ForegroundColor DarkGray
+        $ansDeep = ''
+        try { $ansDeep = (Read-Host '    Run Deep-clean? [Y/N]').Trim().ToLowerInvariant() } catch { $ansDeep = 'n' }
+        if ($ansDeep -eq 'y' -or $ansDeep -eq 'yes') {
+            $deep = Invoke-ConnectHygieneDeepClean -Report $report2 -ProtectRemotePath $ProtectRemotePath `
+                -ProtectProjectId $ProtectProjectId -Alias $Alias
+            Write-Host ("    Deep-clean: siblings_t={0} ui={1} cursor={2} keep_cleared={3}" -f `
+                $deep.SiblingTunnels, $deep.SiblingConnects, $deep.CursorWindows, $deep.KeepCleared) -ForegroundColor Green
+            Write-Host ''
+            return
+        }
+        Write-Host '    Skipped Deep-clean.' -ForegroundColor DarkGray
+    }
+
     if ($report2.SiblingCount -le 0) {
         Write-Host ''
         return
@@ -2709,7 +3350,15 @@ function Acquire-TunnelPort {
         [int[]]$ProtectedProcessIds = @()
     )
     $portBase = Get-TunnelPortUserBase -UidStr $UidStr
-    if (-not $UidStr) { return $false }
+    $acqSibling = 0
+    $acqKeep = 0
+    $acqOrphan = 0
+    $acqForeign = 0
+    Write-GitModeLog ("ACQUIRE_BEGIN uid={0} port_base={1}" -f $(if ($UidStr) { $UidStr } else { '?' }), $portBase) 'INFO'
+    if (-not $UidStr) {
+        Write-GitModeLog 'ACQUIRE_END port=0 outcome=no_uid sibling=0 keep_editor=0 orphan=0 foreign=0' 'WARN'
+        return $false
+    }
 
     # Already bound to a live session tunnel - do not rescan.
     if ($Port -and $script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) {
@@ -2720,6 +3369,7 @@ function Acquire-TunnelPort {
         foreach ($tunnelPid in $localNow) {
             if ($mine -contains [int]$tunnelPid) {
                 Write-GitModeLog "ACQUIRE_KEEP: session_tunnel port=$Port pid=$tunnelPid" 'DEBUG'
+                Write-GitModeLog ("ACQUIRE_END port={0} outcome=keep_session sibling=0 keep_editor=0 orphan=0 foreign=0" -f $Port) 'INFO'
                 return $true
             }
         }
@@ -2762,28 +3412,75 @@ function Acquire-TunnelPort {
     if ($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) { $protected += [int]$script:SessionBgTunnel.Id }
 
     $probePorts = @()
+    $keepMarkersAcq = @()
+    if (Get-Command Get-ConnectKeepTunnelMarkers -ErrorAction SilentlyContinue) {
+        $keepMarkersAcq = @(Get-ConnectKeepTunnelMarkers)
+    }
     foreach ($c in $candidates) {
         $candPort = [int]$c.Port
         if (Get-Command Test-CachedForeignTunnelPort -ErrorAction SilentlyContinue) {
-            if (Test-CachedForeignTunnelPort -TargetPort $candPort) { continue }
+            if (Test-CachedForeignTunnelPort -TargetPort $candPort) {
+                $acqForeign++
+                continue
+            }
         }
-        $peerLive = $false
+        # Classify: sibling_live / keep_editor / ACQUIRE_ORPHAN_RECLAIMABLE (not permanent peer_live).
+        $sibLive = @()
+        if (Get-Command Get-SiblingConnectTunnelPids -ErrorAction SilentlyContinue) {
+            $sibLive = @(Get-SiblingConnectTunnelPids -TargetPort $candPort -ProtectedProcessIds $protected)
+        }
+        if ($sibLive.Count -gt 0) {
+            $acqSibling++
+            Write-GitModeLog ("ACQUIRE_SKIP: sibling_live port={0} slot={1} pids={2}" -f $candPort, $c.Slot, ($sibLive -join ',')) 'DEBUG'
+            continue
+        }
+        $portKeeps = @($keepMarkersAcq | Where-Object { $_.Port -eq $candPort })
+        $keepEditor = $false
+        foreach ($km in $portKeeps) {
+            if ($protected -contains [int]$km.TunnelPid) { continue }
+            # Live keep marker on this port: treat as keep_editor (pin), not reclaimable orphan.
+            $keepEditor = $true
+            if (Get-Command Test-ConnectKeepEditorProtect -ErrorAction SilentlyContinue) {
+                if (-not (Test-ConnectKeepEditorProtect -KeepMarker $km -RemotePath $km.RemotePath -ProjectId $km.ProjectId)) {
+                    # Marker live but editor not confirmed — still skip as keep_editor (pin preferred).
+                    Write-GitModeLog ("ACQUIRE_SKIP: keep_editor port={0} slot={1} project={2} editor_check=0" -f $candPort, $c.Slot, $km.ProjectId) 'DEBUG'
+                } else {
+                    Write-GitModeLog ("ACQUIRE_SKIP: keep_editor port={0} slot={1} project={2}" -f $candPort, $c.Slot, $km.ProjectId) 'DEBUG'
+                }
+            } else {
+                Write-GitModeLog ("ACQUIRE_SKIP: keep_editor port={0} slot={1} project={2}" -f $candPort, $c.Slot, $km.ProjectId) 'DEBUG'
+            }
+            break
+        }
+        if ($keepEditor) {
+            $acqKeep++
+            continue
+        }
+
+        $orphanReclaimable = $false
         if ($localMap.ContainsKey($candPort)) {
             foreach ($processId in @($localMap[$candPort])) {
                 if ($protected -contains [int]$processId) { continue }
                 $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
-                if ($proc -and -not $proc.HasExited) { $peerLive = $true; break }
+                if ($proc -and -not $proc.HasExited) {
+                    $orphanReclaimable = $true
+                    Write-GitModeLog ("ACQUIRE_ORPHAN_RECLAIMABLE port={0} slot={1} pid={2}" -f $candPort, $c.Slot, $processId) 'INFO'
+                    break
+                }
             }
         }
-        if ($peerLive) {
-            Write-GitModeLog "ACQUIRE_SKIP: peer_live port=$candPort slot=$($c.Slot)" 'DEBUG'
+        if ($orphanReclaimable) {
+            $acqOrphan++
+            # Busy with unprotected orphan — not permanent peer_live; Ensure reclaim clears other slots.
+            # Still skip this port for free claim (local -R held).
             continue
         }
         $probePorts += $candPort
     }
+    Write-GitModeLog ("ACQUIRE_SLOT_MAP sibling={0} keep_editor={1} orphan={2} foreign={3} probe={4}" -f $acqSibling, $acqKeep, $acqOrphan, $acqForeign, @($probePorts).Count) 'INFO'
 
     if (@($probePorts).Count -eq 0) {
-        Write-GitModeLog 'ACQUIRE_FAST no_probe_ports (all peer_live/foreign) - trying sticky reclaim' 'WARN'
+        Write-GitModeLog 'ACQUIRE_FAST no_probe_ports (all sibling/keep_editor/orphan/foreign) - trying sticky reclaim' 'WARN'
         $openSet = New-Object "System.Collections.Generic.HashSet[int]"
         # Prefer sticky conf PORT / UI slot even if marked peer_live - may be our orphan.
         $stickyPort = $null
@@ -2813,6 +3510,7 @@ function Acquire-TunnelPort {
                         Save-TunnelSlot
                         Push-ServerConnectConf
                         Write-GitModeLog ("ACQUIRE_FAST claim_sticky port={0} slot={1} ms={2}" -f $stickyPort, $stickySlot, $sw.ElapsedMilliseconds) 'INFO'
+                        Write-GitModeLog ("ACQUIRE_END port={0} outcome=claim_sticky sibling={1} keep_editor={2} orphan={3} foreign={4}" -f $stickyPort, $acqSibling, $acqKeep, $acqOrphan, $acqForeign) 'INFO'
                         return $true
                     }
                 }
@@ -2841,6 +3539,7 @@ function Acquire-TunnelPort {
             Save-TunnelSlot
             Push-ServerConnectConf
             Write-GitModeLog ("ACQUIRE_FAST claim_busy_fallback port={0} slot={1} ms={2}" -f $candPort, $slot, $sw.ElapsedMilliseconds) 'WARN'
+            Write-GitModeLog ("ACQUIRE_END port={0} outcome=claim_busy_fallback sibling={1} keep_editor={2} orphan={3} foreign={4}" -f $candPort, $acqSibling, $acqKeep, $acqOrphan, $acqForeign) 'INFO'
             return $true
         }
         if ($portBase -le 20000) {
@@ -2853,6 +3552,7 @@ function Acquire-TunnelPort {
             $script:TunnelSlot = 0
         }
         Write-GitModeLog ("ACQUIRE_FAST fail_empty_probe ms={0} port={1}" -f $sw.ElapsedMilliseconds, $script:Port) 'WARN'
+        Write-GitModeLog ("ACQUIRE_END port={0} outcome=fail_empty_probe sibling={1} keep_editor={2} orphan={3} foreign={4}" -f $script:Port, $acqSibling, $acqKeep, $acqOrphan, $acqForeign) 'WARN'
         return $false
     }
     $openSet = $null
@@ -2885,6 +3585,7 @@ function Acquire-TunnelPort {
         Save-TunnelSlot
         Push-ServerConnectConf
         Write-GitModeLog ("ACQUIRE_FAST claim_free port={0} slot={1} ms={2}" -f $candPort, $slot, $sw.ElapsedMilliseconds) 'INFO'
+        Write-GitModeLog ("ACQUIRE_END port={0} outcome=claim_free sibling={1} keep_editor={2} orphan={3} foreign={4}" -f $candPort, $acqSibling, $acqKeep, $acqOrphan, $acqForeign) 'INFO'
         return $true
     }
 
@@ -2939,6 +3640,7 @@ function Acquire-TunnelPort {
             Save-TunnelSlot
             Push-ServerConnectConf
             Write-GitModeLog ("ACQUIRE_FAST claim_reclaim port={0} slot={1} ms={2}" -f $candPort, $slot, $sw.ElapsedMilliseconds) 'INFO'
+            Write-GitModeLog ("ACQUIRE_END port={0} outcome=claim_reclaim sibling={1} keep_editor={2} orphan={3} foreign={4}" -f $candPort, $acqSibling, $acqKeep, $acqOrphan, $acqForeign) 'INFO'
             return $true
         }
     }
@@ -2947,6 +3649,7 @@ function Acquire-TunnelPort {
     $Port = $script:Port
     $script:TunnelSlot = 0
     Write-GitModeLog ("ACQUIRE_FAST fail ms={0} fallback_port={1}" -f $sw.ElapsedMilliseconds, $script:Port) 'WARN'
+    Write-GitModeLog ("ACQUIRE_END port={0} outcome=fail sibling={1} keep_editor={2} orphan={3} foreign={4}" -f $script:Port, $acqSibling, $acqKeep, $acqOrphan, $acqForeign) 'WARN'
     return $false
 }
 function Test-TunnelUp {
@@ -3593,10 +4296,38 @@ function Ensure-SessionTunnel {
     )
     $TunnelReused.Value = $false
     $skipAdoptAfterSoftFail = $false
+    Write-GitModeLog ("ENSURE_TUNNEL begin port={0} alias={1}" -f $(if ($Port) { $Port } else { '?' }), $Alias) 'INFO'
     if ((-not $BgTunnel.Value -or $BgTunnel.Value.HasExited) -and
         $script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) {
         $BgTunnel.Value = $script:SessionBgTunnel
     }
+
+    # Once per Ensure: pin preferred → orphan reclaim → then reuse/adopt (rebuild map after reclaim).
+    if (-not $script:OrphanReclaimDoneThisEnsure) {
+        $script:OrphanReclaimDoneThisEnsure = $true
+        $uidForReclaim = $script:ServerUidStr
+        if (-not $uidForReclaim -and (Get-Command SshX -ErrorAction SilentlyContinue)) {
+            try {
+                $uidForReclaim = ((SshX 'id -u' 2>$null) -join '').Trim() -replace '\D', ''
+            } catch { $uidForReclaim = '' }
+            if ($uidForReclaim) { $script:ServerUidStr = $uidForReclaim }
+        }
+        $preferredPort = 0
+        if ($Port) { $preferredPort = [int]$Port }
+        $protectSet = @()
+        if ($BgTunnel.Value -and -not $BgTunnel.Value.HasExited) { $protectSet += [int]$BgTunnel.Value.Id }
+        if ($script:SessionBgTunnel -and -not $script:SessionBgTunnel.HasExited) {
+            $protectSet += [int]$script:SessionBgTunnel.Id
+        }
+        if (Get-Command Invoke-ConnectOrphanReclaim -ErrorAction SilentlyContinue) {
+            $null = Invoke-ConnectOrphanReclaim -UidStr $uidForReclaim -ProtectSet $protectSet `
+                -PreferredPort $preferredPort -CurrentBgTunnel $BgTunnel.Value
+        }
+        if (Get-Command Get-LocalTunnelPortPidMap -ErrorAction SilentlyContinue) {
+            $null = Get-LocalTunnelPortPidMap
+        }
+    }
+
     if ($BgTunnel.Value -and -not $BgTunnel.Value.HasExited) {
         if (Test-TunnelUp) {
             $TunnelReused.Value = $true
@@ -3605,6 +4336,7 @@ function Ensure-SessionTunnel {
             Set-SocksProxyPortOnReuse -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath
             if (-not (Test-ProxyReseedShouldKill -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
                 Complete-CursorProxyAfterTunnel
+                Write-GitModeLog "ENSURE_TUNNEL end outcome=reused reason=tunnel_up port=$Port" 'INFO'
                 return $true
             }
             # Fall through: kill + reseed with -L proxy leg (ReseedEffective only)
@@ -3625,6 +4357,7 @@ function Ensure-SessionTunnel {
                 Set-SocksProxyPortOnReuse -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath
                 if (-not (Test-ProxyReseedShouldKill -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
                     Complete-CursorProxyAfterTunnel
+                    Write-GitModeLog "ENSURE_TUNNEL end outcome=reused reason=recent_success_tcp_open port=$Port" 'INFO'
                     return $true
                 }
                 $TunnelReused.Value = $false
@@ -3638,6 +4371,7 @@ function Ensure-SessionTunnel {
                     -TcpOpen $true -Banner $script:TunnelBannerCacheBanner
                 Release-StaleTunnelPort
                 $script:TunnelSoftFailCount = 0
+                Write-GitModeLog "ENSURE_TUNNEL end outcome=fail reason=soft_fail_budget port=$Port" 'WARN'
                 return $false
             }
             # Fall through to kill/reseed - must NOT adopt the same local -R (that defeated reseed).
@@ -3650,6 +4384,7 @@ function Ensure-SessionTunnel {
             Set-SocksProxyPortOnReuse -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath
             if (-not (Test-ProxyReseedShouldKill -TunnelPid $BgTunnel.Value.Id -Alias $Alias -SshCfgPath $SshCfgPath)) {
                 Complete-CursorProxyAfterTunnel
+                Write-GitModeLog "ENSURE_TUNNEL end outcome=reused reason=recent_success port=$Port" 'INFO'
                 return $true
             }
             # Fall through: kill + reseed with -L proxy leg (ReseedEffective only)
@@ -3676,6 +4411,7 @@ function Ensure-SessionTunnel {
                     Set-SocksProxyPortOnReuse -TunnelPid $adoptPid -Alias $Alias -SshCfgPath $SshCfgPath
                     if (-not (Test-ProxyReseedShouldKill -TunnelPid $adoptPid -Alias $Alias -SshCfgPath $SshCfgPath)) {
                         Complete-CursorProxyAfterTunnel
+                        Write-GitModeLog "ENSURE_TUNNEL end outcome=reused reason=adopt_local_forward port=$Port" 'INFO'
                         return $true
                     }
                     # Fall through: kill + reseed with -L proxy leg (ReseedEffective only)
@@ -3827,6 +4563,7 @@ function Ensure-SessionTunnel {
         if ([int]$script:RefuseSpawnStreak -ge [int]$script:RefuseSpawnStreakCap) {
             Write-GitModeLog ("ENSURE_TUNNEL refuse_spawn_streak_exhausted port={0} streak={1} cap={2}" -f $busyPort, $script:RefuseSpawnStreak, $script:RefuseSpawnStreakCap) 'ERROR'
             $BgTunnel.Value = $null
+            Write-GitModeLog "ENSURE_TUNNEL end outcome=fail reason=refuse_spawn_streak_exhausted port=$busyPort" 'ERROR'
             return $false
         }
         $rebound = $false
@@ -3862,6 +4599,7 @@ function Ensure-SessionTunnel {
             $script:TunnelSlot = $savedSlot
             Write-GitModeLog ("ENSURE_TUNNEL refuse_spawn reason=stale_port_busy_no_rebind port={0} streak={1}" -f $busyPort, $script:RefuseSpawnStreak) 'WARN'
             $BgTunnel.Value = $null
+            Write-GitModeLog "ENSURE_TUNNEL end outcome=fail reason=refuse_spawn_no_rebind port=$busyPort" 'WARN'
             return $false
         }
     }
@@ -3887,6 +4625,7 @@ function Ensure-SessionTunnel {
         $script:RefuseSpawnStreak = 0
         Write-GitModeLog "ENSURE_TUNNEL ok=1 pid=$($BgTunnel.Value.Id)" 'INFO'
         Complete-CursorProxyAfterTunnel
+        Write-GitModeLog "ENSURE_TUNNEL end outcome=ok port=$Port" 'INFO'
         return $true
     }
     $script:TunnelWaitFailStreak = [int]$script:TunnelWaitFailStreak + 1
@@ -3904,6 +4643,7 @@ function Ensure-SessionTunnel {
         Stop-TunnelProcessWithExitLog -ProcessId $BgTunnel.Value.Id -Reason 'ensure_wait_timeout'
     }
     $BgTunnel.Value = $null
+    Write-GitModeLog "ENSURE_TUNNEL end outcome=fail reason=wait_timeout port=$Port" 'WARN'
     return $false
 }
 
@@ -4170,6 +4910,9 @@ elif [ -n "`$PREFER" ]; then
     printf 'ACTIVE_MOUNT_GUARD keep=%s prefer=%s reason=other_still_mounted\n' "`$CUR_AM" "`$PREFER"
   else
     AM=`$PREFER
+    if [ -n "`$CUR_AM" ] && [ "`$CUR_AM" != "`$PREFER" ]; then
+      printf 'ACTIVE_MOUNT_STEAL from=%s to=%s\n' "`$CUR_AM" "`$PREFER"
+    fi
   fi
 else
   AM=`$CUR_AM
@@ -4211,9 +4954,57 @@ if [ "`$AM_ONLY" = "1" ]; then
     PUBLISH_PORT=0
   fi
 else
-  PORT_OUT=`$PORT
-  SLOT_OUT=`$SLOT
-  PUBLISH_PORT=`$PORT
+  # Primary soft-liveness: when published CUR_PORT differs from this session PORT,
+  # keep CUR only if both listeners are up AND a live sshfs under ~/mounts uses -p CUR.
+  # Otherwise primary may overwrite (fleet reclaim) or take over a dead published port.
+  if [ -n "`$CUR_PORT" ] && [ "`$CUR_PORT" != "0" ] && [ -n "`$PORT" ] && [ "`$PORT" != "`$CUR_PORT" ]; then
+    CUR_LIVE=0
+    if timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/'`$CUR_PORT 2>/dev/null; then
+      CUR_LIVE=1
+    fi
+    OUR_LIVE=0
+    if [ -n "`$PORT" ] && [ "`$PORT" != "0" ]; then
+      if timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/'`$PORT 2>/dev/null; then
+        OUR_LIVE=1
+      fi
+    fi
+    MOUNT_ON_CUR=0
+    for _m_pid in `$(pgrep -u "`$(id -un)" -f '[s]shfs' 2>/dev/null); do
+      [ -r /proc/`$_m_pid/cmdline ] || continue
+      _m_cmd=`$(tr '\0' ' ' < /proc/`$_m_pid/cmdline 2>/dev/null)
+      case "`$_m_cmd" in
+        *"`$HOME/mounts/"*) ;;
+        *) continue ;;
+      esac
+      _m_p=`$(printf '%s' "`$_m_cmd" | sed -n 's/.* -p \([0-9][0-9]*\).*/\1/p; t; s/.* -p\([0-9][0-9]*\).*/\1/p')
+      if [ "`$_m_p" = "`$CUR_PORT" ]; then
+        MOUNT_ON_CUR=1
+        break
+      fi
+    done
+    unset _m_pid _m_cmd _m_p
+    if [ "`$CUR_LIVE" = "1" ] && [ "`$OUR_LIVE" = "1" ] && [ "`$MOUNT_ON_CUR" = "1" ]; then
+      PORT_OUT=`$CUR_PORT
+      SLOT_OUT=`$CUR_SLOT
+      PUBLISH_PORT=0
+      printf 'PUSH_CONF primary_soft_keep session=%s server=%s reason=mount_on_cur\n' "`$PORT" "`$CUR_PORT"
+    elif [ "`$CUR_LIVE" = "0" ] && [ "`$OUR_LIVE" = "1" ]; then
+      PORT_OUT=`$PORT
+      SLOT_OUT=`$SLOT
+      PUBLISH_PORT=`$PORT
+    else
+      PORT_OUT=`$PORT
+      SLOT_OUT=`$SLOT
+      PUBLISH_PORT=`$PORT
+      if [ "`$CUR_LIVE" = "1" ] && [ "`$MOUNT_ON_CUR" = "0" ]; then
+        printf 'PUSH_CONF primary_overwrite cur_live=1 mount_on_cur=0\n'
+      fi
+    fi
+  else
+    PORT_OUT=`$PORT
+    SLOT_OUT=`$SLOT
+    PUBLISH_PORT=`$PORT
+  fi
 fi
 # Never wipe TUNNEL_PORT (empty/0 PORT_OUT -> laptop-exec NO_PORT / legacy 20000+UID).
 if { [ -z "`$PORT_OUT" ] || [ "`$PORT_OUT" = "0" ]; } && [ -n "`$CUR_PORT" ] && [ "`$CUR_PORT" != "0" ]; then
@@ -4248,9 +5039,19 @@ printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s am_only=%s publish_port=%s
     if ($pushExit -ne 0 -or -not $hasResult) {
         # Do not record dedupe on failure - allow immediate retry of the same prefer/clear key.
         Write-GitModeLog "PUSH_CONF fail exit=$pushExit out=$pushLine" 'ERROR'
-        foreach ($sig in @('ABORT_EMPTY', 'port_empty_recovered', 'port_mismatch_keep', 'port_takeover')) {
+        foreach ($sig in @('ABORT_EMPTY', 'port_empty_recovered', 'port_mismatch_keep', 'port_takeover', 'ACTIVE_MOUNT_GUARD', 'ACTIVE_MOUNT_STEAL', 'primary_soft_keep', 'primary_overwrite')) {
             if ($pushScan -match [regex]::Escape($sig)) {
                 Write-GitModeLog "PUSH_CONF signal=$sig out=$pushLine" 'WARN'
+                if ($sig -eq 'ACTIVE_MOUNT_STEAL' -and $pushScan -match 'ACTIVE_MOUNT_STEAL from=(\S+) to=(\S+)') {
+                    Write-GitModeLog ("ACTIVE_MOUNT_STEAL from={0} to={1}" -f $Matches[1], $Matches[2]) 'WARN'
+                }
+                if ($sig -eq 'ACTIVE_MOUNT_GUARD') {
+                    try {
+                        if ([Environment]::UserInteractive) {
+                            Write-Host '  [!] ACTIVE_MOUNT_GUARD: another project still mounted - keeping current ACTIVE_MOUNT' -ForegroundColor Yellow
+                        }
+                    } catch { }
+                }
             }
         }
     } else {
@@ -4260,9 +5061,19 @@ printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s am_only=%s publish_port=%s
             $script:LastPushConfActive = $Matches[1]
         }
         Write-GitModeLog "PUSH_CONF ok exit=$pushExit $pushLine" 'INFO'
-        foreach ($sig in @('ABORT_EMPTY', 'port_empty_recovered', 'port_mismatch_keep', 'port_takeover')) {
+        foreach ($sig in @('ABORT_EMPTY', 'port_empty_recovered', 'port_mismatch_keep', 'port_takeover', 'ACTIVE_MOUNT_GUARD', 'ACTIVE_MOUNT_STEAL', 'primary_soft_keep', 'primary_overwrite')) {
             if ($pushScan -match [regex]::Escape($sig)) {
                 Write-GitModeLog "PUSH_CONF signal=$sig out=$pushLine" 'WARN'
+                if ($sig -eq 'ACTIVE_MOUNT_STEAL' -and $pushScan -match 'ACTIVE_MOUNT_STEAL from=(\S+) to=(\S+)') {
+                    Write-GitModeLog ("ACTIVE_MOUNT_STEAL from={0} to={1}" -f $Matches[1], $Matches[2]) 'WARN'
+                }
+                if ($sig -eq 'ACTIVE_MOUNT_GUARD') {
+                    try {
+                        if ([Environment]::UserInteractive) {
+                            Write-Host '  [!] ACTIVE_MOUNT_GUARD: another project still mounted - keeping current ACTIVE_MOUNT' -ForegroundColor Yellow
+                        }
+                    } catch { }
+                }
             }
         }
     }

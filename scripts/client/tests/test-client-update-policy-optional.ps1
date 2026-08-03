@@ -15,13 +15,18 @@ Write-Host ""
 $policyPath = Join-Path $RepoRoot 'scripts\server\client-update-policy.json'
 Assert (Test-Path -LiteralPath $policyPath) 'client-update-policy.json exists'
 $policy = Get-Content -LiteralPath $policyPath -Raw | ConvertFrom-Json
-Assert ([string]$policy.mode -eq 'optional') 'policy mode is optional'
+Assert ([string]$policy.mode -eq 'force' -or [string]$policy.mode -eq 'optional') 'policy mode is force or optional'
 $verTxt = (Get-Content (Join-Path $RepoRoot 'scripts\client\windows\connect-version.txt') -Raw).Trim()
 Assert ([string]$policy.latest -eq $verTxt) "policy latest matches connect-version.txt ($verTxt)"
 $minRaw = $null
 try { $minRaw = $policy.force_min_version } catch { $minRaw = $null }
 $minStr = if ($null -eq $minRaw) { '' } else { [string]$minRaw }
-Assert ([string]::IsNullOrWhiteSpace($minStr) -or $minStr -eq 'null') 'policy force_min_version is null/empty'
+if ([string]$policy.mode -eq 'force') {
+    Assert (-not [string]::IsNullOrWhiteSpace($minStr) -and $minStr -ne 'null') 'force mode has force_min_version set'
+    Assert ([string]$minStr -eq $verTxt) 'force_min_version matches latest/connect-version'
+} else {
+    Assert ([string]::IsNullOrWhiteSpace($minStr) -or $minStr -eq 'null') 'optional policy force_min_version is null/empty'
+}
 Assert (-not ($policy.PSObject.Properties.Name -contains 'defer_hours')) 'policy JSON has no defer_hours'
 Assert (-not [string]::IsNullOrWhiteSpace([string]$policy.message_optional)) 'policy keeps message_optional'
 

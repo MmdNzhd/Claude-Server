@@ -21,7 +21,15 @@ $tests = @(
     'test-agent-home-launch-gate.ps1',
     'test-harder-adversarial.ps1',
     'test-versioned-layout.ps1',
-    'test-versioned-layout-deep-live.ps1'
+    'test-versioned-layout-deep-live.ps1',
+    # Multi-Connect KEEP / skew HARDER (L1–L7)
+    'test-harder-live-keep-reclaim.ps1',
+    'test-harder-live-keep-soft-race.ps1',
+    'test-harder-live-pin-before-reclaim.ps1',
+    'test-harder-live-acquire-keep-split.ps1',
+    'test-harder-live-slot-storm-keep.ps1',
+    'test-harder-adversarial-keep-mount.ps1',
+    'test-harder-live-mount-skew-gate.ps1'
 )
 Write-Host ''
 Write-Host '=== HARD+++ BATTERY ===' -ForegroundColor White

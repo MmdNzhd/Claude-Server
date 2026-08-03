@@ -110,12 +110,9 @@ Assert ($launchSrc -match 'LAUNCH_RETRY_NO_KILL') 'launch retry does not force-k
 Assert ($launchSrc -notmatch "Stop-CursorServerProfileTreeIfNeeded -Reason 'pre_launch_agent_or_new_window' -Force") 'pre_launch force-kill removed'
 Assert ($launchSrc -notmatch 'retry_before_\$\(\$strategy\.Name\)' ) 'retry force-kill removed'
 
-# Multi-session race fix: a sibling connect session's window can appear microseconds after
-# our entry-time profile_main check, so "orphan_helpers" (profile_all>0, profile_main=False)
-# must request --new-window too - not just true "profile_open" (profile_main=True). Before
-# the fix, orphan_helpers computed use_new_window=False, and Cursor's single-instance IPC
-# could silently reroute our "open folder" request into the sibling session's window instead
-# of spawning ours (confirmed live: launch spent minutes retrying against the wrong project).
+# B11: orphan_helpers (helpers-only, no main) must NOT request --new-window — that amplified
+# litter (amir). Caller settles then reaps helpers → cold start (UseNewWindow=false).
+# Real multi-project keeps --new-window via profile_open / agent_home only.
 Assert (Get-Command Get-CursorLaunchWindowPlan -ErrorAction SilentlyContinue) 'Get-CursorLaunchWindowPlan defined'
 
 $planCold = Get-CursorLaunchWindowPlan -AgentHome $false -HasProfileWindow $false -ProfileProcCount 0
@@ -124,7 +121,8 @@ Assert ($planCold.UseNewWindow -eq $false) 'plan: cold_start does not need --new
 
 $planOrphan = Get-CursorLaunchWindowPlan -AgentHome $false -HasProfileWindow $false -ProfileProcCount 9
 Assert ($planOrphan.Reason -eq 'orphan_helpers') 'plan: helper processes with no classified main -> orphan_helpers'
-Assert ($planOrphan.UseNewWindow -eq $true) 'plan: orphan_helpers now requests --new-window too (race fix)'
+Assert ($planOrphan.UseNewWindow -eq $false) 'plan: orphan_helpers does NOT request --new-window (B11 reap-cold)'
+Assert ($planOrphan.OrphanHelpers -eq $true) 'plan: OrphanHelpers flag still true for caller reap'
 
 $planOpen = Get-CursorLaunchWindowPlan -AgentHome $false -HasProfileWindow $true -ProfileProcCount 9
 Assert ($planOpen.Reason -eq 'profile_open') 'plan: classified main window present -> profile_open'
@@ -135,6 +133,14 @@ Assert ($planAgent.Reason -eq 'agent_home') 'plan: agent_home takes priority ove
 Assert ($planAgent.UseNewWindow -eq $true) 'plan: agent_home requests --new-window'
 
 Assert ($launchSrc -match 'Get-CursorLaunchWindowPlan -AgentHome \$agentHome -HasProfileWindow \$hasProfileWindow -ProfileProcCount \$profileProcCount') 'Launch-RemoteEditor delegates plan decision to the testable helper'
+Assert ($launchSrc -match 'orphan_helpers_reaped') 'Launch-RemoteEditor reaps helpers-only before cold start'
+Assert ($launchSrc -match 'LAUNCH_SETTLE') 'Launch-RemoteEditor settles before helpers-only reap'
+# Single-main unwrap bug (20260803.5): (Get-CursorMain...).Count without @() is $null when
+# exactly one main exists → false orphan_helpers → LAUNCH_REAP kills the open Cursor window.
+Assert ($launchSrc -match '@\(Get-CursorMainProfileProcesses\)\.Count') 'Launch-RemoteEditor @()-wraps main count (single-main unwrap safe)'
+Assert ($launchSrc -notmatch '(?<!@)\(Get-CursorMainProfileProcesses\)\.Count') 'no bare (Get-CursorMainProfileProcesses).Count left (unwrap hazard)'
+# Document the hazard next to Get-CursorMainProfileProcesses so future edits keep @()-wrap.
+Assert ($launchSrc -match 'function Get-CursorMainProfileProcesses[\s\S]{0,500}?orphan_helpers') 'Get-CursorMainProfileProcesses comments the single-main unwrap / orphan_helpers hazard'
 
 # Recovery cold-launch poll budget: a cold Cursor.exe start after soft_stop_profile has to
 # spin up its whole process tree from disk with no warm profile process to reuse - on a

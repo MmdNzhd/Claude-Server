@@ -52,6 +52,8 @@ Note 'extract setup-launch + update prune helpers'
 $needLaunch = @(
     'Resolve-VersionedTree',
     'Test-VersionSrcStructural',
+    'Get-ConnectPs1EmbeddedVersionLocal',
+    'Set-SrcVersionStamp',
     'Test-VersionSrcComplete',
     'Copy-PayloadToSrc',
     'Move-LaunchExeIntoVerDir',
@@ -81,6 +83,13 @@ $extract = Join-Path $root 'IXP000.TMP'
 $null = New-Item -ItemType Directory -Force -Path $spacedDrop, $extract
 
 try {
+    # Test seam: redirect install-current pointer at an isolated file under this test's
+    # temp root so this test NEVER touches the real live
+    # %USERPROFILE%\.config\claude-connect\install-current.txt (hit live 2026-08-03).
+    $savedInstallCurrentOverride = $env:CLAUDE_CONNECT_TEST_INSTALL_CURRENT_PATH
+    $env:CLAUDE_CONNECT_TEST_INSTALL_CURRENT_PATH = Join-Path $root 'install-current.txt'
+    . (Get-ClientFile 'windows\connect-env-repair.ps1')
+
     $winSrc = Join-Path $script:RepoRoot 'scripts\client\windows'
     foreach ($rel in @(
         'connect.bat', 'connect.ps1', 'connect-boot.ps1', 'connect-update.ps1',
@@ -137,11 +146,10 @@ try {
     Note 'install batch: folders-only root + no EXE in src or root'
     Copy-PayloadToSrc -ExtractSrc $extract -SrcDir $srcDirPath
     Remove-Item -LiteralPath (Join-Path $tDrop.Root 'current.txt') -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE '.config\claude-connect') | Out-Null
-    Set-Content -LiteralPath (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt') -Value $testVer -Encoding ASCII -NoNewline
+    Set-Content -LiteralPath (Get-ConnectInstallCurrentPath) -Value $testVer -Encoding ASCII -NoNewline
     Assert (-not (Test-Path -LiteralPath (Join-Path $tDrop.Root 'current.txt'))) `
         'no root current.txt (pointer is install-current.txt)'
-    Assert (((Get-Content (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt') -Raw).Trim()) -eq $testVer) `
+    Assert (((Get-Content (Get-ConnectInstallCurrentPath) -Raw).Trim()) -eq $testVer) `
         'install-current pointer matches installed version'
     $srcExes = @(Get-ChildItem -LiteralPath $srcDirPath -Filter 'Claude-Connect*.exe' -File -ErrorAction SilentlyContinue)
     Assert ($srcExes.Count -eq 0) 'no EXE inside src\ after payload + move batch'
@@ -199,21 +207,14 @@ try {
     Write-Host ("  FAIL  extra-hard batch exception: {0}" -f $_.Exception.Message) -ForegroundColor Red
     $Fail++
 } finally {
-    try {
-        $icRestore = Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt'
-        if ($null -ne $script:BakInstallCurrent) {
-            Set-Content -LiteralPath $icRestore -Value $script:BakInstallCurrent -Encoding ASCII -NoNewline
-        } elseif (Test-Path -LiteralPath $icRestore) {
-            # Prefer newest real VerDir on Desktop if we had no prior pointer
-            $deskCc = Join-Path $env:USERPROFILE 'Desktop\Claude-Connect'
-            if (Test-Path -LiteralPath $deskCc) {
-                $best = Get-ChildItem -LiteralPath $deskCc -Directory -EA SilentlyContinue |
-                    Where-Object { $_.Name -match '^\d{8}\.\d+$' -and (Test-Path (Join-Path $_.FullName 'src\connect.ps1')) } |
-                    Sort-Object Name -Descending | Select-Object -First 1
-                if ($best) { Set-Content -LiteralPath $icRestore -Value $best.Name -Encoding ASCII -NoNewline }
-            }
-        }
-    } catch {}
+    # Test-seam-only cleanup: this test never wrote to the real live install-current.txt
+    # (all writes were redirected via CLAUDE_CONNECT_TEST_INSTALL_CURRENT_PATH above), so
+    # there is nothing to restore on the live pointer - just release the override.
+    if ($null -eq $savedInstallCurrentOverride) {
+        Remove-Item Env:\CLAUDE_CONNECT_TEST_INSTALL_CURRENT_PATH -ErrorAction SilentlyContinue
+    } else {
+        $env:CLAUDE_CONNECT_TEST_INSTALL_CURRENT_PATH = $savedInstallCurrentOverride
+    }
     try { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue } catch {}
 }
 

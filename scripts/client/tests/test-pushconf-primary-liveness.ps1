@@ -1,8 +1,9 @@
 #Requires -Version 5.1
 # test-pushconf-primary-liveness.ps1
-# P1.3: non-primary AM_ONLY must take over TUNNEL_PORT when the published port is
-# confirmed dead and this session's port is confirmed listening — and must NOT
-# take over when the published port is still live (multi-slot hard-test safety).
+# P1.3 AM_ONLY takeover + primary soft-liveness (AM_ONLY=0):
+#   - non-primary: take over dead published port; keep when CUR still live
+#   - primary: soft_keep CUR when both live + sshfs -p CUR under ~/mounts;
+#     overwrite (fleet reclaim) when CUR live without mount_on_cur
 #
 # Exercises the REAL Push-ServerConnectConf $remoteBody (extracted + ExpandString +
 # bash), not a reimplementation.
@@ -44,6 +45,20 @@ Assert ($push -match 'OUR_LIVE') 'PushConf remote probes OUR_LIVE'
 Assert ($push -match 'published_dead') 'port_takeover names published_dead'
 Assert ($push -match 'port_mismatch_keep.*cur_live') 'mismatch_keep retains cur_live/our_live observability'
 Assert (($push -split "`n" | Where-Object { $_ -match "port_takeover" -and $_ -match 'foreach' }).Count -ge 1) 'client foreach signal list includes port_takeover'
+Assert ($push -match 'primary_soft_keep') 'PushConf remote emits primary_soft_keep'
+Assert ($push -match 'primary_overwrite') 'PushConf remote emits primary_overwrite'
+Assert ($push -match 'MOUNT_ON_CUR') 'PushConf remote probes MOUNT_ON_CUR'
+Assert ($push -match "pgrep.*\[s\]shfs|pgrep.*'\[s\]shfs'") 'PushConf remote scans sshfs via pgrep'
+Assert ($push -match 'reason=mount_on_cur') 'primary_soft_keep cites reason=mount_on_cur'
+Assert (($push -split "`n" | Where-Object { $_ -match 'primary_soft_keep' -and $_ -match 'foreach' }).Count -ge 1) 'client foreach signal list includes primary_soft_keep'
+Assert (($push -split "`n" | Where-Object { $_ -match 'primary_overwrite' -and $_ -match 'foreach' }).Count -ge 1) 'client foreach signal list includes primary_overwrite'
+
+$gmShPath = Get-ClientFile 'git-mode.sh'
+$gmSh = Get-Content $gmShPath -Raw
+Assert ($gmSh -match 'primary_soft_keep') 'Mac push_server_connect_conf emits primary_soft_keep'
+Assert ($gmSh -match 'primary_overwrite') 'Mac push_server_connect_conf emits primary_overwrite'
+Assert ($gmSh -match 'MOUNT_ON_CUR') 'Mac remote probes MOUNT_ON_CUR'
+Assert ($gmSh -match 'reason=mount_on_cur') 'Mac primary_soft_keep cites mount_on_cur'
 
 # Slot preference must remain: UI_SLOT=3 is non-primary (am_only path), takeover is remote.
 if ($prim) {
@@ -253,6 +268,86 @@ rm -rf "`$TMPHOME"
 
     Assert ($outDeadText -notmatch 'port_takeover') 'no takeover when session port is not listening yet'
     Assert ($writtenDeadPort -eq "$dead2") "conf keeps prior published port when session not live yet"
+
+    Write-Host '--- E) LIVE primary: CUR live + OUR live + fake sshfs on CUR => soft_keep ---' -ForegroundColor Cyan
+    # AM_ONLY=0 (primary). Fake sshfs: bash -c sleep with trailing argv "sshfs -p CUR $HOME/mounts/..."
+    # (GNU sleep rejects extra args and exits; bash keeps them in /proc/*/cmdline for pgrep -f).
+    $expandedSoft = Expand-PushConfRemoteBody -Template $templateText -SessionPort "$livePort" -SessionSlot '0' -AmOnly '0'
+    $wrapperSoft = @"
+set -u
+TMPHOME=`$(mktemp -d)
+export HOME="`$TMPHOME"
+mkdir -p "`$HOME/mounts/fakeproj"
+# Fake sshfs cmdline via long-lived bash argv tail (sleep alone drops args on exec).
+bash -c 'trap "exit 0" TERM; while true; do sleep 1; done' sshfs -p $altLivePort "`$HOME/mounts/fakeproj" >/dev/null 2>&1 &
+FAKE_PID=`$!
+# Ensure pgrep can see the fake before PushConf runs.
+for _i in 1 2 3 4 5; do
+  if kill -0 "`$FAKE_PID" 2>/dev/null && pgrep -u "`$(id -un)" -f '[s]shfs' >/dev/null 2>&1; then break; fi
+  sleep 0.1
+done
+printf 'LAPTOP_USER=liveness-test\nTUNNEL_PORT=$altLivePort\nPORT=$altLivePort\nTUNNEL_SLOT=0\nGIT_MODE=off\nLAPTOP_OS=windows\nACTIVE_MOUNT=fakeproj\nLAPTOP_HOSTKEY_FP=\n' > "`$HOME/.claude-connect.conf"
+$expandedSoft
+echo "---CONF---"
+cat "`$HOME/.claude-connect.conf"
+kill `$FAKE_PID 2>/dev/null || true
+rm -rf "`$TMPHOME"
+"@
+    $wrapperSoft = ($wrapperSoft -replace "`r`n", "`n") -replace "`r", "`n"
+    $tmpSoft = [System.IO.Path]::Combine($PSScriptRoot, "_tmp_pushconf_softkeep_$([guid]::NewGuid().ToString('N')).sh")
+    $tempFiles += $tmpSoft
+    [System.IO.File]::WriteAllText($tmpSoft, $wrapperSoft)
+    $outSoft = & bash (ConvertTo-WslPath $tmpSoft) 2>&1
+    $outSoftText = ($outSoft -join "`n")
+    Write-Host '  --- bash output (primary soft_keep) ---' -ForegroundColor DarkGray
+    $outSoft | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+
+    $resultSoft = ($outSoft | Where-Object { $_ -match 'PUSH_CONF_RESULT' } | Select-Object -Last 1)
+    $writtenSoft = [regex]::Match($outSoftText, '(?m)^TUNNEL_PORT=(.*)$')
+    $writtenSoftPort = if ($writtenSoft.Success) { $writtenSoft.Groups[1].Value.Trim() } else { '' }
+
+    Assert ($outSoftText -match 'primary_soft_keep') 'emits PUSH_CONF primary_soft_keep when mount_on_cur'
+    Assert ($outSoftText -match 'reason=mount_on_cur') 'primary_soft_keep cites reason=mount_on_cur'
+    Assert ($outSoftText -match "session=$livePort") "soft_keep cites session=$livePort"
+    Assert ($outSoftText -match "server=$altLivePort") "soft_keep cites server=$altLivePort"
+    Assert ($writtenSoftPort -eq "$altLivePort") "conf keeps published CUR_PORT $altLivePort (soft keep)"
+    Assert ($resultSoft -match 'publish_port=0') 'RESULT publish_port=0 on primary soft_keep'
+    Assert ($resultSoft -match 'am_only=0') 'RESULT am_only=0 on primary soft_keep path'
+    Assert ($outSoftText -notmatch 'primary_overwrite') 'no primary_overwrite when soft_keep applies'
+    Assert ($outSoftText -notmatch 'port_takeover') 'no am_only port_takeover on primary soft_keep'
+
+    Write-Host '--- F) LIVE primary: CUR live + OUR live + no sshfs => overwrite ---' -ForegroundColor Cyan
+    $expandedOw = Expand-PushConfRemoteBody -Template $templateText -SessionPort "$livePort" -SessionSlot '0' -AmOnly '0'
+    $wrapperOw = @"
+set -u
+TMPHOME=`$(mktemp -d)
+export HOME="`$TMPHOME"
+mkdir -p "`$HOME"
+printf 'LAPTOP_USER=liveness-test\nTUNNEL_PORT=$altLivePort\nPORT=$altLivePort\nTUNNEL_SLOT=0\nGIT_MODE=off\nLAPTOP_OS=windows\nACTIVE_MOUNT=\nLAPTOP_HOSTKEY_FP=\n' > "`$HOME/.claude-connect.conf"
+$expandedOw
+echo "---CONF---"
+cat "`$HOME/.claude-connect.conf"
+rm -rf "`$TMPHOME"
+"@
+    $wrapperOw = ($wrapperOw -replace "`r`n", "`n") -replace "`r", "`n"
+    $tmpOw = [System.IO.Path]::Combine($PSScriptRoot, "_tmp_pushconf_overwrite_$([guid]::NewGuid().ToString('N')).sh")
+    $tempFiles += $tmpOw
+    [System.IO.File]::WriteAllText($tmpOw, $wrapperOw)
+    $outOw = & bash (ConvertTo-WslPath $tmpOw) 2>&1
+    $outOwText = ($outOw -join "`n")
+    Write-Host '  --- bash output (primary overwrite) ---' -ForegroundColor DarkGray
+    $outOw | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+
+    $resultOw = ($outOw | Where-Object { $_ -match 'PUSH_CONF_RESULT' } | Select-Object -Last 1)
+    $writtenOw = [regex]::Match($outOwText, '(?m)^TUNNEL_PORT=(.*)$')
+    $writtenOwPort = if ($writtenOw.Success) { $writtenOw.Groups[1].Value.Trim() } else { '' }
+
+    Assert ($outOwText -match 'primary_overwrite') 'emits PUSH_CONF primary_overwrite when CUR live without mount'
+    Assert ($outOwText -match 'cur_live=1') 'overwrite cites cur_live=1'
+    Assert ($outOwText -match 'mount_on_cur=0') 'overwrite cites mount_on_cur=0'
+    Assert ($outOwText -notmatch 'primary_soft_keep') 'no soft_keep without mount_on_cur'
+    Assert ($writtenOwPort -eq "$livePort") "conf publishes session PORT $livePort (fleet reclaim)"
+    Assert ($resultOw -match "publish_port=$livePort") "RESULT publish_port=$livePort on overwrite"
 } catch {
     Write-Host "  FAIL  live harness exception: $($_.Exception.Message)" -ForegroundColor Red
     $fail++

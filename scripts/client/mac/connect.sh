@@ -50,7 +50,7 @@ _update_script="$(cd "$(dirname "$0")" && pwd)/connect-update.sh"
 # Manual-only updates: skip auto-update on start (user presses u in the menu).
 # connect-update.sh remains available for invoke_connect_manual_update.
 
-CONNECT_VERSION='20260802.4'
+CONNECT_VERSION='20260803.11'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).
@@ -856,6 +856,9 @@ while [ "$exit_requested" -eq 0 ]; do
         warn "No editor found. Install Cursor or VS Code (+ Remote-SSH extension), then re-run."
         echo ""; exit 1
     fi
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "SESSION_CONTEXT remotePath=${go_path:-?} mountsId=${go_id:-?} editor=${EDITOR_CMD:-?}" 'INFO'
+    fi
 
     _editor_opened=0
     # Sticky safety evidence: transient process-detection misses must never
@@ -889,8 +892,36 @@ while [ "$exit_requested" -eq 0 ]; do
             if [ "$keep_tunnel_for_editor" -eq 1 ]; then
                 declare -F connect_log >/dev/null 2>&1 \
                     && connect_log 'FINALLY_KEEP_TUNNEL reason=editor_open' 'WARN'
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "SESSION_END reason=keep port=${PORT:-?} project=${go_id:-?}" 'INFO'
+                fi
+                # Write keep marker BEFORE disown (Win marker-before-detach parity).
+                if declare -F write_connect_keep_tunnel_marker >/dev/null 2>&1 \
+                    && [ -n "${PORT:-}" ] && [ "${PORT:-0}" != "0" ]; then
+                    local _keep_slot="${CLAUDE_CONNECT_UI_SLOT:--1}"
+                    case "$_keep_slot" in ''|*[!0-9]*) _keep_slot=-1 ;; esac
+                    write_connect_keep_tunnel_marker "$PORT" "$_keep_slot" "${bg_pid:-0}" \
+                        "${go_id:-}" "${go_path:-}" "${ALIAS:-claude-server}" "${EDITOR_CMD:-}" || true
+                    unset _keep_slot
+                fi
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "SESSION_KEEP port=${PORT:-?} project=${go_id:-?} tunnelPid=${bg_pid:-0}" 'INFO'
+                fi
                 [ -n "${bg_pid:-}" ] && disown "$bg_pid" 2>/dev/null || true
             else
+                if declare -F connect_log >/dev/null 2>&1; then
+                    _end_reason=session_end
+                    [ "$already_down" -eq 1 ] && _end_reason=quit
+                    connect_log "SESSION_END reason=${_end_reason} port=${PORT:-?} project=${go_id:-?}" 'INFO'
+                    unset _end_reason
+                fi
+                if declare -F clear_connect_keep_tunnel_marker >/dev/null 2>&1 \
+                    && [ -n "${PORT:-}" ] && [ "${PORT:-0}" != "0" ]; then
+                    clear_connect_keep_tunnel_marker "$PORT" || true
+                fi
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "SESSION_CLEAR_KEEP port=${PORT:-?} project=${go_id:-?}" 'INFO'
+                fi
                 if [ "$already_down" -eq 0 ]; then
                     already_down=1
                     printf '\n    Disconnecting...\n'
@@ -911,6 +942,8 @@ while [ "$exit_requested" -eq 0 ]; do
         session_done=0
         while [ "$session_done" -eq 0 ]; do
             already_down=0
+            # Reset so each session-loop Ensure can run orphan reclaim once (Win OrphanReclaimDoneThisEnsure).
+            _ORPHAN_RECLAIM_DONE_THIS_ENSURE=0
             SESSION_LOOP_ITER=$(( SESSION_LOOP_ITER + 1 ))
             # Quiet-repeat: only the FIRST session-loop pass (the initial connect) shows
             # routine step "ok" lines on console; recovery re-passes stay file-only.
@@ -918,6 +951,9 @@ while [ "$exit_requested" -eq 0 ]; do
             if declare -F connect_log >/dev/null 2>&1; then
                 connect_log "SESSION_LOOP begin iter=$SESSION_LOOP_ITER recovery_gen=${RECOVERY_GENERATION:-0} post_recovery=${POST_TUNNEL_RECOVERY:-0} force_auth=${CURSOR_AUTH_FORCE:-0}"
         if declare -F log_session_context >/dev/null 2>&1; then log_session_context 'session_loop'; fi
+                if [ "$SESSION_LOOP_ITER" -eq 1 ]; then
+                    connect_log "SESSION_BEGIN ver=${CONNECT_VERSION:-?} uid=${SERVER_UID_STR:-?} alias=${ALIAS:-?} projectId=${go_id:-?} slot=${CLAUDE_CONNECT_UI_SLOT:-?} port=${PORT:-?} pid=$$ git_mode=$(get_git_mode 2>/dev/null || echo '?')" 'INFO'
+                fi
             fi
 
             ensure_openssh_mux_limits || true
@@ -1329,6 +1365,9 @@ while [ "$exit_requested" -eq 0 ]; do
                         fi
                         continue
                     fi
+                    if declare -F connect_log >/dev/null 2>&1; then
+                        connect_log "UI_KEY key=$_resolved" 'INFO'
+                    fi
                     _action="$_resolved"
                     _got_key=1; break
                 fi
@@ -1447,9 +1486,14 @@ while [ "$exit_requested" -eq 0 ]; do
                 printf '    Disconnecting...\n'
                 if declare -F connect_log >/dev/null 2>&1; then
                     connect_log "SESSION: disconnect project=$go_id reason=user_quit" 'INFO'
+                    connect_log "SESSION_END reason=quit port=${PORT:-?} project=${go_id:-?}" 'INFO'
                 fi
                 if declare -F clear_connect_session_slot_marker >/dev/null 2>&1; then
                     clear_connect_session_slot_marker
+                fi
+                if declare -F clear_connect_keep_tunnel_marker >/dev/null 2>&1 \
+                    && [ -n "${PORT:-}" ] && [ "${PORT:-0}" != "0" ]; then
+                    clear_connect_keep_tunnel_marker "$PORT" || true
                 fi
                 clear_session_mount "$go_id" "$EDITOR_CMD" "$ALIAS" "$go_path" 1 'user_quit'
                 stop_session_tunnel_cleanup 1

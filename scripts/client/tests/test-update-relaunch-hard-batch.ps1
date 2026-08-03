@@ -82,7 +82,17 @@ Assert (
 
 if (Test-Path -LiteralPath $policyPath) {
     $policy = Get-Content -LiteralPath $policyPath -Raw | ConvertFrom-Json
-    Assert ([string]$policy.mode -eq 'optional') 'server client-update-policy.json mode is optional'
+    $mode = [string]$policy.mode
+    Assert ($mode -eq 'optional' -or $mode -eq 'force') 'server client-update-policy.json mode is optional or force'
+    if ($mode -eq 'optional') {
+        $minRaw = $null
+        try { $minRaw = $policy.force_min_version } catch { $minRaw = $null }
+        $minStr = if ($null -eq $minRaw) { '' } else { [string]$minRaw }
+        Assert ([string]::IsNullOrWhiteSpace($minStr) -or $minStr -eq 'null') 'optional mode keeps force_min_version null/empty'
+    } else {
+        Assert (-not [string]::IsNullOrWhiteSpace([string]$policy.force_min_version)) 'force mode has force_min_version set'
+        Assert ([string]$policy.force_min_version -eq [string]$policy.latest) 'force mode force_min_version matches latest'
+    }
 } else {
     Assert $false 'server client-update-policy.json missing'
 }

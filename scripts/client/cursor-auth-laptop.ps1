@@ -276,6 +276,29 @@ public static class CursorAuthSqlite
         }
     }
 
+    public static bool DeleteKeys(string dbPath, string[] keys)
+    {
+        if (keys == null || keys.Length == 0) { return true; }
+        IntPtr db;
+        if (!OpenDb(dbPath, 30000, out db)) { return false; }
+        try
+        {
+            foreach (string key in keys)
+            {
+                if (string.IsNullOrEmpty(key)) { continue; }
+                if (!ExecStatement(db, "DELETE FROM ItemTable WHERE key = ?", key))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        finally
+        {
+            if (db != IntPtr.Zero) { _close(db); }
+        }
+    }
+
     public static bool HasAuthTokens(string dbPath)
     {
         IntPtr db;
@@ -545,11 +568,27 @@ function Merge-CursorAuthIntoLocalDb {
             if ($map.ContainsKey('storage.serviceMachineId')) { $mid = $map['storage.serviceMachineId'] }
             elseif ($map.ContainsKey('telemetry.machineId')) { $mid = $map['telemetry.machineId'] }
             if ($mid) { Write-CursorProfileMachineId -MachineId $mid | Out-Null }
+            # Drop stale UI display-name cache so Settings does not keep showing the
+            # previous account nickname after golden email rotation.
+            Clear-CursorAuthDisplayNameCache -DbPath $DbPath
             return $true
         }
         Start-Sleep -Milliseconds 400
     }
     return $false
+}
+
+function Clear-CursorAuthDisplayNameCache {
+    param([Parameter(Mandatory)][string]$DbPath)
+    if (-not (Test-Path -LiteralPath $DbPath)) { return }
+    if (-not (Initialize-CursorAuthSqlite)) { return }
+    try {
+        [void][CursorAuthSqlite]::DeleteKeys($DbPath, @(
+            'cursor.customize.userDisplayNameCache'
+        ))
+    } catch {
+        # fail-open: auth tokens already merged
+    }
 }
 
 function Merge-CursorStorageJsonFromGolden {
@@ -722,15 +761,18 @@ function Test-CursorAuthStampCurrent {
     $syncedAt = if (Test-Path -LiteralPath $syncedAtPath) {
         (Get-Content -LiteralPath $syncedAtPath -Raw -ErrorAction SilentlyContinue).Trim()
     } else { '' }
-    # Local-first: if we synced recently, skip the SSH cat of exported-at (~0.5-3s).
-    if ($syncedAt -and (Test-Path -LiteralPath $syncedAtPath)) {
-        $ageMin = ((Get-Date) - (Get-Item -LiteralPath $syncedAtPath).LastWriteTime).TotalMinutes
-        if ($ageMin -ge 0 -and $ageMin -lt 60) {
+    # Local-first ONLY when this session already fetched server exported-at into
+    # CursorGoldenStampCache AND it matches local stamp. Never invent Current=true
+    # from file mtime alone (that left laptops on the old Cursor account for up to
+    # 60 minutes after golden rotation / account change).
+    if ($syncedAt -and $script:CursorGoldenStampCache -and $script:CursorGoldenStampCache.Stamp) {
+        $cached = [string]$script:CursorGoldenStampCache.Stamp
+        if ($cached -and ($syncedAt -eq $cached)) {
             return [PSCustomObject]@{
                 Current          = $true
                 SyncedAt         = $syncedAt
-                GoldenExportedAt = $syncedAt
-                Source           = 'local_ttl'
+                GoldenExportedAt = $cached
+                Source           = 'session_cache'
             }
         }
     }
@@ -883,12 +925,27 @@ function Sync-CursorGoldenAuth {
     $walBytes = if (Test-Path "$dbPath-wal") { (Get-Item "$dbPath-wal").Length } else { 0 }
 
     Write-AuthSyncLog "AUTH_SYNC: begin force=$Force db_bytes=$dbBytes wal_bytes=$walBytes alias=$Alias remote_path=$RemotePath" 'INFO'
-    # Mid-session AUTH: never merge into a huge open profile DB (chat freeze / WAL risk).
-    # Threshold 500 MiB. -Force (explicit bootstrap/P) still allowed.
+    # Mid-session AUTH: avoid merge into a huge open profile DB (chat freeze / WAL risk).
+    # Threshold 500 MiB. Bypass when -Force OR golden stamp is already known-stale
+    # (account rotation must land; large profiles were stuck on the old email).
     $authDbTooLarge = 524288000L
-    if (-not $Force -and $dbBytes -gt $authDbTooLarge) {
+    $localSyncedAtEarly = if (Test-Path -LiteralPath $syncedAtPath) {
+        (Get-Content -LiteralPath $syncedAtPath -Raw -ErrorAction SilentlyContinue).Trim()
+    } else { '' }
+    $prefetchStamp = ''
+    if ($script:CursorGoldenStampCache -and $script:CursorGoldenStampCache.Stamp) {
+        $prefetchStamp = [string]$script:CursorGoldenStampCache.Stamp
+    }
+    $goldenKnownStale = $false
+    if ($prefetchStamp -and $localSyncedAtEarly -and ($prefetchStamp -ne $localSyncedAtEarly)) {
+        $goldenKnownStale = $true
+    }
+    if (-not $Force -and -not $goldenKnownStale -and $dbBytes -gt $authDbTooLarge) {
         Write-AuthSyncLog ("AUTH_SYNC_SKIP: reason=db_too_large db_bytes={0} threshold={1}" -f $dbBytes, $authDbTooLarge) 'WARN'
         return [PSCustomObject]@{ Ok = $false; Skipped = $true; Reason = 'db_too_large' }
+    }
+    if (-not $Force -and $goldenKnownStale -and $dbBytes -gt $authDbTooLarge) {
+        Write-AuthSyncLog ("AUTH_SYNC: bypass db_too_large reason=golden_stale db_bytes={0} synced_at={1} golden_exported_at={2}" -f $dbBytes, $localSyncedAtEarly, $prefetchStamp) 'WARN'
     }
     # If we already saw exported-at this session (stamp prefetch), golden is NOT missing.
     if ($script:CursorGoldenStampCache -and $script:CursorGoldenStampCache.Stamp) {
@@ -942,6 +999,10 @@ fi
     # IMPORTANT: check already-complete BEFORE cursor-auth-sync --force (was wasting ~3-5s).
     $syncedAt = if (Test-Path $syncedAtPath) { (Get-Content $syncedAtPath -Raw -ErrorAction SilentlyContinue).Trim() } else { '' }
     $goldenCurrent = $goldenExportedAt -and ($syncedAt -eq $goldenExportedAt)
+    # Late size gate: if probe proved golden_stale, never block on db_too_large (account rotation).
+    if (-not $Force -and -not $goldenCurrent -and $dbBytes -gt $authDbTooLarge -and $goldenExportedAt) {
+        Write-AuthSyncLog ("AUTH_SYNC: bypass db_too_large reason=golden_stale_after_probe db_bytes={0} synced_at={1} golden_exported_at={2}" -f $dbBytes, $syncedAt, $goldenExportedAt) 'WARN'
+    }
     # Single OpenDb session gives us both the completeness gate and serviceMachineId
     # in one read (Get-LocalCursorAuthState) instead of two separate SQLite opens.
     $localAuthState = Get-LocalCursorAuthState -DbPath $dbPath

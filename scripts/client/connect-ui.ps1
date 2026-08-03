@@ -299,10 +299,22 @@ function Enter-ConnectSingleInstance {
         $script:ConnectInstanceMutex = $global:ClaudeConnectBootMutex
         $global:ClaudeConnectBootMutex = $null
         $slot = ($env:CLAUDE_CONNECT_UI_SLOT + '').Trim()
-        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
-            Write-ConnectLog ("MULTI_INSTANCE: acquired pid={0} via=connect-boot slot={1}" -f $PID, $slot) 'INFO'
+        # C7: refuse empty inherit — fall through to mutex loop so UI_SLOT is always a digit.
+        if ($slot -notmatch '^\d+$') {
+            if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                Write-ConnectLog ("MULTI_INSTANCE: boot_inherit_refuse_empty_slot pid={0} - claiming fresh slot" -f $PID) 'WARN'
+            }
+            try { $script:ConnectInstanceMutex.ReleaseMutex() } catch { }
+            try { $script:ConnectInstanceMutex.Close() } catch { }
+            $script:ConnectInstanceMutex = $null
+            $env:CLAUDE_CONNECT_BOOT_MUTEX = '0'
+            # Fall through to normal Global\ClaudeConnect# acquire below.
+        } else {
+            if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                Write-ConnectLog ("MULTI_INSTANCE: acquired pid={0} via=connect-boot slot={1}" -f $PID, $slot) 'INFO'
+            }
+            return $true
         }
-        return $true
     }
     $script:ConnectInstanceMutex = $null
     try {
@@ -685,7 +697,39 @@ function Sync-ConnectLogToServer {
         # Force retry overlapping a drained non-Force must not clobber the in-flight chunk).
         $tmpLocal = Join-Path $tmpDir ("claude-connect-chunk-{0}-{1}.log" -f $PID, [guid]::NewGuid().ToString('N').Substring(0, 8))
         if ($null -eq $chunk -or $take -le 0) { $script:LastConnectLogSyncOk = $true; return }
-        [System.IO.File]::WriteAllBytes($tmpLocal, $chunk)
+        try {
+            [System.IO.File]::WriteAllBytes($tmpLocal, $chunk)
+        } catch {
+            # Dual-Connect day-log races + AV locks showed up as outer detail=exception
+            # type=NullReferenceException err=Object (Smart 2026-08-03). Classify here.
+            if (-not $script:ConnectLogSyncFailLogged) {
+                $script:ConnectLogSyncFailLogged = $true
+                try {
+                    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
+                    $sid = Get-ConnectSessionId
+                    $why = ''
+                    try {
+                        $rootEx = $_.Exception
+                        if ($rootEx -and $rootEx.InnerException) { $rootEx = $rootEx.InnerException }
+                        if ($rootEx) { $why = (([string]$rootEx.Message) -replace '[\r\n]+', ' ').Trim() }
+                    } catch { }
+                    if (-not $why -or $why -eq 'Object') { $why = 'chunk_write_fail' }
+                    if ($why.Length -gt 120) { $why = $why.Substring(0, 120) }
+                    $exType = 'unknown'
+                    try {
+                        if ($_.Exception) { $exType = $_.Exception.GetType().Name }
+                        if ($_.Exception -and $_.Exception.InnerException) {
+                            $exType = $exType + '/' + $_.Exception.InnerException.GetType().Name
+                        }
+                    } catch { }
+                    if ($script:ConnectLogWriter) {
+                        Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=chunk_write_fail type=$exType err=$why (local kept; retry later)"
+                    }
+                } catch { }
+            }
+            if (-not $LogPath -or $LogPath -eq $script:ConnectLogPath) { $script:ConnectLogSyncNeeded = $true }
+            return
+        }
         $day = if ($path -match 'connect-(\d{8})\.log$') { $Matches[1] } else { Get-Date -Format 'yyyyMMdd' }
         $remoteTmp = ".claude/logs/.connect-buf-$PID.tmp"
         $remoteDay = ".claude/logs/connect-$day.log"
@@ -950,9 +994,18 @@ function Sync-ConnectLogToServer {
             try {
                 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                 $sid = Get-ConnectSessionId
-                $ex = [string]($_.Exception.Message)
-                if (-not $ex) { $ex = [string]$_ }
+                $ex = ''
+                try { $ex = [string]($_.Exception.Message) } catch { $ex = '' }
+                if (-not $ex) {
+                    try { $ex = [string]($_.Exception.ToString()) } catch { $ex = '' }
+                }
+                if (-not $ex) { try { $ex = [string]$_ } catch { $ex = '' } }
                 $ex = (($ex -replace '[\r\n]+', ' ').Trim())
+                # Fleet: NullReferenceException with empty/.ToString noise collapsed to bare
+                # "Object" — useless for ops. Expand to the standard NRE phrase.
+                if (-not $ex -or $ex -eq 'Object' -or $ex -eq 'Object.') {
+                    $ex = 'Object reference not set to an instance of an object.'
+                }
                 if ($ex.Length -gt 160) { $ex = $ex.Substring(0, 160) }
                 # A bare message ("Object reference not set to an instance of an object.")
                 # is not actionable: carry the type and the throwing line so a recurrence
@@ -966,7 +1019,7 @@ function Sync-ConnectLogToServer {
                         $exType = $exType + '/' + $_.Exception.InnerException.GetType().Name
                         try {
                             $innerMsg = (([string]$_.Exception.InnerException.Message) -replace '[\r\n]+', ' ').Trim()
-                            if ($innerMsg) { $ex = $innerMsg }
+                            if ($innerMsg -and $innerMsg -ne 'Object' -and $innerMsg -ne 'Object.') { $ex = $innerMsg }
                         } catch { }
                     }
                 } catch { }
@@ -1364,14 +1417,18 @@ function Write-ConnectLog {
                         } catch { }
                     }
             $nowFlush = Get-Date
-            if (-not $script:ConnectLogLastTraceFlushAt -or ($nowFlush - $script:ConnectLogLastTraceFlushAt).TotalSeconds -ge 2) {
+            $verboseLog = ($env:CLAUDE_CONNECT_LOG_VERBOSE -eq '1')
+            $flushSec = if ($verboseLog) { 0.5 } else { 2 }
+            if (-not $script:ConnectLogLastTraceFlushAt -or ($nowFlush - $script:ConnectLogLastTraceFlushAt).TotalSeconds -ge $flushSec) {
                 Write-ConnectLogSynced
                 $script:ConnectLogLastTraceFlushAt = $nowFlush
             }
             # Bug 36: TUNNEL_* TRACE may carry soft_fail context - allow sync trigger.
-            if ($Level -eq 'TRACE' -and $Message -match 'TUNNEL_') {
+            # VERBOSE: also sync DEBUG/TRACE more often so server day log gets S-spine detail.
+            if (($Level -eq 'TRACE' -and $Message -match 'TUNNEL_') -or $verboseLog) {
                 $script:ConnectLogLinesSinceSync = [int]$script:ConnectLogLinesSinceSync + 1
-                if ($Message -match 'soft_fail|TUNNEL_DROP|TUNNEL_EXIT' -or $script:ConnectLogLinesSinceSync -ge 25) {
+                $syncEvery = if ($verboseLog) { 10 } else { 25 }
+                if ($Message -match 'soft_fail|TUNNEL_DROP|TUNNEL_EXIT' -or $script:ConnectLogLinesSinceSync -ge $syncEvery) {
                     Write-ConnectLogSynced
                     # Never inline-sync from here (same reasoning as the INFO path below): a
                     # burst of TUNNEL_* trace lines mid-connect must not block the console on a

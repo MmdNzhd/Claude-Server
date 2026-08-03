@@ -124,6 +124,19 @@ $keepSlice = if ($keepAt -ge 0) { $syncSrc.Substring($keepAt, [Math]::Min(320, $
 Assert (($keepSlice -match 'return \$true') -and ($keepSlice -match 'TunnelSyncFailCount = 0')) `
     'Sync-SessionTunnelProcess keep_alive returns true and clears sync fail counter'
 
+Write-Host '--- G) H0a Multi-Connect reclaim / Soft / keep_editor ---' -ForegroundColor Cyan
+Assert ($gm -match 'ACQUIRE_ORPHAN_RECLAIMABLE') 'Acquire logs ACQUIRE_ORPHAN_RECLAIMABLE'
+Assert ($gm -match 'ACQUIRE_SKIP: keep_editor|keep_editor') 'Acquire classifies keep_editor'
+Assert ($gm -match 'Invoke-ConnectOrphanReclaim') 'Ensure orphan reclaim API present'
+Assert ($gm -match 'OrphanReclaimDoneThisEnsure') 'Ensure once-per-pass reclaim flag'
+Assert ($gm -match 'HYGIENE_SOFT_PORT') 'Soft per-port log'
+Assert ($gm -match 'Test-ConnectKeepEditorProtect') 'Soft/reclaim editor protect'
+Assert ($gm -match 'Invoke-ConnectMountDownByPort') 'Soft down-by-port'
+Assert ($gm -match 'mount_only_down|HYGIENE_SOFT_DEAD_BOUND') 'Soft mount-only / dead-bound heal'
+$ensSrc = Get-FunctionSource -Content $gm -Name 'Ensure-SessionTunnel'
+Assert (($ensSrc -and ($ensSrc -match 'Invoke-ConnectOrphanReclaim')) -or ($gm -match '(?s)function Ensure-SessionTunnel[\s\S]{0,3500}Invoke-ConnectOrphanReclaim')) `
+    'Ensure-SessionTunnel calls orphan reclaim before adopt'
+
 Write-Host ''
 Write-Host ("GIT tunnel hard batch: {0} passed, {1} failed" -f $passed, $failed) -ForegroundColor $(if ($failed -eq 0) { 'Green' } else { 'Red' })
 if ($failed -gt 0) { exit 1 }

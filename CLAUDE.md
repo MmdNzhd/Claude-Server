@@ -110,6 +110,8 @@ sudo cursor-auth-export --from-user smart
 sudo claude-server sync-cursor-auth
 ```
 
+**Changing the shared Cursor account:** follow [`docs/cursor-account-rotation.md`](docs/cursor-account-rotation.md) (bump `exported-at`, sync, force Connect >= 20260803.4). Chat is the laptop profile — server-only sync is not enough.
+
 `add-user`, `claude-automount`, `sync-cursor-auth`, and cron (`cursor-auth-refresh` every 6h) keep `~/.config/Cursor/User/globalStorage/` aligned. Laptops only need `cursor.exe` + Remote-SSH - **no per-laptop Cursor login**.
 
 **Chat uses laptop globalStorage - via an isolated profile:** Remote SSH Chat reads the *local* Cursor globalStorage on Windows, not the server's `.cursor-server` storage. `connect.ps1` opens Cursor with `--user-data-dir <LOCALAPPDATA>\ClaudeServerCursorProfile` (`Get-CursorRemoteProfileDir` in `editor-launch.ps1`) - a dedicated profile, separate from the developer's default `%APPDATA%\Cursor` profile. `cursor-auth-sync --force` runs on the server, then `cursor-auth-laptop.ps1` **merges** auth keys into that isolated profile's `state.vscdb` via SQLite UPSERT (never replaces the whole file, never closes any Cursor window). Many server-profile windows share one profile dir - one merge updates all of them. Personal Cursor (`%APPDATA%\Cursor`) is **never read, overwritten, or closed**.
@@ -286,8 +288,8 @@ When any of these files change, update `scripts/server/commands/install.sh` (the
 | Both EXIT and SIGTERM traps | mac:444-445 | `kill <pid>` won't trigger EXIT alone |
 | `[Console]::Key` + `KeyChar` checks | win:610,728,784 | Physical key check so R/Q/C/X work under Persian/Arabic keyboard layouts |
 | `[Uri]::EscapeDataString` for Gateway URL | win:695 | PS5.1+PS7 safe; avoids `System.Web` dependency |
-| `$script:ConnectVersion = '20260802.4'` | win connect.ps1 | Must match connect.bat guard + connect-version.txt |
-| `CONNECT_VERSION='20260802.4'` | mac connect.sh | Must match published client version |
+| `$script:ConnectVersion = '20260803.11'` | win connect.ps1 | Must match connect.bat guard + connect-version.txt |
+| `CONNECT_VERSION='20260803.11'` | mac connect.sh | Must match published client version |
 | No `start /MIN` in connect.bat / instant launcher | win bat + connect-update + publish setup-launch | Minimize still taskbar-visible; use hide-relaunch VBS style 0 |
 | `connect-hide-relaunch.vbs` + `connect-hide-console.ps1` shipped | win + deploy-client-bundle + manifest.tsv | BAT_INNER true-hide; belt ShowWindow(SW_HIDE); fail-open |
 | Helper `powershell` in connect.bat uses outer `-WindowStyle Hidden` | windows/connect.bat | Prevents helper console flashes; final UI `start` of connect-boot stays visible |

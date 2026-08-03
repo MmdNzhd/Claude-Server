@@ -103,6 +103,22 @@ wait_pid_timeout() {
     return "$rc"
 }
 
+test_is_primary_tunnel_publisher() {
+    # Slot preference only: UI slot 0 (or legacy unset) is the preferred publisher.
+    # Remote AM_ONLY body may still let a non-primary publish via port_takeover.
+    local slot="${CLAUDE_CONNECT_UI_SLOT:-}"
+    slot="$(printf '%s' "$slot" | tr -d '[:space:]')"
+    [ -z "$slot" ] && return 0
+    [ "$slot" = "0" ]
+}
+
+_push_conf_sq_escape() {
+    # Escape for embedding inside a single-quoted bash assignment.
+    local s="${1:-}"
+    s="${s//\'/\'\\\'\'}"
+    printf '%s' "$s"
+}
+
 push_server_connect_conf() {
     if [ -z "${LAPTOP_HOSTKEY_FP:-}" ]; then
         LAPTOP_HOSTKEY_FP="$(get_stored_laptop_hostkey_fp || true)"
@@ -122,8 +138,9 @@ push_server_connect_conf() {
         return 0
     fi
     local mode os="${GIT_MODE_LAPTOP_OS:-mac}" active="${ACTIVE_MOUNT_ID:-}"
-    local clear="${1:-}" clear_flag=0 prefer="" lu port mode_esc
-    local dedupe_key now_ts
+    local clear="${1:-}" clear_flag=0 prefer="" lu port
+    local dedupe_key now_ts am_only=0 am_only_flag=0 publish_port_log
+    local prefer_esc lu_esc mode_esc slot_esc hk_esc port_esc
     mode="$(get_git_mode)"
     # Preserve server ACTIVE_MOUNT when caller left it empty (tunnel-ensure must not wipe).
     if [ "$clear" = "--clear" ]; then
@@ -165,7 +182,15 @@ push_server_connect_conf() {
         fi
         unset _uid_fb _slot_fb _base_fb
     fi
-    dedupe_key="${lu}|${port}|${mode}|${prefer}|${clear_flag}"
+    # Non-primary still pushes ACTIVE_MOUNT(+GIT_MODE); prefer not to overwrite primary TUNNEL_PORT.
+    if ! test_is_primary_tunnel_publisher; then
+        am_only=1
+        am_only_flag=1
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "PUSH_CONF am_only slot=${CLAUDE_CONNECT_UI_SLOT:-} port=$port publish_port=0" 'INFO'
+        fi
+    fi
+    dedupe_key="${lu}|${port}|${mode}|${prefer}|${clear_flag}|${am_only_flag}"
     now_ts="$(date +%s 2>/dev/null || printf '0')"
     if [ -n "${_LAST_PUSH_CONF_KEY:-}" ] && [ "$_LAST_PUSH_CONF_KEY" = "$dedupe_key" ] \
         && [ -n "${_LAST_PUSH_CONF_AT:-}" ] && [ "$now_ts" != "0" ] \
@@ -175,48 +200,148 @@ push_server_connect_conf() {
         fi
         return 0
     fi
+    prefer_esc="$(_push_conf_sq_escape "$prefer")"
+    lu_esc="$(_push_conf_sq_escape "$lu")"
+    mode_esc="$(_push_conf_sq_escape "$mode")"
+    slot_esc="$(_push_conf_sq_escape "${TUNNEL_SLOT:-}")"
+    hk_esc="$(_push_conf_sq_escape "${LAPTOP_HOSTKEY_FP:-}")"
+    port_esc="$(_push_conf_sq_escape "$port")"
+    publish_port_log="$port"
+    [ "$am_only_flag" = "1" ] && publish_port_log=0
     if declare -F connect_log >/dev/null 2>&1; then
-        connect_log "PUSH_CONF begin laptop_user=$lu port=$port git_mode=$mode prefer_mount=$prefer clear=$clear_flag" 'INFO'
+        connect_log "PUSH_CONF begin laptop_user=$lu port=$port slot=${TUNNEL_SLOT:-} git_mode=$mode prefer_mount=$prefer clear=$clear_flag am_only=$am_only_flag publish_port=$publish_port_log" 'INFO'
     fi
     # Base64 remote body - avoids quote-eating on nested ssh (parity with Windows).
+    # ACTIVE_MOUNT_GUARD / AM_ONLY / port_takeover / port_mismatch_keep / primary_soft_keep match Win.
     local remote_body b64 push_out push_ec
     remote_body="$(cat <<EOF
 set +e
 CLEAR='$clear_flag'
-PREFER='$prefer'
-LU='$lu'
-PORT='$port'
-SLOT='${TUNNEL_SLOT:-}'
-MODE='$mode'
-OS='$os'
-HK='${LAPTOP_HOSTKEY_FP:-}'
+PREFER='$prefer_esc'
+LU='$lu_esc'
+PORT='$port_esc'
+SLOT='$slot_esc'
+MODE='$mode_esc'
+HK='$hk_esc'
+AM_ONLY='$am_only_flag'
 CUR_AM=\$(grep -E '^ACTIVE_MOUNT=' "\$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
 CUR_PORT=\$(grep -E '^TUNNEL_PORT=' "\$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
 CUR_SLOT=\$(grep -E '^TUNNEL_SLOT=' "\$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2-)
 if [ "\$CLEAR" = "1" ]; then
   AM=
 elif [ -n "\$PREFER" ]; then
-  AM=\$PREFER
+  if [ -n "\$CUR_AM" ] && [ "\$CUR_AM" != "\$PREFER" ] && mountpoint -q "\$HOME/mounts/\$CUR_AM" 2>/dev/null; then
+    AM=\$CUR_AM
+    printf 'ACTIVE_MOUNT_GUARD keep=%s prefer=%s reason=other_still_mounted\n' "\$CUR_AM" "\$PREFER"
+  else
+    AM=\$PREFER
+    if [ -n "\$CUR_AM" ] && [ "\$CUR_AM" != "\$PREFER" ]; then
+      printf 'ACTIVE_MOUNT_STEAL from=%s to=%s\n' "\$CUR_AM" "\$PREFER"
+    fi
+  fi
 else
   AM=\$CUR_AM
 fi
-PORT_OUT=\$PORT
-SLOT_OUT=\$SLOT
-# Never wipe TUNNEL_PORT (empty -> laptop-exec NO_PORT / legacy 20000+UID).
-if [ -z "\$PORT_OUT" ] || [ "\$PORT_OUT" = "0" ]; then
-  if [ -n "\$CUR_PORT" ] && [ "\$CUR_PORT" != "0" ]; then
-    PORT_OUT=\$CUR_PORT
-    SLOT_OUT=\$CUR_SLOT
-    printf 'PUSH_CONF port_empty_recovered server=%s\n' "\$CUR_PORT"
+if [ "\$AM_ONLY" = "1" ]; then
+  if [ -n "\$CUR_PORT" ]; then
+    # P1.3 liveness override: slot-index am_only must not permanently keep a dead
+    # published port. Take over ONLY when CUR_PORT has no listener AND this
+    # session's PORT is listening.
+    CUR_LIVE=0
+    if timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/'\$CUR_PORT 2>/dev/null; then
+      CUR_LIVE=1
+    fi
+    OUR_LIVE=0
+    if [ -n "\$PORT" ] && [ "\$PORT" != "0" ]; then
+      if timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/'\$PORT 2>/dev/null; then
+        OUR_LIVE=1
+      fi
+    fi
+    if [ "\$CUR_LIVE" = "0" ] && [ "\$OUR_LIVE" = "1" ]; then
+      PORT_OUT=\$PORT
+      SLOT_OUT=\$SLOT
+      PUBLISH_PORT=\$PORT
+      printf 'PUSH_CONF port_takeover published_dead=%s session=%s slot=%s\n' "\$CUR_PORT" "\$PORT" "\$SLOT"
+    else
+      PORT_OUT=\$CUR_PORT
+      SLOT_OUT=\$CUR_SLOT
+      if [ -n "\$PORT" ] && [ "\$PORT" != "\$CUR_PORT" ]; then
+        printf 'PUSH_CONF port_mismatch_keep session=%s server=%s cur_live=%s our_live=%s\n' "\$PORT" "\$CUR_PORT" "\$CUR_LIVE" "\$OUR_LIVE"
+      fi
+      PUBLISH_PORT=0
+    fi
+  else
+    PORT_OUT=\$PORT
+    SLOT_OUT=\$SLOT
+    PUBLISH_PORT=0
+  fi
+else
+  # Primary soft-liveness: when published CUR_PORT differs from this session PORT,
+  # keep CUR only if both listeners are up AND a live sshfs under ~/mounts uses -p CUR.
+  # Otherwise primary may overwrite (fleet reclaim) or take over a dead published port.
+  if [ -n "\$CUR_PORT" ] && [ "\$CUR_PORT" != "0" ] && [ -n "\$PORT" ] && [ "\$PORT" != "\$CUR_PORT" ]; then
+    CUR_LIVE=0
+    if timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/'\$CUR_PORT 2>/dev/null; then
+      CUR_LIVE=1
+    fi
+    OUR_LIVE=0
+    if [ -n "\$PORT" ] && [ "\$PORT" != "0" ]; then
+      if timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/'\$PORT 2>/dev/null; then
+        OUR_LIVE=1
+      fi
+    fi
+    MOUNT_ON_CUR=0
+    for _m_pid in \$(pgrep -u "\$(id -un)" -f '[s]shfs' 2>/dev/null); do
+      [ -r /proc/\$_m_pid/cmdline ] || continue
+      _m_cmd=\$(tr '\0' ' ' < /proc/\$_m_pid/cmdline 2>/dev/null)
+      case "\$_m_cmd" in
+        *"\$HOME/mounts/"*) ;;
+        *) continue ;;
+      esac
+      _m_p=\$(printf '%s' "\$_m_cmd" | sed -n 's/.* -p \([0-9][0-9]*\).*/\1/p; t; s/.* -p\([0-9][0-9]*\).*/\1/p')
+      if [ "\$_m_p" = "\$CUR_PORT" ]; then
+        MOUNT_ON_CUR=1
+        break
+      fi
+    done
+    unset _m_pid _m_cmd _m_p
+    if [ "\$CUR_LIVE" = "1" ] && [ "\$OUR_LIVE" = "1" ] && [ "\$MOUNT_ON_CUR" = "1" ]; then
+      PORT_OUT=\$CUR_PORT
+      SLOT_OUT=\$CUR_SLOT
+      PUBLISH_PORT=0
+      printf 'PUSH_CONF primary_soft_keep session=%s server=%s reason=mount_on_cur\n' "\$PORT" "\$CUR_PORT"
+    elif [ "\$CUR_LIVE" = "0" ] && [ "\$OUR_LIVE" = "1" ]; then
+      PORT_OUT=\$PORT
+      SLOT_OUT=\$SLOT
+      PUBLISH_PORT=\$PORT
+    else
+      PORT_OUT=\$PORT
+      SLOT_OUT=\$SLOT
+      PUBLISH_PORT=\$PORT
+      if [ "\$CUR_LIVE" = "1" ] && [ "\$MOUNT_ON_CUR" = "0" ]; then
+        printf 'PUSH_CONF primary_overwrite cur_live=1 mount_on_cur=0\n'
+      fi
+    fi
+  else
+    PORT_OUT=\$PORT
+    SLOT_OUT=\$SLOT
+    PUBLISH_PORT=\$PORT
   fi
 fi
+# Never wipe TUNNEL_PORT (empty/0 PORT_OUT -> laptop-exec NO_PORT / legacy 20000+UID).
+if { [ -z "\$PORT_OUT" ] || [ "\$PORT_OUT" = "0" ]; } && [ -n "\$CUR_PORT" ] && [ "\$CUR_PORT" != "0" ]; then
+  PORT_OUT=\$CUR_PORT
+  SLOT_OUT=\$CUR_SLOT
+  printf 'PUSH_CONF port_empty_recovered server=%s\n' "\$CUR_PORT"
+fi
 if [ -z "\$PORT_OUT" ] || [ "\$PORT_OUT" = "0" ]; then
-  printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s publish_port=ABORT_EMPTY\n' "\$CLEAR" "\$PREFER" "\$AM"
+  printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s am_only=%s publish_port=ABORT_EMPTY\n' "\$CLEAR" "\$PREFER" "\$AM" "\$AM_ONLY"
   exit 0
 fi
-printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nPORT=%s\nTUNNEL_SLOT=%s\nGIT_MODE=%s\nLAPTOP_OS=%s\nACTIVE_MOUNT=%s\nLAPTOP_HOSTKEY_FP=%s\n' "\$LU" "\$PORT_OUT" "\$PORT_OUT" "\$SLOT_OUT" "\$MODE" "\$OS" "\$AM" "\$HK" > "\$HOME/.claude-connect.conf"
+mkdir -p "\$HOME/.local/bin"
+printf 'LAPTOP_USER=%s\nTUNNEL_PORT=%s\nPORT=%s\nTUNNEL_SLOT=%s\nGIT_MODE=%s\nLAPTOP_OS=mac\nACTIVE_MOUNT=%s\nLAPTOP_HOSTKEY_FP=%s\n' "\$LU" "\$PORT_OUT" "\$PORT_OUT" "\$SLOT_OUT" "\$MODE" "\$AM" "\$HK" > "\$HOME/.claude-connect.conf"
 chmod 600 "\$HOME/.claude-connect.conf" 2>/dev/null || true
-printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s publish_port=%s\n' "\$CLEAR" "\$PREFER" "\$AM" "\$PORT_OUT"
+printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s am_only=%s publish_port=%s\n' "\$CLEAR" "\$PREFER" "\$AM" "\$AM_ONLY" "\$PUBLISH_PORT"
 EOF
 )"
     b64="$(printf '%s' "$remote_body" | base64 | tr -d '\n')"
@@ -227,9 +352,18 @@ EOF
     if [ "$push_ec" -ne 0 ] || [ -z "$result_line" ]; then
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "PUSH_CONF fail exit=$push_ec out=${result_line:-no_result} $(printf '%s' "$push_out" | tr '\n' ' ')" 'ERROR'
-            for _push_sig in ABORT_EMPTY port_empty_recovered port_mismatch_keep; do
+            # Win signal list (includes ACTIVE_MOUNT_GUARD + primary soft-liveness).
+            for _push_sig in ABORT_EMPTY port_empty_recovered port_mismatch_keep port_takeover ACTIVE_MOUNT_GUARD ACTIVE_MOUNT_STEAL primary_soft_keep primary_overwrite; do
                 case "${result_line:-} ${push_out:-}" in
-                    *"$_push_sig"*) connect_log "PUSH_CONF signal=$_push_sig out=${result_line:-no_result}" 'WARN' ;;
+                    *"$_push_sig"*)
+                        connect_log "PUSH_CONF signal=$_push_sig out=${result_line:-no_result}" 'WARN'
+                        if [ "$_push_sig" = "ACTIVE_MOUNT_STEAL" ]; then
+                            _steal_from="$(printf '%s' "$push_out" | sed -n 's/.*ACTIVE_MOUNT_STEAL from=\([^ ]*\) to=\([^ ]*\).*/\1/p' | head -1)"
+                            _steal_to="$(printf '%s' "$push_out" | sed -n 's/.*ACTIVE_MOUNT_STEAL from=\([^ ]*\) to=\([^ ]*\).*/\2/p' | head -1)"
+                            [ -n "$_steal_from" ] && connect_log "ACTIVE_MOUNT_STEAL from=$_steal_from to=$_steal_to" 'WARN'
+                            unset _steal_from _steal_to
+                        fi
+                        ;;
                 esac
             done
             unset _push_sig
@@ -244,9 +378,17 @@ EOF
     _LAST_PUSH_CONF_AT="$now_ts"
     if declare -F connect_log >/dev/null 2>&1; then
         connect_log "PUSH_CONF ok exit=0 $result_line" 'INFO'
-        for _push_sig in ABORT_EMPTY port_empty_recovered port_mismatch_keep; do
+        for _push_sig in ABORT_EMPTY port_empty_recovered port_mismatch_keep port_takeover ACTIVE_MOUNT_GUARD ACTIVE_MOUNT_STEAL primary_soft_keep primary_overwrite; do
             case "${result_line:-} ${push_out:-}" in
-                *"$_push_sig"*) connect_log "PUSH_CONF signal=$_push_sig out=${result_line:-no_result}" 'WARN' ;;
+                *"$_push_sig"*)
+                    connect_log "PUSH_CONF signal=$_push_sig out=${result_line:-no_result}" 'WARN'
+                    if [ "$_push_sig" = "ACTIVE_MOUNT_STEAL" ]; then
+                        _steal_from="$(printf '%s' "$push_out" | sed -n 's/.*ACTIVE_MOUNT_STEAL from=\([^ ]*\) to=\([^ ]*\).*/\1/p' | head -1)"
+                        _steal_to="$(printf '%s' "$push_out" | sed -n 's/.*ACTIVE_MOUNT_STEAL from=\([^ ]*\) to=\([^ ]*\).*/\2/p' | head -1)"
+                        [ -n "$_steal_from" ] && connect_log "ACTIVE_MOUNT_STEAL from=$_steal_from to=$_steal_to" 'WARN'
+                        unset _steal_from _steal_to
+                    fi
+                    ;;
             esac
         done
         unset _push_sig
@@ -1977,6 +2119,25 @@ ensure_session_tunnel() {
     TUNNEL_REUSED=0
     _PROXY_RESEED=0
     local now_ts
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "ENSURE_TUNNEL begin port=${PORT:-?} alias=${ALIAS:-}" 'INFO'
+    fi
+    # Once per Ensure: pin preferred → orphan reclaim → then reuse/adopt (Win Ensure parity).
+    # Honor CLAUDE_CONNECT_AUTO_RECLAIM=0 killswitch inside invoke_connect_orphan_reclaim.
+    if [ "${_ORPHAN_RECLAIM_DONE_THIS_ENSURE:-0}" != "1" ]; then
+        _ORPHAN_RECLAIM_DONE_THIS_ENSURE=1
+        local _uid_reclaim="" _pref_port="${PORT:-0}"
+        _uid_reclaim="${SERVER_UID_STR:-}"
+        if [ -z "$_uid_reclaim" ]; then
+            _uid_reclaim="$(sshx 'id -u' 2>/dev/null | tr -d '\r' | grep -E '^[0-9]+$' | head -1 | tr -dc '0-9')"
+            [ -n "$_uid_reclaim" ] && SERVER_UID_STR="$_uid_reclaim"
+        fi
+        if declare -F invoke_connect_orphan_reclaim >/dev/null 2>&1; then
+            invoke_connect_orphan_reclaim "$_uid_reclaim" "$_pref_port" \
+                "${ACTIVE_PROJECT_PATH:-${go_path:-}}" "${ACTIVE_PROJECT_ID:-${go_id:-}}" || true
+        fi
+        unset _uid_reclaim _pref_port
+    fi
     # PID loss is not authoritative: a re-parented reverse forward can remain usable.
     # Reuse valid banner/TCP evidence before any kill or stale-forward cleanup.
     if [ -n "${bg_pid:-}" ]; then
@@ -1991,6 +2152,7 @@ ensure_session_tunnel() {
                 if declare -F complete_cursor_proxy_after_tunnel >/dev/null 2>&1; then
                     complete_cursor_proxy_after_tunnel || true
                 fi
+                declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL end outcome=reused reason=tunnel_up port=$PORT" 'INFO'
                 return 0
             fi
             TUNNEL_REUSED=0
@@ -2020,6 +2182,7 @@ ensure_session_tunnel() {
                 if declare -F complete_cursor_proxy_after_tunnel >/dev/null 2>&1; then
                     complete_cursor_proxy_after_tunnel || true
                 fi
+                declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL end outcome=reused reason=recent_success port=$PORT" 'INFO'
                 return 0
             fi
             TUNNEL_REUSED=0
@@ -2041,6 +2204,7 @@ ensure_session_tunnel() {
                 complete_cursor_proxy_after_tunnel || true
             fi
             TUNNEL_REUSED=1
+            declare -F connect_log >/dev/null 2>&1 && connect_log "ENSURE_TUNNEL end outcome=reused reason=reseed_skip_foreign port=${PORT:-}" 'INFO'
             return 0
         fi
         if declare -F connect_log >/dev/null 2>&1; then
@@ -2171,6 +2335,7 @@ ensure_session_tunnel() {
         _REFUSE_SPAWN_STREAK=0
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "ENSURE_TUNNEL ok=1 pid=$bg_pid" 'INFO'
+            connect_log "ENSURE_TUNNEL end outcome=ok port=$PORT" 'INFO'
         fi
         if declare -F complete_cursor_proxy_after_tunnel >/dev/null 2>&1; then
             complete_cursor_proxy_after_tunnel || true
@@ -2188,6 +2353,7 @@ ensure_session_tunnel() {
     [ -n "${TUNNEL_WAIT_BACKOFF_SEC:-}" ] || TUNNEL_WAIT_BACKOFF_SEC=2
     if declare -F connect_log >/dev/null 2>&1; then
         connect_log "ENSURE_TUNNEL ok=0 reason=wait_timeout pid=$bg_pid streak=$TUNNEL_WAIT_FAIL_STREAK backoff_sec=$TUNNEL_WAIT_BACKOFF_SEC" 'WARN'
+        connect_log "ENSURE_TUNNEL end outcome=fail reason=wait_timeout port=${PORT:-}" 'WARN'
     fi
     if [ "$TUNNEL_WAIT_FAIL_STREAK" -ge 6 ]; then
         declare -F connect_log >/dev/null 2>&1 && connect_log 'ENSURE_TUNNEL wait_timeout_budget_exhausted surfacing_ui' 'ERROR'
@@ -2296,38 +2462,98 @@ get_local_tunnel_ssh_pids() {
     done
 }
 
+test_process_command_is_connect_ui() {
+    # Mac Connect UI: connect.sh / connect-boot (Win: connect.ps1 / connect-boot.ps1).
+    local cmd="${1:-}"
+    [ -n "$cmd" ] || return 1
+    printf '%s' "$cmd" | grep -qE '(^|[[:space:]/])connect\.sh|(^|[[:space:]/])connect-boot'
+}
+
+get_sibling_connect_tunnel_pids() {
+    # Mirror Win Get-SiblingConnectTunnelPids: ssh -R whose ancestor is another Connect UI.
+    local target_port="$1"
+    local protect_extra="${2:-}"
+    local ssh_pid cur hops is_sib ui_pid cmd parent
+    [ -n "$target_port" ] || return 0
+    for ssh_pid in $(get_local_tunnel_ssh_pids "$target_port" 2>/dev/null || true); do
+        # Skip protected (current bg / extra list).
+        if [ -n "${bg_pid:-}" ] && [ "$ssh_pid" = "$bg_pid" ]; then
+            continue
+        fi
+        if [ -n "$protect_extra" ]; then
+            case " $protect_extra " in *" $ssh_pid "*) continue ;; esac
+        fi
+        cur="$ssh_pid"
+        hops=0
+        is_sib=0
+        while [ -n "$cur" ] && [ "$cur" -gt 0 ] 2>/dev/null && [ "$hops" -lt 14 ]; do
+            hops=$((hops + 1))
+            cmd="$(ps -p "$cur" -o command= 2>/dev/null || true)"
+            if test_process_command_is_connect_ui "$cmd"; then
+                ui_pid="$cur"
+                if [ "$ui_pid" = "$$" ]; then
+                    break
+                fi
+                if [ -n "$protect_extra" ]; then
+                    case " $protect_extra " in *" $ui_pid "*) break ;; esac
+                fi
+                is_sib=1
+                break
+            fi
+            parent="$(ps -p "$cur" -o ppid= 2>/dev/null | tr -d ' ')"
+            [ -n "$parent" ] || break
+            [ "$parent" = "$cur" ] && break
+            cur="$parent"
+        done
+        if [ "$is_sib" -eq 1 ]; then
+            printf '%s\n' "$ssh_pid"
+        fi
+    done
+}
+
 remove_local_orphan_tunnel() {
     local target_port="$1" killed=0 protect_pid="${2:-${bg_pid:-}}"
+    local p siblings="" protect_set=""
     [ -n "$target_port" ] || return 0
-    # Do not kill the live session tunnel (Win skip_current parity).
+    # Hybrid multi-UI: never kill a sibling's live ssh -R (ORPHAN_TUNNEL: skip_sibling).
+    protect_set="$$"
     if [ -n "$protect_pid" ] && kill -0 "$protect_pid" 2>/dev/null; then
-        if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "ORPHAN_TUNNEL: skip_current pid=$protect_pid port=$target_port" 'DEBUG'
-        fi
-        # Kill other matching ssh reverse forwards on this port, if any.
-        local p
-        for p in $(get_local_tunnel_ssh_pids "$target_port" 2>/dev/null || true); do
-            if [ "$p" != "$protect_pid" ]; then
-                kill "$p" 2>/dev/null || true
-                killed=1
+        protect_set="$protect_set $protect_pid"
+    fi
+    if [ -n "${bg_pid:-}" ] && kill -0 "$bg_pid" 2>/dev/null; then
+        protect_set="$protect_set $bg_pid"
+    fi
+    siblings="$(get_sibling_connect_tunnel_pids "$target_port" "$protect_set" 2>/dev/null | tr '\n' ' ')"
+    siblings="$(printf '%s' "$siblings" | sed 's/[[:space:]]*$//')"
+    if [ -n "$siblings" ]; then
+        protect_set="$protect_set $siblings"
+    fi
+    for p in $(get_local_tunnel_ssh_pids "$target_port" 2>/dev/null || true); do
+        case " $protect_set " in
+            *" $p "*)
                 if declare -F connect_log >/dev/null 2>&1; then
-                    connect_log "ORPHAN_TUNNEL: killing local pid=$p port=$target_port" 'DEBUG'
+                    case " $siblings " in
+                        *" $p "*) connect_log "ORPHAN_TUNNEL: skip_sibling pid=$p port=$target_port" 'INFO' ;;
+                        *) connect_log "ORPHAN_TUNNEL: skip_current pid=$p port=$target_port" 'DEBUG' ;;
+                    esac
                 fi
+                continue
+                ;;
+        esac
+        if kill -0 "$p" 2>/dev/null; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "ORPHAN_TUNNEL: kill pid=$p port=$target_port reason=unprotected_live" 'INFO'
             fi
-        done
-    else
-        for p in $(get_local_tunnel_ssh_pids "$target_port" 2>/dev/null || true); do
             kill "$p" 2>/dev/null || true
             killed=1
-        done
-        if [ "$killed" -eq 1 ] && declare -F connect_log >/dev/null 2>&1; then
-            connect_log "ORPHAN_TUNNEL: killed local ssh port=$target_port" 'DEBUG'
         fi
-    fi
+    done
     clear_tunnel_banner_cache
     if [ "$killed" -eq 1 ]; then
         clear_server_stale_tunnel_forward "$target_port" || true
     fi
+    # Return killed count via global for Soft callers (0/1 sufficient).
+    _ORPHAN_TUNNEL_KILLED="$killed"
 }
 
 stop_session_tunnel_cleanup() {
@@ -2559,7 +2785,13 @@ tunnel_port_user_base() {
 acquire_tunnel_port() {
     local uid_str="$1" port_base slot=0 port="" banner="" preferred="" try_slots="" s
     port_base="$(tunnel_port_user_base "$uid_str")"
-    [ -n "$uid_str" ] || return 1
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "ACQUIRE_BEGIN uid=${uid_str:-?} port_base=${port_base:-?}" 'INFO'
+    fi
+    [ -n "$uid_str" ] || {
+        declare -F connect_log >/dev/null 2>&1 && connect_log 'ACQUIRE_END port=0 outcome=no_uid' 'WARN'
+        return 1
+    }
     if [ -f "${CFG:-}" ]; then
         preferred="$(grep -E '^TUNNEL_SLOT=' "$CFG" 2>/dev/null | tail -1 | cut -d= -f2- | tr -dc '0-9')"
     fi
@@ -2627,11 +2859,17 @@ acquire_tunnel_port() {
             PORT=$port
             save_tunnel_slot
             push_server_connect_conf
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "ACQUIRE_END port=$PORT outcome=claim slot=$TUNNEL_SLOT" 'INFO'
+            fi
             return 0
         fi
     done
     PORT=$port_base
     TUNNEL_SLOT=0
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "ACQUIRE_END port=$PORT outcome=fail" 'WARN'
+    fi
     return 1
 }
 verify_laptop_reverse_ssh() {
@@ -2991,6 +3229,327 @@ clear_connect_session_slot_marker() {
     rm -f "$(_connect_slot_marker_dir)/session-slot-${slot}.json" 2>/dev/null || true
 }
 
+_connect_keep_tunnel_marker_path() {
+    local port="$1"
+    printf '%s/keep-tunnel-%s.json' "$(_connect_slot_marker_dir)" "$port"
+}
+
+write_connect_keep_tunnel_marker() {
+    # Args: port slot tunnel_pid project_id remote_path [alias] [editor_cmd]
+    local port="${1:-0}" slot="${2:--1}" tunnel_pid="${3:-0}"
+    local project_id="${4:-}" remote_path="${5:-}" alias="${6:-}" editor_cmd="${7:-}"
+    local dir path tmp kept_at
+    case "$port" in ''|*[!0-9]*|0) return 1 ;; esac
+    dir="$(_connect_slot_marker_dir)"
+    mkdir -p "$dir" 2>/dev/null || true
+    path="$(_connect_keep_tunnel_marker_path "$port")"
+    kept_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    tmp="${path}.write.$$.$RANDOM.tmp"
+    if ! printf '{"port":%s,"slot":%s,"tunnelPid":%s,"projectId":"%s","remotePath":"%s","alias":"%s","editorCmd":"%s","keptAt":"%s"}\n' \
+        "$port" "$slot" "$tunnel_pid" \
+        "$(printf '%s' "$project_id" | tr -d '"')" \
+        "$(printf '%s' "$remote_path" | tr -d '"')" \
+        "$(printf '%s' "$alias" | tr -d '"')" \
+        "$(printf '%s' "$editor_cmd" | tr -d '"')" \
+        "$kept_at" > "$tmp" 2>/dev/null; then
+        rm -f "$tmp" 2>/dev/null || true
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "KEEP_MARKER_WRITE_FAIL port=$port err=write" 'WARN'
+        fi
+        return 1
+    fi
+    if mv -f "$tmp" "$path" 2>/dev/null; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "KEEP_MARKER_WRITE port=$port slot=$slot tunnelPid=$tunnel_pid projectId=$project_id" 'INFO'
+        fi
+        return 0
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "KEEP_MARKER_WRITE_FAIL port=$port err=mv" 'WARN'
+    fi
+    return 1
+}
+
+clear_connect_keep_tunnel_marker() {
+    local port="${1:-0}" dir f
+    if [ -n "$port" ] && [ "$port" != "0" ]; then
+        case "$port" in *[!0-9]*) return 0 ;; esac
+        f="$(_connect_keep_tunnel_marker_path "$port")"
+        if [ -f "$f" ]; then
+            rm -f "$f" 2>/dev/null || true
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "KEEP_MARKER_CLEAR port=$port" 'INFO'
+            fi
+        fi
+        return 0
+    fi
+    dir="$(_connect_slot_marker_dir)"
+    [ -d "$dir" ] || return 0
+    for f in "$dir"/keep-tunnel-*.json; do
+        [ -f "$f" ] || continue
+        rm -f "$f" 2>/dev/null || true
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "KEEP_MARKER_CLEAR file=$(basename "$f")" 'INFO'
+        fi
+    done
+}
+
+get_connect_keep_tunnel_markers() {
+    # Print live markers as: port|slot|tunnelPid|projectId|remotePath|alias|editorCmd|keptAt
+    # Dead tunnelPid markers are dropped (KEEP_MARKER_CLEAR reason=dead_tunnelPid).
+    local dir f port slot tunnel_pid project_id remote_path alias editor_cmd kept_at raw
+    dir="$(_connect_slot_marker_dir)"
+    [ -d "$dir" ] || return 0
+    for f in "$dir"/keep-tunnel-*.json; do
+        [ -f "$f" ] || continue
+        raw="$(cat "$f" 2>/dev/null || true)"
+        [ -n "$raw" ] || continue
+        port="$(printf '%s' "$raw" | sed -n 's/.*"port":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)"
+        tunnel_pid="$(printf '%s' "$raw" | sed -n 's/.*"tunnelPid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)"
+        slot="$(printf '%s' "$raw" | sed -n 's/.*"slot":[[:space:]]*\(-\?[0-9][0-9]*\).*/\1/p' | head -1)"
+        project_id="$(printf '%s' "$raw" | sed -n 's/.*"projectId":"\([^"]*\)".*/\1/p' | head -1)"
+        remote_path="$(printf '%s' "$raw" | sed -n 's/.*"remotePath":"\([^"]*\)".*/\1/p' | head -1)"
+        alias="$(printf '%s' "$raw" | sed -n 's/.*"alias":"\([^"]*\)".*/\1/p' | head -1)"
+        editor_cmd="$(printf '%s' "$raw" | sed -n 's/.*"editorCmd":"\([^"]*\)".*/\1/p' | head -1)"
+        kept_at="$(printf '%s' "$raw" | sed -n 's/.*"keptAt":"\([^"]*\)".*/\1/p' | head -1)"
+        [ -n "$port" ] || continue
+        [ -n "$tunnel_pid" ] || tunnel_pid=0
+        [ -n "$slot" ] || slot=-1
+        if [ "$tunnel_pid" -gt 0 ] 2>/dev/null && kill -0 "$tunnel_pid" 2>/dev/null; then
+            printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+                "$port" "$slot" "$tunnel_pid" "$project_id" "$remote_path" "$alias" "$editor_cmd" "$kept_at"
+        else
+            rm -f "$f" 2>/dev/null || true
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "KEEP_MARKER_CLEAR port=$port reason=dead_tunnelPid pid=$tunnel_pid" 'INFO'
+            fi
+        fi
+    done
+}
+
+test_connect_keep_editor_protect() {
+    # Folder/window check for KEEP Soft/reclaim protect. Sticky <=15m only when checks unavailable
+    # (Win catch/sticky path) — not when checks return false (editor closed).
+    # Args: remote_path project_id [kept_at] [alias] [has_marker=1]
+    local remote_path="${1:-}" project_id="${2:-}" kept_at="${3:-}" alias_use="${4:-claude-server}" has_marker="${5:-1}"
+    local checked=0 age_min now_ts kept_ts
+    [ -n "$alias_use" ] || alias_use="claude-server"
+    if [ -n "$remote_path" ] && declare -F remote_editor_window_open >/dev/null 2>&1; then
+        checked=1
+        if remote_editor_window_open cursor "$alias_use" "$remote_path" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    if [ -n "$remote_path" ] && declare -F remote_editor_on_correct_folder >/dev/null 2>&1; then
+        checked=1
+        if remote_editor_on_correct_folder cursor "$alias_use" "$remote_path" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    if [ "$checked" -eq 1 ]; then
+        return 1
+    fi
+    # No editor helpers available: sticky protect when marker present and keptAt within 15m.
+    if [ "$has_marker" = "1" ]; then
+        if [ -n "$kept_at" ]; then
+            now_ts="$(date +%s 2>/dev/null || printf '0')"
+            kept_ts="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$kept_at" +%s 2>/dev/null || date -d "$kept_at" +%s 2>/dev/null || printf '0')"
+            if [ "$now_ts" != "0" ] && [ "$kept_ts" != "0" ]; then
+                age_min=$(( (now_ts - kept_ts) / 60 ))
+                if [ "$age_min" -ge 0 ] && [ "$age_min" -le 15 ]; then
+                    if declare -F connect_log >/dev/null 2>&1; then
+                        connect_log "KEEP_PROTECT sticky=1 age_min=$age_min reason=check_unavailable path=$remote_path" 'WARN'
+                    fi
+                    return 0
+                fi
+            fi
+        else
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "KEEP_PROTECT sticky=1 reason=check_unavailable_no_keptAt path=$remote_path" 'WARN'
+            fi
+            return 0
+        fi
+    fi
+    return 1
+}
+
+invoke_connect_mount_down_by_port() {
+    # Soft/reclaim: down ALL sshfs mounts bound to Port P. Fail-open if remote helper missing.
+    local port="$1" cm out one
+    case "$port" in ''|*[!0-9]*|0) return 0 ;; esac
+    if ! declare -F sshx >/dev/null 2>&1; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "HYGIENE_SOFT_DOWN_BY_PORT skip port=$port reason=no_sshx" 'WARN'
+        fi
+        return 0
+    fi
+    cm="${CM:-\$HOME/.local/bin/claude-mount}"
+    out="$(sshx "timeout 20 $cm down-by-port $port 2>&1 || true" 2>/dev/null || true)"
+    one="$(printf '%s' "$out" | tr '\n' ' ' | sed 's/[[:space:]]\{1,\}/ /g' | cut -c1-160)"
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "HYGIENE_SOFT_DOWN_BY_PORT port=$port out=$one" 'INFO'
+    fi
+}
+
+invoke_connect_mount_down_dead_bound_ports() {
+    # Soft mount-only litter: sshfs still bound to -p but TCP listener on that port is dead
+    # (local -R already gone). Never tear mounts whose -p is still listening / protect list.
+    # Arg1: optional space-separated protect ports (session PORT / still-listening).
+    # Same remote logic as Win Invoke-ConnectMountDownDeadBoundPorts.
+    local protect_list="${1:-}" cm out ln remote
+    if ! declare -F sshx >/dev/null 2>&1; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log 'HYGIENE_SOFT_DEAD_BOUND skip reason=no_sshx' 'WARN'
+        fi
+        return 0
+    fi
+    cm="${CM:-\$HOME/.local/bin/claude-mount}"
+    # shellcheck disable=SC2086,SC2016
+    remote="set +e
+CM='$cm'
+PROTECT='$protect_list'
+downed=0
+seen=''
+for pid in \$(pgrep -u \"\$(id -un)\" -f '[s]shfs' 2>/dev/null); do
+  [ -r /proc/\$pid/cmdline ] || continue
+  cmd=\$(tr '\\0' ' ' < /proc/\$pid/cmdline 2>/dev/null)
+  p=\$(printf '%s' \"\$cmd\" | sed -n 's/.* -p \\([0-9][0-9]*\\).*/\\1/p; t; s/.* -p\\([0-9][0-9]*\\).*/\\1/p')
+  [ -n \"\$p\" ] || continue
+  case \" \$seen \" in *\" \$p \"*) continue ;; esac
+  seen=\"\$seen \$p\"
+  skip=0
+  for pp in \$PROTECT; do
+    [ \"\$pp\" = \"\$p\" ] && skip=1 && break
+  done
+  [ \"\$skip\" = \"1\" ] && continue
+  if timeout 2 bash -c \"exec 3<>/dev/tcp/127.0.0.1/\$p\" 2>/dev/null; then
+    continue
+  fi
+  echo \"HYGIENE_SOFT_DEAD_BOUND port=\$p\"
+  timeout 20 \$CM down-by-port \$p 2>&1 || true
+  downed=\$((downed + 1))
+done
+echo \"HYGIENE_SOFT_DEAD_BOUND_DONE n=\$downed\""
+    out="$(sshx "$remote" 2>/dev/null || true)"
+    while IFS= read -r ln; do
+        [ -n "$ln" ] || continue
+        case "$ln" in
+            *HYGIENE_SOFT_DEAD_BOUND*)
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "$ln" 'INFO'
+                fi
+                ;;
+        esac
+    done <<EOF
+$(printf '%s\n' "$out")
+EOF
+}
+
+invoke_connect_orphan_reclaim() {
+    # Scan UID base+0..9; skip current/sibling; pin preferred Port if keep marker live.
+    # Args: uid_str [preferred_port] [protect_remote_path] [protect_project_id]
+    local uid_str="${1:-}" preferred_port="${2:-0}" protect_path="${3:-}" protect_project="${4:-}"
+    local port_base=20000 slot port killed=0 skipped_sib=0 skipped_keep=0 down_mounts=0
+    local protect="" siblings="" line km_port km_slot km_tpid km_proj km_path km_alias km_ed km_kept
+    local ssh_pids p killed_here keep_protect port_keeps
+
+    if [ "${CLAUDE_CONNECT_AUTO_RECLAIM:-}" = "0" ]; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log 'RECLAIM_SKIP reason=AUTO_RECLAIM=0' 'INFO'
+        fi
+        return 0
+    fi
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log 'RECLAIM_BEGIN' 'INFO'
+    fi
+    if [ -n "$uid_str" ] && declare -F tunnel_port_user_base >/dev/null 2>&1; then
+        port_base="$(tunnel_port_user_base "$uid_str")"
+    fi
+    protect="$$"
+    if [ -n "${bg_pid:-}" ] && kill -0 "$bg_pid" 2>/dev/null; then
+        protect="$protect $bg_pid"
+    fi
+
+    # Pin preferred Port when keep marker is live (even if editor check is false).
+    if [ -n "$preferred_port" ] && [ "$preferred_port" != "0" ]; then
+        while IFS='|' read -r km_port km_slot km_tpid km_proj km_path km_alias km_ed km_kept; do
+            [ "$km_port" = "$preferred_port" ] || continue
+            if [ -n "$km_tpid" ] && [ "$km_tpid" -gt 0 ] 2>/dev/null; then
+                protect="$protect $km_tpid"
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "RECLAIM_PIN preferred_port=$preferred_port tunnelPid=$km_tpid" 'INFO'
+                fi
+            fi
+            break
+        done < <(get_connect_keep_tunnel_markers 2>/dev/null || true)
+    fi
+
+    for slot in 0 1 2 3 4 5 6 7 8 9; do
+        port=$((port_base + slot))
+        [ "$port" -gt 20000 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null || continue
+        ssh_pids="$(get_local_tunnel_ssh_pids "$port" 2>/dev/null | tr '\n' ' ')"
+        ssh_pids="$(printf '%s' "$ssh_pids" | sed 's/[[:space:]]*$//')"
+        [ -n "$ssh_pids" ] || continue
+
+        siblings="$(get_sibling_connect_tunnel_pids "$port" "$protect" 2>/dev/null | tr '\n' ' ')"
+        siblings="$(printf '%s' "$siblings" | sed 's/[[:space:]]*$//')"
+        [ -n "$siblings" ] && protect="$protect $siblings"
+
+        keep_protect=0
+        port_keeps=0
+        while IFS='|' read -r km_port km_slot km_tpid km_proj km_path km_alias km_ed km_kept; do
+            [ "$km_port" = "$port" ] || continue
+            port_keeps=1
+            if [ -n "$preferred_port" ] && [ "$preferred_port" != "0" ] && [ "$port" = "$preferred_port" ]; then
+                keep_protect=1
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "RECLAIM_SKIP_KEEP port=$port reason=preferred_pin" 'INFO'
+                fi
+                break
+            fi
+            if test_connect_keep_editor_protect "$km_path" "$km_proj" "$km_kept" "${km_alias:-claude-server}" 1; then
+                keep_protect=1
+                [ -n "$km_tpid" ] && protect="$protect $km_tpid"
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "RECLAIM_SKIP_KEEP port=$port reason=keep_editor project=$km_proj" 'INFO'
+                fi
+                break
+            fi
+        done < <(get_connect_keep_tunnel_markers 2>/dev/null || true)
+        if [ "$keep_protect" -eq 1 ]; then
+            skipped_keep=$((skipped_keep + 1))
+            continue
+        fi
+
+        killed_here=0
+        for p in $ssh_pids; do
+            case " $protect " in
+                *" $p "*)
+                    case " $siblings " in *" $p "*) skipped_sib=$((skipped_sib + 1)) ;; esac
+                    continue
+                    ;;
+            esac
+            if kill -0 "$p" 2>/dev/null; then
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "RECLAIM_KILL port=$port pid=$p" 'INFO'
+                fi
+                kill "$p" 2>/dev/null || true
+                killed_here=$((killed_here + 1))
+            fi
+        done
+        if [ "$killed_here" -gt 0 ]; then
+            killed=$((killed + killed_here))
+            clear_connect_keep_tunnel_marker "$port" || true
+            invoke_connect_mount_down_by_port "$port" || true
+            down_mounts=$((down_mounts + 1))
+        fi
+    done
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "RECLAIM_END killed=$killed skipped_sibling=$skipped_sib skipped_keep=$skipped_keep down_mounts=$down_mounts" 'INFO'
+    fi
+}
+
 _close_cursor_project_windows_mac() {
     # Best-effort: close Cursor windows whose name contains project root; skip protect root.
     local root="$1" protect="${2:-}"
@@ -3099,13 +3658,97 @@ show_connect_hygiene_interactive() {
         return 0
     fi
     if declare -F connect_log >/dev/null 2>&1; then connect_log 'HYGIENE_SOFT begin' 'INFO'; fi
+    local before_n after_n killed_n skip_protect hint_id km_port km_slot km_tpid km_proj km_path km_alias km_ed km_kept orphans_killed=0 port_keeps_n
     for slot in 0 1 2 3 4 5 6 7 8 9; do
         port=$((port_base + slot))
+        before_n=0
+        for p in $(get_local_tunnel_ssh_pids "$port" 2>/dev/null || true); do
+            before_n=$((before_n + 1))
+        done
+
+        skip_protect=0
+        hint_id=""
+        port_keeps_n=0
+        while IFS='|' read -r km_port km_slot km_tpid km_proj km_path km_alias km_ed km_kept; do
+            [ "$km_port" = "$port" ] || continue
+            port_keeps_n=$((port_keeps_n + 1))
+            [ -n "$hint_id" ] || hint_id="$km_proj"
+            if test_connect_keep_editor_protect "$km_path" "$km_proj" "$km_kept" "${km_alias:-claude-server}" 1; then
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "HYGIENE_SOFT_PORT port=$port action=skip reason=keep_editor project=$km_proj" 'INFO'
+                    connect_log "PROTECT_ROOT path=$km_path hit=1 sticky=0" 'INFO'
+                fi
+                skip_protect=1
+                break
+            fi
+        done < <(get_connect_keep_tunnel_markers 2>/dev/null || true)
+        if [ "$skip_protect" -eq 0 ] && [ -n "$protect_root" ]; then
+            # protect_root from current session path/project — skip if editor still holds it.
+            if test_connect_keep_editor_protect "$protect_path" "$protect_project" "" "claude-server" 0; then
+                local root_match=""
+                root_match="$(basename "${protect_path%/}")"
+                [ -n "$root_match" ] || root_match="$protect_project"
+                if [ -n "$root_match" ] && [ "$root_match" = "$protect_root" ]; then
+                    if declare -F connect_log >/dev/null 2>&1; then
+                        connect_log "HYGIENE_SOFT_PORT port=$port action=skip reason=protect_root root=$protect_root" 'INFO'
+                    fi
+                    # Only skip when this port's tunnels look tied to protect project via slot marker.
+                    if [ -f "$(_connect_slot_marker_dir)/session-slot-${slot}.json" ]; then
+                        local slot_proj
+                        slot_proj="$(sed -n 's/.*"projectId":"\([^"]*\)".*/\1/p' "$(_connect_slot_marker_dir)/session-slot-${slot}.json" | head -1)"
+                        if [ "$slot_proj" = "$protect_project" ] || [ "$slot_proj" = "$protect_root" ]; then
+                            skip_protect=1
+                        fi
+                    fi
+                fi
+            fi
+        fi
+        if [ "$skip_protect" -eq 1 ]; then
+            continue
+        fi
+
+        # Mount-only litter: no local -R left but keep marker still present → clear + down-by-port.
+        if [ "$before_n" -eq 0 ]; then
+            if [ "$port_keeps_n" -gt 0 ]; then
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "HYGIENE_SOFT_PORT port=$port action=mount_only_down hint_project=$hint_id" 'INFO'
+                fi
+                clear_connect_keep_tunnel_marker "$port" || true
+                invoke_connect_mount_down_by_port "$port" || true
+            fi
+            continue
+        fi
+
+        _ORPHAN_TUNNEL_KILLED=0
         remove_local_orphan_tunnel "$port" "${bg_pid:-}" || true
+        after_n=0
+        for p in $(get_local_tunnel_ssh_pids "$port" 2>/dev/null || true); do
+            after_n=$((after_n + 1))
+        done
+        killed_n=$((before_n - after_n))
+        [ "$killed_n" -lt 0 ] && killed_n=0
+        orphans_killed=$((orphans_killed + killed_n))
+        # Unprotected Soft kill of Port P: clear keep-marker + down ALL mounts bound to P.
+        if [ "$killed_n" -gt 0 ]; then
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "HYGIENE_SOFT_PORT port=$port action=kill killed=$killed_n hint_project=$hint_id" 'INFO'
+            fi
+            clear_connect_keep_tunnel_marker "$port" || true
+            invoke_connect_mount_down_by_port "$port" || true
+        fi
     done
+    # Also down mounts whose bound -p has no TCP listener (tunnel already gone, no keep marker).
+    local protect_live=""
+    if [ -n "${PORT:-}" ] && [ "${PORT}" -gt 0 ] 2>/dev/null; then
+        protect_live="$PORT"
+    fi
+    invoke_connect_mount_down_dead_bound_ports "$protect_live" || true
     if declare -F sshx >/dev/null 2>&1; then
         sshx 'command -v cursor-server-reaper >/dev/null && cursor-server-reaper --apply --user "$USER" 2>&1 | tail -3 || true' >/dev/null 2>&1 || true
         sshx 'n=0; for s in "$HOME/.cache/laptop-exec"/cm-*; do [ -e "$s" ] || continue; ssh -O check -o ControlPath="$s" -o ControlMaster=no -o BatchMode=yes -o ConnectTimeout=2 x >/dev/null 2>&1 || { rm -f "$s"; n=$((n+1)); }; done; echo MUX_DEAD_REMOVED=$n' >/dev/null 2>&1 || true
+    fi
+    if declare -F connect_log >/dev/null 2>&1; then
+        connect_log "HYGIENE_SOFT done orphans_killed=$orphans_killed" 'INFO'
     fi
     printf '    \033[0;32mSoft done.\033[0m\n'
     # Re-scan siblings after soft (parity with Windows Get-ConnectHygieneReport -SkipServer).

@@ -49,11 +49,28 @@ function Log([string]$m) {
         $f = Join-Path $d ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd'))
         $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
         $sid = if ($env:CLAUDE_CONNECT_RUN_ID) { $env:CLAUDE_CONNECT_RUN_ID } else { 'setup' }
-        $day = "[$ts] [INFO] [$sid] SETUP: $m"
-        [IO.File]::AppendAllText($f, $day + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        $day = "[$ts] [INFO] [$sid] SETUP: $m" + [Environment]::NewLine
+        # FileShare.ReadWrite: connect.ps1 holds the day log open; AppendAllText fails silently.
+        $utf8 = [Text.UTF8Encoding]::new($false)
+        $bytes = $utf8.GetBytes($day)
+        $fs = $null
+        try {
+            $fs = [IO.FileStream]::new(
+                $f,
+                [IO.FileMode]::Append,
+                [IO.FileAccess]::Write,
+                [IO.FileShare]::ReadWrite)
+            $null = $fs.Seek(0, [IO.SeekOrigin]::End)
+            $fs.Write($bytes, 0, $bytes.Length)
+            $fs.Flush()
+        } finally {
+            if ($fs) { try { $fs.Dispose() } catch { } }
+        }
         if ($m -match '(?i)fail|error|skip|exit=') {
             $bread = Join-Path $env:USERPROFILE '.config\claude-connect\last-fail.txt'
-            [IO.File]::AppendAllText($bread, $day + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+            try {
+                [IO.File]::AppendAllText($bread, $day, $utf8)
+            } catch { }
         }
     } catch { }
 }
@@ -186,16 +203,50 @@ function Test-VersionSrcStructural {
     return $true
 }
 
+function Get-ConnectPs1EmbeddedVersionLocal {
+    param([string]$ConnectPs1Path)
+    if (Get-Command Get-ConnectPs1EmbeddedVersion -ErrorAction SilentlyContinue) {
+        try { return [string](Get-ConnectPs1EmbeddedVersion -ConnectPs1Path $ConnectPs1Path) } catch { }
+    }
+    if (-not $ConnectPs1Path -or -not (Test-Path -LiteralPath $ConnectPs1Path)) { return '' }
+    try {
+        $head = Get-Content -LiteralPath $ConnectPs1Path -TotalCount 250 -ErrorAction Stop | Out-String
+        if ($head -match "(?m)ConnectVersion\s*=\s*'([^']+)'") { return $Matches[1].Trim() }
+    } catch {}
+    return ''
+}
+
+function Get-ConnectVersionSortKeyLocal {
+    param([string]$Ver)
+    if (Get-Command Get-ConnectVersionSortKey -ErrorAction SilentlyContinue) {
+        try { return [int64](Get-ConnectVersionSortKey -Ver $Ver) } catch { }
+    }
+    if ($Ver -match '^(\d{8})\.(\d+)$') {
+        return ([int64]$Matches[1] * 10000L + [int64]$Matches[2])
+    }
+    return [int64](-1)
+}
+
 function Set-SrcVersionStamp {
     param([string]$SrcDir, [string]$Version)
     if (-not $SrcDir -or $Version -notmatch '^\d{8}\.\d+$') { return }
+    $ps1Ver = Get-ConnectPs1EmbeddedVersionLocal -ConnectPs1Path (Join-Path $SrcDir 'connect.ps1')
+    if ($ps1Ver -match '^\d{8}\.\d+$' -and $ps1Ver -ne $Version) {
+        # Never lie: keep txt honest to connect.ps1 so EXE fast_path cannot revive poison.
+        try {
+            Set-Content -LiteralPath (Join-Path $SrcDir 'connect-version.txt') -Value $ps1Ver -Encoding ASCII -NoNewline
+        } catch {}
+        return
+    }
     try {
         Set-Content -LiteralPath (Join-Path $SrcDir 'connect-version.txt') -Value $Version -Encoding ASCII -NoNewline
     } catch {}
 }
 
 function Test-VersionSrcComplete {
-    # Hot path: a few Test-Path + one tiny read. No hashing, no tree walk.
+    # Hot path: structural + folder/txt/ps1 MUST agree (2026-08-03 EXE poison).
+    # txt-only match previously let fast_path boot VerDirs where stamp lied vs connect.ps1.
+    # Also reject STALE-SHADOW ui/diagnostic (same class as Test-ConnectVerSrcComplete).
     param([string]$SrcDir, [string]$Version)
     if (-not $SrcDir -or -not $Version) { return $false }
     if (-not (Test-VersionSrcStructural -SrcDir $SrcDir)) { return $false }
@@ -203,8 +254,19 @@ function Test-VersionSrcComplete {
     if (-not (Test-Path -LiteralPath $vf)) { return $false }
     try {
         $v = (Get-Content -LiteralPath $vf -Raw -ErrorAction Stop).Trim()
-        return ($v -eq $Version)
+        if ($v -ne $Version) { return $false }
     } catch { return $false }
+    $ps1Ver = Get-ConnectPs1EmbeddedVersionLocal -ConnectPs1Path (Join-Path $SrcDir 'connect.ps1')
+    if (-not $ps1Ver -or $ps1Ver -ne $Version) { return $false }
+    foreach ($n in @('connect-diagnostic.ps1', 'connect-ui.ps1')) {
+        $p = Join-Path $SrcDir $n
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        try {
+            $head = (Get-Content -LiteralPath $p -TotalCount 8 -ErrorAction Stop) -join "`n"
+            if ($head -match 'STALE-SHADOW') { return $false }
+        } catch { return $false }
+    }
+    return $true
 }
 
 function Repair-SetupVerDirContract {
@@ -451,6 +513,33 @@ try {
     Log ("setup begin src={0} pid={1} run_id={2}" -f $Src, $PID, $env:CLAUDE_CONNECT_RUN_ID)
     Log ("setup tree root={0} ver={1} src={2} how={3} launch_exe={4}" -f `
         $Root, $version, $SrcDir, $resolved.How, $(if ($launchExe) { $launchExe } else { '-' }))
+
+    # Fleet always double-clicks Desktop\Claude-Connect.exe. Stale SFX packages must NOT
+    # fast_path/boot an older VerDir when a newer healthy tree already exists on disk
+    # (seen 2026-08-03: EXE package 20260802.4 -> fast_path -> connect.ps1 still .1).
+    $diskBest = ''
+    if (Get-Command Get-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
+        try { $diskBest = [string](Get-ConnectInstallCurrent -Root $Root) } catch { $diskBest = '' }
+    }
+    if ($diskBest -match '^\d{8}\.\d+$' -and
+        ((Get-ConnectVersionSortKeyLocal -Ver $diskBest) -gt (Get-ConnectVersionSortKeyLocal -Ver $version))) {
+        $preferSrc = Join-Path $Root (Join-Path $diskBest 'src')
+        $preferOk = $false
+        if (Get-Command Test-ConnectVerSrcComplete -ErrorAction SilentlyContinue) {
+            $preferOk = [bool](Test-ConnectVerSrcComplete -SrcDir $preferSrc -Ver $diskBest)
+        } else {
+            $preferOk = Test-VersionSrcComplete -SrcDir $preferSrc -Version $diskBest
+        }
+        if ($preferOk) {
+            Log ("setup prefer_disk_newer disk={0} pkg={1}" -f $diskBest, $version)
+            $version = $diskBest
+            $tree = Resolve-VersionedTree -LaunchParent $launchParent -Version $version
+            $Root = $tree.Root
+            $VerDir = $tree.VerDir
+            $SrcDir = $tree.SrcDir
+            $DestExe = $tree.DestExe
+        }
+    }
 
     # One-time flat -> versioned migrate (Desktop\Claude-Connect with scripts at root).
     if ((Test-Path -LiteralPath (Join-Path $Root 'connect.ps1')) -and -not (Test-Path -LiteralPath (Join-Path $SrcDir 'connect.ps1'))) {

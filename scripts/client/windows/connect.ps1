@@ -179,10 +179,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260802.4'
+$script:ConnectVersion = '20260803.11'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = '82c842cf-8db8-44f2-bffd-0955674a379c'
+$script:ConnectBuildId = '9f7260d8-4b4d-4b60-b68a-cc9edccbc074'
 $script:SshMsSamples = [System.Collections.Generic.List[int]]::new()
 $script:SshMsSampleStartUnix = 0
 $script:LastSshRollupUnix = 0
@@ -1131,7 +1131,14 @@ function Start-DeferredServerSetup {
     $connectPs1 = Join-Path $ConnectScriptDir 'connect.ps1'
     # Inherit parent UI slot for tunnel preference; child must not call Enter-ConnectSingleInstance.
     $parentSlot = ($env:CLAUDE_CONNECT_UI_SLOT + '').Trim()
-    if ($parentSlot -match '^\d+$') { $env:CLAUDE_CONNECT_UI_SLOT = $parentSlot }
+    # C7: refuse empty inherit — never leave deferred worker as second "primary" (unset slot).
+    if ($parentSlot -notmatch '^\d+$') {
+        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+            Write-ConnectLog ("MULTI_INSTANCE: deferred_setup_refuse_empty_slot pid={0}" -f $PID) 'ERROR'
+        }
+        return
+    }
+    $env:CLAUDE_CONNECT_UI_SLOT = $parentSlot
     $env:CLAUDE_CONNECT_SKIP_HEAL = '1'
     $env:CLAUDE_CONNECT_SKIP_BOOTSTRAP = '1'
     $argList = @(
@@ -2484,6 +2491,9 @@ if (Get-Command Write-ConnectSessionContext -ErrorAction SilentlyContinue) { Wri
         $EditorCmd = $editorChoice.EditorCmd
         $EditorName = $editorChoice.EditorName
     }
+    if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+        Write-ConnectLog ("SESSION_CONTEXT remotePath={0} mountsId={1} editor={2}" -f $go.Path, $go.Id, $EditorCmd) 'INFO'
+    }
 
     Step "Checking SSH service"
     $svc = Get-Service sshd -ErrorAction SilentlyContinue
@@ -2609,6 +2619,8 @@ $script:WindowsMcpEnsured = $false
     try {
         :sessionLoop while ($true) {
             $script:SessionLoopIter++
+            # Allow Ensure-SessionTunnel orphan reclaim once per session-loop pass.
+            $script:OrphanReclaimDoneThisEnsure = $false
             # #Quiet-repeat: only the FIRST session-loop pass (the initial connect)
             # shows routine step "ok" lines on console; recovery re-passes stay file-only.
             $script:StepConsoleQuiet = ($script:SessionLoopIter -gt 1)
@@ -2626,6 +2638,33 @@ $script:WindowsMcpEnsured = $false
             Write-ConnectLog "CONTEXT skip reason=throttle phase=session_loop iter=$($script:SessionLoopIter)" 'DEBUG'
         }
     }
+                # C5 S0/S14: once at first sessionLoop after project known.
+                if ($script:SessionLoopIter -eq 1) {
+                    $gmBegin = '?'
+                    try { if (Get-Command Get-GitMode -ErrorAction SilentlyContinue) { $gmBegin = Get-GitMode } } catch { $gmBegin = '?' }
+                    $uidBegin = if ($script:ServerUidStr) { $script:ServerUidStr } else { '?' }
+                    $slotBegin = if ($env:CLAUDE_CONNECT_UI_SLOT) { $env:CLAUDE_CONNECT_UI_SLOT } else { '?' }
+                    $portBegin = if ($Port) { $Port } else { '?' }
+                    Write-ConnectLog ("SESSION_BEGIN ver={0} uid={1} alias={2} projectId={3} slot={4} port={5} pid={6} git_mode={7}" -f `
+                        $script:ConnectVersion, $uidBegin, $Alias, $go.Id, $slotBegin, $portBegin, $PID, $gmBegin) 'INFO'
+                    $connectPsN = 0
+                    $profileAllN = 0
+                    $peerHint = 'none'
+                    try {
+                        $connectPsN = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+                            Where-Object { $_.CommandLine -and ($_.CommandLine -match '(?i)(\\|/)connect\.ps1(\s|$|")') }).Count
+                    } catch { $connectPsN = 0 }
+                    try {
+                        if (Get-Command Get-CursorProfileProcesses -ErrorAction SilentlyContinue) {
+                            $profileAllN = @(Get-CursorProfileProcesses).Count
+                        }
+                    } catch { $profileAllN = 0 }
+                    try {
+                        if ($connectPsN -gt 1) { $peerHint = 'multi_connect_ps' }
+                        elseif ($profileAllN -gt 0) { $peerHint = 'profile_live' }
+                    } catch { $peerHint = 'none' }
+                    Write-ConnectLog ("LITTER_SNAPSHOT connect_ps={0} profile_all={1} peer_hint={2}" -f $connectPsN, $profileAllN, $peerHint) 'INFO'
+                }
             }
             $tunnelReused = $false
             if ($script:SessionLoopIter -eq 1 -and $script:SessionTunnelInitedForPick -and
@@ -2924,8 +2963,8 @@ $script:WindowsMcpEnsured = $false
                 # Harvest the background stamp fetch kicked off before "Mounting files" - by now
                 # the mount step has almost certainly already covered its cost. A short WaitForExit
                 # is just a safety margin, not the normal path (it should already be HasExited).
-                # When mount is backgrounded that cover disappears - skip the 5s wait if local
-                # stamp TTL already says current (Test-CursorAuthStampCurrent Source=local_ttl).
+                # When mount is backgrounded that cover disappears - skip the 5s wait if stamp is
+                # already known current (session_cache / SSH compare via Test-CursorAuthStampCurrent).
                 $stampAlreadyCurrent = $false
                 try {
                     if (Get-Command Test-CursorAuthStampCurrent -ErrorAction SilentlyContinue) {
@@ -2937,7 +2976,7 @@ $script:WindowsMcpEnsured = $false
                     try {
                         if (-not $script:BgAuthStampProc.HasExited) {
                             if ($stampAlreadyCurrent) {
-                                Write-ConnectLog 'AUTH_STAMP_WAIT_SKIPPED reason=local_ttl' 'DEBUG'
+                                Write-ConnectLog 'AUTH_STAMP_WAIT_SKIPPED reason=stamp_current' 'DEBUG'
                             } else {
                                 $null = $script:BgAuthStampProc.WaitForExit(5000)
                             }
@@ -3022,7 +3061,11 @@ $script:WindowsMcpEnsured = $false
                         $script:LastAuthDetail = 'skipped stamp current'
                     }
                 } else {
-                    $authSync = Sync-CursorGoldenAuth -Alias $Alias -Force:$script:ForceCursorAuthSync
+                    # Account rotation (golden_stale) must Force-merge even when the laptop
+                    # ClaudeServerCursorProfile state.vscdb is >500MiB; otherwise reconnect
+                    # keeps the old email forever (seen on amir: db_too_large skip loop).
+                    $authForce = [bool]$script:ForceCursorAuthSync -or [bool]$authNeedsRefresh
+                    $authSync = Sync-CursorGoldenAuth -Alias $Alias -Force:$authForce
                     if ($authSync.Skipped) {
                         if ($authSync.AlreadyComplete) {
                             StepOk 'already ok'
@@ -3038,6 +3081,10 @@ $script:WindowsMcpEnsured = $false
                                 StepFail $why
                                 $script:LastAuthDetail = "fail $why"
                                 Warn "Cursor auth not synced ($why) - login may be required. Reconnect after admin fixes golden, or press O after login."
+                            } elseif ($why -eq 'db_too_large') {
+                                StepFail $why
+                                $script:LastAuthDetail = "fail $why"
+                                Warn "Cursor auth blocked: profile DB too large. Close [Claude Server] Cursor, press R, or reset %LOCALAPPDATA%\ClaudeServerCursorProfile."
                             } else {
                                 StepOk ("skipped ($why)")
                                 $script:LastAuthDetail = "skipped $why"
@@ -3250,6 +3297,15 @@ $script:WindowsMcpEnsured = $false
                 }
             }
 
+            # C6: MOUNT_VERIFY after open (best-effort; BG mount may still be pending).
+            if (Get-Command Invoke-ConnectMountVerify -ErrorAction SilentlyContinue) {
+                try {
+                    Invoke-ConnectMountVerify -ProjectId $go.Id -MountOut ([string]$mountOut)
+                } catch {
+                    Write-ConnectLog ("MOUNT_VERIFY_FAIL err={0}" -f $_.Exception.Message) 'WARN'
+                }
+            }
+
             $sessionExtras = @()
             if ($EditorCmd -eq 'cursor') {
                 if ($script:LastAuthDetail -match '^(ok|tokens only)$') {
@@ -3429,6 +3485,7 @@ $script:WindowsMcpEnsured = $false
                         Write-ConnectLog ("SESSION_KEY ignore non_command key={0} keychar={1}" -f $ki.Key, $ki.KeyChar) 'INFO'
                         continue
                     }
+                    Write-ConnectLog ("UI_KEY key={0}" -f $resolved) 'INFO'
                     $action = $resolved
                     $gotKey = $true
                     break
@@ -3622,6 +3679,9 @@ $script:WindowsMcpEnsured = $false
                 if (Get-Command Clear-ConnectSessionSlotMarker -ErrorAction SilentlyContinue) {
                     Clear-ConnectSessionSlotMarker
                 }
+                if ($Port -and (Get-Command Clear-ConnectKeepTunnelMarker -ErrorAction SilentlyContinue)) {
+                    Clear-ConnectKeepTunnelMarker -Port ([int]$Port)
+                }
                 Clear-SessionMount -ProjectId $go.Id -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -Reason 'user_quit'
                 Stop-SessionTunnelCleanup -BgTunnel ([ref]$bgTunnel) -ClearServerForward
                 $alreadyDown = $true
@@ -3679,6 +3739,27 @@ $script:WindowsMcpEnsured = $false
         }
         if ($keepTunnelForEditor) {
             Write-ConnectLog 'FINALLY_KEEP_TUNNEL reason=editor_open' 'WARN'
+            Write-ConnectLog ("SESSION_END reason=keep port={0} project={1}" -f $(if ($Port) { $Port } else { '?' }), $(if ($go -and $go.Id) { $go.Id } else { '?' })) 'INFO'
+            if ($script:ConnectPerf -and -not $script:PhaseMsLogged) {
+                $script:PhaseMsLogged = $true
+                Write-ConnectLog ("PHASE_MS mount={0} auth={1} open={2} diag={3} ssh_total={4} ssh_count={5}" -f `
+                    $script:ConnectPerf.MountMs, $script:ConnectPerf.AuthMs, $script:ConnectPerf.OpenMs, `
+                    $script:ConnectPerf.DiagMs, $script:ConnectPerf.SshMsTotal, $script:ConnectPerf.SshCount) 'INFO'
+            }
+            # C1: write keep marker BEFORE Detach (even if Detach later fails).
+            if ($Port -and (Get-Command Write-ConnectKeepTunnelMarker -ErrorAction SilentlyContinue)) {
+                $keepSlot = -1
+                if (($env:CLAUDE_CONNECT_UI_SLOT + '') -match '^\d+$') { $keepSlot = [int]$env:CLAUDE_CONNECT_UI_SLOT }
+                $keepPid = 0
+                if ($bgTunnel -and -not $bgTunnel.HasExited) { $keepPid = [int]$bgTunnel.Id }
+                try {
+                    Write-ConnectKeepTunnelMarker -Port ([int]$Port) -Slot $keepSlot -TunnelPid $keepPid `
+                        -ProjectId $go.Id -RemotePath $go.Path -Alias $Alias -EditorCmd $EditorCmd
+                    Write-ConnectLog ("KEEP_MARKER_WRITE port={0} slot={1} pid={2} project={3}" -f $Port, $keepSlot, $keepPid, $go.Id) 'INFO'
+                } catch {
+                    Write-ConnectLog ("KEEP_MARKER_WRITE_FAIL err={0}" -f $_.Exception.Message) 'WARN'
+                }
+            }
             # Bug 5 fix: without this, Windows auto-closes our un-inherited KILL_ON_JOB_CLOSE job
             # handle the instant THIS process exits normally (right after this finally block),
             # killing the tunnel (and every sidecar job sibling) anyway despite deliberately
@@ -3695,6 +3776,17 @@ $script:WindowsMcpEnsured = $false
                 }
             }
         } else {
+            $endReason = if ($alreadyDown) { 'quit' } else { 'session_end' }
+            Write-ConnectLog ("SESSION_END reason={0} port={1} project={2}" -f $endReason, $(if ($Port) { $Port } else { '?' }), $(if ($go -and $go.Id) { $go.Id } else { '?' })) 'INFO'
+            if ($script:ConnectPerf -and -not $script:PhaseMsLogged) {
+                $script:PhaseMsLogged = $true
+                Write-ConnectLog ("PHASE_MS mount={0} auth={1} open={2} diag={3} ssh_total={4} ssh_count={5}" -f `
+                    $script:ConnectPerf.MountMs, $script:ConnectPerf.AuthMs, $script:ConnectPerf.OpenMs, `
+                    $script:ConnectPerf.DiagMs, $script:ConnectPerf.SshMsTotal, $script:ConnectPerf.SshCount) 'INFO'
+            }
+            if ($Port -and (Get-Command Clear-ConnectKeepTunnelMarker -ErrorAction SilentlyContinue)) {
+                Clear-ConnectKeepTunnelMarker -Port ([int]$Port)
+            }
             if (-not $alreadyDown) {
                 Write-Host ""
                 Write-Host "    Disconnecting..." -ForegroundColor DarkGray

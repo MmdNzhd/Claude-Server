@@ -34,6 +34,11 @@ try {
     Write-ExeStep "Staging client files for EXE..."
     Get-ChildItem -LiteralPath $WindowsDir -File -ErrorAction Stop | ForEach-Object {
         if ($_.Name -match '^connect\.log') { return }
+        $head = ''
+        try { $head = (Get-Content -LiteralPath $_.FullName -TotalCount 5 -ErrorAction Stop) -join "`n" } catch {}
+        if ($head -match 'STALE-SHADOW') {
+            Write-ExeErr ("Refuse STALE-SHADOW wrapper in EXE package: {0} (use scripts/client canon, not windows/ shadow)" -f $_.Name)
+        }
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $stage $_.Name) -Force
     }
 

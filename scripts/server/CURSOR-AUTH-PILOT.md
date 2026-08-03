@@ -67,11 +67,15 @@ sudo claude-server diagnose-auth
 Golden tokens in `state.vscdb` are not enough. Electron also reads:
 
 - Mac: `~/Library/Application Support/ClaudeServerCursorProfile/machineid`
-- Windows: `%LOCALAPPDATA%\ClaudeServerCursorProfile\machineid`
+- Windows: `%LOCALAPPDATA%\ClaudeServerCursorProfile-Smart\machineid` (site suffix; legacy unsuffixed path may exist)
 
 Connect writes these from `/etc/cursor-auth/golden/machine-id.txt` on every merge **and** on the already-complete skip path.
 
 Also require the Cursor window to be on the **correct remote path** for that server user (not another user\'s mount under the same `claude-server` alias). Mac v20260717.32+ soft-stops the server profile after auth sync so a stale process cannot keep a logged-out session.
+
+## Account rotation (change shared login)
+
+**Do not improvise.** Follow [`docs/cursor-account-rotation.md`](../../docs/cursor-account-rotation.md) — Chat is laptop-profile; bump `exported-at`; require Connect >= 20260803.3 (stamp + `db_too_large` rotation fixes).
 
 ## Risks (not testable locally)
 

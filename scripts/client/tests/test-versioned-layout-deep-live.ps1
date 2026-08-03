@@ -39,6 +39,8 @@ $needLaunch = @(
     'Get-PackagedConnectVersion',
     'Resolve-VersionedTree',
     'Test-VersionSrcStructural',
+    'Get-ConnectPs1EmbeddedVersionLocal',
+    'Set-SrcVersionStamp',
     'Test-VersionSrcComplete',
     'Copy-PayloadToSrc',
     'Move-LaunchExeIntoVerDir',
@@ -62,6 +64,13 @@ $extract = Join-Path $root 'IXP000.TMP'
 $null = New-Item -ItemType Directory -Force -Path $launchParent, $extract
 
 try {
+    # Test seam: redirect install-current pointer at an isolated file under this test's
+    # temp root so this test NEVER touches the real live
+    # %USERPROFILE%\.config\claude-connect\install-current.txt (hit live 2026-08-03).
+    $savedInstallCurrentOverride = $env:CLAUDE_CONNECT_TEST_INSTALL_CURRENT_PATH
+    $env:CLAUDE_CONNECT_TEST_INSTALL_CURRENT_PATH = Join-Path $root 'install-current.txt'
+    . (Get-ClientFile 'windows\connect-env-repair.ps1')
+
     # Fake SFX payload = real client windows scripts + version
     $winSrc = Join-Path $script:RepoRoot 'scripts\client\windows'
     $clientRoot = Join-Path $script:RepoRoot 'scripts\client'
@@ -92,7 +101,7 @@ try {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     Copy-PayloadToSrc -ExtractSrc $extract -SrcDir $tree.SrcDir
     $moved = [bool](Move-LaunchExeIntoVerDir -LaunchExe $dropExe -DestExe $tree.DestExe -LaunchParent $launchParent -VerDir $tree.VerDir)
-    Set-Content -LiteralPath (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt') -Value $repoVer -Encoding ASCII -NoNewline
+    Set-Content -LiteralPath (Get-ConnectInstallCurrentPath) -Value $repoVer -Encoding ASCII -NoNewline
     Remove-Item -LiteralPath (Join-Path $tree.Root 'current.txt') -Force -ErrorAction SilentlyContinue
     $sw.Stop()
     Assert (Test-VersionSrcComplete -SrcDir $tree.SrcDir -Version $repoVer) 'Case1 src complete after install'
@@ -182,8 +191,7 @@ try {
     Copy-PayloadToSrc -ExtractSrc $appExtract -SrcDir $oldTree.SrcDir
     Set-Content (Join-Path $oldTree.SrcDir 'connect-version.txt') -Value '20260727.10' -NoNewline
     Remove-Item (Join-Path $oldTree.Root 'current.txt') -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE '.config\claude-connect') | Out-Null
-    Set-Content (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt') -Value '20260727.10' -Encoding ASCII -NoNewline
+    Set-Content (Get-ConnectInstallCurrentPath) -Value '20260727.10' -Encoding ASCII -NoNewline
     # Fake "new" windows payload for remote 20260727.13
     $winNew = Join-Path $root 'winNew'
     New-Item -ItemType Directory -Force -Path $winNew | Out-Null
@@ -201,8 +209,7 @@ try {
         Copy-Item $_.FullName (Join-Path $newSrc $_.Name) -Force -Recurse
     }
     Remove-Item (Join-Path $verLayoutApply.Root 'current.txt') -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path (Join-Path $env:USERPROFILE '.config\claude-connect') | Out-Null
-    Set-Content (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt') -Value $remoteVer -Encoding ASCII -NoNewline
+    Set-Content (Get-ConnectInstallCurrentPath) -Value $remoteVer -Encoding ASCII -NoNewline
     # Keep old + new; also plant older ones and prune
     foreach ($v in @('20260101.1', '20260101.5')) {
         New-Item -ItemType Directory -Force -Path (Join-Path (Join-Path $verLayoutApply.Root $v) 'src') | Out-Null
@@ -215,7 +222,7 @@ try {
     Assert ($left2.Count -le 3) ("Case5 after prune <=3 dirs (got $($left2.Count))")
     Assert ($left2 -contains $remoteVer) 'Case5 newest remote ver kept'
     Assert (-not (Test-Path (Join-Path $verLayoutApply.Root 'current.txt'))) 'Case5 no root current.txt'
-    Assert (((Get-Content (Join-Path $env:USERPROFILE '.config\claude-connect\install-current.txt') -Raw).Trim()) -eq $remoteVer) 'Case5 install-current points to new ver'
+    Assert (((Get-Content (Get-ConnectInstallCurrentPath) -Raw).Trim()) -eq $remoteVer) 'Case5 install-current points to new ver'
 
     # ---- Case6: bad dirs still rejected ----
     Note 'Case6: System32 / PowerShell still bad install dirs'
@@ -288,6 +295,11 @@ try {
     Write-Host ("  FAIL  deep exception: {0}" -f $_.Exception.Message) -ForegroundColor Red
     $Fail++
 } finally {
+    if ($null -eq $savedInstallCurrentOverride) {
+        Remove-Item Env:\CLAUDE_CONNECT_TEST_INSTALL_CURRENT_PATH -ErrorAction SilentlyContinue
+    } else {
+        $env:CLAUDE_CONNECT_TEST_INSTALL_CURRENT_PATH = $savedInstallCurrentOverride
+    }
     try { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue } catch {}
 }
 

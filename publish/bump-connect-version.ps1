@@ -146,11 +146,24 @@ function Set-ConnectVersionInRepo {
     Write-BumpedFile -Path $macVerFile -NewText $Version
 
     # Lockstep with bundle: stale policy.latest breaks client checksum verify after deploy.
+    # force_min_version must move with latest when mode=force (else next publish silently
+    # freezes force at the old min — Stage-6b class drift).
     $policyPath = Join-Path $ProjectRoot 'scripts\server\client-update-policy.json'
     if (Test-Path -LiteralPath $policyPath) {
         Invoke-BumpFileReplacement -Path $policyPath `
             -Pattern '("latest"\s*:\s*")[^"]*(")' `
             -Replace "`${1}$Version`${2}"
+        try {
+            $rawPol = Get-Content -LiteralPath $policyPath -Raw -ErrorAction Stop
+            $polObj = $rawPol | ConvertFrom-Json -ErrorAction Stop
+            $mode = ''
+            try { $mode = [string]$polObj.mode } catch { $mode = '' }
+            if ($mode -eq 'force') {
+                Invoke-BumpFileReplacement -Path $policyPath `
+                    -Pattern '("force_min_version"\s*:\s*")[^"]*(")' `
+                    -Replace "`${1}$Version`${2}"
+            }
+        } catch {}
     }
 }
 

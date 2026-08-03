@@ -559,11 +559,26 @@ EOF
         fi
         remote_editor_in_agent_home "$alias" "$remote_path" && agent_home=1
         profile_main="$(cursor_profile_main_count)"
-        local profile_all
+        local profile_all plan_reason orphan_helpers=0 settle
         profile_all="$(cursor_profile_process_count)"
+
+        # B11 settle: profile_main==0 && profile_all>0 → wait ≤3×400ms for sibling spinup, re-query.
+        if [ "${profile_main:-0}" -eq 0 ] && [ "${profile_all:-0}" -gt 0 ]; then
+            for settle in 1 2 3; do
+                sleep 0.4
+                profile_main="$(cursor_profile_main_count)"
+                profile_all="$(cursor_profile_process_count)"
+                declare -F connect_log >/dev/null 2>&1 && \
+                    connect_log "LAUNCH_SETTLE attempt=$settle profile_main=$profile_main profile_all=$profile_all" 'INFO'
+                if [ "${profile_main:-0}" -gt 0 ] || [ "${profile_all:-0}" -eq 0 ]; then
+                    break
+                fi
+            done
+        fi
 
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "LAUNCH_BEGIN editor=cursor on_folder=$on_folder agent_home=$agent_home profile_main=$profile_main profile_all=$profile_all auth_relaunch=${CURSOR_AUTH_RELAUNCH:-0}"
+            connect_log "LAUNCH_PROBE profile_all=$profile_all profile_main=$profile_main agent_home=$agent_home on_folder=$on_folder" 'INFO'
         fi
 
         if [ "${CURSOR_AUTH_RELAUNCH:-0}" = "1" ] && [ "${profile_all:-0}" -gt 0 ]; then
@@ -575,14 +590,37 @@ EOF
             return 0
         fi
 
-        # Match Windows: new window when agent home or profile already open; do NOT soft-kill on agent_home.
-        if [ "$agent_home" -eq 1 ] || [ "$profile_main" -gt 0 ]; then
+        # Still helpers-only after settle → reap ClaudeServerCursorProfile tree → cold.
+        # NEVER touch personal ~/.config/Cursor (stop helpers match ClaudeServer profile tag only).
+        if [ "${profile_main:-0}" -eq 0 ] && [ "${profile_all:-0}" -gt 0 ]; then
+            orphan_helpers=1
+            declare -F connect_log >/dev/null 2>&1 && \
+                connect_log "LAUNCH_REAP: orphan_helpers_reaped profile_all=$profile_all - stop_cursor_profile_soft then cold" 'WARN'
+            stop_cursor_profile_soft
+            sleep 0.4
+            profile_main=0
+            profile_all=0
+            orphan_helpers=0
+            plan_reason=orphan_helpers_reaped
+        fi
+
+        # UseNewWindow = agent_home OR profile_main>0 ONLY (drop orphan helpers from use_new).
+        if [ "$agent_home" -eq 1 ] || [ "${profile_main:-0}" -gt 0 ]; then
             use_new=1
+            if [ -z "${plan_reason:-}" ]; then
+                if [ "$agent_home" -eq 1 ]; then plan_reason=agent_home
+                else plan_reason=profile_open
+                fi
+            fi
+        else
+            use_new=0
+            [ -z "${plan_reason:-}" ] && plan_reason=cold_start
         fi
 
         _cursor_bin="$(_editor_run_cmd cursor)" || _cursor_bin=cursor
         if [ "$use_new" -eq 1 ]; then
-            declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_PLAN: --new-window'
+            declare -F connect_log >/dev/null 2>&1 && \
+                connect_log "LAUNCH_PLAN: use_new_window=1 reason=$plan_reason profile_all=$profile_all" 'INFO'
             # Prefer classic+new-window, fall back to folder-uri
             "$_cursor_bin" --user-data-dir "$profile" "${_proxy_args[@]}" --new-window --classic --folder-uri "$uri" >/dev/null 2>&1 &
             sleep 0.8
@@ -590,7 +628,8 @@ EOF
                 "$_cursor_bin" --user-data-dir "$profile" "${_proxy_args[@]}" --new-window --folder-uri "$uri" >/dev/null 2>&1 &
             fi
         else
-            declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_PLAN: cold --reuse-window'
+            declare -F connect_log >/dev/null 2>&1 && \
+                connect_log "LAUNCH_PLAN: use_new_window=0 reason=$plan_reason profile_all=$profile_all" 'INFO'
             "$_cursor_bin" --user-data-dir "$profile" "${_proxy_args[@]}" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
         fi
         return 0

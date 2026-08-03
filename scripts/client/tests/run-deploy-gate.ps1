@@ -15,6 +15,15 @@ $CriticalScripts = @(
     'test-update-no-defer-prompt.ps1'
     'test-update-kill-self-contract.ps1'
     'test-exe-promote-dirs-contract.ps1'
+    'test-mount-skew-align-hard-batch.ps1'
+    'test-orphan-reclaim-hard-batch.ps1'
+    'test-keep-tunnel-marker-hard-batch.ps1'
+    'test-cleanup-user-hard-batch.ps1'
+    'test-editor-launch-strategies.ps1'
+    'test-harder-live-mount-skew-gate.ps1'  # L7 static skew gate (safe non-live)
+    'test-verdir-content-integrity.ps1'
+    'test-setup-launch-exe-integrity.ps1'
+    'test-no-stale-shadow-in-ship.ps1'
 )
 
 # windows-mcp LIVE storm/chaos/brutal suites take many minutes and stall

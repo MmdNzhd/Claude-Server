@@ -635,6 +635,8 @@ function Write-ConnectInstantLauncher {
                 '  cfgVer = Trim(tf.ReadLine)'
                 '  tf.Close'
                 '  If cfgVer <> "" Then'
+                '    If InStr(cfgVer, "\") > 0 Then cfgVer = Mid(cfgVer, InStrRev(cfgVer, "\") + 1)'
+                '    If InStr(cfgVer, "/") > 0 Then cfgVer = Mid(cfgVer, InStrRev(cfgVer, "/") + 1)'
                 '    If fso.FileExists(root & "\" & cfgVer & "\src\connect-boot.ps1") Then ver = cfgVer'
                 '  End If'
                 'End If'
@@ -807,11 +809,30 @@ function Write-UpdateFileLog {
         $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
         $sid = Ensure-ConnectRunId
         $line = "[$ts] [$Level] [$sid] UPDATE: $Message`n"
-        [System.IO.File]::AppendAllText((Get-UpdateLogPath), $line, [System.Text.UTF8Encoding]::new($false))
+        # FileShare.ReadWrite: connect.ps1 holds the day log open; AppendAllText fails
+        # silently while a session is alive (hit live 2026-08-03 during update proof).
+        $logPath = Get-UpdateLogPath
+        $utf8 = [System.Text.UTF8Encoding]::new($false)
+        $bytes = $utf8.GetBytes($line)
+        $fs = $null
+        try {
+            $fs = [System.IO.FileStream]::new(
+                $logPath,
+                [System.IO.FileMode]::Append,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::ReadWrite)
+            $null = $fs.Seek(0, [System.IO.SeekOrigin]::End)
+            $fs.Write($bytes, 0, $bytes.Length)
+            $fs.Flush()
+        } finally {
+            if ($fs) { try { $fs.Dispose() } catch { } }
+        }
         if ($Level -eq 'ERROR' -or $Level -eq 'WARN') {
             $bread = Join-Path $env:USERPROFILE '.config\claude-connect\last-fail.txt'
             try { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $bread) | Out-Null } catch { }
-            [System.IO.File]::AppendAllText($bread, $line.Replace("`n","`r`n"), [System.Text.UTF8Encoding]::new($false))
+            try {
+                [System.IO.File]::AppendAllText($bread, $line.Replace("`n","`r`n"), $utf8)
+            } catch { }
         }
     } catch { }
 }

@@ -531,6 +531,186 @@ _is_mounted() {
         timeout -k 1 2 ls "$lpath" >/dev/null 2>&1
 }
 
+# Exact sshfs PID whose NUL cmdline contains lpath as an argument.
+_sshfs_pid_for_lpath() {
+    local lpath="${1%/}" pid arg found
+    [ -n "$lpath" ] || return 1
+    for pid in $(pgrep -u "$(id -un)" -f '[s]shfs' 2>/dev/null); do
+        [ -r "/proc/$pid/cmdline" ] || continue
+        found=0
+        while IFS= read -r -d '' arg; do
+            if [ "$arg" = "$lpath" ] || [ "$arg" = "${lpath}/" ]; then
+                found=1
+                break
+            fi
+        done < "/proc/$pid/cmdline"
+        if [ "$found" = "1" ]; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Parse sshfs -p N / -pNNNN from /proc/<pid>/cmdline (NUL-separated).
+_sshfs_port_from_pid() {
+    local pid="${1:-}" arg next=0
+    [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || return 1
+    while IFS= read -r -d '' arg; do
+        if [ "$next" = "1" ]; then
+            case "$arg" in
+                ''|*[!0-9]*) return 1 ;;
+                *) printf '%s\n' "$arg"; return 0 ;;
+            esac
+        fi
+        case "$arg" in
+            -p)
+                next=1
+                ;;
+            -p[0-9]*)
+                printf '%s\n' "${arg#-p}"
+                return 0
+                ;;
+        esac
+    done < "/proc/$pid/cmdline"
+    return 1
+}
+
+# Live sshfs tunnel port for mount lpath (empty if unparsable).
+_sshfs_tunnel_port() {
+    local lpath="$1" pid
+    pid="$(_sshfs_pid_for_lpath "$lpath" 2>/dev/null)" || return 1
+    _sshfs_port_from_pid "$pid"
+}
+
+# TCP probe 127.0.0.1:port (≤2s).
+_mount_port_alive() {
+    local port="${1:-}"
+    [ -n "$port" ] || return 1
+    timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/${port}" 2>/dev/null
+}
+
+# Rewrite conf TUNNEL_PORT/PORT/TUNNEL_SLOT to live_p only — never remount.
+# Reuses rewrite_conf_tunnel_ports when sourced; else minimal copy of that rewrite.
+_align_conf_tunnel_to_live() {
+    local live_p="${1:-}" conf="${CONNECT_CONF:-$HOME/.claude-connect.conf}" base slot tmp uid
+    [ -n "$live_p" ] || return 1
+    if ! declare -F rewrite_conf_tunnel_ports >/dev/null 2>&1; then
+        local _lib
+        for _lib in \
+            /usr/local/lib/claude-server/claude-tunnel-reacquire.sh \
+            "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "$0")" 2>/dev/null)/claude-tunnel-reacquire.sh"
+        do
+            if [ -f "$_lib" ]; then
+                # shellcheck source=/dev/null
+                . "$_lib"
+                break
+            fi
+        done
+    fi
+    if declare -F rewrite_conf_tunnel_ports >/dev/null 2>&1; then
+        rewrite_conf_tunnel_ports "$live_p"
+        TUNNEL_PORT="$live_p"
+        return 0
+    fi
+    [ -f "$conf" ] || return 1
+    uid="$(id -u 2>/dev/null || echo 0)"
+    if [ "$uid" -ge 1000 ] 2>/dev/null; then
+        base=$((20000 + (uid - 1000) * 10))
+    else
+        base=20020
+    fi
+    slot=$((live_p - base))
+    if [ "$slot" -lt 0 ] 2>/dev/null || [ "$slot" -gt 9 ] 2>/dev/null; then
+        slot=0
+    fi
+    tmp="${conf}.tmp.$$"
+    grep -vE '^(TUNNEL_PORT|PORT|TUNNEL_SLOT)=' "$conf" > "$tmp" 2>/dev/null || true
+    printf 'TUNNEL_PORT=%s\nPORT=%s\nTUNNEL_SLOT=%s\n' "$live_p" "$live_p" "$slot" >> "$tmp"
+    mv -f "$tmp" "$conf"
+    chmod 600 "$conf" 2>/dev/null || true
+    TUNNEL_PORT="$live_p"
+    return 0
+}
+
+_mount_log_state() {
+    local action="$1" project="$2" bound="$3" conf="$4" tcp_live="$5" tcp_conf="$6" ls_ok="$7" lpath="${8:-}"
+    logger -t claude-mount \
+        "action=${action} project=${project} bound_port=${bound:--} conf_port=${conf:--} tcp_live=${tcp_live} tcp_conf=${tcp_conf} ls=${ls_ok} lpath=${lpath}" \
+        2>/dev/null || true
+}
+
+# WARN only when ≥2 sshfs share one -p (expected multi-project; do not auto-split).
+_mount_warn_shared_p() {
+    local port="${1:-}" pid p count=0
+    [ -n "$port" ] || return 0
+    for pid in $(pgrep -u "$(id -un)" -f '[s]shfs' 2>/dev/null); do
+        p="$(_sshfs_port_from_pid "$pid" 2>/dev/null)" || continue
+        if [ "$p" = "$port" ]; then
+            count=$((count + 1))
+        fi
+    done
+    if [ "$count" -ge 2 ]; then
+        logger -t claude-mount "MOUNT_SHARED_P port=$port count=$count" 2>/dev/null || true
+        echo "warn: MOUNT_SHARED_P port=$port count=$count" >&2
+    fi
+}
+
+# Three-way skew gate for already-mounted keep-FUSE paths.
+# Returns 0 = keep FUSE (OK / DEFERRED / ALIGN / no-live); 1 = force remount onto conf.
+_mount_skew_keep_fuse() {
+    local lpath="$1" project="${2:-}" live="" conf="${TUNNEL_PORT:-}"
+    local ls_ok=0 tcp_live=0 tcp_conf=0
+
+    live="$(_sshfs_tunnel_port "$lpath" 2>/dev/null || true)"
+    if timeout -k 1 2 ls "$lpath" >/dev/null 2>&1; then
+        ls_ok=1
+    fi
+    if [ -n "$live" ] && _mount_port_alive "$live"; then
+        tcp_live=1
+    fi
+    if [ -n "$conf" ] && _mount_port_alive "$conf"; then
+        tcp_conf=1
+    fi
+
+    _mount_log_state "already_mounted" "$project" "$live" "$conf" "$tcp_live" "$tcp_conf" "$ls_ok" "$lpath"
+    _mount_warn_shared_p "$live"
+
+    # Empty/unparsable live → no false skew; keep already-mounted path.
+    if [ -z "$live" ] || [ -z "$conf" ]; then
+        return 0
+    fi
+    if [ "$live" = "$conf" ]; then
+        return 0
+    fi
+
+    # hung ls OR live TCP dead → remount onto conf
+    if [ "$ls_ok" != "1" ] || [ "$tcp_live" != "1" ]; then
+        logger -t claude-mount \
+            "MOUNT_PORT_SKEW lpath=$lpath live=$live conf=$conf ls=$ls_ok tcp_live=$tcp_live tcp_conf=$tcp_conf" \
+            2>/dev/null || true
+        echo "MOUNT_PORT_SKEW live=$live conf=$conf lpath=$lpath (remount)" >&2
+        return 1
+    fi
+
+    # both tunnels live + readable → keep FUSE
+    if [ "$tcp_conf" = "1" ]; then
+        logger -t claude-mount \
+            "MOUNT_PORT_SKEW_DEFERRED lpath=$lpath live=$live conf=$conf" \
+            2>/dev/null || true
+        echo "MOUNT_PORT_SKEW_DEFERRED live=$live conf=$conf lpath=$lpath" >&2
+        return 0
+    fi
+
+    # live up + conf down → conf rewrite only (never fusermount)
+    logger -t claude-mount \
+        "MOUNT_PORT_SKEW_ALIGN lpath=$lpath live=$live conf=$conf" \
+        2>/dev/null || true
+    echo "MOUNT_PORT_SKEW_ALIGN live=$live conf=$conf lpath=$lpath" >&2
+    _align_conf_tunnel_to_live "$live" || true
+    return 0
+}
+
 # Try every available unmount method, from clean to lazy. Always returns 0.
 _do_unmount() {
     local lpath="$1"
@@ -542,8 +722,10 @@ _do_unmount() {
 }
 
 # Unmount lpath (including hung sshfs) then restore .git on rpath.
+# Kill exact sshfs PID first; pkill fallback only if hung (log UNMOUNT_PKILL).
 _force_unmount_project() {
     local lpath="$1" rpath="$2"
+    local pid="" hung=0 lpath_esc
     if [ -z "$lpath" ]; then
         [ -n "$rpath" ] && _restore_git "$rpath"
         return 0
@@ -552,15 +734,26 @@ _force_unmount_project() {
         [ -n "$rpath" ] && _restore_git "$rpath"
         return 0
     fi
-    if timeout -k 1 2 ls "$lpath" >/dev/null 2>&1; then
-        _do_unmount "$lpath"
-    else
-        local lpath_esc
+    if ! timeout -k 1 2 ls "$lpath" >/dev/null 2>&1; then
+        hung=1
+    fi
+    pid="$(_sshfs_pid_for_lpath "$lpath" 2>/dev/null || true)"
+    if [ -n "$pid" ]; then
+        kill "$pid" 2>/dev/null || true
+        sleep 1
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+    if [ "$hung" = "1" ] && _in_proc_mounts "$lpath"; then
         lpath_esc=$(printf '%s' "$lpath" | sed 's/[[\.*^$(){}+?|]/\\&/g')
+        logger -t claude-mount "UNMOUNT_PKILL lpath=$lpath" 2>/dev/null || true
+        echo "UNMOUNT_PKILL lpath=$lpath" >&2
         pkill -u "$USER" -f "sshfs .*${lpath_esc}" 2>/dev/null || true
         sleep 1
-        _do_unmount "$lpath"
     fi
+    _do_unmount "$lpath"
     if _is_mounted "$lpath"; then
         echo "error: unmount failed: $lpath" >&2
         return 1
@@ -612,46 +805,56 @@ _do_mount() {
 
     if _is_mounted "$lpath"; then
         if [ "$GIT_MODE" = "off" ]; then
-            echo "already mounted: $lpath"
-            _hide_git_and_create_stubs "$rpath"
-            _warm_sshfs_cache "$lpath"
-            _mount_restore_git_mode
-            return 0
-        fi
+            if _mount_skew_keep_fuse "$lpath" "$id"; then
+                echo "already mounted: $lpath"
+                _hide_git_and_create_stubs "$rpath"
+                _warm_sshfs_cache "$lpath"
+                _mount_restore_git_mode
+                return 0
+            fi
+            # MOUNT_PORT_SKEW: dead/hung bound port → force unmount and remount onto conf.
+            _force_unmount_project "$lpath" "$rpath" || _do_unmount "$lpath"
+            sleep 1
         # Server mode needs a fresh mount so SSHFS sees .git after restore on laptop.
-        if [ "$GIT_MODE" = "server" ]; then
+        elif [ "$GIT_MODE" = "server" ]; then
             _do_unmount "$lpath"
             sleep 1
         else
-            echo "already mounted: $lpath"
-            # Fast path: hide already reflected on the mount - skip reverse-SSH hide (~2-3s).
-            if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ] && \
-               { [ ! -e "$lpath/.git" ] || [ -e "$lpath/.git.server-session" ]; } && \
-               [ "$_GIT_HIDE_LAST_FAILED" != "1" ]; then
-                _warm_sshfs_cache "$lpath"
-                _mount_restore_git_mode
-                return 0
-            fi
-            # Hide not yet applied (or untrusted) - (re)apply hide/stubs via reverse SSH.
-            _hide_git_and_create_stubs "$rpath"
-            if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ] && \
-               { [ ! -e "$lpath/.git" ] || [ -e "$lpath/.git.server-session" ]; } && \
-               [ "$_GIT_HIDE_LAST_FAILED" != "1" ]; then
-                _warm_sshfs_cache "$lpath"
-                _mount_restore_git_mode
-                return 0
-            fi
-            # SSHFS cache may keep stale .git after laptop rename - remount if .git still visible.
-            # Skip the remount when the hide itself genuinely failed (e.g. access denied) -
-            # a fresh mount won't clear a laptop-side lock, so retrying just doubles the wait
-            # and repeats the same warning for no benefit.
-            if [ "$GIT_MODE" = "hide" ] && [ -e "$lpath/.git" ] && [ ! -e "$lpath/.git.server-session" ] && [ "$_GIT_HIDE_LAST_FAILED" != "1" ]; then
-                _do_unmount "$lpath"
-                sleep 1
+            if _mount_skew_keep_fuse "$lpath" "$id"; then
+                echo "already mounted: $lpath"
+                # Fast path: hide already reflected on the mount - skip reverse-SSH hide (~2-3s).
+                if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ] && \
+                   { [ ! -e "$lpath/.git" ] || [ -e "$lpath/.git.server-session" ]; } && \
+                   [ "$_GIT_HIDE_LAST_FAILED" != "1" ]; then
+                    _warm_sshfs_cache "$lpath"
+                    _mount_restore_git_mode
+                    return 0
+                fi
+                # Hide not yet applied (or untrusted) - (re)apply hide/stubs via reverse SSH.
+                _hide_git_and_create_stubs "$rpath"
+                if [ "${CLAUDE_TRUSTED_TUNNEL:-}" = "1" ] && \
+                   { [ ! -e "$lpath/.git" ] || [ -e "$lpath/.git.server-session" ]; } && \
+                   [ "$_GIT_HIDE_LAST_FAILED" != "1" ]; then
+                    _warm_sshfs_cache "$lpath"
+                    _mount_restore_git_mode
+                    return 0
+                fi
+                # SSHFS cache may keep stale .git after laptop rename - remount if .git still visible.
+                # Skip the remount when the hide itself genuinely failed (e.g. access denied) -
+                # a fresh mount won't clear a laptop-side lock, so retrying just doubles the wait
+                # and repeats the same warning for no benefit.
+                if [ "$GIT_MODE" = "hide" ] && [ -e "$lpath/.git" ] && [ ! -e "$lpath/.git.server-session" ] && [ "$_GIT_HIDE_LAST_FAILED" != "1" ]; then
+                    _do_unmount "$lpath"
+                    sleep 1
+                else
+                    _warm_sshfs_cache "$lpath"
+                    _mount_restore_git_mode
+                    return 0
+                fi
             else
-                _warm_sshfs_cache "$lpath"
-                _mount_restore_git_mode
-                return 0
+                # MOUNT_PORT_SKEW: dead/hung bound port → force unmount and remount onto conf.
+                _force_unmount_project "$lpath" "$rpath" || _do_unmount "$lpath"
+                sleep 1
             fi
         fi
     fi
@@ -748,6 +951,14 @@ _do_mount() {
         _mount_restore_git_mode
         return 1
     fi
+
+    local _bound _tcp_live=0 _tcp_conf=0
+    _bound="$(_sshfs_tunnel_port "$lpath" 2>/dev/null || true)"
+    [ -z "$_bound" ] && _bound="${TUNNEL_PORT:-}"
+    if [ -n "$_bound" ] && _mount_port_alive "$_bound"; then _tcp_live=1; fi
+    if [ -n "${TUNNEL_PORT:-}" ] && _mount_port_alive "$TUNNEL_PORT"; then _tcp_conf=1; fi
+    _mount_log_state "mounted" "$id" "$_bound" "${TUNNEL_PORT:-}" "$_tcp_live" "$_tcp_conf" "1" "$lpath"
+    _mount_warn_shared_p "$_bound"
 
     echo "mounted: $lpath"
     _warm_sshfs_cache "$lpath"
@@ -1137,7 +1348,7 @@ cmd_down() {
             done < "$f"
             lpath="${lpath//\\//}"
             rpath="${rpath//\\//}"
-            if _is_mounted "$lpath" 2>/dev/null; then
+            if _in_proc_mounts "$lpath" 2>/dev/null; then
                 _force_unmount_project "$lpath" "$rpath" || true
             else
                 # Not mounted - still restore in case .git was hidden by a crashed session
@@ -1145,6 +1356,61 @@ cmd_down() {
             fi
         done
     fi
+}
+
+# Unmount ALL mounts whose sshfs -p equals PORT (Soft reclaim / shared-p teardown).
+cmd_down_by_port() {
+    local port="${1:-}" any=0
+    [ -n "$port" ] || { echo "error: down-by-port requires PORT" >&2; return 1; }
+    case "$port" in
+        ''|*[!0-9]*) echo "error: down-by-port PORT must be numeric: $port" >&2; return 1 ;;
+    esac
+    _load_global
+    mkdir -p "$CONF_DIR"
+
+    # Conf-backed projects
+    for f in "$CONF_DIR"/*.conf; do
+        [ -f "$f" ] || continue
+        local lpath="" rpath="" live=""
+        while IFS='=' read -r k v; do
+            v="${v#\"}" v="${v%\"}"
+            case "$k" in
+                lpath|LOCAL_PATH)  lpath="$v" ;;
+                rpath|REMOTE_PATH) rpath="$v" ;;
+            esac
+        done < "$f"
+        lpath="${lpath//\\//}"
+        rpath="${rpath//\\//}"
+        [ -n "$lpath" ] || continue
+        _in_proc_mounts "$lpath" || continue
+        live="$(_sshfs_tunnel_port "$lpath" 2>/dev/null || true)"
+        if [ "$live" = "$port" ]; then
+            any=1
+            echo "down-by-port: $lpath (-p $port)"
+            _force_unmount_project "$lpath" "$rpath" || true
+        fi
+    done
+
+    # Orphan FUSE under ~/mounts not covered by conf (same -p)
+    local mp live2
+    if [ -d "$HOME/mounts" ]; then
+        for mp in "$HOME/mounts"/*; do
+            [ -d "$mp" ] || continue
+            mp="${mp%/}"
+            _in_proc_mounts "$mp" || continue
+            live2="$(_sshfs_tunnel_port "$mp" 2>/dev/null || true)"
+            if [ "$live2" = "$port" ]; then
+                any=1
+                echo "down-by-port: $mp (-p $port)"
+                _force_unmount_project "$mp" "" || true
+            fi
+        done
+    fi
+
+    if [ "$any" = "0" ]; then
+        echo "down-by-port: no mounts on -p $port"
+    fi
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1162,13 +1428,14 @@ case "$cmd" in
     up|mount)            cmd_up "$@" ;;
     down|umount|unmount) cmd_down "$@" ;;
     down-others)         cmd_down_others "$@" ;;
+    down-by-port)        cmd_down_by_port "$@" ;;
     recover)             cmd_recover ;;
     recover-one)         cmd_recover_one "$@" ;;
     recover-if-needed)   cmd_recover_if_needed "$@" ;;
     check)               cmd_check "$@" ;;
     tunnel-status)       cmd_tunnel_status ;;
     *)
-        echo "Usage: claude-mount {list|status|check|tunnel-status|add|edit|rm|up|down|down-others|recover|recover-one|recover-if-needed} [id]" >&2
+        echo "Usage: claude-mount {list|status|check|tunnel-status|add|edit|rm|up|down|down-others|down-by-port|recover|recover-one|recover-if-needed} [id|PORT]" >&2
         exit 1
         ;;
 esac

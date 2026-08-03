@@ -449,6 +449,106 @@ for mid in os.listdir(mroot):
 PY
 }
 
+# Parse sshfs -p from /proc cmdline (shared by ALIGN heal).
+_heal_parse_sshfs_port() {
+    local pid="${1:-}" arg next=0
+    [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || return 1
+    while IFS= read -r -d '' arg; do
+        if [ "$next" = "1" ]; then
+            case "$arg" in
+                ''|*[!0-9]*) return 1 ;;
+                *) printf '%s\n' "$arg"; return 0 ;;
+            esac
+        fi
+        case "$arg" in
+            -p) next=1 ;;
+            -p[0-9]*) printf '%s\n' "${arg#-p}"; return 0 ;;
+        esac
+    done < "/proc/$pid/cmdline"
+    return 1
+}
+
+# ALIGN before stale umount: if conf TUNNEL_PORT is dead but a live sshfs -p is up,
+# rewrite conf to that live_p only (never fusermount). Prevents mass-umount of healthy FUSE.
+_heal_align_conf_to_live_sshfs() {
+    local conf_p="${TUNNEL_PORT:-}" mp live="" prefer="" pid cand=""
+    # Conf already TCP-up → nothing to ALIGN
+    if [ -n "$conf_p" ]; then
+        if declare -F tunnel_port_tcp_open >/dev/null 2>&1; then
+            tunnel_port_tcp_open "$conf_p" 2>/dev/null && return 0
+        elif timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/${conf_p}" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    # Prefer ACTIVE_MOUNT lpath when mounted
+    if [ -n "${ACTIVE_MOUNT:-}" ] && [ -f "$CONF_DIR/${ACTIVE_MOUNT}.conf" ]; then
+        prefer=""
+        while IFS='=' read -r k v || [ -n "$k" ]; do
+            v="${v#\"}"; v="${v%\"}"; v="$(printf '%s' "$v" | tr -d '\r')"
+            case "$k" in lpath|LOCAL_PATH) prefer="$v" ;; esac
+        done < "$CONF_DIR/${ACTIVE_MOUNT}.conf"
+        prefer="${prefer//\\//}"
+        prefer="${prefer%/}"
+    fi
+
+    # Scan mounts: prefer ACTIVE_MOUNT's bound -p, else first live sshfs under MOUNTS_DIR
+    if [ -d "$MOUNTS_DIR" ]; then
+        for mp in "$MOUNTS_DIR"/*/; do
+            [ -d "$mp" ] || continue
+            mp="${mp%/}"
+            grep -F " $mp " /proc/mounts >/dev/null 2>&1 || continue
+            for pid in $(pgrep -u "$USER_NAME" -f '[s]shfs' 2>/dev/null); do
+                [ -r "/proc/$pid/cmdline" ] || continue
+                if ! tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | grep -qxF -- "$mp"; then
+                    continue
+                fi
+                cand="$(_heal_parse_sshfs_port "$pid" 2>/dev/null || true)"
+                [ -n "$cand" ] || continue
+                if ! timeout 2 bash -c "exec 3<>/dev/tcp/127.0.0.1/${cand}" 2>/dev/null; then
+                    continue
+                fi
+                if [ -n "$prefer" ] && [ "$mp" = "$prefer" ]; then
+                    live="$cand"
+                    break 2
+                fi
+                [ -z "$live" ] && live="$cand"
+            done
+        done
+    fi
+
+    [ -n "$live" ] || return 0
+    if [ -n "$conf_p" ] && [ "$live" = "$conf_p" ]; then
+        return 0
+    fi
+
+    _audit "MOUNT_PORT_SKEW_ALIGN conf=${conf_p:--} live=$live (pre-stale-heal)"
+    if declare -F rewrite_conf_tunnel_ports >/dev/null 2>&1; then
+        rewrite_conf_tunnel_ports "$live"
+        TUNNEL_PORT="$live"
+    else
+        local tmp="${CONNECT_CONF}.tmp.$$" base slot uid
+        uid="$(id -u 2>/dev/null || echo 0)"
+        if [ "$uid" -ge 1000 ] 2>/dev/null; then
+            base=$((20000 + (uid - 1000) * 10))
+        else
+            base=20020
+        fi
+        slot=$((live - base))
+        if [ "$slot" -lt 0 ] 2>/dev/null || [ "$slot" -gt 9 ] 2>/dev/null; then
+            slot=0
+        fi
+        if [ -f "$CONNECT_CONF" ]; then
+            grep -vE '^(TUNNEL_PORT|PORT|TUNNEL_SLOT)=' "$CONNECT_CONF" > "$tmp" 2>/dev/null || true
+            printf 'TUNNEL_PORT=%s\nPORT=%s\nTUNNEL_SLOT=%s\n' "$live" "$live" "$slot" >> "$tmp"
+            mv -f "$tmp" "$CONNECT_CONF"
+            chmod 600 "$CONNECT_CONF" 2>/dev/null || true
+        fi
+        TUNNEL_PORT="$live"
+    fi
+    return 0
+}
+
 _heal_stale_mounts() {
     [ -d "$MOUNTS_DIR" ] || return 0
     if _tunnel_up; then
@@ -573,6 +673,7 @@ _heal_cursor_git_off
 _heal_remove_shim
 _heal_bashrc_timeout
 _heal_connect_log_bufs
+_heal_align_conf_to_live_sshfs
 _heal_stale_mounts
 _heal_zombie_readable
 if [ -d "$MOUNTS_DIR" ] && timeout 3 ls "$MOUNTS_DIR" >/dev/null 2>&1; then

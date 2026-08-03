@@ -68,6 +68,7 @@ _stage_repo_from_laptop() {
         scripts/client/git-mode.ps1
         scripts/client/cursor-auth-laptop.ps1
         scripts/client/windows/windows-mcp-laptop.ps1
+        scripts/client/windows/Claude-Connect.exe
         scripts/client/mac/connect.sh
         scripts/client/mac/connect-update.sh
         scripts/client/mac/cursor-proxy-sidecar.sh

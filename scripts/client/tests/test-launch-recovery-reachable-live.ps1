@@ -1,11 +1,9 @@
-# test-launch-recovery-reachable-live.ps1 - Bug 8 LIVE: proves Get-CursorLaunchWindowPlan's
-# $useNewWindow (via $orphanHelpers) is ALWAYS true whenever $profileProcCount -gt 0, which means
-# the $preservedOpenWindows guard reproduced from editor-launch.ps1's real current formula
+# test-launch-recovery-reachable-live.ps1 - Bug 8 / B11 LIVE: proves Get-CursorLaunchWindowPlan's
+# UseNewWindow = AgentHome -or HasProfileWindow ONLY (orphanHelpers alone => UseNewWindow=false).
+# The $preservedOpenWindows guard reproduced from editor-launch.ps1's real current formula
 # (~line 2237: `$preservedOpenWindows = ($EditorCmd -eq 'cursor' -and ($agentHome -or
-# $useNewWindow) -and ($profileProcCount -gt 0))`) always equals the very next `if`'s condition
-# (`$EditorCmd -eq 'cursor' -and $profileProcCount -gt 0`) too - so the LAUNCH_RECOVERY_SKIP
-# `return $false` always fires first and the soft_stop_profile/cold_launch recovery block right
-# after it (~line 2244) can never execute for the 'cursor' editor whenever $profileProcCount -gt 0.
+# $useNewWindow) -and ($profileProcCount -gt 0))`) is evaluated against the REAL returned
+# .UseNewWindow. B11: orphan-helpers-only must NOT request --new-window (litter fix).
 # This test calls the REAL extracted Get-CursorLaunchWindowPlan function (dot-sourced verbatim out
 # of editor-launch.ps1 via Get-FunctionSource - not a re-implementation) across all 12 real
 # (AgentHome, HasProfileWindow, ProfileProcCount) combinations, then algebraically reconstructs
@@ -18,7 +16,7 @@ function Assert($cond, $msg) {
     else { Write-Host "  FAIL  $msg" -ForegroundColor Red; $script:fail++ }
 }
 Write-Host ''
-Write-Host '=== Launch-recovery reachability (Bug 8) #P2 (LIVE) ===' -ForegroundColor Cyan
+Write-Host '=== Launch-recovery reachability (Bug 8 / B11) #P2 (LIVE) ===' -ForegroundColor Cyan
 
 $editorLaunchFile = Get-ClientFile 'editor-launch.ps1'
 $content = Get-Content $editorLaunchFile -Raw
@@ -83,11 +81,12 @@ Write-Host ''
 Write-Host '--- 12 real Get-CursorLaunchWindowPlan calls + reconstructed guard state ---' -ForegroundColor Cyan
 $results | Format-Table AgentHome, HasProfileWindow, ProfileProcCount, UseNewWindow, OrphanHelpers, Reason, PreservedOpenWindows, RecoverySkipFires -AutoSize | Out-String | Write-Host
 
-Write-Host '--- Algebraic proof: whenever ProfileProcCount -gt 0, UseNewWindow is ALWAYS true ---' -ForegroundColor Cyan
+Write-Host '--- Algebraic proof: UseNewWindow true only when AgentHome or HasProfileWindow; orphan-only is false ---' -ForegroundColor Cyan
 $positiveCountRows = $results | Where-Object { $_.ProfileProcCount -gt 0 }
 Assert ($positiveCountRows.Count -eq 8) "8 of 12 real calls have ProfileProcCount -gt 0 (2x2x2 counts {1,5}), got $($positiveCountRows.Count)"
 foreach ($r in $positiveCountRows) {
-    Assert ($r.UseNewWindow -eq $true) "REAL call UseNewWindow=true for AgentHome=$($r.AgentHome) HasProfileWindow=$($r.HasProfileWindow) ProfileProcCount=$($r.ProfileProcCount) (reason='$($r.Reason)')"
+    $expectedUseNew = ($r.AgentHome -or $r.HasProfileWindow)
+    Assert ($r.UseNewWindow -eq $expectedUseNew) ("REAL call UseNewWindow=$($r.UseNewWindow) expected=$expectedUseNew AgentHome=$($r.AgentHome) HasProfileWindow=$($r.HasProfileWindow) ProfileProcCount=$($r.ProfileProcCount) reason=$($r.Reason)")
 }
 
 Write-Host ''
@@ -108,17 +107,17 @@ foreach ($r in $positiveCountRows) {
 }
 
 Write-Host ''
-Write-Host '--- Crux case: AgentHome=false, HasProfileWindow=false, ProfileProcCount=5 (orphan helpers only, no real open window to protect) ---' -ForegroundColor Cyan
+Write-Host '--- Crux case: AgentHome=false HasProfileWindow=false ProfileProcCount=5 (orphan helpers only) ---' -ForegroundColor Cyan
 $cruxRow = $results | Where-Object { $_.AgentHome -eq $false -and $_.HasProfileWindow -eq $false -and $_.ProfileProcCount -eq 5 } | Select-Object -First 1
-Assert ($null -ne $cruxRow) 'crux row (AgentHome=false, HasProfileWindow=false, ProfileProcCount=5) present among the 12 real results'
-Assert ($cruxRow.OrphanHelpers -eq $true) 'crux case: REAL function call classifies this as OrphanHelpers=true (no window, but stale helper processes exist)'
-Assert ($cruxRow.UseNewWindow -eq $true) 'crux case: REAL function call still returns UseNewWindow=true (unchanged, intentional - Get-CursorLaunchWindowPlan itself was NOT touched by the bug 8 fix, only how Launch-RemoteEditor re-derives preservedOpenWindows from it downstream)'
-Assert ($cruxRow.PreservedOpenWindows -eq $false) 'crux case FIXED: preservedOpenWindows is now FALSE (no real window, not agent-home) - no longer wrongly mirrors UseNewWindow'
-Assert ($cruxRow.RecoverySkipFires -eq $false) 'crux case FIXED: recovery-skip no longer fires -> the soft_stop_profile/cold_launch recovery block designed specifically for genuinely-dead orphan helpers IS NOW REACHABLE'
+Assert ($null -ne $cruxRow) 'crux row present among the 12 real results'
+Assert ($cruxRow.OrphanHelpers -eq $true) 'crux case: OrphanHelpers=true'
+Assert ($cruxRow.UseNewWindow -eq $false) 'crux case B11: UseNewWindow=false for orphan-helpers-only'
+Assert ($cruxRow.PreservedOpenWindows -eq $false) 'crux case: preservedOpenWindows=false'
+Assert ($cruxRow.RecoverySkipFires -eq $false) 'crux case: recovery-skip does not fire (cold-launch reachable)'
 
 Write-Host ''
 if ($fail -eq 0) {
-    Write-Host 'ALL PASS (GREEN): Bug 8 is FIXED - preservedOpenWindows now correctly tracks an actual visible window/agent-home (not the UseNewWindow/OrphanHelpers-contaminated signal), so the cold-launch recovery block is reachable exactly for the orphan-helpers-only case it was designed for, while still protecting every case with a real open window or agent-home.' -ForegroundColor Green
+    Write-Host 'ALL PASS (B11): UseNewWindow = AgentHome -or HasProfileWindow ONLY; orphan-helpers-only yields UseNewWindow=false; recovery-skip protects real windows/agent-home only.' -ForegroundColor Green
     exit 0
 }
 Write-Host "$fail FAIL (unexpected - re-verify against current source; if the formula legitimately changed again, confirm the new semantics before assuming regression)" -ForegroundColor Red

@@ -25,11 +25,26 @@ function Log([string]$m) {
         $f = Join-Path $d ('connect-{0}.log' -f (Get-Date -Format 'yyyyMMdd'))
         $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
         $sid = if ($env:CLAUDE_CONNECT_RUN_ID) { $env:CLAUDE_CONNECT_RUN_ID } else { 'setup' }
-        $day = "[$ts] [INFO] [$sid] SETUP_WORKER: $m"
-        [IO.File]::AppendAllText($f, $day + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+        $day = "[$ts] [INFO] [$sid] SETUP_WORKER: $m" + [Environment]::NewLine
+        # FileShare.ReadWrite: connect.ps1 holds the day log open; AppendAllText fails silently.
+        $utf8 = [Text.UTF8Encoding]::new($false)
+        $bytes = $utf8.GetBytes($day)
+        $fs = $null
+        try {
+            $fs = [IO.FileStream]::new(
+                $f,
+                [IO.FileMode]::Append,
+                [IO.FileAccess]::Write,
+                [IO.FileShare]::ReadWrite)
+            $null = $fs.Seek(0, [IO.SeekOrigin]::End)
+            $fs.Write($bytes, 0, $bytes.Length)
+            $fs.Flush()
+        } finally {
+            if ($fs) { try { $fs.Dispose() } catch { } }
+        }
         if ($m -match '(?i)fail|error|skip|exit=') {
             $bread = Join-Path $env:USERPROFILE '.config\claude-connect\last-fail.txt'
-            [IO.File]::AppendAllText($bread, $day + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+            try { [IO.File]::AppendAllText($bread, $day, $utf8) } catch { }
         }
     } catch { }
 }

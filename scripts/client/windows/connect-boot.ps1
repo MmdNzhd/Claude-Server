@@ -58,20 +58,38 @@ function Repair-ConnectVersionedLayoutAtBoot {
                 if (Get-Command Repair-ConnectVerDirLayout -ErrorAction SilentlyContinue) {
                     [void](Repair-ConnectVerDirLayout -VerDir $verDir -Quiet)
                 }
+                # Content poison: folder name .7 but connect.ps1 still .1 — leave this tree;
+                # Repair-ConnectAllVerDirLayouts + install-current will prefer a healthy VerDir.
+                $srcHealthy = $true
+                if (Get-Command Test-ConnectVerSrcComplete -ErrorAction SilentlyContinue) {
+                    $srcHealthy = [bool](Test-ConnectVerSrcComplete -SrcDir $StartDir -Ver $verName)
+                }
+                # Always prefer newest complete VerDir under root (never re-stamp install-current
+                # to this boot's older folder when a newer tree exists).
+                $best = $null
                 if (Get-Command Repair-ConnectAllVerDirLayouts -ErrorAction SilentlyContinue) {
                     $best = Repair-ConnectAllVerDirLayouts -Root $root -Quiet
-                    if ($best -and (Get-Command Write-ConnectRootInstantLauncher -ErrorAction SilentlyContinue)) {
-                        Write-ConnectRootInstantLauncher -Root $root -Ver $best
-                    }
-                } else {
+                }
+                if (-not $best) {
+                    if ($srcHealthy) { $best = $verName }
+                }
+                if ($best -match '^\d{8}\.\d+$') {
                     if (Get-Command Set-ConnectInstallCurrent -ErrorAction SilentlyContinue) {
-                        try { Set-ConnectInstallCurrent -Root $root -Ver $verName } catch {}
+                        try { Set-ConnectInstallCurrent -Root $root -Ver $best } catch {}
                     }
                     if (Get-Command Write-ConnectRootInstantLauncher -ErrorAction SilentlyContinue) {
-                        Write-ConnectRootInstantLauncher -Root $root -Ver $verName
+                        try { Write-ConnectRootInstantLauncher -Root $root -Ver $best } catch {}
                     }
+                    try {
+                        $stampDir = Join-Path $env:USERPROFILE '.config\claude-connect'
+                        New-Item -ItemType Directory -Force -Path $stampDir | Out-Null
+                        Set-Content -LiteralPath (Join-Path $stampDir 'last-launch-dir.txt') `
+                            -Value (Join-Path $root $best) -Encoding ASCII -NoNewline
+                    } catch {}
+                    Write-ConnectRootRedirectStub -Root $root -Ver $best
+                } else {
+                    Write-ConnectRootRedirectStub -Root $root -Ver $verName
                 }
-                Write-ConnectRootRedirectStub -Root $root -Ver $verName
                 # If all-repair retargeted current to a newer complete tree, prefer that src.
                 try {
                     $cv = ''
