@@ -145,6 +145,12 @@ try {
     # 7-9: install batch — folders-only root + no EXE leak
     Note 'install batch: folders-only root + no EXE in src or root'
     Copy-PayloadToSrc -ExtractSrc $extract -SrcDir $srcDirPath
+    # Align embedded ConnectVersion with testVer (real connect.ps1 has live repo ver).
+    $ps1Path = Join-Path $srcDirPath 'connect.ps1'
+    $ps1Raw = Get-Content -LiteralPath $ps1Path -Raw -ErrorAction Stop
+    $ps1Aligned = [regex]::Replace($ps1Raw, "(?m)(ConnectVersion\s*=\s*)'[^']+'", "`$1'$testVer'")
+    [IO.File]::WriteAllText($ps1Path, $ps1Aligned, [Text.UTF8Encoding]::new($false))
+    Set-Content -LiteralPath (Join-Path $srcDirPath 'connect-version.txt') -Value $testVer -Encoding ASCII -NoNewline
     Remove-Item -LiteralPath (Join-Path $tDrop.Root 'current.txt') -Force -ErrorAction SilentlyContinue
     Set-Content -LiteralPath (Get-ConnectInstallCurrentPath) -Value $testVer -Encoding ASCII -NoNewline
     Assert (-not (Test-Path -LiteralPath (Join-Path $tDrop.Root 'current.txt'))) `

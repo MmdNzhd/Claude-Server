@@ -3,7 +3,7 @@
 #
 # Bundle co-origination stamp: must match connect.ps1 ConnectBuildId (publish bumps both).
 # Detects split-generation installs where version string alone is unchanged (P1.2 residual).
-$script:GitModeBuildId = '9f7260d8-4b4d-4b60-b68a-cc9edccbc074'
+$script:GitModeBuildId = '8bee02bf-624b-4994-b31e-e6f7e650f77f'
 
 function Get-GitMode {
     # Site policy: GIT_MODE hide/server disabled. Always OFF (no .git rename).
@@ -1753,7 +1753,8 @@ function Invoke-ConnectOrphanReclaim {
         [string]$UidStr = '',
         [int[]]$ProtectSet = @(),
         [int]$PreferredPort = 0,
-        [System.Diagnostics.Process]$CurrentBgTunnel = $null,
+        # Accept real Process or test doubles with Id/HasExited (do not force [Diagnostics.Process]).
+        $CurrentBgTunnel = $null,
         [string]$ProtectRemotePath = '',
         [string]$ProtectProjectId = ''
     )

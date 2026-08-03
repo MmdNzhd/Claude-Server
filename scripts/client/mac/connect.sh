@@ -50,7 +50,7 @@ _update_script="$(cd "$(dirname "$0")" && pwd)/connect-update.sh"
 # Manual-only updates: skip auto-update on start (user presses u in the menu).
 # connect-update.sh remains available for invoke_connect_manual_update.
 
-CONNECT_VERSION='20260803.11'
+CONNECT_VERSION='20260803.13'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).
@@ -894,6 +894,10 @@ while [ "$exit_requested" -eq 0 ]; do
                     && connect_log 'FINALLY_KEEP_TUNNEL reason=editor_open' 'WARN'
                 if declare -F connect_log >/dev/null 2>&1; then
                     connect_log "SESSION_END reason=keep port=${PORT:-?} project=${go_id:-?}" 'INFO'
+                    if [ "${_PHASE_MS_LOGGED:-0}" != "1" ]; then
+                        _PHASE_MS_LOGGED=1
+                        connect_log "PHASE_MS mount=${SESSION_MOUNT_SEC:-${mount_t:-0}} auth=0 open=0 diag=0 ssh_total=0 ssh_count=0" 'INFO'
+                    fi
                 fi
                 # Write keep marker BEFORE disown (Win marker-before-detach parity).
                 if declare -F write_connect_keep_tunnel_marker >/dev/null 2>&1 \
@@ -913,6 +917,10 @@ while [ "$exit_requested" -eq 0 ]; do
                     _end_reason=session_end
                     [ "$already_down" -eq 1 ] && _end_reason=quit
                     connect_log "SESSION_END reason=${_end_reason} port=${PORT:-?} project=${go_id:-?}" 'INFO'
+                    if [ "${_PHASE_MS_LOGGED:-0}" != "1" ]; then
+                        _PHASE_MS_LOGGED=1
+                        connect_log "PHASE_MS mount=${SESSION_MOUNT_SEC:-${mount_t:-0}} auth=0 open=0 diag=0 ssh_total=0 ssh_count=0" 'INFO'
+                    fi
                     unset _end_reason
                 fi
                 if declare -F clear_connect_keep_tunnel_marker >/dev/null 2>&1 \
@@ -953,6 +961,14 @@ while [ "$exit_requested" -eq 0 ]; do
         if declare -F log_session_context >/dev/null 2>&1; then log_session_context 'session_loop'; fi
                 if [ "$SESSION_LOOP_ITER" -eq 1 ]; then
                     connect_log "SESSION_BEGIN ver=${CONNECT_VERSION:-?} uid=${SERVER_UID_STR:-?} alias=${ALIAS:-?} projectId=${go_id:-?} slot=${CLAUDE_CONNECT_UI_SLOT:-?} port=${PORT:-?} pid=$$ git_mode=$(get_git_mode 2>/dev/null || echo '?')" 'INFO'
+                    # E5: litter snapshot (best-effort peer Connect / Cursor hint)
+                    _litter_connect=0 _litter_profile=0 _litter_hint='none'
+                    _litter_connect="$(pgrep -af 'mac/connect\.sh|/connect\.sh' 2>/dev/null | grep -c . || echo 0)"
+                    _litter_profile="$(pgrep -af 'Cursor Helper|cursor-server' 2>/dev/null | grep -c . || echo 0)"
+                    if [ "${_litter_connect:-0}" -gt 1 ] 2>/dev/null; then _litter_hint='connect_live'
+                    elif [ "${_litter_profile:-0}" -gt 0 ] 2>/dev/null; then _litter_hint='profile_live'
+                    fi
+                    connect_log "LITTER_SNAPSHOT connect_ps=${_litter_connect} profile_all=${_litter_profile} peer_hint=${_litter_hint}" 'INFO'
                 fi
             fi
 
@@ -1107,10 +1123,15 @@ while [ "$exit_requested" -eq 0 ]; do
             fi
 
             step_ok "${mount_t}s"
+            SESSION_MOUNT_SEC="$mount_t"
             show_mount_git_warn "$mount_out"
             clean_out="$(printf '%s' "$mount_out" | sed 's/^already mounted: //')"
             if [ -n "$clean_out" ] && ! echo "$clean_out" | grep -q '^warn:'; then
                 printf '      -> \033[0;90m%s\033[0m\n' "$clean_out"
+            fi
+            # C6: MOUNT_VERIFY after successful mount (best-effort).
+            if declare -F invoke_connect_mount_verify >/dev/null 2>&1; then
+                invoke_connect_mount_verify "$go_id" "$mount_out" || true
             fi
             ACTIVE_PROJECT_ID="$go_id"
             CURSOR_AUTH_NEEDS_BOOTSTRAP=0

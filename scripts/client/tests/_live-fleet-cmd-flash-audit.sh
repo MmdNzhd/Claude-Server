@@ -43,8 +43,11 @@ users=0; dirty=0; miss=0; mismatch=0
 for h in /home/*; do
     [ -d "$h" ] || continue
     u=$(basename "$h")
+    # Skip non-user litter / accidental argv bleed (e.g. literal "--help" path).
+    case "$u" in
+      ''|-*|root|lost+found|administrator) continue ;;
+    esac
     id "$u" >/dev/null 2>&1 || continue
-    case "$u" in root|lost+found|administrator) continue ;; esac
     users=$((users + 1))
     for b in claude-mount claude-self-heal laptop-exec; do
         p="$h/.local/bin/$b"

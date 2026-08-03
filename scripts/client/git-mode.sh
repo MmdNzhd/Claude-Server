@@ -1504,6 +1504,82 @@ invoke_mount_project() {
     return "$ec"
 }
 
+# C6 / E5: best-effort post-open health — timed ls + bound -p + shared-p.
+# Never treat skip_remount_healthy / started_in_background alone as healthy.
+invoke_connect_mount_verify() {
+    local id="${1:-}" mount_out="${2:-}" out="" line="" shared_n=0 bound_p=""
+    id="$(printf '%s' "$id" | tr "'" '-')"
+    [ -n "$id" ] || return 0
+    out="$(sshx "set +e
+ID='$id'
+LP=\"\$HOME/mounts/\$ID\"
+ls_ok=0
+bound=''
+conf=''
+shared=0
+if [ -d \"\$LP\" ]; then
+  if timeout 3 ls -la \"\$LP\" >/dev/null 2>&1; then ls_ok=1; fi
+fi
+for p in /proc/[0-9]*; do
+  [ -r \"\$p/cmdline\" ] || continue
+  cmd=\$(tr '\\0' ' ' < \"\$p/cmdline\" 2>/dev/null)
+  case \"\$cmd\" in
+    *sshfs*)
+      case \"\$cmd\" in
+        *\"\$LP\"*)
+          bound=\$(printf '%s' \"\$cmd\" | sed -n 's/.* -p \\([0-9][0-9]*\\).*/\\1/p; t; s/.* -p\\([0-9][0-9]*\\).*/\\1/p')
+          break
+          ;;
+      esac
+      ;;
+  esac
+done
+conf=\$(grep -E '^TUNNEL_PORT=' \"\$HOME/.claude-connect.conf\" 2>/dev/null | tail -1 | cut -d= -f2- | tr -dc '0-9')
+if [ -n \"\$bound\" ]; then
+  shared=\$(ps -eo args 2>/dev/null | grep -F -- \"-p \$bound\" | grep -c '[s]shfs' || true)
+fi
+printf 'MOUNT_VERIFY ls_ok=%s bound_p=%s conf_p=%s shared_p=%s project=%s\\n' \"\$ls_ok\" \"\$bound\" \"\$conf\" \"\$shared\" \"\$ID\"
+if [ \"\$shared\" -ge 2 ] 2>/dev/null; then
+  printf 'MOUNT_SHARED_P projects_on_port=%s port=%s\\n' \"\$shared\" \"\$bound\"
+fi
+" 2>/dev/null || true)"
+    if [ -z "$out" ]; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "MOUNT_VERIFY empty project=${id} mount_out=$(printf '%s' "$mount_out" | tr '\n' ' ')" 'WARN'
+        fi
+        return 0
+    fi
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        case "$line" in
+            *MOUNT_VERIFY*|*MOUNT_SHARED_P*|*DUAL_CONNECT*)
+                if declare -F connect_log >/dev/null 2>&1; then
+                    case "$line" in
+                        *MOUNT_SHARED_P*|*DUAL_CONNECT*|*ls_ok=0*) connect_log "$line" 'WARN' ;;
+                        *) connect_log "$line" 'INFO' ;;
+                    esac
+                fi
+                ;;
+        esac
+    done <<EOF
+$out
+EOF
+    shared_n="$(printf '%s' "$out" | sed -n 's/.*shared_p=\([0-9][0-9]*\).*/\1/p' | head -1)"
+    bound_p="$(printf '%s' "$out" | sed -n 's/.*bound_p=\([0-9][0-9]*\).*/\1/p' | head -1)"
+    if [ "${shared_n:-0}" -ge 2 ] 2>/dev/null; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "DUAL_CONNECT warn shared_p=${shared_n} port=${bound_p:-?} project=${id}" 'WARN'
+        fi
+    fi
+    if echo "$mount_out" | grep -qE 'skip_remount_healthy|started_in_background' \
+        && ! echo "$out" | grep -q 'ls_ok=1'; then
+        if declare -F connect_log >/dev/null 2>&1; then
+            connect_log "MOUNT_VERIFY not_healthy_from_skip_alone project=${id}" 'WARN'
+        fi
+    fi
+    return 0
+}
+
 ensure_laptop_reverse_ssh_cached() {
     local pub="${1:-}" rc=0
     if [ "${LAPTOP_SSH_VERIFIED:-0}" = "1" ] && verify_laptop_reverse_ssh; then
@@ -3787,6 +3863,91 @@ show_connect_hygiene_interactive() {
             fi
         done
     done
+
+    # B9 / E5: Deep-clean offer — siblings, unmarked KEEP, or high Cursor profile litter.
+    # Never touches personal Cursor (~/Library/... personal profile); server-profile only via
+    # _close_cursor_project_windows_mac protect_root skip.
+    local keep_left=0 profile_all=0 offer_deep=0
+    keep_left="$(get_connect_keep_tunnel_markers 2>/dev/null | grep -c . || echo 0)"
+    profile_all="$(pgrep -af 'Cursor Helper|cursor-server|ClaudeServerCursor' 2>/dev/null | grep -c . || echo 0)"
+    if [ "${siblings:-0}" -gt 0 ] 2>/dev/null || [ "${keep_left:-0}" -gt 0 ] 2>/dev/null || [ "${profile_all:-0}" -ge 10 ] 2>/dev/null; then
+        offer_deep=1
+    fi
+    if [ "$offer_deep" -eq 1 ]; then
+        echo ""
+        printf '    \033[0;33mDeep-clean candidate: siblings=%s keep_markers=%s profile_all=%s\033[0m\n' \
+            "$siblings" "$keep_left" "$profile_all"
+        printf '    \033[0;90mStops sibling Connect, closes other project Cursor windows, clears unmarked KEEP.\033[0m\n'
+        printf '    \033[0;90mNever touches personal Cursor profile.\033[0m\n'
+        local ans_deep=""
+        if declare -F connect_prompt >/dev/null 2>&1; then
+            ans_deep="$(connect_prompt "    Run Deep-clean? [Y/N] " "HYGIENE_DEEP")"
+        else
+            read -rp "    Run Deep-clean? [Y/N] " ans_deep || true
+        fi
+        ans_deep="$(printf '%s' "$ans_deep" | tr '[:upper:]' '[:lower:]')"
+        if [ "$ans_deep" = "y" ] || [ "$ans_deep" = "yes" ]; then
+            if declare -F connect_log >/dev/null 2>&1; then connect_log 'HYGIENE_DEEP begin' 'INFO'; fi
+            local deep_sib_t=0 deep_sib_ui=0 deep_cursor=0 deep_keep=0 deep_orphans=0
+            # (a) Sibling stop (same as HYGIENE_SIBLING)
+            local i=0
+            for i in "${!sib_pids[@]}"; do
+                p="${sib_pids[$i]}"
+                port="${sib_ports[$i]}"
+                local proj="${sib_projects[$i]:-}"
+                kill "$p" 2>/dev/null || true
+                deep_sib_t=$((deep_sib_t + 1))
+                if declare -F connect_log >/dev/null 2>&1; then
+                    connect_log "HYGIENE_DEEP_SIBLING tunnels=1 port=$port pid=$p" 'INFO'
+                fi
+                local mark_slot=$((port - port_base)) mark_file mark_pid=""
+                mark_file="$(_connect_slot_marker_dir)/session-slot-${mark_slot}.json"
+                if [ -f "$mark_file" ]; then
+                    mark_pid="$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$mark_file" | head -1)"
+                fi
+                if [ -n "$mark_pid" ] && [ "$mark_pid" != "$$" ] && kill -0 "$mark_pid" 2>/dev/null; then
+                    kill "$mark_pid" 2>/dev/null || true
+                    deep_sib_ui=$((deep_sib_ui + 1))
+                fi
+                if [ -n "$proj" ] && [ "$proj" != "?" ]; then
+                    _close_cursor_project_windows_mac "$proj" "$protect_root" || true
+                    deep_cursor=$((deep_cursor + 1))
+                fi
+                clear_connect_session_slot_marker "$mark_slot" || true
+            done
+            # (b) Clear unmarked KEEP (no editor protect) — kill tunnel + marker + down-by-port
+            while IFS='|' read -r km_port km_slot km_tpid km_proj km_path km_alias km_ed km_kept; do
+                [ -n "$km_port" ] || continue
+                if test_connect_keep_editor_protect "$km_path" "$km_proj" "$km_kept" "${km_alias:-claude-server}" 1; then
+                    if declare -F connect_log >/dev/null 2>&1; then
+                        connect_log "HYGIENE_DEEP_KEEP_SKIP port=$km_port reason=editor_protect project=$km_proj" 'INFO'
+                    fi
+                    continue
+                fi
+                if [ -n "$km_tpid" ] && [ "$km_tpid" -gt 0 ] 2>/dev/null \
+                    && { [ -z "${bg_pid:-}" ] || [ "$km_tpid" != "$bg_pid" ]; }; then
+                    if declare -F connect_log >/dev/null 2>&1; then
+                        connect_log "HYGIENE_DEEP_KEEP_KILL port=$km_port pid=$km_tpid" 'INFO'
+                    fi
+                    kill "$km_tpid" 2>/dev/null || true
+                    deep_orphans=$((deep_orphans + 1))
+                fi
+                clear_connect_keep_tunnel_marker "$km_port" || true
+                if declare -F invoke_connect_mount_down_by_port >/dev/null 2>&1; then
+                    invoke_connect_mount_down_by_port "$km_port" || true
+                fi
+                deep_keep=$((deep_keep + 1))
+            done < <(get_connect_keep_tunnel_markers 2>/dev/null || true)
+            if declare -F connect_log >/dev/null 2>&1; then
+                connect_log "HYGIENE_DEEP done siblings_t=$deep_sib_t siblings_ui=$deep_sib_ui cursor=$deep_cursor keep_cleared=$deep_keep orphans=$deep_orphans" 'INFO'
+            fi
+            printf '    \033[0;32mDeep-clean: siblings_t=%s ui=%s cursor=%s keep_cleared=%s\033[0m\n\n' \
+                "$deep_sib_t" "$deep_sib_ui" "$deep_cursor" "$deep_keep"
+            return 0
+        fi
+        printf '    \033[0;90mSkipped Deep-clean.\033[0m\n'
+    fi
+
     if [ "$siblings" -le 0 ]; then echo ""; return 0; fi
     echo ""
     printf '    \033[0;33m%s sibling Connect session(s) still listed.\033[0m\n' "$siblings"

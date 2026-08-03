@@ -82,7 +82,8 @@ $script:tunnelStops = New-Object System.Collections.Generic.List[string]
 $script:uiStops = New-Object System.Collections.Generic.List[int]
 $script:cursorCloses = New-Object System.Collections.Generic.List[string]
 function Write-GitModeLog { param($Message,$Level='INFO') }
-function Get-LocalTunnelSshPids { param([int]$TargetPort); return @() }
+function Get-LocalTunnelSshPids { param([int]$TargetPort); [void]$script:softPidProbes.Add([int]$TargetPort); return @() }
+function Get-ConnectKeepTunnelMarkers { return @() }
 function Remove-LocalOrphanTunnel {
     param([int]$TargetPort,$CurrentBgTunnel=$null,[int[]]$ProtectedProcessIds=@())
     [void]$script:orphanPorts.Add([int]$TargetPort)
@@ -95,12 +96,14 @@ function Stop-Process { [CmdletBinding()] param([int]$Id,[switch]$Force); [void]
 . ([scriptblock]::Create((Get-FunctionSource -Content $git -Name 'Invoke-ConnectHygieneClean')))
 $empty = [pscustomobject]@{
     PortBase=20000; CurrentPid=[int]$PID; CurrentTunnelPid=0; ProtectRootName='Cur'
-    ProtectRemotePath=''; Markers=@(); Tunnels=@(); OrphanTunnelPids=@(); Siblings=@()
+    ProtectRemotePath=''; Markers=@(); KeepMarkers=@(); Tunnels=@(); OrphanTunnelPids=@(); Siblings=@()
     SoftTargetCount=0; SiblingCount=0; Server=[pscustomobject]@{Ok=$false}
 }
 $script:orphanPorts.Clear()
+$script:softPidProbes = New-Object System.Collections.Generic.List[int]
 $null = Invoke-ConnectHygieneClean -Mode Soft -Report $empty
-Assert ($script:orphanPorts.Count -eq 10) 'empty Soft still scans 10 ports (safe reclaim)'
+Assert ($script:softPidProbes.Count -ge 10) 'empty Soft still probes all 10 UID ports'
+Assert ($script:orphanPorts.Count -eq 0) 'empty Soft no Remove when no local -R'
 Assert ($script:tunnelStops.Count -eq 0 -and $script:uiStops.Count -eq 0 -and $script:cursorCloses.Count -eq 0) 'empty Soft no sibling side effects'
 $script:orphanPorts.Clear(); $script:tunnelStops.Clear(); $script:uiStops.Clear(); $script:cursorCloses.Clear()
 $null = Invoke-ConnectHygieneClean -Mode Sibling -Report $empty
@@ -109,17 +112,17 @@ Assert ($script:orphanPorts.Count -eq 0 -and $script:tunnelStops.Count -eq 0 -an
 # --- Interactive: cancel soft / soft-only / soft+sibling ---
 Write-Host ''
 Write-Host '--- Interactive UX ---' -ForegroundColor DarkCyan
-$script:softCalls = 0; $script:sibCalls = 0; $script:reportCalls = 0
+$script:softCalls = 0; $script:sibCalls = 0; $script:deepCalls = 0; $script:reportCalls = 0
 $script:answers = [System.Collections.Generic.Queue[string]]::new()
 function Read-Host { param([string]$Prompt) if ($script:answers.Count -eq 0) { return 'n' }; return $script:answers.Dequeue() }
 function Get-ConnectHygieneReport {
     param([string]$UidStr='',[string]$ProtectRemotePath='',[string]$ProtectProjectId='',[switch]$SkipServer)
     $script:reportCalls++
     if ($SkipServer -and $script:softCalls -ge 1) {
-        return [pscustomobject]@{ SoftTargetCount=0; SiblingCount=1; Tunnels=@(); Server=[pscustomobject]@{Ok=$false;Detail='skip'}; Siblings=@([pscustomobject]@{}) }
+        return [pscustomobject]@{ SoftTargetCount=0; SiblingCount=1; KeepMarkers=@(); Tunnels=@(); Server=[pscustomobject]@{Ok=$false;Detail='skip'}; Siblings=@([pscustomobject]@{}) }
     }
     return [pscustomobject]@{
-        SoftTargetCount=1; SiblingCount=1
+        SoftTargetCount=1; SiblingCount=1; KeepMarkers=@()
         Tunnels=@([pscustomobject]@{Class='orphan';Port=20002;TunnelPid=1;ConnectUiPid=0;ProjectId=''})
         Server=[pscustomobject]@{Ok=$true;SftpCount=0;ListenPorts=@(20000)}
         Siblings=@([pscustomobject]@{})
@@ -131,23 +134,36 @@ function Invoke-ConnectHygieneClean {
     $script:sibCalls++
     return [pscustomobject]@{SiblingTunnels=1;SiblingConnects=1;CursorWindows=1}
 }
+function Invoke-ConnectHygieneDeepClean {
+    param($Report,[string]$ProtectRemotePath='',[string]$ProtectProjectId='',[string]$Alias='claude-server')
+    $script:deepCalls++
+    return [pscustomobject]@{SiblingTunnels=0;SiblingConnects=0;CursorWindows=0;KeepCleared=0;OrphansKilled=0}
+}
 . ([scriptblock]::Create((Get-FunctionSource -Content $git -Name 'Show-ConnectHygieneInteractive')))
 
 $script:answers.Clear(); $script:answers.Enqueue('n')
-$script:softCalls=0; $script:sibCalls=0; $script:reportCalls=0
+$script:softCalls=0; $script:sibCalls=0; $script:deepCalls=0; $script:reportCalls=0
 Show-ConnectHygieneInteractive -UidStr '1000' -ProtectRemotePath 'D:\work\Cur' -ProtectProjectId 'Cur' | Out-Null
-Assert ($script:softCalls -eq 0 -and $script:sibCalls -eq 0) 'interactive N on soft cancels (no Soft/Sibling clean)'
+Assert ($script:softCalls -eq 0 -and $script:sibCalls -eq 0 -and $script:deepCalls -eq 0) 'interactive N on soft cancels (no Soft/Sibling/Deep clean)'
 
-$script:answers.Clear(); $script:answers.Enqueue('y'); $script:answers.Enqueue('n')
-$script:softCalls=0; $script:sibCalls=0
+# Soft Y + Deep N + Sibling N
+$script:answers.Clear(); $script:answers.Enqueue('y'); $script:answers.Enqueue('n'); $script:answers.Enqueue('n')
+$script:softCalls=0; $script:sibCalls=0; $script:deepCalls=0
 Show-ConnectHygieneInteractive -UidStr '1000' -ProtectRemotePath 'D:\work\Cur' -ProtectProjectId 'Cur' | Out-Null
-Assert ($script:softCalls -eq 1 -and $script:sibCalls -eq 0) 'interactive Y soft + N sibling runs Soft only'
+Assert ($script:softCalls -eq 1 -and $script:sibCalls -eq 0 -and $script:deepCalls -eq 0) 'interactive Y soft + N deep + N sibling runs Soft only'
 
-$script:answers.Clear(); $script:answers.Enqueue('yes'); $script:answers.Enqueue('YES')
-$script:softCalls=0; $script:sibCalls=0
+# Soft YES + Deep N + Sibling YES
+$script:answers.Clear(); $script:answers.Enqueue('yes'); $script:answers.Enqueue('n'); $script:answers.Enqueue('YES')
+$script:softCalls=0; $script:sibCalls=0; $script:deepCalls=0
 Show-ConnectHygieneInteractive -UidStr '1000' -ProtectRemotePath 'D:\work\Cur' -ProtectProjectId 'Cur' | Out-Null
-Assert ($script:softCalls -eq 1 -and $script:sibCalls -eq 1) 'interactive YES/YES runs Soft then Sibling'
+Assert ($script:softCalls -eq 1 -and $script:sibCalls -eq 1 -and $script:deepCalls -eq 0) 'interactive YES soft + N deep + YES sibling runs Soft then Sibling'
 Assert ($script:reportCalls -ge 2) 'interactive re-scans after soft (SkipServer path)'
+
+# Soft Y + Deep Y short-circuits Sibling
+$script:answers.Clear(); $script:answers.Enqueue('y'); $script:answers.Enqueue('y')
+$script:softCalls=0; $script:sibCalls=0; $script:deepCalls=0
+Show-ConnectHygieneInteractive -UidStr '1000' -ProtectRemotePath 'D:\work\Cur' -ProtectProjectId 'Cur' | Out-Null
+Assert ($script:softCalls -eq 1 -and $script:deepCalls -eq 1 -and $script:sibCalls -eq 0) 'interactive Deep Y runs Deep and skips Sibling prompt'
 
 # Nothing to clean
 function Get-ConnectHygieneReport {

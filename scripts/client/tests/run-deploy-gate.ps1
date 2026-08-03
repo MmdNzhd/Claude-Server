@@ -30,10 +30,17 @@ $CriticalScripts = @(
 # publish\deploy.bat / deploy-scripts-only. They are commented out in run-all.ps1
 # too; run the .ps1 files directly when changing windows-mcp-laptop.ps1.
 # Static windows-mcp-* batch/ports suites stay in the gate (fast).
+#
+# Also skip LIVE SSH fleet / post-deploy parity suites: they require the
+# already-deployed bundle to match repo (chicken-egg on scripts-only bump).
 $SkipDeployScripts = @(
     'test-harder-live-windows-mcp-storm.ps1'
     'test-hardest-live-windows-mcp-chaos.ps1'
     'test-brutal-live-windows-mcp-abuse.ps1'
+    'test-harder-adversarial.ps1'              # live repo==server==EXE parity (post-deploy)
+    'test-hard-cmd-flash-fleet-push.ps1'       # LIVE fleet ssh audit
+    'test-hard-utf8-mojibake-fleet.ps1'        # LIVE fleet encoding
+    'test-publish.ps1'                        # Desktop Smart/Sepidz ZIP mirror (not scripts-only)
 )
 
 function Get-SuitesFromRunAll {
@@ -53,7 +60,9 @@ function Get-SuitesFromRunAll {
     foreach ($m in $matches) {
         $name = $m.Groups[1].Value
         $script = $m.Groups[2].Value
-        if ($script -match '-live\.ps1$') { continue }
+        # Skip LIVE suites: both `*-live.ps1` and `*-live-*.ps1` (e.g. bat-boot-handoff).
+        # CriticalScripts may re-add known-safe static "live-named" gates (e.g. L7 skew).
+        if ($script -match '-live(\.ps1$|-)') { continue }
         if ($SkipDeployScripts -contains $script) { continue }
         if ($seen.ContainsKey($script)) { continue }
         $seen[$script] = $true

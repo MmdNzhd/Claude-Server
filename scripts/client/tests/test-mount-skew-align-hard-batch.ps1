@@ -57,6 +57,10 @@ Assert ($gm -match 'Invoke-ConnectOrphanReclaim') 'Win orphan reclaim'
 Assert ($gm -match 'Invoke-ConnectMountVerify') 'Win MOUNT_VERIFY'
 Assert ($gm -notmatch '\*"\\\$LP"\*') 'MOUNT_VERIFY does not use broken "\$LP" escape'
 Assert ($gm -match '(?m)case "`\$cmd" in') 'MOUNT_VERIFY uses escaped case cmd'
+Assert ($gmSh -match 'invoke_connect_mount_verify') 'Mac git-mode has invoke_connect_mount_verify'
+Assert ($mac -match 'invoke_connect_mount_verify') 'Mac connect calls MOUNT_VERIFY'
+Assert ($mac -match 'LITTER_SNAPSHOT') 'Mac SESSION_BEGIN emits LITTER_SNAPSHOT'
+Assert ($mac -match 'PHASE_MS mount=') 'Mac finally emits PHASE_MS'
 $envRepair = Get-Content (Get-ClientFile 'windows\connect-env-repair.ps1') -Raw
 Assert ($envRepair -match 'function Get-ConnectVersionSortKey') 'Get-ConnectVersionSortKey present'
 Assert ($envRepair -match 'Anti-downgrade') 'Set-ConnectInstallCurrent anti-downgrade'
@@ -64,7 +68,8 @@ $boot = Get-Content (Get-ClientFile 'windows\connect-boot.ps1') -Raw
 Assert ($boot -match 'never re-stamp install-current') 'boot prefers newest VerDir'
 Assert ($gm -match 'ACQUIRE_ORPHAN_RECLAIMABLE') 'Acquire orphan reclaimable class'
 
-Assert ($connect -match "ConnectVersion = '20260803\.5'") 'Win ConnectVersion 20260803.5'
+$verExpect = (Get-Content (Get-ClientFile 'windows\connect-version.txt') -Raw).Trim()
+Assert ($connect -match [regex]::Escape("ConnectVersion = '$verExpect'")) "Win ConnectVersion $verExpect"
 Assert ($connect -match 'Write-ConnectKeepTunnelMarker') 'KEEP writes marker'
 Assert ($connect -match 'OrphanReclaimDoneThisEnsure = \$false') 'sessionLoop resets reclaim flag'
 Assert ($connect -match 'Invoke-ConnectMountVerify') 'connect calls MOUNT_VERIFY'
@@ -75,7 +80,7 @@ Assert ($gmSh -match 'port_takeover') 'Mac PushConf port_takeover'
 Assert ($gmSh -match 'AM_ONLY|am_only') 'Mac PushConf AM_ONLY'
 Assert ($gmSh -match 'get_sibling_connect_tunnel_pids') 'Mac Soft sibling-safe'
 Assert ($gmSh -match 'down-by-port') 'Mac Soft down-by-port'
-Assert ($mac -match "CONNECT_VERSION='20260803\.5'") 'Mac CONNECT_VERSION 20260803.5'
+Assert ($mac -match [regex]::Escape("CONNECT_VERSION='$verExpect'")) "Mac CONNECT_VERSION $verExpect"
 Assert ($mac -match 'write_connect_keep_tunnel_marker') 'Mac KEEP marker before disown'
 
 $cleanup = Get-ServerFile 'server\commands\cleanup-user.sh'

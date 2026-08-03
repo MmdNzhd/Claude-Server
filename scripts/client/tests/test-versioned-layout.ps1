@@ -62,19 +62,24 @@ try {
     Assert ($left -notcontains '20260101.1') 'prune removed oldest .1'
     Assert ($left.Count -eq 3) 'prune left exactly 3 dirs'
 
-    # Fast-path complete check (Complete depends on Structural — extract both)
+    # Fast-path complete check (Complete needs Structural + embedded ps1 helper)
     $fnStruct = Get-FunctionSource -Content $launch -Name 'Test-VersionSrcStructural'
     Assert ($null -ne $fnStruct) 'extracted Test-VersionSrcStructural'
     Invoke-Expression $fnStruct
+    $fnPs1 = Get-FunctionSource -Content $launch -Name 'Get-ConnectPs1EmbeddedVersionLocal'
+    Assert ($null -ne $fnPs1) 'extracted Get-ConnectPs1EmbeddedVersionLocal'
+    Invoke-Expression $fnPs1
     $fn2 = Get-FunctionSource -Content $launch -Name 'Test-VersionSrcComplete'
     Assert ($null -ne $fn2) 'extracted Test-VersionSrcComplete'
     Invoke-Expression $fn2
     $src = Join-Path $root 'src-test'
     New-Item -ItemType Directory -Force -Path $src | Out-Null
     Assert (-not (Test-VersionSrcComplete -SrcDir $src -Version '20260101.15')) 'incomplete src => false'
-    foreach ($n in @('connect.bat', 'connect.ps1', 'connect-boot.ps1', 'connect-update.ps1', 'editor-launch.ps1', 'connect-ui.ps1', 'connect-env-repair.ps1')) {
+    foreach ($n in @('connect.bat', 'connect-boot.ps1', 'connect-update.ps1', 'editor-launch.ps1', 'connect-ui.ps1', 'connect-env-repair.ps1')) {
         Set-Content (Join-Path $src $n) -Value 'x'
     }
+    # EXE poison guard: folder/txt/ps1 MUST agree (txt-only match is not enough).
+    Set-Content (Join-Path $src 'connect.ps1') -Value "`$script:ConnectVersion = '20260101.15'" -Encoding ASCII
     Set-Content (Join-Path $src 'connect-version.txt') -Value '20260101.15' -NoNewline
     Assert (Test-VersionSrcComplete -SrcDir $src -Version '20260101.15') 'complete src => true'
     # Fast-path requires stamp == package version (mismatch => reinstall/repair).

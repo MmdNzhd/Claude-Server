@@ -1,7 +1,7 @@
 {
-    "mode": "optional",
-    "latest": "20260803.11",
-    "force_min_version": null,
-    "message_optional": "A newer Claude Connect is available. Update now?",
-    "message_force": "A required Claude Connect update will be applied now."
+    "mode": "force",
+    "latest": "20260803.13",
+    "force_min_version": "20260803.13",
+    "message_optional": "A newer Claude Connect is available (Multi-Connect mount fixes). Update now?",
+    "message_force": "Update required: Multi-Connect mount lifecycle fixes. Updating now."
 }

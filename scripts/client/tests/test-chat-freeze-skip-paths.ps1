@@ -30,7 +30,8 @@ Assert ($side -match 'Detach-CursorProxySidecarJobProcess -Process \$pWd') 'watc
 Assert ($auth -match 'AUTH_SYNC_SKIP') 'auth has AUTH_SYNC_SKIP'
 Assert ($auth -match 'db_too_large') 'auth skips reason=db_too_large'
 Assert ($auth -match '524288000') 'auth threshold is 500 MiB (524288000)'
-Assert ($auth -match '-not \$Force -and \$dbBytes -gt') 'db_too_large only on mid-session (!Force)'
+# Size skip is mid-session only: requires -not $Force (Force / golden_stale may bypass).
+Assert ($auth -match '(?s)-not \$Force[\s\S]{0,120}\$dbBytes\s*-gt') 'db_too_large only on mid-session (!Force)'
 
 # Stage 6 auto_relaunch must not regress
 Assert ($conn -match 'auto_relaunch_skip reason=cursor_settings') 'auto_relaunch still gated on cursor_settings'

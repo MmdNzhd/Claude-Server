@@ -106,7 +106,7 @@ Assert ($stepFailBlock -notmatch 'StepConsoleQuiet') 'StepFail is NOT gated by $
 Assert ($stepFailBlock -match 'Write-Host " failed"') 'StepFail still unconditionally prints " failed" to console'
 
 $sessionLoopHeadOk = $win -match (
-    '(?s)\$script:SessionLoopIter\+\+\s*\r?\n\s*(?:#[^\r\n]*\r?\n\s*)*' +
+    '(?s)\$script:SessionLoopIter\+\+\s*\r?\n\s*(?:#[^\r\n]*\r?\n\s*|\$script:OrphanReclaimDoneThisEnsure\s*=\s*\$false\s*\r?\n\s*)*' +
     '\$script:StepConsoleQuiet\s*=\s*\(\$script:SessionLoopIter\s*-gt\s*1\)'
 )
 Assert $sessionLoopHeadOk 'sessionLoop sets $script:StepConsoleQuiet = ($script:SessionLoopIter -gt 1) right after incrementing the iter counter'

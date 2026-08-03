@@ -49,6 +49,7 @@ Note 'extract setup-launch + update prune helpers'
 $needLaunch = @(
     'Resolve-VersionedTree',
     'Test-VersionSrcStructural',
+    'Get-ConnectPs1EmbeddedVersionLocal',
     'Test-VersionSrcComplete',
     'Copy-PayloadToSrc',
     'Move-LaunchExeIntoVerDir',
@@ -140,6 +141,12 @@ try {
     # 6-7: install batch — payload into src, current.txt pointer, no EXE leak
     Note 'install batch: src payload + current.txt + no EXE in src'
     Copy-PayloadToSrc -ExtractSrc $extract -SrcDir $srcDirPath
+    # Align embedded ConnectVersion with testVer (real connect.ps1 has live repo ver).
+    $ps1Path = Join-Path $srcDirPath 'connect.ps1'
+    $ps1Raw = Get-Content -LiteralPath $ps1Path -Raw -ErrorAction Stop
+    $ps1Aligned = [regex]::Replace($ps1Raw, "(?m)(ConnectVersion\s*=\s*)'[^']+'", "`$1'$testVer'")
+    [IO.File]::WriteAllText($ps1Path, $ps1Aligned, [Text.UTF8Encoding]::new($false))
+    Set-Content -LiteralPath (Join-Path $srcDirPath 'connect-version.txt') -Value $testVer -Encoding ASCII -NoNewline
     Set-Content -LiteralPath (Join-Path $tDrop.Root 'current.txt') -Value $testVer -Encoding ASCII -NoNewline
     $srcExes = @(Get-ChildItem -LiteralPath $srcDirPath -Filter 'Claude-Connect*.exe' -File -ErrorAction SilentlyContinue)
     Assert ($srcExes.Count -eq 0) 'no EXE inside src\ after payload copy batch'

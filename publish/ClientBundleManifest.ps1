@@ -71,6 +71,8 @@ function Set-RepoConnectVersion {
     # Keep client-update-policy.json "latest" in lockstep with ConnectVersion.
     # If latest lags and someone hot-patches policy on the live share after deploy,
     # checksums.txt still has the old hash → client "Update checksum failed" (live 2026-07-28).
+    # force_min_version must move with latest when mode=force (else scripts-only
+    # freezes force at the old min — same Stage-6b class drift as bump-connect-version).
     $policyPath = Join-Path $ProjectRoot 'scripts\server\client-update-policy.json'
     if (Test-Path -LiteralPath $policyPath) {
         $pol = Get-Content -LiteralPath $policyPath -Raw
@@ -78,6 +80,14 @@ function Set-RepoConnectVersion {
         if ($pol2 -eq $pol -and $pol -notmatch [regex]::Escape('"latest"') ) {
             throw "client-update-policy.json missing latest field"
         }
+        try {
+            $polObj = $pol2 | ConvertFrom-Json -ErrorAction Stop
+            $mode = ''
+            try { $mode = [string]$polObj.mode } catch { $mode = '' }
+            if ($mode -eq 'force') {
+                $pol2 = [regex]::Replace($pol2, '("force_min_version"\s*:\s*")[^"]*(")', "`${1}$Version`${2}")
+            }
+        } catch {}
         if ($pol2 -ne $pol) {
             [System.IO.File]::WriteAllText($policyPath, $pol2.TrimEnd() + "`n", [System.Text.UTF8Encoding]::new($false))
         }

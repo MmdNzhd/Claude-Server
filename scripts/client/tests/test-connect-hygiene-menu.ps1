@@ -56,7 +56,8 @@ Assert ($markersFn -match 'markerPid') 'markers reader avoids $pid vs automatic 
 Assert ($markersFn -notmatch '\$pid\s*=') 'markers reader has no $pid assignment'
 Assert ($git -match 'UTF8Encoding::new\(\$false\)|UTF8Encoding\]::new\(\$false\)') 'marker write is UTF-8 without BOM'
 
-Assert ($clean2 -match '(?s)Mode -eq ''Soft''[\s\S]{0,1200}Remove-LocalOrphanTunnel') 'Soft arm calls orphan reclaim'
+Assert ($clean2 -match 'for \(\$slot = 0; \$slot -lt 10') 'Soft loops all 10 UID ports'
+Assert ($clean2 -match '(?s)Mode -eq ''Soft''[\s\S]{0,4000}Remove-LocalOrphanTunnel') 'Soft arm calls Remove-LocalOrphanTunnel'
 Assert ($clean2 -match '(?s)HYGIENE_SIBLING begin[\s\S]{0,800}Report\.Siblings') 'Sibling arm iterates Report.Siblings'
 Assert ($clean2 -match 'protect_current') 'Sibling skips Cursor close when root equals protect'
 Assert ($show -match 'Soft-clean orphans/idle') 'interactive asks soft confirm'
@@ -184,7 +185,9 @@ Assert ($classes -contains '20002:orphan') 'HARD classifies orphan tunnel'
 
 $script:orphanPorts.Clear(); $script:tunnelStops.Clear(); $script:uiStops.Clear(); $script:cursorCloses.Clear(); $script:sshxCalls.Clear()
 $soft = Invoke-ConnectHygieneClean -Mode Soft -Report $r -ProtectRemotePath 'D:\work\CurrentProj' -ProtectProjectId 'CurrentProj'
-Assert ($script:orphanPorts.Count -eq 10) 'HARD Soft scans all 10 user ports via orphan reclaim'
+# Soft only Remove-LocalOrphanTunnel on ports that still have local -R (not empty slots).
+Assert ($script:orphanPorts.Count -eq 3) 'HARD Soft Remove on live local -R ports only (3)'
+Assert ((@($script:orphanPorts | Sort-Object -Unique) -join ',') -eq '20000,20001,20002') 'HARD Soft Remove ports are the three live tunnels'
 Assert ($script:tunnelStops.Count -eq 0) 'HARD Soft never Stop-TunnelProcessWithExitLog'
 Assert ($script:uiStops.Count -eq 0) 'HARD Soft never Stop-Process Connect UI'
 Assert ($script:cursorCloses.Count -eq 0) 'HARD Soft never Close-CursorProjectWindows'

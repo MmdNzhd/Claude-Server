@@ -41,6 +41,27 @@ Write-Host ''
 
 $winVerPath = Join-Path $ProjectRoot 'scripts\client\windows\connect-version.txt'
 $beforeVer = (Get-Content -LiteralPath $winVerPath -Raw).Trim()
+
+# Run deploy-gate BEFORE bump so repo content can still match the live bundle
+# for any residual static checks. Version bump happens after gate passes.
+$gateScript = Join-Path $ProjectRoot 'scripts\client\tests\run-deploy-gate.ps1'
+if ($SkipTests) {
+    Write-Host ''
+    Write-Host '  *** WARN: -SkipTests — deploy-gate NOT run (emergency override) ***' -ForegroundColor Yellow
+    Write-Host ''
+} else {
+    if (-not (Test-Path -LiteralPath $gateScript)) {
+        throw "Missing deploy gate script: $gateScript"
+    }
+    Write-Host '  Running client deploy-gate tests (pre-bump)...' -ForegroundColor Cyan
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $gateScript
+    $gateExit = $LASTEXITCODE
+    if ($gateExit -ne 0) {
+        throw "Client deploy-gate tests failed (exit=$gateExit). Fix tests or pass -SkipTests to override."
+    }
+    Write-Host '  Deploy-gate tests passed' -ForegroundColor Green
+}
+
 $newVer = $beforeVer
 if ($Version) {
     $newVer = $Version.Trim()
@@ -52,24 +73,6 @@ if ($Version) {
     Write-Host "  Version bump: $beforeVer -> $newVer" -ForegroundColor Cyan
 } else {
     Write-Host "  Version keep: $newVer (-NoBump)" -ForegroundColor DarkGray
-}
-
-$gateScript = Join-Path $ProjectRoot 'scripts\client\tests\run-deploy-gate.ps1'
-if ($SkipTests) {
-    Write-Host ''
-    Write-Host '  *** WARN: -SkipTests — deploy-gate NOT run (emergency override) ***' -ForegroundColor Yellow
-    Write-Host ''
-} else {
-    if (-not (Test-Path -LiteralPath $gateScript)) {
-        throw "Missing deploy gate script: $gateScript"
-    }
-    Write-Host '  Running client deploy-gate tests...' -ForegroundColor Cyan
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $gateScript
-    $gateExit = $LASTEXITCODE
-    if ($gateExit -ne 0) {
-        throw "Client deploy-gate tests failed (exit=$gateExit). Fix tests or pass -SkipTests to override."
-    }
-    Write-Host '  Deploy-gate tests passed' -ForegroundColor Green
 }
 
 # Snapshot live EXE hash before deploy (must match after).

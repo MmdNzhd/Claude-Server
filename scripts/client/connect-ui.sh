@@ -323,7 +323,14 @@ write_connect_scorecard() {
         port_sc="$(printf '%s' "$TUNNEL_PORT" | tr -dc '0-9')"
     fi
     [ -n "$port_sc" ] || port_sc=0
-    local line="SCORECARD ${phase} auth_ms=n/a banner=${banner} mount_ms=n/a am=${am} editor=${ed} slot=0 ver=${ver} port=${port_sc}"
+    # C7: never hardcode slot=0 — empty/non-digit → '?' (must not look like primary).
+    local slot_sc='?'
+    case "${CLAUDE_CONNECT_UI_SLOT:-}" in
+        '' ) slot_sc='?' ;;
+        *[!0-9]* ) slot_sc='?' ;;
+        * ) slot_sc="${CLAUDE_CONNECT_UI_SLOT}" ;;
+    esac
+    local line="SCORECARD ${phase} auth_ms=n/a banner=${banner} mount_ms=n/a am=${am} editor=${ed} slot=${slot_sc} ver=${ver} port=${port_sc}"
     if [ -n "${_LAST_AGENT_PATH_OK:-}" ]; then
         local ap_state='bad' ap_conf="${_LAST_AGENT_PATH_CONF:-}"
         [ "${_LAST_AGENT_PATH_OK}" = "1" ] && ap_state='ok'

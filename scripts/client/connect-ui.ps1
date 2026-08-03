@@ -1894,8 +1894,9 @@ function Write-ConnectScorecard {
         try { $edOpen = [bool](Get-Variable -Name editorOpened -Scope 1 -ValueOnly) } catch { $edOpen = $false }
     }
     $ed = if ($edOpen) { 'open' } else { 'closed' }
-    $slot = ($env:CLAUDE_CONNECT_UI_SLOT + '')
-    if (-not $slot) { $slot = '0' }
+    # C7: never coerce empty UI_SLOT → 0 (looks like primary). Digit only, else '?'.
+    $slot = ($env:CLAUDE_CONNECT_UI_SLOT + '').Trim()
+    if ($slot -notmatch '^\d+$') { $slot = '?' }
     $line = ("SCORECARD {0} auth_ms={1} banner={2} mount_ms={3} am={4} editor={5} slot={6} ver={7}" -f `
         $Phase, $auth, $banner, $mount, $am, $ed, $slot, $ver)
     $sessionPortSc = ''

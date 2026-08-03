@@ -47,6 +47,9 @@ Assert ($gm -match 'keep_editor') 'keep_editor classification present'
 # --- Deep hygiene ---
 Assert ($gm -match 'function Invoke-ConnectHygieneDeepClean') 'Invoke-ConnectHygieneDeepClean defined'
 Assert ($gm -match 'HYGIENE_DEEP') 'HYGIENE_DEEP log present'
+Assert ($gmSh -match 'HYGIENE_DEEP begin') 'Mac HYGIENE_DEEP begin log'
+Assert ($gmSh -match 'HYGIENE_DEEP_KEEP_SKIP|HYGIENE_DEEP_KEEP_KILL') 'Mac HYGIENE_DEEP keep clear path'
+Assert ($gmSh -match 'Never touches personal Cursor') 'Mac Deep never touches personal Cursor'
 
 # --- KEEP path writes marker ---
 Assert ($connect -match 'Write-ConnectKeepTunnelMarker') 'connect KEEP writes marker'
