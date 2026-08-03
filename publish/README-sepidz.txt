@@ -3,7 +3,7 @@ Claude Code Server - Client Package (Sepidz)
 
 Site: Sepidz
 Server IP (baked into connect scripts): 192.168.250.70
-Current connect scripts: v20260802.3
+Current connect scripts: v20260802.4
 
 SEPIDZ PUBLISH FREEZE (permanent until explicit unfreeze)
 ---------------------------------------------------------
@@ -39,7 +39,7 @@ WINDOWS
   3. Double-click connect.bat
 
   Header must show:
-    claude-server  |  192.168.250.70  |  v20260802.3
+    claude-server  |  192.168.250.70  |  v20260802.4
 
 MAC
   1. In Terminal:
@@ -48,7 +48,7 @@ MAC
      claude-mount.sh
 
   Header must show:
-    claude-server  |  192.168.250.70  |  v20260802.3
+    claude-server  |  192.168.250.70  |  v20260802.4
 
   Mac Remote Login: System Settings -> Sharing -> Remote Login must allow
   your Mac account (whoami) or All users. Separate from Linux server username.
@@ -74,7 +74,7 @@ ONE CONNECT PER PC
   Orphan tunnel cleanup never kills the live session ssh -R (peer safety).
 
 
-SINGLE PROJECT: only one ACTIVE_MOUNT per session (v20260802.3+).
+SINGLE PROJECT: only one ACTIVE_MOUNT per session (v20260802.4+).
 
 DESIGNER CLIENT (designer\)
 ---------------------------
@@ -95,7 +95,7 @@ TROUBLESHOOTING
 
 CURSOR AUTH: server golden tokens + profile machineid; use [Claude Server] window only.
 
-LOGS (durable on laptop + synced to server, v20260802.3+)
+LOGS (durable on laptop + synced to server, v20260802.4+)
 ----------------------------------------------------------------
   Connect keeps a durable local day log on your laptop AND syncs it to
   the Sepidz server account:

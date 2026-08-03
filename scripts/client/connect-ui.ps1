@@ -110,6 +110,32 @@ function Write-ConnectLogSyncWatermark {
     } catch { }
 }
 
+function Sync-ConnectLogAckWatermarkAdvance {
+    # Every successful sync writes its own LOG_SYNC_OK (and, on rebuild/reconcile paths, a
+    # sibling LOG_SYNC_REBUILD/LOG_SYNC_RECONCILE) line into the SAME day log it just synced,
+    # but the watermark was already persisted to the offset BEFORE those bytes existed. Left
+    # alone, that ack line is immediately "new unsynced content" of its own, so the next pump
+    # tick syncs it, writes another ack line, and repeats forever - a self-feeding ~4s loop
+    # that was found live on 2026-08-03 running ~15 syncs/min (hundreds of SSH legs/hour)
+    # syncing nothing but its own acknowledgements, starving real SSH traffic (e.g. a
+    # deferred Server-setup PUSH_CONF) of connection capacity on the same box. Re-read the
+    # file's real current length right after writing the ack line(s) and fold those bytes
+    # into the watermark immediately, so the ack line is treated as already-synced instead
+    # of re-triggering another sync of itself.
+    param(
+        [Parameter(Mandatory)][string]$LogPath,
+        [switch]$IsPrimary
+    )
+    try {
+        $len = (Get-Item -LiteralPath $LogPath -ErrorAction Stop).Length
+        Write-ConnectLogSyncWatermark -Offset ([int]$len) -LogPath $LogPath
+        if ($IsPrimary) {
+            $script:ConnectLogSyncOffset = [int]$len
+            $script:ConnectLogLinesSinceSync = 0
+        }
+    } catch { }
+}
+
 function Get-ConnectLogSyncPendingPath {
     param([string]$LogPath = $script:ConnectLogPath)
     if (-not $LogPath) { $LogPath = Get-ConnectLogDayPath }
@@ -702,6 +728,7 @@ function Sync-ConnectLogToServer {
                                 Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_REBUILD local=$fileLen remote_was=$remoteBeforeProbe off=$off (replaced remote day log)"
                             }
                         } catch { }
+                        Sync-ConnectLogAckWatermarkAdvance -LogPath $path -IsPrimary:(-not $LogPath -or $LogPath -eq $script:ConnectLogPath)
                         try { Remove-Item -LiteralPath $tmpLocal -Force -ErrorAction SilentlyContinue } catch { }
                         return
                     }
@@ -730,6 +757,7 @@ function Sync-ConnectLogToServer {
                         Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_RECONCILE pending_ok off=$off take=$take remote=$rNow (skipped re-append)"
                     }
                 } catch { }
+                Sync-ConnectLogAckWatermarkAdvance -LogPath $path -IsPrimary:(-not $LogPath -or $LogPath -eq $script:ConnectLogPath)
                 try { Remove-Item -LiteralPath $tmpLocal -Force -ErrorAction SilentlyContinue } catch { }
                 return
             }
@@ -752,6 +780,7 @@ function Sync-ConnectLogToServer {
                     Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_RECONCILE tail_hash_match off=$off take=$take (skipped re-append)"
                 }
             } catch { }
+            Sync-ConnectLogAckWatermarkAdvance -LogPath $path -IsPrimary:(-not $LogPath -or $LogPath -eq $script:ConnectLogPath)
             try { Remove-Item -LiteralPath $tmpLocal -Force -ErrorAction SilentlyContinue } catch { }
             return
         }
@@ -837,6 +866,7 @@ function Sync-ConnectLogToServer {
                     Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_OK off=$newOff take=$take force=$([int][bool]$Force) mode=append"
                 }
             } catch { }
+            Sync-ConnectLogAckWatermarkAdvance -LogPath $path -IsPrimary:(-not $LogPath -or $LogPath -eq $script:ConnectLogPath)
             if ($newOff -lt $fileLen -and (-not $LogPath -or $LogPath -eq $script:ConnectLogPath)) {
                 $script:ConnectLogLinesSinceSync = 25
             }

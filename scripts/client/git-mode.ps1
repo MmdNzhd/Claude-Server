@@ -3,7 +3,7 @@
 #
 # Bundle co-origination stamp: must match connect.ps1 ConnectBuildId (publish bumps both).
 # Detects split-generation installs where version string alone is unchanged (P1.2 residual).
-$script:GitModeBuildId = '3ba70694-6390-4dc2-9e35-aadfb29d628e'
+$script:GitModeBuildId = '82c842cf-8db8-44f2-bffd-0955674a379c'
 
 function Get-GitMode {
     # Site policy: GIT_MODE hide/server disabled. Always OFF (no .git rename).

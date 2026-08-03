@@ -70,6 +70,7 @@ $suites = @(
     @{ Name = 'log-sync-nullsafe';      Script = 'test-log-sync-nullsafe.ps1' }
     @{ Name = 'log-sync-chunk-read-nullsafe'; Script = 'test-log-sync-chunk-read-nullsafe.ps1' }
     @{ Name = 'log-sync-delivery-nonerror'; Script = 'test-log-sync-delivery-nonerror.ps1' }
+    @{ Name = 'log-sync-ack-no-feedback-loop'; Script = 'test-log-sync-ack-no-feedback-loop.ps1' }
     @{ Name = 'error-flush-contract';   Script = 'test-error-flush-contract.ps1' }
     @{ Name = 'mount-failfast'; Script = 'test-mount-failfast.ps1' }
     @{ Name = 'session-fresh-probe-skips'; Script = 'test-session-fresh-probe-skips.ps1' }
