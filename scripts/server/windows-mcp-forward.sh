@@ -79,6 +79,23 @@ _stop() {
   sleep 0.3
 }
 
+# Normalize curl http_code: never append via `|| echo 000` (concat → 000000).
+_wmcp_http() {
+  local c
+  c=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${FPORT}/mcp" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -H "Authorization: Bearer ${WINDOWS_MCP_AUTH_KEY}" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"wmcp-fwd","version":"0"}}}' \
+    --max-time 3 2>/dev/null || true)
+  c=$(printf '%s' "$c" | tr -dc '0-9')
+  c=$(printf '%s' "$c" | sed 's/.*\([0-9]\{3\}\)$/\1/')
+  case "$c" in
+    [0-9][0-9][0-9]) printf '%s' "$c" ;;
+    *) printf '000' ;;
+  esac
+}
+
 case "$CMD" in
   status)
     if _listening; then
@@ -95,25 +112,41 @@ case "$CMD" in
     ;;
   start|"")
     # If a dedicated forward already targets the current LPORT, leave it.
-    # If FPORT is held by something else but HTTP already works, leave it too
-    # (never steal a live working path / never kill laptop-exec mux).
-    # Otherwise recreate (Hyper-V port moves, dead one-shot ssh -f -N).
+    # Parallel Connect: do NOT _stop on the first non-200 — MCP cold-start and peer
+    # probes race; killing a live -L drops everyone to WMCP_PROBE=000 (e2e ×6).
     # ControlMaster=no: keep this off laptop-exec's shared mux.
     if _listening && pgrep -af "ssh.*-L 127.0.0.1:${FPORT}:127.0.0.1:${LPORT}" >/dev/null 2>&1; then
+      if [ -n "${WINDOWS_MCP_AUTH_KEY:-}" ]; then
+        _code=000
+        for _t in 1 2 3 4 5; do
+          _code="$(_wmcp_http)"
+          [ "$_code" = "200" ] && break
+          sleep 0.6
+        done
+        if [ "$_code" = "200" ]; then
+          echo "windows-mcp-forward: already up on $FPORT -> laptop:$LPORT (http=200)"
+          exit 0
+        fi
+        # Forward SSH is up but MCP not ready yet — leave the -L; caller retries probe.
+        echo "windows-mcp-forward: leave live forward on $FPORT (http=$_code, no_stop)"
+        exit 0
+      fi
       echo "windows-mcp-forward: already up on $FPORT -> laptop:$LPORT"
       exit 0
     fi
     if _listening && [ -n "${WINDOWS_MCP_AUTH_KEY:-}" ]; then
-      _code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${FPORT}/mcp" \
-        -H 'Content-Type: application/json' \
-        -H 'Accept: application/json, text/event-stream' \
-        -H "Authorization: Bearer ${WINDOWS_MCP_AUTH_KEY}" \
-        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"wmcp-fwd","version":"0"}}}' \
-        --max-time 3 2>/dev/null || echo 000)"
+      _code=000
+      for _t in 1 2 3 4 5; do
+        _code="$(_wmcp_http)"
+        [ "$_code" = "200" ] && break
+        sleep 0.6
+      done
       if [ "$_code" = "200" ]; then
         echo "windows-mcp-forward: already healthy on $FPORT (http=200, leave live session)"
         exit 0
       fi
+      # Foreign/stale holder without matching argv — only then recreate.
+      echo "windows-mcp-forward: FPORT up but unhealthy http=$_code; recreating" >&2
     fi
     _stop
     if _listening; then

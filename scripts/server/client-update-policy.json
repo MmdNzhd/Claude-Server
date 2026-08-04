@@ -1,7 +1,7 @@
 {
-    "mode": "force",
-    "latest": "20260803.13",
-    "force_min_version": "20260803.13",
-    "message_optional": "A newer Claude Connect is available (Multi-Connect mount fixes). Update now?",
-    "message_force": "Update required: Multi-Connect mount lifecycle fixes. Updating now."
+    "mode":  "force",
+    "latest":  "20260804.16",
+    "force_min_version":  "20260804.16",
+    "message_optional":  "A newer Claude Connect is available (multi-Connect complete: reap-skip, gate contended, e2e hygiene). Update now?",
+    "message_force":  "Update required: multi-Connect complete pack (orphan reap-skip + launch gate Contended + log/e2e hygiene). Updating now."
 }

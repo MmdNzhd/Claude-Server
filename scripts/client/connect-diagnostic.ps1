@@ -135,7 +135,9 @@ function Get-ConnectProblemVerdict {
             NextAction = 'C'
         }
     }
-    if ($Ctx.EditorCmd -eq 'cursor' -and $Ctx.AuthOk -eq $false -and -not $Ctx.OnFolder) {
+    # AuthOk=$false + detail skip is normal (stamp current) — do not WARN as incomplete.
+    $authSkipOk = ([string]$Ctx.AuthDetail -match 'skip')
+    if ($Ctx.EditorCmd -eq 'cursor' -and $Ctx.AuthOk -eq $false -and -not $Ctx.OnFolder -and -not $authSkipOk) {
         return @{
             Code = 'CURSOR_AUTH_INCOMPLETE'; Severity = 'WARN'; Summary = 'Cursor auth merge incomplete.'
             Cause = 'state.vscdb tokens missing or merge failed.'
@@ -294,7 +296,7 @@ function Write-ConnectDiagnosticReport {
         EditorCmd = $EditorCmd; Port = $Port; ServerIP = $ServerIP
         TunnelUp = $tunnelUpNow; MountOk = $MountOk; MountOut = $MountOut
         OnFolder = $OnFolder; AgentHome = $AgentHome; WindowOpen = $WindowOpen
-        DidLaunch = $DidLaunch; AuthOk = $AuthOk; CursorExeFound = $cursorFound
+        DidLaunch = $DidLaunch; AuthOk = $AuthOk; AuthDetail = $AuthDetail; CursorExeFound = $cursorFound
         ServerReachable = $serverReachable; RemotePath = $RemotePath
         MountPoint = $mountPoint; PathExists = $pathExists
         LaunchHistory = $LaunchHistory

@@ -299,7 +299,7 @@ function Enter-ConnectSingleInstance {
         $script:ConnectInstanceMutex = $global:ClaudeConnectBootMutex
         $global:ClaudeConnectBootMutex = $null
         $slot = ($env:CLAUDE_CONNECT_UI_SLOT + '').Trim()
-        # C7: refuse empty inherit — fall through to mutex loop so UI_SLOT is always a digit.
+        # C7: refuse empty inherit - fall through to mutex loop so UI_SLOT is always a digit.
         if ($slot -notmatch '^\d+$') {
             if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
                 Write-ConnectLog ("MULTI_INSTANCE: boot_inherit_refuse_empty_slot pid={0} - claiming fresh slot" -f $PID) 'WARN'
@@ -469,6 +469,43 @@ function Get-ConnectLogProcFailReason {
     return ($bits -join ' ')
 }
 
+function Write-ConnectLogSyncFailBreadcrumb {
+    # Dual-Connect: Write-ConnectLogSynced can fail under mutex/AV while Sync still needs a
+    # durable LOG_SYNC_FAIL line (fleet showed detail=exception at=649 with zero chunk_read_fail
+    # ever landing). Try synced write first; on miss, AppendAllText the day log. Always mirror
+    # to last-fail.txt so classification cannot vanish.
+    param(
+        [Parameter(Mandatory)][string]$Line,
+        [string]$LogPath = ''
+    )
+    $wrote = $false
+    try {
+        if ($script:ConnectLogWriter) {
+            Write-ConnectLogSynced -Line $Line
+            $wrote = $true
+        }
+    } catch { }
+    $payload = ($Line + [Environment]::NewLine)
+    $enc = [System.Text.UTF8Encoding]::new($false)
+    if (-not $wrote) {
+        try {
+            $dayPath = if ($LogPath) { $LogPath } else { $script:ConnectLogPath }
+            if ($dayPath -and (Test-Path -LiteralPath $dayPath -PathType Leaf)) {
+                [System.IO.File]::AppendAllText($dayPath, $payload, $enc)
+                $wrote = $true
+            } elseif ($script:ConnectLogPath -and (Test-Path -LiteralPath $script:ConnectLogPath -PathType Leaf)) {
+                [System.IO.File]::AppendAllText($script:ConnectLogPath, $payload, $enc)
+                $wrote = $true
+            }
+        } catch { }
+    }
+    try {
+        $breadDir = Join-Path $env:USERPROFILE '.config\claude-connect'
+        New-Item -ItemType Directory -Force -Path $breadDir | Out-Null
+        [System.IO.File]::AppendAllText((Join-Path $breadDir 'last-fail.txt'), $payload, $enc)
+    } catch { }
+}
+
 function Invoke-ConnectLogProcTimed {
     param(
         [Parameter(Mandatory)][string]$Exe,
@@ -545,13 +582,82 @@ function Invoke-ConnectLogProcTimed {
                         $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                         $sid = Get-ConnectSessionId
                         if ($script:ConnectLogWriter) {
-                            Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] TEMP_CLEANUP_FAIL path=$f err=$($_.Exception.Message)"
+                            Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] TEMP_CLEANUP_FAIL path=$f err=$($_.Exception.Message)"
                         }
                     } catch { }
                 }
             }
         } catch { }
     }
+}
+
+function Read-ConnectLogChunkBytes {
+    # Fail-soft chunk reader for Sync-ConnectLogToServer. Returns:
+    #   byte[] length>0  — bytes to ship
+    #   byte[] length=0  — EOF / nothing to read
+    #   $null            — hard read failure (caller logs chunk_read_fail)
+    # Must never throw. Critical: do NOT `return` inside try/finally — PS can resurface a
+    # Dispose/race NRE from finally and wipe the catch return (fleet .8 stack still showed
+    # NullReferenceException escaping to Sync outer catch from this helper).
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int64]$Offset,
+        [Parameter(Mandatory)][int]$Take
+    )
+    $fs = $null
+    $result = $null
+    $failed = $true
+    try {
+        if ($Take -le 0) {
+            $result = [byte[]]::new(0)
+            $failed = $false
+        } elseif (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            $failed = $true
+        } else {
+            $fs = [System.IO.File]::Open(
+                $Path,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite)
+            if ($null -eq $fs) {
+                $failed = $true
+            } else {
+                $len = [int64]$fs.Length
+                $offUse = $Offset
+                if ($offUse -lt 0) { $offUse = 0 }
+                if ($offUse -ge $len) {
+                    $result = [byte[]]::new(0)
+                    $failed = $false
+                } else {
+                    $null = $fs.Seek([int64]$offUse, [System.IO.SeekOrigin]::Begin)
+                    $buf = [byte[]]::new($Take)
+                    $n = $fs.Read($buf, 0, $Take)
+                    if ($n -le 0) {
+                        $result = [byte[]]::new(0)
+                        $failed = $false
+                    } elseif ($n -ge $Take) {
+                        $result = $buf
+                        $failed = $false
+                    } else {
+                        $out = [byte[]]::new($n)
+                        [Array]::Copy($buf, 0, $out, 0, $n)
+                        $result = $out
+                        $failed = $false
+                    }
+                }
+            }
+        }
+    } catch {
+        $result = $null
+        $failed = $true
+    } finally {
+        try {
+            if ($null -ne $fs) { $fs.Dispose() }
+        } catch { }
+        $fs = $null
+    }
+    if ($failed) { return $null }
+    return $result
 }
 
 function Sync-ConnectLogToServer {
@@ -622,76 +728,44 @@ function Sync-ConnectLogToServer {
             $script:ConnectLogSyncOffset = $off
         }
         # W3: chunked FileStream read (avoid loading entire day log into memory).
+        # Never throw from this block — fleet still saw NullReferenceException escape to the
+        # outer Sync catch (at=got-lt-take) under parallel day-log writers. Helper returns
+        # $null on any failure; empty byte[] means EOF/no work.
         $maxChunk = 512KB
         $fileLen = [int64]0
         $take = 0
         $chunk = $null
-        $fsRead = $null
         try {
-            $fsRead = [System.IO.File]::Open(
-                $path,
-                [System.IO.FileMode]::Open,
-                [System.IO.FileAccess]::Read,
-                [System.IO.FileShare]::ReadWrite)
-            if (-not $fsRead) { throw [System.IO.IOException]::new('chunk_read File.Open returned null') }
-            $fileLen = [int64]$fsRead.Length
-            if ($off -lt 0) { $off = 0 }
-            if ($off -gt $fileLen) { $off = 0 }
-            if ($off -ge $fileLen) { $script:LastConnectLogSyncOk = $true; return }
-            $remain = $fileLen - $off
-            $take = if ($remain -gt $maxChunk) { [int]$maxChunk } else { [int]$remain }
-            if ($take -le 0) { $script:LastConnectLogSyncOk = $true; return }
-            $null = $fsRead.Seek([int64]$off, [System.IO.SeekOrigin]::Begin)
-            $chunk = New-Object byte[] $take
-            if ($null -eq $chunk) { throw [System.IO.IOException]::new('chunk_read New-Object byte[] returned null') }
-            $got = [int]$fsRead.Read($chunk, 0, $take)
-            if ($got -le 0) { $script:LastConnectLogSyncOk = $true; return }
-            if ($got -lt $take) {
-                $take = $got
-                if ($take -le 0) { $script:LastConnectLogSyncOk = $true; return }
-                $trimmed = New-Object byte[] $take
-                if ($null -eq $chunk -or $null -eq $trimmed) {
-                    throw [System.IO.IOException]::new('chunk_read trim buffers null')
-                }
-                [Array]::Copy($chunk, 0, $trimmed, 0, $take)
-                $chunk = $trimmed
-            }
+            $fi = Get-Item -LiteralPath $path -ErrorAction Stop
+            $fileLen = [int64]$fi.Length
         } catch {
-            # P0.5 guarded WriteAllBytes($chunk) but left this Open/Seek/Read/trim try with
-            # only a finally. Fleet 2026-08-02 parsa: detail=exception type=NullReferenceException
-            # at=<this block> 21ms after a LOG_SYNC_OK under dual-Connect day-log writers.
-            # Any failure here must stay fail-soft (named breadcrumb + local retry), never an
-            # opaque outer detail=exception.
+            $fileLen = [int64]0
+        }
+        if ($off -lt 0) { $off = 0 }
+        if ($fileLen -gt 0 -and $off -gt $fileLen) { $off = 0 }
+        if ($off -ge $fileLen) { $script:LastConnectLogSyncOk = $true; return }
+        $remain = $fileLen - $off
+        $want = if ($remain -gt $maxChunk) { [int]$maxChunk } else { [int]$remain }
+        if ($want -le 0) { $script:LastConnectLogSyncOk = $true; return }
+        try {
+            $chunk = Read-ConnectLogChunkBytes -Path $path -Offset $off -Take $want
+        } catch {
+            $chunk = $null
+        }
+        if ($null -eq $chunk) {
             if (-not $script:ConnectLogSyncFailLogged) {
                 $script:ConnectLogSyncFailLogged = $true
                 try {
                     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                     $sid = Get-ConnectSessionId
-                    $why = ''
-                    try {
-                        $root = $_.Exception
-                        if ($root -and $root.InnerException) { $root = $root.InnerException }
-                        if ($root) { $why = (([string]$root.Message) -replace '[\r\n]+', ' ').Trim() }
-                    } catch { }
-                    if (-not $why) { $why = 'chunk_read_fail' }
-                    if ($why.Length -gt 120) { $why = $why.Substring(0, 120) }
-                    $exType = 'unknown'
-                    try {
-                        if ($_.Exception) { $exType = $_.Exception.GetType().Name }
-                        if ($_.Exception -and $_.Exception.InnerException) {
-                            $exType = $exType + '/' + $_.Exception.InnerException.GetType().Name
-                        }
-                    } catch { }
-                    if ($script:ConnectLogWriter) {
-                        Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=chunk_read_fail type=$exType err=$why (local kept; retry later)"
-                    }
+                    Write-ConnectLogSyncFailBreadcrumb -LogPath $path -Line "[$ts] [INFO] [$sid] LOG_SYNC_FAIL target=$target detail=chunk_read_fail type=soft err=read_helper_null (local kept; retry later)"
                 } catch { }
             }
             if (-not $LogPath -or $LogPath -eq $script:ConnectLogPath) { $script:ConnectLogSyncNeeded = $true }
             return
-        } finally {
-            if ($fsRead) { try { $fsRead.Dispose() } catch { } }
         }
+        $take = [int]$chunk.Length
+        if ($take -le 0) { $script:LastConnectLogSyncOk = $true; return }
         $tmpDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
         # Unique per attempt: dual Connect (same PID namespace across sessions is fine, but a
         # Force retry overlapping a drained non-Force must not clobber the in-flight chunk).
@@ -722,9 +796,7 @@ function Sync-ConnectLogToServer {
                             $exType = $exType + '/' + $_.Exception.InnerException.GetType().Name
                         }
                     } catch { }
-                    if ($script:ConnectLogWriter) {
-                        Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=chunk_write_fail type=$exType err=$why (local kept; retry later)"
-                    }
+                    Write-ConnectLogSyncFailBreadcrumb -LogPath $path -Line "[$ts] [INFO] [$sid] LOG_SYNC_FAIL target=$target detail=chunk_write_fail type=$exType err=$why (local kept; retry later)"
                 } catch { }
             }
             if (-not $LogPath -or $LogPath -eq $script:ConnectLogPath) { $script:ConnectLogSyncNeeded = $true }
@@ -853,7 +925,7 @@ function Sync-ConnectLogToServer {
                         # rc/err come from the proc helper so a repeat failure says WHY
                         # (auth, DNS, refused) instead of only "mkdir_timeout_or_fail".
                         $why = Get-ConnectLogProcFailReason -Result $mkRes
-                        Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=mkdir_timeout_or_fail $why (local kept; retry later)"
+                        Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_FAIL target=$target detail=mkdir_timeout_or_fail $why (local kept; retry later)"
                     }
                 } catch { }
             }
@@ -862,7 +934,7 @@ function Sync-ConnectLogToServer {
                     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                     $sid = Get-ConnectSessionId
                     if ($script:ConnectLogWriter) {
-                        Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] TEMP_CLEANUP_FAIL path=$tmpLocal err=$($_.Exception.Message)"
+                        Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] TEMP_CLEANUP_FAIL path=$tmpLocal err=$($_.Exception.Message)"
                     }
                 } catch { }
             }
@@ -954,7 +1026,12 @@ function Sync-ConnectLogToServer {
                         if ($fs2) { try { $fs2.Dispose() } catch { } }
                     }
                     if ($null -eq $chunk2 -or $take2 -le 0) { break }
-                    [System.IO.File]::WriteAllBytes($tmpLocal, $chunk2)
+                    try {
+                        [System.IO.File]::WriteAllBytes($tmpLocal, $chunk2)
+                    } catch {
+                        # Force drain must not turn a write NRE into outer detail=exception.
+                        break
+                    }
                     $scp2 = Invoke-ConnectLogProcTimed -Exe 'scp' -ArgumentList (@('-o','BatchMode=yes','-o','ConnectTimeout=12','-o','ControlMaster=no','-q', $tmpLocal, "${target}:$remoteTmp")) -TimeoutMs 20000
                     if (-not $scp2 -or -not $scp2.Ok) { break }
                     $cat2 = Invoke-ConnectLogProcTimed -Exe 'ssh' -ArgumentList ($sshOpts + @($target, $cat)) -TimeoutMs 12000
@@ -974,7 +1051,7 @@ function Sync-ConnectLogToServer {
                 $sid = Get-ConnectSessionId
                 if ($script:ConnectLogWriter) {
                     $why = Get-ConnectLogProcFailReason -Result $(if ($scpRes -and $scpRes.Ok) { $catRes } else { $scpRes })
-                    Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] LOG_SYNC_FAIL target=$target detail=scp_or_append_fail $why (local kept; retry later)"
+                    Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] LOG_SYNC_FAIL target=$target detail=scp_or_append_fail $why (local kept; retry later)"
                 }
             } catch { }
         }
@@ -983,7 +1060,7 @@ function Sync-ConnectLogToServer {
                 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
                 $sid = Get-ConnectSessionId
                 if ($script:ConnectLogWriter) {
-                    Write-ConnectLogSynced -Line "[$ts] [WARN] [$sid] TEMP_CLEANUP_FAIL path=$tmpLocal err=$($_.Exception.Message)"
+                    Write-ConnectLogSynced -Line "[$ts] [INFO] [$sid] TEMP_CLEANUP_FAIL path=$tmpLocal err=$($_.Exception.Message)"
                 }
             } catch { }
         }
@@ -1032,10 +1109,33 @@ function Sync-ConnectLogToServer {
                     }
                 } catch { }
                 if ($ex.Length -gt 160) { $ex = $ex.Substring(0, 160) }
-                if ($script:ConnectLogWriter) {
-                    $atBit = if ($atScript) { '{0}:{1}' -f $atScript, $atLine } else { [string]$atLine }
-                    Write-ConnectLogSynced -Line ("[$ts] [WARN] [$sid] LOG_SYNC_FAIL target={0} detail=exception type={1} at={2} err={3} (local kept; retry later)" -f $(if ($target) { $target } else {'(none)'}), $exType, $atBit, $(if ($ex) { $ex } else { '(null)' }))
+                $atBit = if ($atScript) { '{0}:{1}' -f $atScript, $atLine } else { [string]$atLine }
+                $stackBit = ''
+                try {
+                    $st = [string]$_.ScriptStackTrace
+                    if ($st) {
+                        $stackBit = (($st -split "`r?`n" | Select-Object -First 1) -replace '[\r\n]+', ' ').Trim()
+                        if ($stackBit.Length -gt 100) { $stackBit = $stackBit.Substring(0, 100) }
+                    }
+                } catch { }
+                # Fleet 2026-08-03: ScriptLineNumber sometimes points at the chunk-read block
+                # (e.g. connect-ui.ps1:649) while the throw still escaped to this outer catch
+                # (zero chunk_read_fail lines in the day log). Reclassify that line range.
+                $detailKind = 'exception'
+                # Helper + Sync chunk call site + Force drain ranges (line numbers drift by version).
+                if ($atLine -ge 590 -and $atLine -le 780) { $detailKind = 'chunk_read_fail' }
+                elseif ($atLine -ge 920 -and $atLine -le 1020) { $detailKind = 'chunk_read_fail' }
+                elseif ($atScript -match 'connect-ui' -and $stackBit -match 'Read-ConnectLogChunkBytes') {
+                    $detailKind = 'chunk_read_fail'
                 }
+                # Soft / dual-Connect races: INFO. Opaque unclassified exception stays WARN.
+                $lvl = if ($detailKind -eq 'exception') { 'WARN' } else { 'INFO' }
+                $line = if ($stackBit) {
+                    ("[$ts] [{0}] [$sid] LOG_SYNC_FAIL target={1} detail={2} type={3} at={4} err={5} stack={6} (local kept; retry later)" -f $lvl, $(if ($target) { $target } else {'(none)'}), $detailKind, $exType, $atBit, $(if ($ex) { $ex } else { '(null)' }), $stackBit)
+                } else {
+                    ("[$ts] [{0}] [$sid] LOG_SYNC_FAIL target={1} detail={2} type={3} at={4} err={5} (local kept; retry later)" -f $lvl, $(if ($target) { $target } else {'(none)'}), $detailKind, $exType, $atBit, $(if ($ex) { $ex } else { '(null)' }))
+                }
+                Write-ConnectLogSyncFailBreadcrumb -LogPath $path -Line $line
             } catch { }
         }
         # Zero-loss: the local day log and its watermark are untouched, so the bytes ship on
@@ -1317,6 +1417,8 @@ function Get-ConnectLogWriteMutex {
 # just flushes whatever WriteLine already buffered in memory).
 function Write-ConnectLogSynced {
     param([string]$Line = '')
+    # Collapse so TEMP_CLEANUP_FAIL / Exception.Message never inject bare continuations.
+    if ($Line) { $Line = (($Line + '') -replace '[\r\n]+', ' ').TrimEnd() }
     $mutex = Get-ConnectLogWriteMutex
     $acquired = $false
     try {
@@ -1399,6 +1501,9 @@ function Write-ConnectLog {
         [Parameter(Mandatory)][string]$Message,
         [ValidateSet('INFO', 'WARN', 'ERROR', 'DEBUG', 'TRACE')][string]$Level = 'INFO'
     )
+    # One physical line per event. UNHANDLED PositionMessage (and similar) used to inject
+    # bare "+ while (...)" continuations into the day log.
+    $Message = (($Message + '') -replace '[\r\n]+', ' ').Trim()
     if (-not (Ensure-ConnectLogWriter)) { return }
     try {
         $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
@@ -1497,6 +1602,37 @@ function Read-ConnectPrompt {
     return $shown
 }
 
+# Console key helpers: [Console]::KeyAvailable throws when stdin is redirected
+# (headless harness / no console). Never let that become UNHANDLED after a good session.
+function Test-ConnectConsoleInteractive {
+    try {
+        if ([Console]::IsInputRedirected) { return $false }
+    } catch { }
+    try {
+        $null = [Console]::KeyAvailable
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Test-ConnectConsoleKeyAvailable {
+    if (-not (Test-ConnectConsoleInteractive)) { return $false }
+    try { return [bool][Console]::KeyAvailable } catch { return $false }
+}
+
+function Clear-ConnectConsoleKeyBuffer {
+    if (-not (Test-ConnectConsoleInteractive)) { return }
+    try {
+        while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
+    } catch { }
+}
+
+function Read-ConnectConsoleKey {
+    if (-not (Test-ConnectConsoleKeyAvailable)) { return $null }
+    try { return [Console]::ReadKey($true) } catch { return $null }
+}
+
 
 function Write-ConnectUserFacingError {
     # Every red [X] the user sees MUST land in the day log as ERROR (grep-able).
@@ -1581,7 +1717,18 @@ function Wait-ConnectExit {
         Sync-ConnectLogToServer -Force | Out-Null
     }
     if ($script:ConnectUiReady) {
-        try { Read-Host '    Press Enter to close' | Out-Null } catch { }
+        # Headless / e2e redirect stdin: never block on Read-Host (and never poke KeyAvailable).
+        $askEnter = $true
+        try {
+            if (Get-Command Test-ConnectConsoleInteractive -ErrorAction SilentlyContinue) {
+                $askEnter = [bool](Test-ConnectConsoleInteractive)
+            } elseif ([Console]::IsInputRedirected) {
+                $askEnter = $false
+            }
+        } catch { }
+        if ($askEnter) {
+            try { Read-Host '    Press Enter to close' | Out-Null } catch { }
+        }
     }
     if (Get-Command Close-ConnectLog -ErrorAction SilentlyContinue) { Close-ConnectLog }
     exit $Code
@@ -1766,8 +1913,8 @@ function Invoke-ConnectManualUpdate {
 
 function Invoke-AgentPathProbe {
     # Fail-open: probe server conf TUNNEL_PORT vs this UI session port (rate-limited 60s).
-    # Dual-UI: session!=conf with listen_conf=1 is ok (primary_match=0). Bad only when
-    # conf empty, conf port closed, or parse/ssh fail.
+    # Dual-UI / shared-p: session!=conf with listen_conf=1 is ok (primary_match=0). Bad only when
+    # conf empty, published conf port closed (after AGENT_PATH_LISTEN_RETRY), or parse/ssh fail.
     try {
         $sessionPortRaw = $null
         if ($null -ne $script:Port -and ("$($script:Port)").Trim().Length -gt 0) {
@@ -1787,8 +1934,6 @@ function Invoke-AgentPathProbe {
 
         $nowUnix = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
         if (($nowUnix - [int]$script:LastAgentPathUnix) -lt 60) { return }
-        # Stamp immediately so a fail does not retry-storm within the window.
-        $script:LastAgentPathUnix = $nowUnix
 
         if (-not (Get-Command SshX -ErrorAction SilentlyContinue)) {
             Write-ConnectTrace 'AGENT_PATH skip reason=no_sshx'
@@ -1796,18 +1941,35 @@ function Invoke-AgentPathProbe {
         }
 
         # Literal remote one-liner; only PORTPLACEHOLDER is substituted (digits-only session port).
+        # AGENT_PATH_LISTEN_RETRY: fleet still saw listen_conf=0 while MOUNT_VERIFY bound_p=conf
+        # under parallel Connect. Prefer ss sport= (exact), then grep, then /dev/tcp v4/v6; 5 tries;
+        # one delayed recheck when session is live but conf looks closed (shared-p false-neg).
         $remoteCmd = @'
-timeout 3 bash -c 'C="$HOME/.claude-connect.conf"; cp=$(grep -E "^TUNNEL_PORT=" "$C" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\r"); am=$(grep -E "^ACTIVE_MOUNT=" "$C" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\r"); sp=PORTPLACEHOLDER; lc=0; ls=0; if [ -n "$cp" ]; then timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/$cp" 2>/dev/null && lc=1 || true; fi; if [ -n "$sp" ]; then timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/$sp" 2>/dev/null && ls=1 || true; fi; echo "AGENT_PATH_PROBE conf_port=${cp:-} conf_am=${am:-} listen_conf=$lc listen_session=$ls session_port=$sp"'
+timeout 20 bash -c 'C="$HOME/.claude-connect.conf"; cp=$(grep -E "^TUNNEL_PORT=" "$C" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\r"); am=$(grep -E "^ACTIVE_MOUNT=" "$C" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\r"); sp=PORTPLACEHOLDER; lc=0; ls=0; _ap_listen(){ p="$1"; [ -n "$p" ] || return 1; for i in 1 2 3 4 5; do ss -H -ltn sport = :$p 2>/dev/null | grep -q . && return 0; ss -ltn 2>/dev/null | grep -qE "[\\.:]$p([[:space:]]|$)" && return 0; timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$p" 2>/dev/null && return 0; timeout 1 bash -c "exec 3<>/dev/tcp/::1/$p" 2>/dev/null && return 0; command -v nc >/dev/null 2>&1 && nc -z -w1 127.0.0.1 "$p" 2>/dev/null && return 0; ps -eo args 2>/dev/null | grep -F -- "-p $p" | grep -q "[s]shfs" && return 0; sleep 0.2; done; return 1; }; if [ -n "$cp" ]; then _ap_listen "$cp" && lc=1 || true; fi; if [ -n "$sp" ]; then _ap_listen "$sp" && ls=1 || true; fi; if [ "$lc" = "0" ] && [ "$ls" = "1" ] && [ -n "$cp" ]; then sleep 0.45; _ap_listen "$cp" && lc=1 || true; fi; echo "AGENT_PATH_PROBE AGENT_PATH_LISTEN_RETRY conf_port=${cp:-} conf_am=${am:-} listen_conf=$lc listen_session=$ls session_port=$sp"'
 '@
         $remoteCmd = $remoteCmd.Replace('PORTPLACEHOLDER', $sessionPort)
 
         $outLines = @()
-        try {
-            $outLines = @(SshX $remoteCmd)
-        } catch {
-            $script:LastAgentPathResult = @{ Ok = $false; ConfPort = ''; Reason = 'probe_fail' }
-            Write-ConnectLog ("AGENT_PATH bad reason=probe_fail session_port={0} conf_port= conf_am= listen_conf= listen_session= primary_match=0" -f $sessionPort) 'WARN'
-            return
+        $sshAttempts = 0
+        $sshOk = $false
+        while ($sshAttempts -lt 2 -and -not $sshOk) {
+            $sshAttempts++
+            try {
+                $outLines = @(SshX $remoteCmd)
+                $sshOk = $true
+            } catch {
+                if ($sshAttempts -lt 2) {
+                    Start-Sleep -Milliseconds 400
+                    continue
+                }
+                # Short backoff on SSH miss (was 60s sticky after pre-stamp — fleet false alarm).
+                $script:LastAgentPathUnix = $nowUnix - 45
+                $script:LastAgentPathResult = @{ Ok = $false; ConfPort = ''; Reason = 'probe_fail' }
+                # After a boot AGENT_PATH ok, teardown SSH crashes are INFO (not zero-noise WARN).
+                $apLvl = if ($script:AgentPathEverOk) { 'INFO' } else { 'WARN' }
+                Write-ConnectLog ("AGENT_PATH bad reason=probe_fail session_port={0} conf_port= conf_am= listen_conf= listen_session= primary_match=0" -f $sessionPort) $apLvl
+                return
+            }
         }
 
         $joined = ($outLines | ForEach-Object { "$_" }) -join "`n"
@@ -1819,11 +1981,28 @@ timeout 3 bash -c 'C="$HOME/.claude-connect.conf"; cp=$(grep -E "^TUNNEL_PORT=" 
         if (-not $probeLine -and $joined -match '(?m)(AGENT_PATH_PROBE\b[^\r\n]*)') {
             $probeLine = $Matches[1].Trim()
         }
+        # Empty parse / SSH crash (exit -1073741502) under ×6 teardown: one retry.
         if (-not $probeLine) {
+            Start-Sleep -Milliseconds 400
+            try { $outLines = @(SshX $remoteCmd) } catch { $outLines = @() }
+            $joined = ($outLines | ForEach-Object { "$_" }) -join "`n"
+            foreach ($ln in $outLines) {
+                $s = ("$ln").Trim()
+                if ($s -match 'AGENT_PATH_PROBE\b') { $probeLine = $s; break }
+            }
+            if (-not $probeLine -and $joined -match '(?m)(AGENT_PATH_PROBE\b[^\r\n]*)') {
+                $probeLine = $Matches[1].Trim()
+            }
+        }
+        if (-not $probeLine) {
+            $script:LastAgentPathUnix = $nowUnix - 45
             $script:LastAgentPathResult = @{ Ok = $false; ConfPort = ''; Reason = 'probe_fail' }
-            Write-ConnectLog ("AGENT_PATH bad reason=probe_fail session_port={0} conf_port= conf_am= listen_conf= listen_session= primary_match=0" -f $sessionPort) 'WARN'
+            $apLvl = if ($script:AgentPathEverOk) { 'INFO' } else { 'WARN' }
+            Write-ConnectLog ("AGENT_PATH bad reason=probe_fail session_port={0} conf_port= conf_am= listen_conf= listen_session= primary_match=0" -f $sessionPort) $apLvl
             return
         }
+        # Full 60s rate-limit only after a parsed probe (success or classified bad).
+        $script:LastAgentPathUnix = $nowUnix
 
         $confPort = ''
         $confAm = ''
@@ -1842,7 +2021,13 @@ timeout 3 bash -c 'C="$HOME/.claude-connect.conf"; cp=$(grep -E "^TUNNEL_PORT=" 
             $reason = 'conf_empty'
         } elseif ("$listenConf" -eq '0') {
             $ok = $false
-            $reason = 'conf_port_closed'
+            # Shared-p am_only: session tunnel may be up while published TUNNEL_PORT is dead —
+            # LE still uses conf port, so stay bad, but name the shape for ops/takeover.
+            if ("$listenSession" -eq '1' -and $primaryMatch -eq 0) {
+                $reason = 'conf_port_closed_session_live'
+            } else {
+                $reason = 'conf_port_closed'
+            }
         }
 
         $script:LastAgentPathResult = @{
@@ -1852,11 +2037,13 @@ timeout 3 bash -c 'C="$HOME/.claude-connect.conf"; cp=$(grep -E "^TUNNEL_PORT=" 
         }
 
         if ($ok) {
+            $script:AgentPathEverOk = $true
             Write-ConnectLog ("AGENT_PATH ok session_port={0} conf_port={1} conf_am={2} listen_conf={3} listen_session={4} primary_match={5}" -f `
                 $sessionPort, $confPort, $confAm, $listenConf, $listenSession, $primaryMatch) 'INFO'
         } else {
+            $apBadLvl = if ($script:AgentPathEverOk) { 'INFO' } else { 'WARN' }
             Write-ConnectLog ("AGENT_PATH bad reason={0} session_port={1} conf_port={2} conf_am={3} listen_conf={4} listen_session={5} primary_match={6}" -f `
-                $reason, $sessionPort, $confPort, $confAm, $listenConf, $listenSession, $primaryMatch) 'WARN'
+                $reason, $sessionPort, $confPort, $confAm, $listenConf, $listenSession, $primaryMatch) $apBadLvl
         }
     } catch {
         # Fail-open: never break the status-line loop.

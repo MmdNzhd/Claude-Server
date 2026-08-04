@@ -50,7 +50,7 @@ _update_script="$(cd "$(dirname "$0")" && pwd)/connect-update.sh"
 # Manual-only updates: skip auto-update on start (user presses u in the menu).
 # connect-update.sh remains available for invoke_connect_manual_update.
 
-CONNECT_VERSION='20260803.13'
+CONNECT_VERSION='20260804.33'
 CONNECT_PORT_BASE=20000
 
 # Reuse one SSH TCP connection for all sshx() calls this session (big speed win).
@@ -197,8 +197,9 @@ _agent_path_probe_if_due() {
     if [ $(( now - ${_LAST_AGENT_PATH_UNIX:-0} )) -lt 60 ]; then return 0; fi
     _LAST_AGENT_PATH_UNIX="$now"
 
-    # No leading "timeout" so sshx base64-wraps (nested quotes safe). Inner timeout 1s per listen check.
-    remote_cmd="C=\"\$HOME/.claude-connect.conf\"; cp=\$(grep -E \"^TUNNEL_PORT=\" \"\$C\" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d \"\\r\"); am=\$(grep -E \"^ACTIVE_MOUNT=\" \"\$C\" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d \"\\r\"); sp=${session_port}; lc=0; ls=0; if [ -n \"\$cp\" ]; then timeout 1 bash -c \"echo >/dev/tcp/127.0.0.1/\$cp\" 2>/dev/null && lc=1 || true; fi; if [ -n \"\$sp\" ]; then timeout 1 bash -c \"echo >/dev/tcp/127.0.0.1/\$sp\" 2>/dev/null && ls=1 || true; fi; echo \"AGENT_PATH_PROBE conf_port=\${cp:-} conf_am=\${am:-} listen_conf=\$lc listen_session=\$ls session_port=\$sp\""
+    # No leading "timeout" so sshx base64-wraps (nested quotes safe).
+    # AGENT_PATH_LISTEN_RETRY: ss sport= + grep + /dev/tcp v4/v6 + nc; delayed recheck for shared-p.
+    remote_cmd="C=\"\$HOME/.claude-connect.conf\"; cp=\$(grep -E \"^TUNNEL_PORT=\" \"\$C\" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d \"\\r\"); am=\$(grep -E \"^ACTIVE_MOUNT=\" \"\$C\" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d \"\\r\"); sp=${session_port}; lc=0; ls=0; _ap_listen(){ p=\"\$1\"; [ -n \"\$p\" ] || return 1; for i in 1 2 3 4 5; do ss -H -ltn sport = :\$p 2>/dev/null | grep -q . && return 0; ss -ltn 2>/dev/null | grep -qE \"[\\.:]\$p([[:space:]]|\$)\" && return 0; timeout 1 bash -c \"exec 3<>/dev/tcp/127.0.0.1/\$p\" 2>/dev/null && return 0; timeout 1 bash -c \"exec 3<>/dev/tcp/::1/\$p\" 2>/dev/null && return 0; command -v nc >/dev/null 2>&1 && nc -z -w1 127.0.0.1 \"\$p\" 2>/dev/null && return 0; ps -eo args 2>/dev/null | grep -F -- \"-p \$p\" | grep -q \"[s]shfs\" && return 0; sleep 0.2; done; return 1; }; if [ -n \"\$cp\" ]; then _ap_listen \"\$cp\" && lc=1 || true; fi; if [ -n \"\$sp\" ]; then _ap_listen \"\$sp\" && ls=1 || true; fi; if [ \"\$lc\" = \"0\" ] && [ \"\$ls\" = \"1\" ] && [ -n \"\$cp\" ]; then sleep 0.45; _ap_listen \"\$cp\" && lc=1 || true; fi; echo \"AGENT_PATH_PROBE AGENT_PATH_LISTEN_RETRY conf_port=\${cp:-} conf_am=\${am:-} listen_conf=\$lc listen_session=\$ls session_port=\$sp\""
     out="$(sshx "$remote_cmd" 2>/dev/null)" || true
     probe_line="$(printf '%s\n' "$out" | grep -E 'AGENT_PATH_PROBE\b' | head -1 | tr -d '\r')"
     if [ -z "$probe_line" ]; then
@@ -219,7 +220,11 @@ _agent_path_probe_if_due() {
         reason='conf_empty'
     elif [ "$listen_conf" = "0" ]; then
         ok=0
-        reason='conf_port_closed'
+        if [ "$listen_session" = "1" ] && [ "$primary_match" = "0" ]; then
+            reason='conf_port_closed_session_live'
+        else
+            reason='conf_port_closed'
+        fi
     fi
     _LAST_AGENT_PATH_OK="$ok"
     _LAST_AGENT_PATH_CONF="$conf_port"
@@ -891,7 +896,7 @@ while [ "$exit_requested" -eq 0 ]; do
 
             if [ "$keep_tunnel_for_editor" -eq 1 ]; then
                 declare -F connect_log >/dev/null 2>&1 \
-                    && connect_log 'FINALLY_KEEP_TUNNEL reason=editor_open' 'WARN'
+                    && connect_log 'FINALLY_KEEP_TUNNEL reason=editor_open' 'INFO'
                 if declare -F connect_log >/dev/null 2>&1; then
                     connect_log "SESSION_END reason=keep port=${PORT:-?} project=${go_id:-?}" 'INFO'
                     if [ "${_PHASE_MS_LOGGED:-0}" != "1" ]; then
@@ -1285,6 +1290,8 @@ while [ "$exit_requested" -eq 0 ]; do
                 # re-probe (possibly stale) state here, which was causing a false "not on
                 # target folder" relaunch (double launch) right after a successful open.
                 _editor_opened=1
+                # Probe once at boot so SCORECARD carries agent_path (E2E may kill before status loop).
+                if declare -F _agent_path_probe_if_due >/dev/null 2>&1; then _agent_path_probe_if_due || true; fi
                 if declare -F write_connect_scorecard >/dev/null 2>&1; then write_connect_scorecard boot; fi
                 _editor_seen_open=1
                 declare -F connect_log >/dev/null 2>&1 && connect_log 'SESSION: trusting launch result (did_launch+launch_ok) - skip relaunch check' 'DEBUG'
@@ -1486,13 +1493,13 @@ while [ "$exit_requested" -eq 0 ]; do
                     _editor_seen_open=1
                     already_down=0
                     if declare -F connect_log >/dev/null 2>&1; then
-                        connect_log 'RECOVERY_SKIP_CLEAR_MOUNT reason=editor_open' 'WARN'
-                        connect_log 'TUNNEL: recovering session (preserve mount, re-ensure tunnel)' 'WARN'
+                        connect_log 'RECOVERY_SKIP_CLEAR_MOUNT reason=editor_open' 'INFO'
+                        connect_log 'TUNNEL: recovering session (preserve mount, re-ensure tunnel)' 'INFO'
                     fi
                 else
                     _editor_opened=0
                     if declare -F connect_log >/dev/null 2>&1; then
-                        connect_log 'TUNNEL: recovering session (down mount, restart tunnel)' 'WARN'
+                        connect_log 'TUNNEL: recovering session (down mount, restart tunnel)' 'INFO'
                     fi
                     clear_session_mount "$go_id" "" "$ALIAS" "$go_path" 1 'auto_recovery'
                     stop_session_tunnel_cleanup 1

@@ -50,7 +50,10 @@ Assert ($mutexFn -and $mutexFn -match 'MULTI_INSTANCE: acquired') 'Enter-Connect
 Assert ($mutexFn -and $mutexFn -match 'mutex error \(block\)' -and $mutexFn -notmatch 'mutex error \(continue\)') `
     'Enter-ConnectSingleInstance mutex catch is fail-closed (block)'
 
-$sessionKeyHay = [regex]::Match($win, '(?s)if \(\[Console\]::KeyAvailable\)[\s\S]{0,2200}break\s*\n\s*\}').Value
+Assert ($ui -match 'function Read-ConnectConsoleKey' -and $ui -match 'IsInputRedirected') `
+    'connect-ui has redirected-stdin-safe Read-ConnectConsoleKey'
+Assert ($win -notmatch '\[Console\]::KeyAvailable') 'connect.ps1 has zero raw KeyAvailable (use helpers)'
+$sessionKeyHay = [regex]::Match($win, '(?s)\$ki = Read-ConnectConsoleKey[\s\S]{0,2200}break\s*\n\s*\}').Value
 Assert (
     ($sessionKeyHay -match "resolved = 'r'" -and $sessionKeyHay -match "resolved = 'h'" -and $sessionKeyHay -match "resolved = 'o'" -and $sessionKeyHay -match "resolved = 'q'") -and
     ($sessionKeyHay -match '\[ConsoleKey\]::R') -and ($sessionKeyHay -match '\[ConsoleKey\]::H') -and

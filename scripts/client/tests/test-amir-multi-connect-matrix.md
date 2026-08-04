@@ -36,6 +36,12 @@ powershell -NoProfile -File scripts\client\tests\test-harder-live-mount-skew-gat
 
 # Or via battery / run-all HARDER section
 powershell -NoProfile -File scripts\client\tests\run-harder-battery.ps1
+
+# E2E chat pyramid (TEST ONLY — no product file edits)
+# Rank-1 = Connect SCORECARD/AGENT_PATH contracts; Rank-2 = agent CLI hello (not GUI Chat)
+powershell -NoProfile -File scripts\client\tests\run-e2e-chat-pyramid.ps1
+# Optional LIVE (not deploy-gate): -Live -Count 1 -ProjectSlot 1
+# powershell -NoProfile -File scripts\client\tests\run-e2e-chat-pyramid.ps1 -Live
 ```
 
 ## Sign-off

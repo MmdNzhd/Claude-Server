@@ -90,7 +90,10 @@ Assert ($ref -notmatch '127\.0\.0\.1:8000') 'reference no longer teaches laptop 
 
 # Never-again guards (amir: sync OK but forward dead; no keepalive)
 Assert ($mcp -match 'WMCP_PROBE') 'Sync HTTP-probes forward (WMCP_PROBE)'
+Assert ($mcp -match 'Global\\ClaudeConnectWmcpEnsure') 'Ensure serializes start/restart/probe via Global\ClaudeConnectWmcpEnsure mutex'
 Assert ($mcp -match 'server_sync_probe_bad|server_sync_probe_ok') 'Sync logs probe result'
+Assert ($mcp -notmatch '\|\|\s*echo\s+000') 'Sync must not append echo 000 after curl http_code (six-digit bug)'
+Assert ($mcp -match '_wmcp_http') 'Sync normalizes probe via _wmcp_http'
 Assert ($mcp -match 'function\s+Maintain-WindowsMcpSession') 'Maintain-WindowsMcpSession exists'
 Assert ($mcp -match 'listening but server forward/probe failed') 'Ensure fails closed when probe fails'
 $wd = Get-Content (Get-ServerFile 'server\claude-watchdog.sh') -Raw

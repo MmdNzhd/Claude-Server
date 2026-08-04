@@ -97,20 +97,22 @@ function KillTunnels {
     }
 }
 
-function SafeReadKey {
-    try {
-        if ([Console]::KeyAvailable) {
-            return [Console]::ReadKey($true)
-        }
-    } catch {}
-    return $null
+function Test-DesignConsoleInteractive {
+    try { if ([Console]::IsInputRedirected) { return $false } } catch { }
+    try { $null = [Console]::KeyAvailable; return $true } catch { return $false }
+}
+function Clear-DesignConsoleKeyBuffer {
+    if (-not (Test-DesignConsoleInteractive)) { return }
+    try { while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) } } catch { }
+}
+function Read-DesignConsoleKey {
+    if (-not (Test-DesignConsoleInteractive)) { return $null }
+    try { return [Console]::ReadKey($true) } catch { return $null }
 }
 
-function FlushKeys {
-    try {
-        while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
-    } catch {}
-}
+function SafeReadKey { return Read-DesignConsoleKey }
+
+function FlushKeys { Clear-DesignConsoleKeyBuffer }
 
 function Resolve-DesignKeyLetter {
     param($ki)

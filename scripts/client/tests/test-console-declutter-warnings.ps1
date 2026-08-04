@@ -16,7 +16,7 @@ $winContent = Get-Content (Get-ClientFile 'windows\connect.ps1') -Raw
 $macContent = Get-Content (Get-ClientFile 'mac\connect.sh') -Raw
 
 Assert ($winContent -notmatch "Write-Host [^\r\n]*international path down") 'Win: xray "international path down" no longer printed to console'
-Assert ($winContent -match "Write-ConnectLog 'PROXY_HEALTH_UI warn international_path_down'") 'Win: xray warning still fully recorded in the day log'
+Assert ($winContent -match "Write-ConnectLog 'PROXY_HEALTH_UI international_path_down") 'Win: xray path still fully recorded in the day log (INFO)'
 
 Assert ($winContent -notmatch "Warn 'Personal Cursor is open") 'Win: "Personal Cursor is open" no longer printed to console'
 Assert ($winContent -match "Write-ConnectLog 'AUTH_WARN personal_cursor_dominant'") 'Win: personal-Cursor warning still fully recorded in the day log'

@@ -1,5 +1,40 @@
 # editor-launch.sh - shared VS Code/Cursor launch (sourced by connect.sh)
 
+_CURSOR_LAUNCH_GATE_DIR=""
+_CURSOR_LAUNCH_GATE_WAITED=0
+_cursor_launch_gate_enter() {
+    # Serialize ClaudeServerCursorProfile launches (parallel Connect cold-start race).
+    local base="${HOME}/.config/claude-connect"
+    local lockdir="${base}/cursor-launch.lockdir"
+    local i=0
+    _CURSOR_LAUNCH_GATE_WAITED=0
+    mkdir -p "$base" 2>/dev/null || true
+    while ! mkdir "$lockdir" 2>/dev/null; do
+        i=$((i + 1))
+        if [ "$i" -gt 150 ]; then
+            # Contended even without the lock — force peer belt (--new-window), match Windows.
+            _CURSOR_LAUNCH_GATE_WAITED=1
+            declare -F connect_log >/dev/null 2>&1 && \
+                connect_log 'LAUNCH_GATE timeout (proceed without serialize)' 'WARN'
+            _CURSOR_LAUNCH_GATE_DIR=""
+            return 0
+        fi
+        sleep 0.3
+    done
+    _CURSOR_LAUNCH_GATE_DIR="$lockdir"
+    if [ "$i" -gt 0 ]; then _CURSOR_LAUNCH_GATE_WAITED=1; fi
+    declare -F connect_log >/dev/null 2>&1 && \
+        connect_log "LAUNCH_GATE acquired waited_loops=$i" 'INFO'
+}
+
+_cursor_launch_gate_exit() {
+    if [ -n "${_CURSOR_LAUNCH_GATE_DIR:-}" ]; then
+        rmdir "${_CURSOR_LAUNCH_GATE_DIR}" 2>/dev/null || true
+        _CURSOR_LAUNCH_GATE_DIR=""
+        declare -F connect_log >/dev/null 2>&1 && connect_log 'LAUNCH_GATE released' 'DEBUG'
+    fi
+}
+
 get_editor_pref() {
     local cfg="$1" f="$cfg/editor.conf" saved
     [ -f "$f" ] || { printf 'cursor'; return 0; }
@@ -399,7 +434,7 @@ PY
         if [ "$changed_out" = "1" ]; then
             any=1
             if declare -F connect_log >/dev/null 2>&1; then
-                connect_log "CURSOR_PROXY_CLEAR removed_18998_dead_proxy path=${settings}" 'WARN'
+                connect_log "CURSOR_PROXY_CLEAR removed_18998_dead_proxy path=${settings}" 'INFO'
             fi
         fi
     done < <(cursor_proxy_settings_paths_for_clear)
@@ -531,7 +566,7 @@ EOF
             fi
         else
             declare -F connect_log >/dev/null 2>&1 && \
-                connect_log 'CURSOR_PROXY_CLEAR force reason=18998_down_or_unhealthy' 'WARN'
+                connect_log 'CURSOR_PROXY_CLEAR force reason=18998_down_or_unhealthy' 'INFO'
             if test_may_clear_cursor_proxy_settings 1; then
                 if clear_cursor_proxy_settings; then
                     declare -F connect_log >/dev/null 2>&1 && connect_log 'CURSOR_PROXY_CLEAR: no_windows (no soft-stop)' 'INFO'
@@ -590,22 +625,53 @@ EOF
             return 0
         fi
 
+        # Parallel Connect cold-start race: mkdir lock; re-query after wait.
+        # Holder releases after spawn — peer often still sees profile_all=0; always settle when waited.
+        _cursor_launch_gate_enter
+        profile_main="$(cursor_profile_main_count)"
+        profile_all="$(cursor_profile_process_count)"
+        if [ "${_CURSOR_LAUNCH_GATE_WAITED:-0}" -eq 1 ] && [ "${profile_main:-0}" -eq 0 ]; then
+            for settle in 1 2 3 4 5 6 7 8 9 10 11 12; do
+                sleep 0.4
+                profile_main="$(cursor_profile_main_count)"
+                profile_all="$(cursor_profile_process_count)"
+                declare -F connect_log >/dev/null 2>&1 && \
+                    connect_log "LAUNCH_GATE_SETTLE attempt=$settle profile_main=$profile_main profile_all=$profile_all" 'INFO'
+                if [ "${profile_main:-0}" -gt 0 ]; then
+                    break
+                fi
+            done
+        fi
+        remote_editor_in_agent_home "$alias" "$remote_path" && agent_home=1 || agent_home=0
+
         # Still helpers-only after settle → reap ClaudeServerCursorProfile tree → cold.
         # NEVER touch personal ~/.config/Cursor (stop helpers match ClaudeServer profile tag only).
+        # NEVER reap after gate wait: helpers may be peer mid cold-boot (lock released at spawn).
         if [ "${profile_main:-0}" -eq 0 ] && [ "${profile_all:-0}" -gt 0 ]; then
-            orphan_helpers=1
-            declare -F connect_log >/dev/null 2>&1 && \
-                connect_log "LAUNCH_REAP: orphan_helpers_reaped profile_all=$profile_all - stop_cursor_profile_soft then cold" 'WARN'
-            stop_cursor_profile_soft
-            sleep 0.4
-            profile_main=0
-            profile_all=0
-            orphan_helpers=0
-            plan_reason=orphan_helpers_reaped
+            if [ "${_CURSOR_LAUNCH_GATE_WAITED:-0}" -eq 1 ]; then
+                declare -F connect_log >/dev/null 2>&1 && \
+                    connect_log "LAUNCH_REAP_SKIP: orphan_helpers after gate wait profile_all=$profile_all" 'INFO'
+                orphan_helpers=0
+                use_new=1
+                plan_reason=launch_gate_peer
+            else
+                orphan_helpers=1
+                declare -F connect_log >/dev/null 2>&1 && \
+                    connect_log "LAUNCH_REAP: orphan_helpers_reaped profile_all=$profile_all - stop_cursor_profile_soft then cold" 'WARN'
+                stop_cursor_profile_soft
+                sleep 0.4
+                profile_main=0
+                profile_all=0
+                orphan_helpers=0
+                plan_reason=orphan_helpers_reaped
+            fi
         fi
 
         # UseNewWindow = agent_home OR profile_main>0 ONLY (drop orphan helpers from use_new).
-        if [ "$agent_home" -eq 1 ] || [ "${profile_main:-0}" -gt 0 ]; then
+        # Do not clobber launch_gate_peer set by REAP_SKIP above.
+        if [ "${plan_reason:-}" = "launch_gate_peer" ]; then
+            use_new=1
+        elif [ "$agent_home" -eq 1 ] || [ "${profile_main:-0}" -gt 0 ]; then
             use_new=1
             if [ -z "${plan_reason:-}" ]; then
                 if [ "$agent_home" -eq 1 ]; then plan_reason=agent_home
@@ -616,6 +682,17 @@ EOF
             use_new=0
             [ -z "${plan_reason:-}" ] && plan_reason=cold_start
         fi
+        # Belt: waited on peer lock but still cold — force --new-window on shared profile.
+        if [ "${_CURSOR_LAUNCH_GATE_WAITED:-0}" -eq 1 ] && [ "${use_new:-0}" -eq 0 ]; then
+            case "${plan_reason:-}" in
+                cold_start|orphan_helpers_reaped|'')
+                    use_new=1
+                    plan_reason=launch_gate_peer
+                    declare -F connect_log >/dev/null 2>&1 && \
+                        connect_log "LAUNCH_GATE_PEER: force use_new_window=1 profile_all=$profile_all" 'INFO'
+                    ;;
+            esac
+        fi
 
         _cursor_bin="$(_editor_run_cmd cursor)" || _cursor_bin=cursor
         if [ "$use_new" -eq 1 ]; then
@@ -623,6 +700,7 @@ EOF
                 connect_log "LAUNCH_PLAN: use_new_window=1 reason=$plan_reason profile_all=$profile_all" 'INFO'
             # Prefer classic+new-window, fall back to folder-uri
             "$_cursor_bin" --user-data-dir "$profile" "${_proxy_args[@]}" --new-window --classic --folder-uri "$uri" >/dev/null 2>&1 &
+            _cursor_launch_gate_exit
             sleep 0.8
             if ! remote_editor_on_correct_folder cursor "$alias" "$remote_path"; then
                 "$_cursor_bin" --user-data-dir "$profile" "${_proxy_args[@]}" --new-window --folder-uri "$uri" >/dev/null 2>&1 &
@@ -631,6 +709,7 @@ EOF
             declare -F connect_log >/dev/null 2>&1 && \
                 connect_log "LAUNCH_PLAN: use_new_window=0 reason=$plan_reason profile_all=$profile_all" 'INFO'
             "$_cursor_bin" --user-data-dir "$profile" "${_proxy_args[@]}" --reuse-window --folder-uri "$uri" >/dev/null 2>&1 &
+            _cursor_launch_gate_exit
         fi
         return 0
     fi

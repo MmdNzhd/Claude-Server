@@ -155,7 +155,10 @@ Assert ($reapBody -match 'Stop-Process|\.Kill\(\)') "$reapName actually terminat
 # #5 connect.ps1: disconnect path calls Stop/Reap; keepTunnelForEditor path must NOT
 # ----------------------------------------------------------------------------
 Write-Host '--- #5 connect.ps1 finally/cleanup: Stop/Reap called on disconnect, not when keepTunnelForEditor ---' -ForegroundColor Cyan
-$finallyMatch = [regex]::Match($connect, '(?s)\}\s*finally\s*\{.*?\r?\n    \}\r?\n\r?\n    while \(\[Console\]::KeyAvailable\)')
+$finallyMatch = [regex]::Match($connect, '(?s)\}\s*finally\s*\{.*?\r?\n    \}\r?\n\r?\n    Clear-ConnectConsoleKeyBuffer')
+if (-not $finallyMatch.Success) {
+    $finallyMatch = [regex]::Match($connect, '(?s)\}\s*finally\s*\{.*?\r?\n    \}\r?\n\r?\n    while \(\[Console\]::KeyAvailable\)')
+}
 Assert $finallyMatch.Success 'located the sessionLoop finally{} block in connect.ps1'
 $finallyBlock = if ($finallyMatch.Success) { $finallyMatch.Value } else { '' }
 

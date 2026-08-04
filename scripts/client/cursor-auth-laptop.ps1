@@ -875,7 +875,7 @@ function Test-CursorAuthNeedsRefresh {
     if ($personalMain -gt 0 -and $profileMain -eq 0 -and -not $AuthComplete) {
         Write-AuthSyncLog (
             "personal Cursor active without server profile (personal_main=$personalMain profile_main=$profileMain) - auth needs refresh"
-        ) 'WARN'
+        ) 'INFO'
         $reasons += 'personal_without_profile'
     }
 

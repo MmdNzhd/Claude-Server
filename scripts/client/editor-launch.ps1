@@ -411,7 +411,7 @@ function Align-CursorProxyWithRunningCli {
             $frontUp = [bool](Test-CursorProxySidecarListening -Port $frontSocks)
         }
         if ($frontUp) {
-            Write-EditorLaunchLog ("CURSOR_PROXY_ALIGN: prefer_sticky_front socks={0} cli_legacy={1} (relaunch picks up front)" -f $frontSocks, $cliPort) 'WARN'
+            Write-EditorLaunchLog ("CURSOR_PROXY_ALIGN: prefer_sticky_front socks={0} cli_legacy={1} (relaunch picks up front)" -f $frontSocks, $cliPort) 'INFO'
             $http = $HttpPort
             if ($script:CursorHttpFrontPort) { $http = [int]$script:CursorHttpFrontPort }
             return @{ Aligned = $true; SocksPort = $frontSocks; HttpPort = $http; LegacyCli = $cliPort }
@@ -431,13 +431,13 @@ function Align-CursorProxyWithRunningCli {
 function Test-MayClearCursorProxySettings {
     param([switch]$AllowClear)
     if ($null -ne $script:CursorProxyOwner -and -not $script:CursorProxyOwner) {
-        Write-EditorLaunchLog 'CURSOR_PROXY_CLEAR_SKIP: reason=non_owner' 'WARN'
+        Write-EditorLaunchLog 'CURSOR_PROXY_CLEAR_SKIP: reason=non_owner' 'INFO'
         return $false
     }
     $n = 0
     try { $n = @(Get-CursorProfileProcesses).Count } catch { $n = 0 }
     if ($n -gt 0) {
-        Write-EditorLaunchLog ("CURSOR_PROXY_CLEAR_SKIP: reason=windows_open socks_null=1 profile_count={0}" -f $n) 'WARN'
+        Write-EditorLaunchLog ("CURSOR_PROXY_CLEAR_SKIP: reason=windows_open socks_null=1 profile_count={0}" -f $n) 'INFO'
         return $false
     }
     if (-not $AllowClear) {
@@ -998,7 +998,8 @@ function Confirm-RemoteEditorLaunchVisible {
         [Parameter(Mandatory)][string]$EditorCmd,
         [Parameter(Mandatory)][string]$Alias,
         [Parameter(Mandatory)][string]$RemotePath,
-        [int]$WaitMs = 500
+        # Warm ×6: single 500ms recheck missed handoff flicker (Precise 20260804.17 dakhl).
+        [int]$WaitMs = 3000
     )
     # Project-scoped only. Never treat "any Cursor MainWindowHandle on the profile" as
     # confirmation - that false-positive skipped Launch-RemoteEditor (known_on_folder) while
@@ -1007,8 +1008,10 @@ function Confirm-RemoteEditorLaunchVisible {
     # used to return true from Launch while Confirm rejected it -> false "elevated launch failed").
     if (Get-Command Clear-CursorProcessCache -ErrorAction SilentlyContinue) { Clear-CursorProcessCache }
     if (Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath) { return $true }
-    if ($WaitMs -gt 0) {
-        Start-Sleep -Milliseconds $WaitMs
+    if ($WaitMs -le 0) { return $false }
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
+    while ($deadline.ElapsedMilliseconds -lt $WaitMs) {
+        Start-Sleep -Milliseconds 250
         if (Get-Command Clear-CursorProcessCache -ErrorAction SilentlyContinue) { Clear-CursorProcessCache }
         if (Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath) { return $true }
     }
@@ -2482,6 +2485,67 @@ function Get-CursorLaunchWindowPlan {
     return [pscustomobject]@{ UseNewWindow = $useNewWindow; Reason = $reason; OrphanHelpers = $orphanHelpers }
 }
 
+function Enter-CursorProfileLaunchGate {
+    # Serialize ClaudeServerCursorProfile launches across parallel Connect UIs.
+    # Fleet 2026-08-03: W1+W2 both saw cold_start profile_all=0 and dual-spawned without
+    # --new-window. Holder starts first; waiter re-queries and typically becomes profile_open.
+    param([int]$TimeoutMs = 45000)
+    $result = [pscustomobject]@{
+        Acquired  = $false
+        WaitedMs  = 0
+        Contended = $false
+        Mutex     = $null
+    }
+    try {
+        $created = $false
+        $mtx = New-Object System.Threading.Mutex($false, 'Global\ClaudeConnectCursorLaunch', [ref]$created)
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $got = $false
+        try {
+            $got = $mtx.WaitOne($TimeoutMs)
+        } catch [System.Threading.AbandonedMutexException] {
+            $got = $true
+        } catch {
+            $got = $false
+        }
+        $sw.Stop()
+        $result.WaitedMs = [int]$sw.ElapsedMilliseconds
+        if ($got) {
+            $result.Acquired = $true
+            $result.Mutex = $mtx
+            if ($result.WaitedMs -gt 0) { $result.Contended = $true }
+            if (Get-Command Write-EditorLaunchLog -ErrorAction SilentlyContinue) {
+                Write-EditorLaunchLog ("LAUNCH_GATE acquired waited_ms={0} created={1}" -f $result.WaitedMs, [int]$created) 'INFO'
+            }
+        } else {
+            $result.Contended = $true
+            try { $mtx.Dispose() } catch { }
+            if (Get-Command Write-EditorLaunchLog -ErrorAction SilentlyContinue) {
+                Write-EditorLaunchLog ("LAUNCH_GATE timeout waited_ms={0} (proceed without serialize)" -f $result.WaitedMs) 'WARN'
+            }
+        }
+    } catch {
+        $result.Contended = $true
+        if (Get-Command Write-EditorLaunchLog -ErrorAction SilentlyContinue) {
+            Write-EditorLaunchLog ("LAUNCH_GATE fail err={0}" -f $_.Exception.Message) 'WARN'
+        }
+    }
+    return $result
+}
+
+function Exit-CursorProfileLaunchGate {
+    param($Gate)
+    if (-not $Gate -or -not $Gate.Acquired -or -not $Gate.Mutex) { return }
+    try {
+        $Gate.Mutex.ReleaseMutex()
+    } catch { }
+    try { $Gate.Mutex.Dispose() } catch { }
+    try { $Gate.Acquired = $false } catch { }
+    if (Get-Command Write-EditorLaunchLog -ErrorAction SilentlyContinue) {
+        Write-EditorLaunchLog 'LAUNCH_GATE released' 'DEBUG'
+    }
+}
+
 function Launch-RemoteEditor {
     param(
         [Parameter(Mandatory)][string]$EditorCmd,
@@ -2565,7 +2629,7 @@ function Launch-RemoteEditor {
                         Write-EditorLaunchLog ("CURSOR_PROXY_SET: preserved_open_windows socks={0} http={1} (no soft-stop)" -f $socksForSettings, $httpWrite) 'INFO'
                     }
                     Write-EditorLaunchLog 'LAUNCH_PROXY mode=proxy_settings_healthy' 'DEBUG'
-                } catch { Write-EditorLaunchLog "CURSOR_PROXY_SET_FAIL: $($_.Exception.Message)" 'WARN' }
+                } catch { Write-EditorLaunchLog "CURSOR_PROXY_SET_FAIL: $($_.Exception.Message)" 'INFO' }
             } else {
                 # No healthy socks/http after Ensure - clear dead 18998; last resort = direct.
                 # Clear-CursorProxySettingsSidecar: CLEAR_SKIP+repair when windows open AND
@@ -2575,7 +2639,7 @@ function Launch-RemoteEditor {
                     $nOpen = 0
                     try { $nOpen = @(Get-CursorProfileProcesses -ForceRefresh).Count } catch { $nOpen = 0 }
                     if ($nOpen -gt 0) {
-                        Write-EditorLaunchLog ("CURSOR_PROXY_CLEAR_SKIP: reason=windows_open action=repair_sidecar_only profile_count={0}" -f $nOpen) 'WARN'
+                        Write-EditorLaunchLog ("CURSOR_PROXY_CLEAR_SKIP: reason=windows_open action=repair_sidecar_only profile_count={0}" -f $nOpen) 'INFO'
                     }
                     if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
                         try { $cleared = [bool](Clear-CursorProxySettingsSidecar) } catch { $cleared = $false }
@@ -2589,7 +2653,7 @@ function Launch-RemoteEditor {
                             $cleared = $true
                         }
                     } elseif (-not $cleared) {
-                        Write-EditorLaunchLog 'CURSOR_PROXY_CLEAR_SKIP: reason=windows_open_or_non_owner action=reload_for_server_direct' 'WARN'
+                        Write-EditorLaunchLog 'CURSOR_PROXY_CLEAR_SKIP: reason=windows_open_or_non_owner action=reload_for_server_direct' 'INFO'
                     }
                     Write-EditorLaunchLog 'LAUNCH_PROXY mode=server_direct' 'INFO'
                 } catch { Write-EditorLaunchLog "CURSOR_PROXY_CLEAR_FAIL: $($_.Exception.Message)" 'WARN' }
@@ -2636,7 +2700,7 @@ function Launch-RemoteEditor {
     # wiped every remote window. Auth keys merge in-place into state.vscdb; no kill needed.
     if ($AuthRelaunch -and $EditorCmd -eq 'cursor' -and $profileProcCount -gt 0) {
         $mainCount = @(Get-CursorMainProfileProcesses).Count
-        Write-EditorLaunchLog ("LAUNCH_KILL_SKIP: reason=auth_relaunch_never_kill profile_count={0} main={1}" -f $profileProcCount, $mainCount) 'WARN'
+        Write-EditorLaunchLog ("LAUNCH_KILL_SKIP: reason=auth_relaunch_never_kill profile_count={0} main={1}" -f $profileProcCount, $mainCount) 'INFO'
     }
 
     Write-EditorLaunchLog (
@@ -2667,23 +2731,66 @@ function Launch-RemoteEditor {
         Write-EditorLaunchVerboseState -Label 'BEGIN' -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
     }
 
+    # Parallel Connect cold-start race: serialize profile launch; re-query after wait.
+    # Holder releases right after Start-Process — peer often still sees profile_all=0 for
+    # several seconds. Old settle required profile_all>0 first, so it skipped and dual
+    # cold_start without --new-window still happened (fleet W1+W2 same-ms shape).
+    $launchGate = $null
+    $gateWaited = $false
+    if ($EditorCmd -eq 'cursor') {
+        $launchGate = Enter-CursorProfileLaunchGate
+        # Contended = waited OR timeout/fail (never dual reuse-window cold after peer pressure).
+        $gateWaited = [bool]$launchGate.Contended -or ([int]$launchGate.WaitedMs -gt 0)
+        Clear-CursorProcessCache
+        $hasProfileWindow = @(Get-CursorMainProfileProcesses).Count -gt 0
+        $profileProcCount = @(Get-CursorProfileProcesses).Count
+        if ($gateWaited -and (-not $hasProfileWindow)) {
+            # Always poll after a wait — even while profile_all is still 0 (peer cold boot).
+            for ($settle = 1; $settle -le 12; $settle++) {
+                Start-Sleep -Milliseconds 400
+                Clear-CursorProcessCache
+                $hasProfileWindow = @(Get-CursorMainProfileProcesses).Count -gt 0
+                $profileProcCount = @(Get-CursorProfileProcesses).Count
+                Write-EditorLaunchLog ("LAUNCH_GATE_SETTLE attempt={0} profile_main={1} profile_all={2} waited_ms={3}" -f $settle, $hasProfileWindow, $profileProcCount, $launchGate.WaitedMs) 'INFO'
+                if ($hasProfileWindow) { break }
+            }
+        }
+        $agentHome = Test-RemoteEditorInAgentHome -RemotePath $RemotePath
+    }
+
+    try {
     $plan = Get-CursorLaunchWindowPlan -AgentHome $agentHome -HasProfileWindow $hasProfileWindow -ProfileProcCount $profileProcCount
     $orphanHelpers = $plan.OrphanHelpers
     $useNewWindow = $plan.UseNewWindow
     $planReason = $plan.Reason
-    # Still helpers-only after settle â†’ reap server-profile tree â†’ cold start (UseNewWindow=false).
+    # Still helpers-only after settle -> reap server-profile tree -> cold start (UseNewWindow=false).
+    # NEVER reap after a gate wait: helpers may be the peer's mid cold-boot (gate releases at
+    # Start-Process). Killing that tree races the holder and drops their window.
     if ($EditorCmd -eq 'cursor' -and $orphanHelpers) {
-        Write-EditorLaunchLog ("LAUNCH_REAP: orphan_helpers_reaped profile_all={0} - Stop-CursorServerProfileTree then cold" -f $profileProcCount) 'WARN'
-        try { Stop-CursorServerProfileTree } catch {
-            Write-EditorLaunchLog ("LAUNCH_REAP_FAIL: {0}" -f $_.Exception.Message) 'WARN'
+        if ($gateWaited) {
+            Write-EditorLaunchLog ("LAUNCH_REAP_SKIP: orphan_helpers after gate wait - peer may be mid cold boot profile_all={0}" -f $profileProcCount) 'INFO'
+            $orphanHelpers = $false
+            $useNewWindow = $true
+            $planReason = 'launch_gate_peer'
+        } else {
+            Write-EditorLaunchLog ("LAUNCH_REAP: orphan_helpers_reaped profile_all={0} - Stop-CursorServerProfileTree then cold" -f $profileProcCount) 'WARN'
+            try { Stop-CursorServerProfileTree } catch {
+                Write-EditorLaunchLog ("LAUNCH_REAP_FAIL: {0}" -f $_.Exception.Message) 'WARN'
+            }
+            Start-Sleep -Milliseconds 400
+            Clear-CursorProcessCache
+            $hasProfileWindow = $false
+            $profileProcCount = 0
+            $orphanHelpers = $false
+            $useNewWindow = $false
+            $planReason = 'orphan_helpers_reaped'
         }
-        Start-Sleep -Milliseconds 400
-        Clear-CursorProcessCache
-        $hasProfileWindow = $false
-        $profileProcCount = 0
-        $orphanHelpers = $false
-        $useNewWindow = $false
-        $planReason = 'orphan_helpers_reaped'
+    }
+    # Belt: waited/contended on peer gate but still look cold — never dual reuse-window on shared profile.
+    if ($EditorCmd -eq 'cursor' -and $gateWaited -and (-not $useNewWindow) -and ($planReason -eq 'cold_start' -or $planReason -eq 'orphan_helpers_reaped')) {
+        $useNewWindow = $true
+        $planReason = 'launch_gate_peer'
+        Write-EditorLaunchLog ("LAUNCH_GATE_PEER: force use_new_window=1 after wait waited_ms={0} profile_all={1}" -f $launchGate.WaitedMs, $profileProcCount) 'INFO'
     }
     Write-EditorLaunchLog "LAUNCH_PLAN: use_new_window=$useNewWindow reason=$planReason profile_all=$profileProcCount" 'INFO'
 
@@ -2714,6 +2821,8 @@ function Launch-RemoteEditor {
     $attempt = 0
     $anyStarted = $false
     $script:LastLaunchAttempts = @()
+    $script:LaunchSawOnFolderTick = $false
+    $script:LaunchGraceRelaunchDone = $false
     # Baseline profile PIDs before any strategy starts - used to reap losing-strategy orphans
     # without touching windows that were already open (shared ClaudeServerCursorProfile).
     $baselineProfilePids = @()
@@ -2723,7 +2832,13 @@ function Launch-RemoteEditor {
         } catch { $baselineProfilePids = @() }
     }
     $failedAttemptPids = @()
+    # Warm + promising: skip remote-classic (IPC interrupt) and go to extended grace.
+    $script:LaunchSkipWarmClassic = $false
     foreach ($strategy in $strategies) {
+        if ($script:LaunchSkipWarmClassic -and $strategy.Name -eq 'remote-classic') {
+            Write-EditorLaunchLog 'LAUNCH_SKIP: strategy=remote-classic reason=promising_handoff_in_flight' 'INFO'
+            continue
+        }
         $attempt++
         if ($attempt -gt 1 -and $EditorCmd -eq 'cursor') {
             # Do not wipe the profile tree on strategy retry -- other open projects must stay alive.
@@ -2769,6 +2884,12 @@ function Launch-RemoteEditor {
         $swStart.Stop()
         Write-LaunchPerfLog -Mark 'start_process' -Ms $swStart.ElapsedMilliseconds -Extra "strategy=$($strategy.Name)"
         $anyStarted = $true
+        # Release gate as soon as a process is spawned so a peer Connect can re-query and
+        # take profile_open/--new-window instead of blocking through on_folder poll.
+        if ($launchGate) {
+            Exit-CursorProfileLaunchGate -Gate $launchGate
+            $launchGate = $null
+        }
 
         # Track PIDs this attempt introduced (for orphan reap after a later winner).
         $thisAttemptPids = @()
@@ -2792,19 +2913,27 @@ function Launch-RemoteEditor {
         # Poll every 250ms instead of sleeping a full 1s between checks - a ready window is
         # typically detected within one tick of becoming ready instead of up to ~900ms late.
         $pollMs = 250
-        # Warm attempt 1: up to 20s (80 ticks) for Remote-SSH title settle on existing window.
-        # Warm retries: short (folder-uri cascade removed; remote-classic is the only warm #2).
-        # Cold attempt 1: was 12 ticks/3s - far too short for Cursor cold boot (Aug 2 needed
-        # ~40s across 4 strategies). Give cold first strategy 48 ticks (12s) so --remote can
-        # finish before we spawn orphan retries. Cold retries keep 12 ticks.
+        # Warm attempt 1: wall-clock 25s (tick count alone inflated to ~76s under ×6 CIM load —
+        # Precise 20260804.16 W6 Opening Cursor=94268ms). Warm retries short.
+        # Cold attempt 1: 48 ticks (12s). Cold retries keep 12 ticks.
         $pollMaxTicks =
             if ($attempt -gt 1 -and $useNewWindow -and $profileProcCount -gt 0) { 6 }
-            elseif ($attempt -eq 1 -and $useNewWindow -and $profileProcCount -gt 0) { 80 }
+            elseif ($attempt -eq 1 -and $useNewWindow -and $profileProcCount -gt 0) { 100 }
             elseif ($attempt -eq 1) { 48 }
             else { 12 }
+        $warmWallMs = if ($attempt -eq 1 -and $useNewWindow -and $profileProcCount -gt 0) { 25000 } else { 0 }
+        $swPoll = [System.Diagnostics.Stopwatch]::StartNew()
+        $promisingStreak = 0
+        $onFolderStreak = 0
+        $exitForPromisingGrace = $false
         for ($pollTick = 1; $pollTick -le $pollMaxTicks; $pollTick++) {
+            if ($warmWallMs -gt 0 -and $swPoll.ElapsedMilliseconds -ge $warmWallMs) {
+                Write-EditorLaunchLog ("LAUNCH_POLL_WALL: strategy={0} wall_ms={1} cap={2} - stop tick poll" -f $strategy.Name, $swPoll.ElapsedMilliseconds, $warmWallMs) 'INFO'
+                break
+            }
             Start-Sleep -Milliseconds $pollMs
-            Clear-CursorProcessCache
+            # Throttle full CIM refresh under fleet load (promising path).
+            if (($pollTick % 2) -eq 1 -or $promisingStreak -lt 2) { Clear-CursorProcessCache }
             $afterFolder = Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath
             $afterAgent = if ($EditorCmd -eq 'cursor') { Test-RemoteEditorInAgentHome -RemotePath $RemotePath } else { $false }
 
@@ -2818,7 +2947,7 @@ function Launch-RemoteEditor {
                     if ($curWinCount -gt $baseWinCount) { $windowCountIncreased = $true; break }
                 }
             }
-            $elapsedMs = $pollTick * $pollMs
+            $elapsedMs = [int]$swPoll.ElapsedMilliseconds
             Write-EditorLaunchLog (
                 "LAUNCH_POLL: strategy=$($strategy.Name) elapsed=${elapsedMs}ms on_folder=$afterFolder agent_home=$afterAgent window_count_increased=$windowCountIncreased"
             ) 'DEBUG'
@@ -2827,8 +2956,16 @@ function Launch-RemoteEditor {
             # Unified success bar with Confirm-RemoteEditorLaunchVisible: on_folder ONLY.
             # window_count_increased is promising (keep polling) but must not return true -
             # that disagreement produced false StepFail "elevated launch failed" (P0.4).
+            # Require 2 consecutive on_folder ticks under warm ×6 (single-tick flicker on dakhl).
             if ($afterFolder) {
-                Write-EditorLaunchLog "LAUNCH_OK: strategy=$($strategy.Name) attempt=$attempt reason=on_folder agent_home=$afterAgent" 'INFO'
+                $onFolderStreak++
+                $script:LaunchSawOnFolderTick = $true
+            } else {
+                $onFolderStreak = 0
+            }
+            $needStable = if ($useNewWindow -and $profileProcCount -gt 0) { 2 } else { 1 }
+            if ($afterFolder -and $onFolderStreak -ge $needStable) {
+                Write-EditorLaunchLog "LAUNCH_OK: strategy=$($strategy.Name) attempt=$attempt reason=on_folder agent_home=$afterAgent streak=$onFolderStreak" 'INFO'
                 $script:LastLaunchAttempts += "${attempt}:$($strategy.Name):folder=$afterFolder:agent=$afterAgent:wincount=$windowCountIncreased"
                 if ($EditorCmd -eq 'cursor' -and $failedAttemptPids.Count -gt 0) {
                     $keepPids = @($baselineProfilePids + $thisAttemptPids)
@@ -2842,9 +2979,21 @@ function Launch-RemoteEditor {
                 return $true
             }
             if ($windowCountIncreased -and -not $afterAgent) {
+                $promisingStreak++
                 Write-EditorLaunchLog (
-                    "LAUNCH_PROMISING: strategy=$($strategy.Name) reason=window_count_increased_no_title_match - waiting for on_folder"
+                    "LAUNCH_PROMISING: strategy=$($strategy.Name) reason=window_count_increased_no_title_match streak=$promisingStreak - waiting for on_folder"
                 ) 'DEBUG'
+                # Sustained promising under ×6: skip remote-classic only if we already saw on_folder
+                # at least once (flicker). Early grace without any on_folder → started_but_no_process
+                # after 45s (Precise×6 20260804.32 R2 deploy).
+                if ($promisingStreak -ge 6 -and $useNewWindow -and $profileProcCount -gt 0 -and $elapsedMs -ge 8000 -and $script:LaunchSawOnFolderTick) {
+                    Write-EditorLaunchLog ("LAUNCH_PROMISING_EARLY_GRACE: strategy={0} wall_ms={1} saw_on_folder=1" -f $strategy.Name, $elapsedMs) 'INFO'
+                    $script:LaunchSkipWarmClassic = $true
+                    $exitForPromisingGrace = $true
+                    break
+                }
+            } else {
+                $promisingStreak = 0
             }
 
             if ($script:VerboseLaunch -and $pollTick -eq $pollMaxTicks) {
@@ -2864,19 +3013,49 @@ function Launch-RemoteEditor {
             Write-EditorLaunchVerboseState -Label "RESULT_$($strategy.Name)" -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath -IncludeSnapshot
         }
 
-        Write-EditorLaunchLog "LAUNCH_RETRY: strategy=$($strategy.Name) did not reach target folder - next strategy" 'WARN'
+        if ($exitForPromisingGrace) {
+            # Do not WARN LAUNCH_RETRY — handoff in flight; grace is the next step.
+            break
+        }
+        # Cascade to next strategy is expected under warm ×6 — INFO; final LAUNCH_WARN stays WARN.
+        Write-EditorLaunchLog "LAUNCH_RETRY: strategy=$($strategy.Name) did not reach target folder - next strategy" 'INFO'
     }
 
     # Warm grace: the --remote IPC handoff may still be settling (same-window title update).
-    # One more short poll for on_folder before declaring failure - covers the case where the
-    # primary poll ceiling just barely missed the title flip.
+    # Extended when promising early-exit (×6 title settle can take 30–60s wall).
     if ($anyStarted -and $warmHandoff) {
-        Write-EditorLaunchLog 'LAUNCH_GRACE: warm handoff - waiting up to 10s more for on_folder' 'INFO'
-        for ($g = 1; $g -le 40; $g++) {
+        # Default warm grace 30s (was 10s) — last Parallel slot under ×6 often needs it.
+        # Promising early-exit keeps 45s.
+        $graceTicks = if ($script:LaunchSkipWarmClassic) { 240 } else { 160 }
+        Write-EditorLaunchLog ("LAUNCH_GRACE: warm handoff - waiting up to {0}s more for on_folder" -f ([int]($graceTicks * 0.25))) 'INFO'
+        $graceOnFolderStreak = 0
+        for ($g = 1; $g -le $graceTicks; $g++) {
             Start-Sleep -Milliseconds 250
             Clear-CursorProcessCache
+            # Mid-grace: profile tree vanished under ×6 sibling pressure — one cold relaunch.
+            if ($EditorCmd -eq 'cursor' -and ((@(Get-CursorMainProfileProcesses).Count) -eq 0) -and -not $script:LaunchGraceRelaunchDone) {
+                $script:LaunchGraceRelaunchDone = $true
+                Write-EditorLaunchLog 'LAUNCH_GRACE_RELAUNCH: profile_empty mid-grace - cold remote once' 'INFO'
+                try {
+                    $reArgs = $null
+                    foreach ($st in @($strategies)) {
+                        if ($st.Name -eq 'remote') { $reArgs = $st.Args; break }
+                    }
+                    if ($reArgs) {
+                        [void](Start-ProcessAsInteractiveUser -FilePath $cli -ArgumentList $reArgs)
+                    }
+                } catch {
+                    Write-EditorLaunchLog ("LAUNCH_GRACE_RELAUNCH_FAIL: {0}" -f $_.Exception.Message) 'INFO'
+                }
+                continue
+            }
             if (Test-RemoteEditorOnCorrectFolder -EditorCmd $EditorCmd -Alias $Alias -RemotePath $RemotePath) {
-                Write-EditorLaunchLog ("LAUNCH_OK: strategy=grace attempt=post reason=on_folder elapsed={0}ms" -f ($g * 250)) 'INFO'
+                $graceOnFolderStreak++
+            } else {
+                $graceOnFolderStreak = 0
+            }
+            if ($graceOnFolderStreak -ge 2) {
+                Write-EditorLaunchLog ("LAUNCH_OK: strategy=grace attempt=post reason=on_folder elapsed={0}ms streak=2" -f ($g * 250)) 'INFO'
                 $script:LastLaunchAttempts += "grace:on_folder"
                 if ($EditorCmd -eq 'cursor' -and $failedAttemptPids.Count -gt 0) {
                     $keepPids = @($baselineProfilePids)
@@ -3002,5 +3181,11 @@ function Launch-RemoteEditor {
 
     Write-LaunchPerfLog -Mark 'launch_total' -Ms $script:LaunchPerfSw.ElapsedMilliseconds -Extra 'path=fail_not_on_folder'
     return $false
+    } finally {
+        if ($launchGate) {
+            Exit-CursorProfileLaunchGate -Gate $launchGate
+            $launchGate = $null
+        }
+    }
 }
 

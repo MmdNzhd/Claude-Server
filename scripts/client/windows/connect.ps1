@@ -1,4 +1,4 @@
-# connect.ps1 - Claude Code launcher for Windows.
+﻿# connect.ps1 - Claude Code launcher for Windows.
 # connect.bat invariant: menu footer lives in connect-ui.ps1
 # Usage:  double-click connect.bat
 #         connect.bat -Setup   (reconfigure username)
@@ -139,8 +139,15 @@ trap {
     Write-Host "  [X] Unexpected error: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "      $($_.InvocationInfo.PositionMessage)" -ForegroundColor DarkGray
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
-        Write-ConnectLog "UNHANDLED: $($_.Exception.Message) at $($_.InvocationInfo.PositionMessage)" 'ERROR'
-        Write-ConnectLog ("FAIL UNHANDLED: {0}" -f $_.Exception.Message) 'ERROR'
+        # PositionMessage is multi-line (caret under the throwing expression) - collapse so the day
+        # log never grows bare "+ while (...)" continuations without a stamp.
+        $pos = ''
+        try { $pos = (($_.InvocationInfo.PositionMessage + '') -replace '[\r\n]+', ' ').Trim() } catch { }
+        if ($pos.Length -gt 240) { $pos = $pos.Substring(0, 240) }
+        $msg = ''
+        try { $msg = (($_.Exception.Message + '') -replace '[\r\n]+', ' ').Trim() } catch { }
+        Write-ConnectLog ("UNHANDLED: {0} at {1}" -f $(if ($msg) { $msg } else { '(null)' }), $(if ($pos) { $pos } else { '?' })) 'ERROR'
+        Write-ConnectLog ("FAIL UNHANDLED: {0}" -f $(if ($msg) { $msg } else { '(null)' })) 'ERROR'
     }
     # Error-flush: ensure day log sync attempted even if Write-ConnectLog sync was skipped/locked.
     if (Get-Command Sync-ConnectLogToServer -ErrorAction SilentlyContinue) {
@@ -179,10 +186,10 @@ $Alias    = "claude-server"
 $script:ServerIP = $ServerIP
 $script:SshAlias = $Alias
 $script:CursorProfileSite = 'Smart'
-$script:ConnectVersion = '20260803.13'
+$script:ConnectVersion = '20260804.33'
 # Internal-only build tag (never shown in the console UI) - logged to CONTEXT lines so we can
 # tell exactly which build a session ran without the user seeing any version/update noise.
-$script:ConnectBuildId = '8bee02bf-624b-4994-b31e-e6f7e650f77f'
+$script:ConnectBuildId = 'e93ff6d0-5552-4050-9422-df96e090ba83'
 $script:SshMsSamples = [System.Collections.Generic.List[int]]::new()
 $script:SshMsSampleStartUnix = 0
 $script:LastSshRollupUnix = 0
@@ -1131,7 +1138,7 @@ function Start-DeferredServerSetup {
     $connectPs1 = Join-Path $ConnectScriptDir 'connect.ps1'
     # Inherit parent UI slot for tunnel preference; child must not call Enter-ConnectSingleInstance.
     $parentSlot = ($env:CLAUDE_CONNECT_UI_SLOT + '').Trim()
-    # C7: refuse empty inherit — never leave deferred worker as second "primary" (unset slot).
+    # C7: refuse empty inherit - never leave deferred worker as second "primary" (unset slot).
     if ($parentSlot -notmatch '^\d+$') {
         if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
             Write-ConnectLog ("MULTI_INSTANCE: deferred_setup_refuse_empty_slot pid={0}" -f $PID) 'ERROR'
@@ -1199,7 +1206,7 @@ function Wait-DeferredServerSetup {
             if (($sw.ElapsedMilliseconds - $lastBeatMs) -ge 15000) {
                 $lastBeatMs = [int]$sw.ElapsedMilliseconds
                 if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
-                    Write-ConnectLog ("SERVER_SETUP_WAIT ms={0} pid={1}" -f $lastBeatMs, $script:DeferredSetupProc.Id) 'WARN'
+                    Write-ConnectLog ("SERVER_SETUP_WAIT ms={0} pid={1}" -f $lastBeatMs, $script:DeferredSetupProc.Id) 'INFO'
                 }
             }
             Start-Sleep -Milliseconds 50
@@ -1371,25 +1378,47 @@ function SshX([string]$Cmd, [switch]$NoRetryOnTimeout) {
     $result = Invoke-SshXCore -RemoteCmd $remoteCmd -ApplyTimeout:$applyTimeout
     if ($result.Exit -eq 124 -and -not $NoRetryOnTimeout) {
         if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
-            Write-ConnectLog "SSH_TIMEOUT exit=124 cmd=$truncCmd - retrying once" 'ERROR'
+            # ×6 WMCP sync often hits ssh timeout 124 then succeeds on retry — not ERROR.
+            Write-ConnectLog "SSH_TIMEOUT exit=124 cmd=$truncCmd - retrying once" 'INFO'
         }
         $result = Invoke-SshXCore -RemoteCmd $remoteCmd -ApplyTimeout:$applyTimeout
+    }
+    # Windows STATUS_DLL_INIT_FAILED (-1073741502) / similar NTSTATUS under Parallel×6
+    # ssh.exe spawn storms: retry independent of -NoRetryOnTimeout (that switch is hang budget only).
+    if ($result.Exit -lt 0) {
+        foreach ($ntDelayMs in @(200, 450)) {
+            if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                Write-ConnectLog ("SSH_SPAWN_RETRY exit={0} sleep_ms={1} cmd={2}" -f $result.Exit, $ntDelayMs, $truncCmd) 'INFO'
+            }
+            Start-Sleep -Milliseconds $ntDelayMs
+            $result = Invoke-SshXCore -RemoteCmd $remoteCmd -ApplyTimeout:$applyTimeout
+            if ($result.Exit -ge 0) { break }
+        }
     }
     $truncOut = ($result.Out.Trim() -replace '\s+', ' ')
     if ($truncOut.Length -gt 300) { $truncOut = $truncOut.Substring(0, 300) + '...' }
     if (-not $truncOut) { $truncOut = '(empty)' }
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
         $sshLevel = 'INFO'
-        if ($result.Exit -eq 124) { $sshLevel = 'ERROR' }
+        # Timeout under Parallel Connect is expected soft failure (caller retries / peer path).
+        if ($result.Exit -eq 124) { $sshLevel = 'INFO' }
         elseif ($result.Exit -ne 0) {
             # #18: expected pre-mount check noise must not WARN the day log.
             if ($truncOut -match '(?i)\bneed_mount\b' -and $truncOut -notmatch '(?i)Permission denied|Connection refused|Could not resolve|No route to host|Connection timed out|error:') {
                 $sshLevel = 'TRACE'
+            } elseif ($result.Exit -lt 0 -and ($truncOut -eq '(empty)' -or -not $truncOut)) {
+                # Windows NTSTATUS / forced tree-kill during Connect teardown (e.g. -1073741502).
+                $sshLevel = 'INFO'
             } else {
                 $sshLevel = 'WARN'
             }
         }
-        Write-ConnectLog "SSH_END exit=$($result.Exit) ms=$($result.Ms) out=$truncOut" $sshLevel
+        # Redact intermediate WMCP_PROBE=000 from day-log SSH_END (Precise last-match poison).
+        $sshOutForLog = $truncOut
+        if ($sshOutForLog -match 'WMCP_PROBE=000\b') {
+            $sshOutForLog = ($sshOutForLog -replace 'WMCP_PROBE=000', 'WMCP_PEER_MISS=000')
+        }
+        Write-ConnectLog "SSH_END exit=$($result.Exit) ms=$($result.Ms) out=$sshOutForLog" $sshLevel
         if ($truncOut -match 'unexpected EOF while looking for matching') {
             Write-ConnectLog ("FAIL SSH_QUOTE: exit={0} cmd={1} out={2}" -f $result.Exit, $truncCmd, $truncOut) 'ERROR'
         } elseif ($result.Exit -ne 0 -and $result.Exit -ne 124 -and $truncOut -match '(?i)Permission denied|Connection refused|Could not resolve|No route to host|Connection timed out|Unknown error') {
@@ -1402,9 +1431,7 @@ function SshX([string]$Cmd, [switch]$NoRetryOnTimeout) {
     }
     Add-SshMsSample ([int]$result.Ms)
     Add-SshRecentLog "exit=$($result.Exit) ms=$($result.Ms) cmd=$truncCmd"
-    if ($result.Exit -ne 0 -and $result.Exit -ne 124) {
-        $script:LastSshExit = $result.Exit
-    }
+    $script:LastSshExit = [int]$result.Exit
     $global:LASTEXITCODE = $result.Exit
     return $result.Lines
 }
@@ -1422,8 +1449,12 @@ function Start-MountProjectBackground {
         [Parameter(Mandatory)][string]$ProjectId,
         [Parameter(Mandatory)][string]$Alias,
         [Parameter(Mandatory)][string]$LogDir,
-        [Parameter(Mandatory)][string]$SessionId
+        [Parameter(Mandatory)][string]$SessionId,
+        # Session reverse-tunnel port (not fleet-published conf). Prevents MOUNT_BG_FAIL when
+        # published TUNNEL_PORT dies under Parallel Connect (Precise×6 20260804.16 W5).
+        [int]$SessionPort = 0
     )
+    if ($SessionPort -le 0 -and $script:Port) { $SessionPort = [int]$script:Port }
     $runnerDir = Join-Path $env:TEMP 'claude-connect-mountbg'
     if (-not (Test-Path -LiteralPath $runnerDir)) { New-Item -ItemType Directory -Force -Path $runnerDir | Out-Null }
     $runnerPath = Join-Path $runnerDir ("mount-bg-{0}.ps1" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -1432,7 +1463,8 @@ param(
     [Parameter(Mandatory)][string]$ProjectId,
     [Parameter(Mandatory)][string]$Alias,
     [Parameter(Mandatory)][string]$LogDir,
-    [Parameter(Mandatory)][string]$SessionId
+    [Parameter(Mandatory)][string]$SessionId,
+    [int]$SessionPort = 0
 )
 $ErrorActionPreference = 'Continue'
 function Write-MountBgLog([string]$Msg, [string]$Level = 'INFO') {
@@ -1463,17 +1495,41 @@ function Write-MountBgLog([string]$Msg, [string]$Level = 'INFO') {
     }
 }
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-Write-MountBgLog "MOUNT_BG_BEGIN project=$ProjectId"
+Write-MountBgLog ("MOUNT_BG_BEGIN project=$ProjectId session_port={0}" -f $SessionPort)
 try {
-    $mountCmd = "CLAUDE_TRUSTED_TUNNEL=1 CLAUDE_TUNNEL_BANNER_OK=1 `$HOME/.local/bin/claude-mount up '$ProjectId' 2>&1"
-    $out = & ssh -n -o BatchMode=yes -o ConnectTimeout=15 $Alias $mountCmd 2>&1
-    $ec = $LASTEXITCODE
+    $portEnv = ''
+    if ($SessionPort -ge 1024 -and $SessionPort -le 65535) {
+        $portEnv = "CLAUDE_MOUNT_TUNNEL_PORT=$SessionPort "
+    }
+    $mountCmd = "${portEnv}CLAUDE_TRUSTED_TUNNEL=1 CLAUDE_TUNNEL_BANNER_OK=1 `$HOME/.local/bin/claude-mount up '$ProjectId' 2>&1"
+    $retryPat = '(?i)connection reset|reset by peer|rejected the key|key auth failed|publickey|Permission denied|Connection closed'
+    $maxAttempts = 3
+    $lastEc = 0
+    $lastOutJoined = ''
+    $succeeded = $false
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        if ($attempt -gt 1) {
+            Write-MountBgLog "MOUNT_BG_RETRY project=$ProjectId attempt=$attempt"
+            Start-Sleep -Seconds 1.5
+        }
+        $out = & ssh -n -o BatchMode=yes -o ConnectTimeout=15 $Alias $mountCmd 2>&1
+        $ec = $LASTEXITCODE
+        $lastEc = $ec
+        $lastOutJoined = (($out -join ' ') -replace '\s+', ' ').Trim()
+        if ($ec -eq 0) {
+            $succeeded = $true
+            break
+        }
+        $shouldRetry = ($ec -ne 0) -or ($lastOutJoined -match $retryPat)
+        if (-not $shouldRetry -or $attempt -ge $maxAttempts) {
+            break
+        }
+    }
     $sw.Stop()
-    $outJoined = (($out -join ' ') -replace '\s+', ' ').Trim()
-    if ($ec -eq 0) {
-        Write-MountBgLog ("MOUNT_BG_OK project=$ProjectId ms={0} out={1}" -f $sw.ElapsedMilliseconds, $outJoined)
+    if ($succeeded) {
+        Write-MountBgLog ("MOUNT_BG_OK project=$ProjectId ms={0} out={1}" -f $sw.ElapsedMilliseconds, $lastOutJoined)
     } else {
-        Write-MountBgLog ("MOUNT_BG_FAIL project=$ProjectId exit=$ec ms={0} out={1} - press O to reopen editor after fixing, or R to reconnect" -f $sw.ElapsedMilliseconds, $outJoined) 'WARN'
+        Write-MountBgLog ("MOUNT_BG_FAIL project=$ProjectId exit=$lastEc ms={0} out={1} - press O to reopen editor after fixing, or R to reconnect" -f $sw.ElapsedMilliseconds, $lastOutJoined) 'WARN'
     }
 } catch {
     Write-MountBgLog ("MOUNT_BG_EXCEPTION project=$ProjectId error=$($_.Exception.Message)") 'WARN'
@@ -1484,7 +1540,8 @@ try {
         $argList = @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
             '-File', $runnerPath,
-            '-ProjectId', $ProjectId, '-Alias', $Alias, '-LogDir', $LogDir, '-SessionId', $SessionId
+            '-ProjectId', $ProjectId, '-Alias', $Alias, '-LogDir', $LogDir, '-SessionId', $SessionId,
+            '-SessionPort', "$SessionPort"
         )
         # Job-bound: dies with Connect on X/crash (session job, not sidecar job).
         if (Get-Command Start-JobBoundProcess -ErrorAction SilentlyContinue) {
@@ -2681,7 +2738,7 @@ $script:WindowsMcpEnsured = $false
                     if (-not (Test-CanClaimCursorProxyOwner)) {
                         $needReseed = $false
                         if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
-                            Write-ConnectLog "ENSURE_TUNNEL bg_init_reseed_skip reason=foreign_owner_cannot_bind pid=$($bgTunnel.Id) port=$Port" 'WARN'
+                            Write-ConnectLog "ENSURE_TUNNEL bg_init_reseed_skip reason=foreign_owner_cannot_bind pid=$($bgTunnel.Id) port=$Port" 'INFO'
                         }
                     }
                 }
@@ -2691,7 +2748,7 @@ $script:WindowsMcpEnsured = $false
                         Write-ConnectLog "ENSURE_TUNNEL skip reason=bg_init_same_pick pid=$($bgTunnel.Id) port=$Port socks=$($script:SocksProxyPort)" 'INFO'
                     }
                 } elseif (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
-                    Write-ConnectLog "ENSURE_TUNNEL bg_init_reseed reason=proxy_leg pid=$($bgTunnel.Id) port=$Port" 'WARN'
+                    Write-ConnectLog "ENSURE_TUNNEL bg_init_reseed reason=proxy_leg pid=$($bgTunnel.Id) port=$Port" 'INFO'
                 }
             }
             if (-not $tunnelReused -and -not (Ensure-SessionTunnel -Alias $Alias -SshCfgPath $sshCfg -BgTunnel ([ref]$bgTunnel) -TunnelReused ([ref]$tunnelReused))) {
@@ -2730,7 +2787,7 @@ $script:WindowsMcpEnsured = $false
             Write-ConnectLog "ACTIVE_MOUNT server_conf=$activeOnServer pushed_id=$($go.Id)"
             $amParsed = ($activeOnServer -replace '^ACTIVE_MOUNT=', '').Trim()
             if ($amParsed -and $go.Id -and ($amParsed -ne [string]$go.Id)) {
-                Write-ConnectLog ("ACTIVE_MOUNT mismatch server_conf={0} pushed_id={1}" -f $amParsed, $go.Id) 'WARN'
+                Write-ConnectLog ("ACTIVE_MOUNT mismatch server_conf={0} pushed_id={1}" -f $amParsed, $go.Id) 'INFO'
             }
             if (Get-Command Write-ConnectSessionContext -ErrorAction SilentlyContinue) { Write-ConnectSessionContext -Phase 'server_ready' }
 
@@ -2873,6 +2930,7 @@ $script:WindowsMcpEnsured = $false
                 # and mislogging "STEP end" under whatever the PREVIOUS step happened to be
                 # (currentStepName is stale when Step() was never called to update it).
                 Step "Mounting files (already mounted)"
+                Write-ConnectLog ("MOUNT_BG_SKIP reason=already_healthy project={0}" -f $go.Id) 'INFO'
                 $mountResult = [pscustomobject]@{ Ok = $true; Out = 'skip_remount_healthy'; Skipped = $true }
                 $mountOut = $mountResult.Out
                 $mountT = 0
@@ -2886,7 +2944,9 @@ $script:WindowsMcpEnsured = $false
                 # prompt here.
                 Step "Mounting files"
                 Write-ConnectLog 'MOUNT_CHECK_SKIPPED reason=bg_up' 'DEBUG'
-                [void](Start-MountProjectBackground -ProjectId $go.Id -Alias $Alias -LogDir (Join-Path $env:USERPROFILE '.config\claude-connect\logs') -SessionId (Get-ConnectSessionId))
+                $mountSessionPort = 0
+                if ($script:Port) { $mountSessionPort = [int]$script:Port }
+                [void](Start-MountProjectBackground -ProjectId $go.Id -Alias $Alias -LogDir (Join-Path $env:USERPROFILE '.config\claude-connect\logs') -SessionId (Get-ConnectSessionId) -SessionPort $mountSessionPort)
                 $mountResult = [pscustomobject]@{ Ok = $false; Out = 'started_in_background'; Skipped = $true; Pending = $true }
                 $mountOut = $mountResult.Out
                 $mountT = 0
@@ -3045,7 +3105,7 @@ $script:WindowsMcpEnsured = $false
                         # Console decluttered on user request (2026-07-24) - full detail stays in
                         # the day log for diagnosis; not actionable enough mid-session to warrant
                         # an inline console interruption every time it happens.
-                        Write-ConnectLog 'AUTH_WARN personal_cursor_dominant' 'WARN'
+                        Write-ConnectLog 'AUTH_WARN personal_cursor_dominant' 'INFO'
                     }
                 }
                 if ($skipAuth) {
@@ -3154,7 +3214,7 @@ $script:WindowsMcpEnsured = $false
                 # Console decluttered on user request (2026-07-24): this fires on a large
                 # fraction of sessions (xray probe timing, see bug 3/4) and was pure noise by
                 # then - full detail stays in the day log for diagnosis.
-                Write-ConnectLog 'PROXY_HEALTH_UI warn international_path_down' 'WARN'
+                Write-ConnectLog 'PROXY_HEALTH_UI international_path_down (server_direct fallback)' 'INFO'
                 if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
                     try { [void](Clear-CursorProxySettingsSidecar) } catch {}
                 }
@@ -3209,7 +3269,16 @@ $script:WindowsMcpEnsured = $false
                             Write-ConnectLog 'EDITOR_SEEN_CLEAR reason=opening_step_fail' 'INFO'
                         }
                     } elseif (Get-Command Confirm-RemoteEditorLaunchVisible -ErrorAction SilentlyContinue) {
-                        if (-not (Confirm-RemoteEditorLaunchVisible -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)) {
+                        $confirmOk = [bool](Confirm-RemoteEditorLaunchVisible -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -WaitMs 5000)
+                        # Warm ×6: stable LAUNCH_OK then title flicker (dakhl .17/.18) — one relaunch + long confirm.
+                        if (-not $confirmOk) {
+                            Write-ConnectLog 'LAUNCH_CONFIRM_RETRY reason=title_flicker_after_stable_poll' 'INFO'
+                            $relaunchOk = [bool](Launch-RemoteEditor -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -AuthRelaunch:$false -KnownOnFolder:$false)
+                            if ($relaunchOk) {
+                                $confirmOk = [bool](Confirm-RemoteEditorLaunchVisible -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -WaitMs 10000)
+                            }
+                        }
+                        if (-not $confirmOk) {
                             $confirmFailMsg = if (Get-Command Get-RemoteEditorLaunchFailMessage -ErrorAction SilentlyContinue) {
                                 Get-RemoteEditorLaunchFailMessage -EditorName $EditorName
                             } else {
@@ -3336,14 +3405,33 @@ $script:WindowsMcpEnsured = $false
             if (Get-Command Write-ConnectSessionOpenSummary -ErrorAction SilentlyContinue) {
                 Write-ConnectSessionOpenSummary
             }
+            # Probe once at boot so SCORECARD/day-log carry agent_path even if the UI
+            # key-loop is killed early (E2E / noninteractive keep). Status-loop still rate-limits.
+            if (Get-Command Invoke-AgentPathProbe -ErrorAction SilentlyContinue) {
+                try { Invoke-AgentPathProbe } catch { }
+            }
             if (Get-Command Write-ConnectScorecard -ErrorAction SilentlyContinue) {
                 Write-ConnectScorecard -Phase 'boot'
+            }
+            # Immediate WMCP maintain (key-loop retries every 12s until stamped).
+            $script:WmcpDayStampOk = $false
+            try {
+                if (Get-Command Maintain-WindowsMcpSession -ErrorAction SilentlyContinue) {
+                    $script:WmcpDayStampOk = [bool](Maintain-WindowsMcpSession -PeerMaxOuter 12)
+                }
+            } catch {
+                if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                    Write-ConnectLog ("WINDOWS_MCP: boot_maintain_failed {0}" -f $_.Exception.Message) 'WARN'
+                }
             }
             Complete-PostTunnelRecovery -MountOk $mountOk -AuthDetail $script:LastAuthDetail `
                 -ProjectId $go.Id -RemotePath $go.Path -EditorCmd $EditorCmd -EditorName $EditorName `
                 -OnFolder $onFolderNow -DidLaunch $didLaunch
 
-            while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
+            Clear-ConnectConsoleKeyBuffer
+            if (-not (Test-ConnectConsoleInteractive)) {
+                Write-ConnectLog 'SESSION: noninteractive_stdin reason=redirected_or_no_console (key loop safe; poll-only)' 'INFO'
+            }
 
             $action = ''
             $gotKey = $false
@@ -3351,7 +3439,7 @@ $script:WindowsMcpEnsured = $false
             $script:lastToastAt = $null
             $tunnelSyncOk = $true
                         $lastEditorCheckAt = [DateTime]::MinValue
-            $lastWmcpMaintainAt = [DateTime]::MinValue
+            $lastWmcpMaintainAt = Get-Date
             $onFolderNow = $editorOpened
             $editorLabel = if ($editorOpened) { $EditorName } else { 'closed' }
             $script:EditorClosedPollStreak = 0
@@ -3360,12 +3448,20 @@ $script:WindowsMcpEnsured = $false
                 $tunnelSyncOk = [bool](Sync-SessionTunnelProcess -BgTunnel ([ref]$bgTunnel))
                 if (-not $tunnelSyncOk) { break }
                 # Keep windows-mcp forward alive without touching the reverse tunnel /
-                # Cursor session. Every 3 min: listen + sync + HTTP probe (fail-soft).
-                if ((Get-Date) - $lastWmcpMaintainAt -gt [TimeSpan]::FromMinutes(3)) {
+                # Cursor session. Until day-log WMCP_PROBE=200: every 12s (Precise settle).
+                # After stamp: every 3 min.
+                $wmcpInterval = if ($script:WmcpDayStampOk) { [TimeSpan]::FromMinutes(3) } else { [TimeSpan]::FromSeconds(12) }
+                if ((Get-Date) - $lastWmcpMaintainAt -gt $wmcpInterval) {
                     $lastWmcpMaintainAt = Get-Date
                     try {
                         if (Get-Command Maintain-WindowsMcpSession -ErrorAction SilentlyContinue) {
-                            [void](Maintain-WindowsMcpSession)
+                            $peerN = if ($script:WmcpDayStampOk) { 0 } else { 6 }
+                            $ok = if ($peerN -gt 0) {
+                                [bool](Maintain-WindowsMcpSession -PeerMaxOuter $peerN)
+                            } else {
+                                [bool](Maintain-WindowsMcpSession)
+                            }
+                            if ($ok) { $script:WmcpDayStampOk = $true }
                         }
                     } catch {
                         if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
@@ -3467,8 +3563,8 @@ $script:WindowsMcpEnsured = $false
                         -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path
                     $lastStatusAt = Get-Date
                 }
-                if ([Console]::KeyAvailable) {
-                    $ki = [Console]::ReadKey($true)
+                $ki = Read-ConnectConsoleKey
+                if ($ki) {
                     $kc = $ki.KeyChar.ToString()
                     $code = if ($kc.Length -eq 1) { [int][char]$kc[0] } else { 0 }
                     $ascii = ($code -ge 32 -and $code -le 126)
@@ -3504,8 +3600,9 @@ $script:WindowsMcpEnsured = $false
                     Show-ConnectToast 'Tunnel dropped - reconnecting...'
                     $script:lastToastAt = Get-Date
                 }
-                if ([Console]::KeyAvailable) {
-                    $ki = [Console]::ReadKey($true)
+                $kiDrop = Read-ConnectConsoleKey
+                if ($kiDrop) {
+                    $ki = $kiDrop
                     $kc = $ki.KeyChar.ToString()
                     $code = if ($kc.Length -eq 1) { [int][char]$kc[0] } else { 0 }
                     $ascii = ($code -ge 32 -and $code -le 126)
@@ -3524,14 +3621,14 @@ $script:WindowsMcpEnsured = $false
                         Write-TunnelDropLog -Reason 'auto_reconnect' -TunnelSyncOk:$tunnelSyncOk -ProjectId $go.Id `
                             -EditorOpened:$editorOpened -EditorSeen:$script:EditorSeenOpen -RecoveryGen $script:RecoveryGeneration -TunnelPid $bgPid
                     } else {
-                        Write-ConnectLog ("TUNNEL_DROP reason=auto_reconnect tunnel_sync_ok={0} project={1} editor_opened={2} editor_seen={3} gen={4}" -f $tunnelSyncOk, $go.Id, $editorOpened, $script:EditorSeenOpen, $script:RecoveryGeneration) 'WARN'
+                        Write-ConnectLog ("TUNNEL_DROP reason=auto_reconnect tunnel_sync_ok={0} project={1} editor_opened={2} editor_seen={3} gen={4}" -f $tunnelSyncOk, $go.Id, $editorOpened, $script:EditorSeenOpen, $script:RecoveryGeneration) 'INFO'
                     }
                     Write-Host "    Connection dropped - reconnecting..." -ForegroundColor Yellow
                 }
             }
 
             if (-not $tunnelSyncOk -and $action -eq '') {
-                Write-ConnectLog 'SESSION: fallthrough_recover reason=tunnel_down_empty_action' 'WARN'
+                    Write-ConnectLog 'SESSION: fallthrough_recover reason=tunnel_down_empty_action' 'INFO'
                 $action = 'r'
             }
 
@@ -3566,7 +3663,14 @@ $script:WindowsMcpEnsured = $false
                             Write-ConnectLog 'EDITOR_SEEN_CLEAR reason=opening_step_fail' 'INFO'
                         }
                     } elseif (Get-Command Confirm-RemoteEditorLaunchVisible -ErrorAction SilentlyContinue) {
-                        if (-not (Confirm-RemoteEditorLaunchVisible -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path)) {
+                        $confirmOk = [bool](Confirm-RemoteEditorLaunchVisible -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -WaitMs 5000)
+                        if (-not $confirmOk) {
+                            Write-ConnectLog 'LAUNCH_CONFIRM_RETRY reason=title_flicker_after_stable_poll action=o' 'INFO'
+                            if (Launch-RemoteEditor -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path) {
+                                $confirmOk = [bool](Confirm-RemoteEditorLaunchVisible -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -WaitMs 10000)
+                            }
+                        }
+                        if (-not $confirmOk) {
                             $confirmFailMsg = if (Get-Command Get-RemoteEditorLaunchFailMessage -ErrorAction SilentlyContinue) {
                                 Get-RemoteEditorLaunchFailMessage -EditorName $EditorName
                             } else {
@@ -3651,14 +3755,15 @@ $script:WindowsMcpEnsured = $false
                     } catch {
                         Write-ConnectLog "RECOVERY_REENSURE_FAILED error=$($_.Exception.Message)" 'WARN'
                     }
-                    Write-ConnectLog 'RECOVERY_SKIP_CLEAR_MOUNT reason=editor_open' 'WARN'
-                    Write-ConnectLog 'TUNNEL: recovering session (preserve mount, re-ensure tunnel)' 'WARN'
+                    Write-ConnectLog 'RECOVERY_SKIP_CLEAR_MOUNT reason=editor_open' 'INFO'
+                    Write-ConnectLog 'TUNNEL: recovering session (preserve mount, re-ensure tunnel)' 'INFO'
                     $alreadyDown = $false
                 } else {
                     Write-Host '    Connection dropped - recovering...' -ForegroundColor Yellow
                     $editorOpened = $false
                     $script:EditorOpened = $editorOpened
-                    Write-ConnectLog 'TUNNEL: recovering session (down mount, restart tunnel)' 'WARN'
+                    # INFO: operational recovery (TUNNEL_DROP already INFO). Keep WARN/ERROR for hard fails.
+                    Write-ConnectLog 'TUNNEL: recovering session (down mount, restart tunnel)' 'INFO'
                     Clear-SessionMount -ProjectId $go.Id -EditorCmd $EditorCmd -Alias $Alias -RemotePath $go.Path -Reason 'auto_recovery'
                     Stop-SessionTunnelCleanup -BgTunnel ([ref]$bgTunnel) -ClearServerForward
                     $alreadyDown = $true
@@ -3729,7 +3834,7 @@ $script:WindowsMcpEnsured = $false
                 } catch {
                     if ($script:EditorSeenOpen) {
                         $keepTunnelForEditor = $true
-                        Write-ConnectLog 'FINALLY_KEEP_TUNNEL reason=editor_check_failed_sticky' 'WARN'
+                        Write-ConnectLog 'FINALLY_KEEP_TUNNEL reason=editor_check_failed_sticky' 'INFO'
                     }
                     Write-ConnectLog "FINALLY_EDITOR_CHECK_FAILED error=$($_.Exception.Message)" 'WARN'
                 }
@@ -3738,7 +3843,7 @@ $script:WindowsMcpEnsured = $false
             }
         }
         if ($keepTunnelForEditor) {
-            Write-ConnectLog 'FINALLY_KEEP_TUNNEL reason=editor_open' 'WARN'
+            Write-ConnectLog 'FINALLY_KEEP_TUNNEL reason=editor_open' 'INFO'
             Write-ConnectLog ("SESSION_END reason=keep port={0} project={1}" -f $(if ($Port) { $Port } else { '?' }), $(if ($go -and $go.Id) { $go.Id } else { '?' })) 'INFO'
             if ($script:ConnectPerf -and -not $script:PhaseMsLogged) {
                 $script:PhaseMsLogged = $true
@@ -3808,7 +3913,7 @@ $script:WindowsMcpEnsured = $false
         }
     }
 
-    while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
+    Clear-ConnectConsoleKeyBuffer
 
     $postKey = Read-PostDisconnectKey -DefaultChar M -TimeoutSec 10
     switch ($postKey) {

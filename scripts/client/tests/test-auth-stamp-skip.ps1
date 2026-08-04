@@ -128,7 +128,7 @@ Assert (
 Assert ($authFuncBlock -match "'personal_without_profile'") 'personal_without_profile reason string still added when the gate condition is met'
 
 Write-Host '--- #6 Windows: AUTH_WARN personal_cursor_dominant gated on -not skipAuth ---' -ForegroundColor Cyan
-Assert ($win -match "Write-ConnectLog 'AUTH_WARN personal_cursor_dominant' 'WARN'") 'connect.ps1 still logs AUTH_WARN personal_cursor_dominant'
+Assert ($win -match "Write-ConnectLog 'AUTH_WARN personal_cursor_dominant' '(WARN|INFO)'") 'connect.ps1 still logs AUTH_WARN personal_cursor_dominant'
 Assert ($win -match '(?s)\$skipAuth = \$false.*?-not \$skipAuth -and \(Get-Command Test-PersonalCursorDominant') 'personal_cursor_dominant gated on -not skipAuth (skip process enum when stamp current)'
 $dominantBlock = ''
 if ($win -match '(?s)if \(-not \$skipAuth -and \(Get-Command Test-PersonalCursorDominant.*?AUTH_WARN personal_cursor_dominant[^\r\n]*\r?\n\s*\}\r?\n\s*\}') {

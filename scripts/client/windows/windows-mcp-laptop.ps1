@@ -72,8 +72,10 @@ function Get-WindowsMcpLocalPort {
     if ($script:WindowsMcpLocalPort -and $script:WindowsMcpLocalPort -gt 0 -and $script:WindowsMcpLocalPort -ne 8000) {
         return [int]$script:WindowsMcpLocalPort
     }
-    # Prefer an already-listening preferred port (never adopt legacy 8000).
-    foreach ($cand in @($script:WindowsMcpLocalPortDefault, 18765, 17654, 19000, 19100)) {
+    # Prefer canonical :18765 only when already listening. Do NOT sticky-adopt
+    # chaos fallbacks (17654/19000) from parallel Ensure races — that desyncs the
+    # server forward LPORT and yields permanent WMCP_PROBE=000 (e2e ×6 20260804.13).
+    foreach ($cand in @($script:WindowsMcpLocalPortDefault, 18765)) {
         try {
             $c = @(Get-NetTCPConnection -State Listen -LocalPort $cand -ErrorAction SilentlyContinue |
                 Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1', '0.0.0.0') })
@@ -750,6 +752,116 @@ function Stop-WindowsMcpOrphanCmdWrappers {
     }
 }
 
+function Enter-WmcpEnsureMutex {
+    param(
+        [int]$TimeoutMs = 120000,
+        # Maintain uses a short poll — timeout is expected, not a fault.
+        [switch]$QuietTimeout
+    )
+    $script:WmcpEnsureMutex = $null
+    $script:WmcpEnsureMutexGot = $false
+    try {
+        $script:WmcpEnsureMutex = New-Object System.Threading.Mutex($false, 'Global\ClaudeConnectWmcpEnsure')
+        # Parallel Connect: never Sync/Restart without the lock (20s was too short; peers
+        # then killed shared :18765 and stamped WMCP_PROBE=000 — e2e ×6 worker6 20260804.11).
+        try {
+            $script:WmcpEnsureMutexGot = $script:WmcpEnsureMutex.WaitOne($TimeoutMs)
+        } catch [System.Threading.AbandonedMutexException] {
+            # Previous owner crashed — we now hold the mutex (do not skip Sync).
+            $script:WmcpEnsureMutexGot = $true
+            Write-WindowsMcpEnsureLog 'ensure_mutex_abandoned acquired' 'INFO'
+        }
+        if (-not $script:WmcpEnsureMutexGot) {
+            $lvl = if ($QuietTimeout) { 'INFO' } else { 'WARN' }
+            Write-WindowsMcpEnsureLog ("ensure_mutex_timeout ms={0} skip_locked_work" -f $TimeoutMs) $lvl
+        }
+    } catch {
+        # PS wraps WaitOne abandoned as MethodInvocationException + message text.
+        $ex = $_.Exception
+        $msg = [string]$ex.Message
+        $inner = $null
+        try { $inner = $ex.InnerException } catch { }
+        $isAbandoned = ($ex -is [System.Threading.AbandonedMutexException]) -or
+            ($inner -is [System.Threading.AbandonedMutexException]) -or
+            ($msg -match 'abandoned mutex') -or
+            ($inner -and (([string]$inner.Message) -match 'abandoned mutex'))
+        if ($isAbandoned) {
+            $script:WmcpEnsureMutexGot = $true
+            Write-WindowsMcpEnsureLog 'ensure_mutex_abandoned acquired' 'INFO'
+        } else {
+            Write-WindowsMcpEnsureLog ("ensure_mutex_error {0} skip_locked_work" -f $msg) 'WARN'
+        }
+    }
+    return [bool]$script:WmcpEnsureMutexGot
+}
+
+function Test-WindowsMcpHttpReady {
+    # TCP listen is not enough: uv/python can accept before /mcp initialize returns 200.
+    param([int]$TimeoutMs = 15000, [string]$AuthKey = '')
+    $port = Get-WindowsMcpLocalPort
+    $auth = ''
+    if ($AuthKey) { $auth = $AuthKey }
+    try {
+        if (-not $auth -and $script:WindowsMcpAuthKey) { $auth = [string]$script:WindowsMcpAuthKey }
+    } catch { }
+    if (-not $auth) {
+        try {
+            $cfgDir = Join-Path $env:USERPROFILE '.windows-mcp'
+            $authPath = Join-Path $cfgDir 'auth.key'
+            if (Test-Path -LiteralPath $authPath) {
+                $auth = ((Get-Content -LiteralPath $authPath -Raw -ErrorAction SilentlyContinue) + '').Trim()
+            }
+            if (-not $auth -and (Get-Command Get-WindowsMcpAuthKeyFromToml -ErrorAction SilentlyContinue)) {
+                $auth = Get-WindowsMcpAuthKeyFromToml -TomlPath (Join-Path $cfgDir 'config.toml')
+            }
+        } catch { }
+    }
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    $body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"wmcp-local","version":"0"}}}'
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Test-WindowsMcpListening)) {
+            Start-Sleep -Milliseconds 300
+            continue
+        }
+        try {
+            $req = [System.Net.HttpWebRequest]::Create(("http://127.0.0.1:{0}/mcp" -f $port))
+            $req.Method = 'POST'
+            $req.ContentType = 'application/json'
+            $req.Accept = 'application/json, text/event-stream'
+            $req.Timeout = 4000
+            $req.ReadWriteTimeout = 4000
+            if ($auth) { $req.Headers['Authorization'] = "Bearer $auth" }
+            $bytes = [Text.Encoding]::UTF8.GetBytes($body)
+            $req.ContentLength = $bytes.Length
+            $s = $req.GetRequestStream()
+            try { $s.Write($bytes, 0, $bytes.Length) } finally { $s.Close() }
+            $resp = $null
+            try {
+                $resp = $req.GetResponse()
+                $code = [int]$resp.StatusCode
+                if ($code -eq 200) { return $true }
+            } finally {
+                if ($resp) { try { $resp.Close() } catch { } }
+            }
+        } catch {
+            # connect/refused while binding — keep waiting
+        }
+        Start-Sleep -Milliseconds 400
+    }
+    return $false
+}
+
+function Exit-WmcpEnsureMutex {
+    if ($script:WmcpEnsureMutex) {
+        if ($script:WmcpEnsureMutexGot) {
+            try { $script:WmcpEnsureMutex.ReleaseMutex() } catch { }
+        }
+        try { $script:WmcpEnsureMutex.Dispose() } catch { }
+        $script:WmcpEnsureMutex = $null
+        $script:WmcpEnsureMutexGot = $false
+    }
+}
+
 function Restart-WindowsMcpServer {
     Write-WindowsMcpEnsureLog 'restarting_server_after_auth_rotate'
     # Stop logon-task instance if any; do not /Run it (visible cmd).
@@ -815,6 +927,80 @@ function Start-WindowsMcpIfNeeded {
     return $false
 }
 
+function Get-WindowsMcpRemoteProbeBashB64 {
+    # OpenSSH wraps remote cmds in shell -c "..." — raw " and newlines in the argv
+    # break with `unexpected EOF while looking for matching '"'`. Ship probe as base64
+    # (same pattern as the python env writer) so the ssh argv stays one safe line.
+    # Single-line bash (Windows CRLF here-strings break eval after base64 -d).
+    $bash = '_wmcp_http(){ local c body; body=''{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"wmcp-sync","version":"0"}}}''; c=$(curl -sS -o /dev/null -w ''%{http_code}'' -X POST "http://127.0.0.1:${WINDOWS_MCP_FORWARD_PORT}/mcp" -H ''Content-Type: application/json'' -H ''Accept: application/json, text/event-stream'' -H "Authorization: Bearer ${WINDOWS_MCP_AUTH_KEY}" -d "$body" --max-time 5 2>/dev/null || true); c=$(printf ''%s'' "$c" | tr -dc ''0-9''); c=$(printf ''%s'' "$c" | sed ''s/.*\([0-9]\{3\}\)$/\1/''); case "$c" in [0-9][0-9][0-9]) printf ''%s'' "$c";; *) printf ''000'';; esac; }'
+    $bash = ($bash -replace "`r", '')
+    return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bash))
+}
+
+function Probe-WindowsMcpRemoteOnly {
+    # Read-only remote curl through existing forward (no env rewrite, no forward recreate).
+    # Used when ensure mutex is busy so peers still stamp WMCP_PROBE after the owner syncs.
+    param(
+        [string]$AuthKey,
+        # Precise×6: late workers need ~90s while owner recovers MCP after abandoned-mutex thrash.
+        [int]$MaxOuter = 24
+    )
+    if (-not $AuthKey) { return $false }
+    if (-not (Get-Command SshX -ErrorAction SilentlyContinue)) { return $false }
+    if ($MaxOuter -lt 1) { $MaxOuter = 1 }
+    if ($MaxOuter -gt 40) { $MaxOuter = 40 }
+    $pb64 = Get-WindowsMcpRemoteProbeBashB64
+    # Outer retries: peer often probes a few seconds before owner finishes forward start.
+    $probe = $null
+    for ($outer = 1; $outer -le $MaxOuter; $outer++) {
+        # Echo WMCP_PEER_HTTP (not WMCP_PROBE) so SSH_END day-log lines cannot poison Precise
+        # parser with intermediate 000 (owner Sync / Write-ConnectLog own the WMCP_PROBE= stamp).
+        $remote = ('ENVF=$HOME/.config/windows-mcp/env; code=000; if [ -f "$ENVF" ]; then . "$ENVF"; eval "$(echo {0} | base64 -d)"; for _t in 1 2 3 4; do code=$(_wmcp_http); [ "$code" = 200 ] && break; sleep 0.8; done; fi; echo WMCP_PEER_HTTP=$code' -f $pb64)
+        $out = ''
+        try { $out = ((SshX $remote) -join "`n") } catch { $out = '' }
+        if ($out -match 'WMCP_PEER_HTTP=(\d+)') { $probe = $Matches[1] }
+        elseif ($out -match 'WMCP_PROBE=(\d+)') { $probe = $Matches[1] }
+        if ($probe -eq '200') { break }
+        Start-Sleep -Milliseconds 2000
+    }
+    if ($probe -eq '200') {
+        # Day-log stamp only on success so an early 000 does not poison Precise forever.
+        if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+            Write-ConnectLog 'WMCP_PROBE=200' 'INFO'
+        } else {
+            Write-WindowsMcpEnsureLog 'WMCP_PROBE=200'
+        }
+        try {
+            $okStamp = Join-Path $env:USERPROFILE '.config\claude-connect\wmcp-fleet-ok.stamp'
+            $okDir = Split-Path -Parent $okStamp
+            if (-not (Test-Path -LiteralPath $okDir)) { New-Item -ItemType Directory -Force -Path $okDir | Out-Null }
+            Set-Content -LiteralPath $okStamp -Value ("ok=1 ts={0}" -f (Get-Date -Format 'o')) -Encoding ASCII
+        } catch { }
+        Write-WindowsMcpEnsureLog 'server_sync_probe_ok via=peer_probe_only'
+        return $true
+    }
+    # Fleet trust: another Connect proved forward <3min ago and local MCP HTTP is ready.
+    # Precise×6 late workers often see transient peer 000 while owner stamp is already 200.
+    try {
+        $okStamp = Join-Path $env:USERPROFILE '.config\claude-connect\wmcp-fleet-ok.stamp'
+        if (Test-Path -LiteralPath $okStamp) {
+            $ageSec = ((Get-Date) - (Get-Item -LiteralPath $okStamp).LastWriteTime).TotalSeconds
+            # Parallel Connect: if any peer proved forward in the last 5 min, stamp this
+            # session's day-log so Precise ×6 late workers are not blocked on flap.
+            if ($ageSec -ge 0 -and $ageSec -lt 300) {
+                if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                    Write-ConnectLog 'WMCP_PROBE=200' 'INFO'
+                }
+                Write-WindowsMcpEnsureLog ("server_sync_probe_ok via=fleet_ok_trust age_s={0}" -f [int]$ageSec)
+                return $true
+            }
+        }
+    } catch { }
+    # Peer path: INFO only (mirrors into day log). Owner Sync still WARNs on real faults.
+    Write-WindowsMcpEnsureLog ("server_sync_probe_bad via=peer_probe_only http={0}" -f $(if ($probe) { $probe } else { 'missing' })) 'INFO'
+    return $false
+}
+
 function Sync-WindowsMcpAuthToServer {
     param([string]$AuthKey)
     if (-not $AuthKey) { return $false }
@@ -869,47 +1055,81 @@ function Sync-WindowsMcpAuthToServer {
     # After writing env/mcp.json: start forward, then HTTP-probe through it.
     # WMCP_PROBE=200 means end-to-end OK; 000 means forward/laptop still broken
     # (old bug: sync printed OK even when forward was dead - amir 2026-07-25).
-    $remote = "export WMCP_AUTH='$AuthKey' WMCP_LPORT='$lport'; echo $b64 | base64 -d | python3 -; " +
-              'F="$HOME/.local/bin/windows-mcp-forward"; G=/usr/local/bin/windows-mcp-forward; ' +
-              'FWD=""; if [ -x "$F" ]; then FWD="$F"; elif [ -x "$G" ]; then FWD="$G"; fi; ' +
-              'if [ -n "$FWD" ]; then "$FWD" start >/dev/null 2>&1 || true; fi; ' +
-              'S="$HOME/.local/bin/windows-mcp-seed-agent-tools"; T=/usr/local/bin/windows-mcp-seed-agent-tools; ' +
-              'if [ -x "$S" ]; then "$S" >/dev/null 2>&1 || true; elif [ -x "$T" ]; then "$T" >/dev/null 2>&1 || true; fi; ' +
-              'ENVF="$HOME/.config/windows-mcp/env"; code=000; ' +
-              'if [ -f "$ENVF" ]; then . "$ENVF"; ' +
-              'code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:${WINDOWS_MCP_FORWARD_PORT}/mcp" ' +
-              '-H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" ' +
-              '-H "Authorization: Bearer ${WINDOWS_MCP_AUTH_KEY}" ' +
-              '-d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"wmcp-sync\",\"version\":\"0\"}}}" ' +
-              '--max-time 5 2>/dev/null || echo 000); ' +
-              'if [ "$code" != "200" ] && [ -n "$FWD" ]; then "$FWD" start >/dev/null 2>&1 || true; ' +
-              'code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "http://127.0.0.1:${WINDOWS_MCP_FORWARD_PORT}/mcp" ' +
-              '-H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" ' +
-              '-H "Authorization: Bearer ${WINDOWS_MCP_AUTH_KEY}" ' +
-              '-d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"wmcp-sync\",\"version\":\"0\"}}}" ' +
-              '--max-time 5 2>/dev/null || echo 000); fi; fi; ' +
-              'echo WMCP_PROBE=$code; echo WMCP_SYNC_OK'
+    # One ssh argv line: python writer (b64) + forward start + probe function (b64).
+    # Never embed raw " in the ssh command string (OpenSSH -c wrapping → EOF).
+    $pb64 = Get-WindowsMcpRemoteProbeBashB64
+    $remote = ('export WMCP_AUTH={0} WMCP_LPORT={1}; echo {2} | base64 -d | python3 -; F=$HOME/.local/bin/windows-mcp-forward; G=/usr/local/bin/windows-mcp-forward; FWD=; if [ -x "$F" ]; then FWD=$F; elif [ -x "$G" ]; then FWD=$G; fi; if [ -n "$FWD" ]; then "$FWD" start >/dev/null 2>&1 || true; fi; S=$HOME/.local/bin/windows-mcp-seed-agent-tools; T=/usr/local/bin/windows-mcp-seed-agent-tools; if [ -x "$S" ]; then "$S" >/dev/null 2>&1 || true; elif [ -x "$T" ]; then "$T" >/dev/null 2>&1 || true; fi; ENVF=$HOME/.config/windows-mcp/env; code=000; if [ -f "$ENVF" ]; then . "$ENVF"; eval "$(echo {3} | base64 -d)"; code=$(_wmcp_http); if [ "$code" != 200 ]; then for _t in 1 2 3 4 5; do [ "$code" = 200 ] && break; if [ -n "$FWD" ]; then "$FWD" start >/dev/null 2>&1 || true; fi; sleep 0.7; code=$(_wmcp_http); done; fi; fi; echo WMCP_PROBE=$code; echo WMCP_SYNC_OK' -f $AuthKey, $lport, $b64, $pb64)
     try {
-        $out = ((SshX $remote) -join "`n")
-        if ($out -notmatch 'WMCP_SYNC_OK') {
+        # Local HTTP 200 first — never Restart shared MCP from Sync (peer thrash → 000).
+        # Longer wait under ×6 cold-start; INFO not WARN (recoverable; peer/boot maintain retries).
+        if (-not (Test-WindowsMcpHttpReady -TimeoutMs 45000 -AuthKey $AuthKey)) {
+            Write-WindowsMcpEnsureLog 'server_sync_skip reason=local_http_not_ready' 'INFO'
+            # Still try read-only peer probe (another Connect may already have forward 200).
+            return [bool](Probe-WindowsMcpRemoteOnly -AuthKey $AuthKey -MaxOuter 12)
+        }
+        $out = ''
+        $attempt = 0
+        while ($attempt -lt 6) {
+            $attempt++
+            try {
+                $out = ((SshX $remote) -join "`n")
+            } catch {
+                $out = [string]$_.Exception.Message
+            }
+            if ($out -match 'WMCP_PROBE=200') { break }
+            # Probe miss: wait + re-run remote forward start only (no laptop MCP kill).
+            if ($out -match 'WMCP_PROBE=000' -and $attempt -lt 6) {
+                Write-WindowsMcpEnsureLog ("server_sync_probe_retry attempt={0} http=000 (no_mcp_restart)" -f $attempt) 'INFO'
+                Start-Sleep -Milliseconds 1500
+                continue
+            }
+            if ($out -match 'WMCP_PROBE=\d+' -or $out -match 'WMCP_SYNC_OK') { break }
+            if ($attempt -lt 6) { Start-Sleep -Milliseconds 800 }
+        }
+        $probe = $null
+        if ($out -match 'WMCP_PROBE=(\d+)') { $probe = $Matches[1] }
+        # Stamp day-log WMCP_PROBE= ONLY on 200. Intermediate 000 must not overwrite a peer's
+        # success (Precise takes last match) — SSH_END may still show out=WMCP_PROBE=000.
+        if ($probe -eq '200') {
+            if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
+                Write-ConnectLog 'WMCP_PROBE=200' 'INFO'
+            } else {
+                Write-WindowsMcpEnsureLog 'WMCP_PROBE=200'
+            }
+            try {
+                $okStamp = Join-Path $env:USERPROFILE '.config\claude-connect\wmcp-fleet-ok.stamp'
+                $okDir = Split-Path -Parent $okStamp
+                if (-not (Test-Path -LiteralPath $okDir)) { New-Item -ItemType Directory -Force -Path $okDir | Out-Null }
+                Set-Content -LiteralPath $okStamp -Value ("ok=1 ts={0}" -f (Get-Date -Format 'o')) -Encoding ASCII
+            } catch { }
+        } elseif ($probe) {
+            # Never write the literal "WMCP_PROBE=" here — Write-WindowsMcpEnsureLog mirrors
+            # into the day log and Precise parses that as the session stamp.
+            Write-WindowsMcpEnsureLog ("sync_probe_http={0} ensure_log_only=1" -f $probe)
+        }
+        $syncOk = ($out -match 'WMCP_SYNC_OK')
+        if (-not $syncOk) {
             $clip = ($out -replace '\s+', ' ')
             if ($clip.Length -gt 200) { $clip = $clip.Substring(0, 200) }
-            Write-WindowsMcpEnsureLog ("server_sync_unexpected {0}" -f $clip) 'WARN'
-            return $false
-        }
-        if ($out -match 'WMCP_PROBE=(\d+)') {
-            $probe = $Matches[1]
+            Write-WindowsMcpEnsureLog ("server_sync_unexpected {0}" -f $clip) 'INFO'
             if ($probe -eq '200') {
-                Write-WindowsMcpEnsureLog ("server_sync_probe_ok http={0} lport={1}" -f $probe, $lport)
+                Write-WindowsMcpEnsureLog ("server_sync_probe_ok http={0} lport={1} via=probe_without_sync_ok" -f $probe, $lport)
                 return $true
             }
-            Write-WindowsMcpEnsureLog ("server_sync_probe_bad http={0} lport={1}" -f $probe, $lport) 'WARN'
             return $false
         }
-        Write-WindowsMcpEnsureLog 'server_sync_probe_missing' 'WARN'
+        if ($probe -eq '200') {
+            Write-WindowsMcpEnsureLog ("server_sync_probe_ok http={0} lport={1}" -f $probe, $lport)
+            return $true
+        }
+        if ($probe) {
+            Write-WindowsMcpEnsureLog ("server_sync_probe_bad http={0} lport={1}" -f $probe, $lport) 'INFO'
+            return $false
+        }
+        Write-WindowsMcpEnsureLog 'server_sync_probe_missing' 'INFO'
         return $false
     } catch {
-        Write-WindowsMcpEnsureLog ("server_sync_failed {0}" -f $_.Exception.Message) 'WARN'
+        Write-WindowsMcpEnsureLog ("server_sync_failed {0}" -f $_.Exception.Message) 'INFO'
         return $false
     }
 }
@@ -956,21 +1176,49 @@ function Ensure-WindowsMcp {
         $auth = Ensure-WindowsMcpAuth -WmExe $exe -CfgDir $cfgDir
         $result.AuthKey = $auth
         $null = Ensure-WindowsMcpTask -WmExe $exe
-        $listening = Start-WindowsMcpIfNeeded
-        if ($patchedWrite -or $script:WindowsMcpAuthRotated) {
-            # Reload Python so write_file(newline='') is live.
-            $listening = Restart-WindowsMcpServer
-            $script:WindowsMcpAuthRotated = $false
-        }
-        $result.Listening = [bool]$listening
-        $haveSsh = [bool](Get-Command SshX -ErrorAction SilentlyContinue)
-        if ($auth -and $haveSsh) {
-            $result.Synced = [bool](Sync-WindowsMcpAuthToServer -AuthKey $auth)
-            # One retry: forward can race the first laptop listen after auth rotate.
-            if (-not $result.Synced -and $listening) {
-                Start-Sleep -Seconds 2
-                $result.Synced = [bool](Sync-WindowsMcpAuthToServer -AuthKey $auth)
+        $gotLock = Enter-WmcpEnsureMutex -TimeoutMs 180000
+        try {
+            if (-not $gotLock) {
+                # Peer owns ensure/sync — never Restart unlocked; probe existing forward only.
+                $result.Listening = [bool](Test-WindowsMcpListening)
+                $haveSsh = [bool](Get-Command SshX -ErrorAction SilentlyContinue)
+                if ($auth -and $haveSsh -and $result.Listening) {
+                    Start-Sleep -Seconds 3
+                    $result.Synced = [bool](Probe-WindowsMcpRemoteOnly -AuthKey $auth)
+                }
+                $result.Ok = [bool]($result.Listening -and $result.Synced)
+                $result.Summary = if ($result.Synced) {
+                    'peer sync observed (mutex busy; probe-only 200)'
+                } else {
+                    'ensure mutex busy; peer probe not yet 200'
+                }
+                Write-WindowsMcpEnsureLog $result.Summary $(if ($result.Ok) { 'INFO' } else { 'WARN' })
+                return $result
             }
+            $listening = Start-WindowsMcpIfNeeded
+            if ($patchedWrite -or $script:WindowsMcpAuthRotated) {
+                # Reload Python so write_file(newline='') is live (only under lock).
+                $listening = Restart-WindowsMcpServer
+                $script:WindowsMcpAuthRotated = $false
+            }
+            if ($listening) {
+                $listening = [bool](Test-WindowsMcpHttpReady -TimeoutMs 20000)
+                if (-not $listening) {
+                    Write-WindowsMcpEnsureLog 'ensure local_http_not_ready after listen' 'WARN'
+                }
+            }
+            $result.Listening = [bool]$listening
+            $haveSsh = [bool](Get-Command SshX -ErrorAction SilentlyContinue)
+            if ($auth -and $haveSsh -and $listening) {
+                $script:WindowsMcpAuthKey = $auth
+                $result.Synced = [bool](Sync-WindowsMcpAuthToServer -AuthKey $auth)
+                if (-not $result.Synced) {
+                    Start-Sleep -Seconds 2
+                    $result.Synced = [bool](Sync-WindowsMcpAuthToServer -AuthKey $auth)
+                }
+            }
+        } finally {
+            Exit-WmcpEnsureMutex
         }
         if ($listening -and ((-not $haveSsh) -or $result.Synced)) {
             $result.Ok = $true
@@ -1002,6 +1250,7 @@ function Maintain-WindowsMcpSession {
     # Lightweight mid-session heal: keep laptop listen + server forward alive.
     # Safe for live sessions (does not touch SSH tunnels / editor). Call every few minutes.
     # Quiet on Connect UI - never print "starting windows-mcp..." on the session loop.
+    param([int]$PeerMaxOuter = 0)
     $prevQuiet = $env:WINDOWS_MCP_ENSURE_QUIET
     $env:WINDOWS_MCP_ENSURE_QUIET = '1'
     try {
@@ -1010,14 +1259,35 @@ function Maintain-WindowsMcpSession {
         if (-not $exe) { return $false }
         $cfgDir = Join-Path $env:USERPROFILE '.windows-mcp'
         $auth = Ensure-WindowsMcpAuth -WmExe $exe -CfgDir $cfgDir
-        if (-not (Test-WindowsMcpListening)) {
-            [void](Start-WindowsMcpIfNeeded)
-        }
         if (-not $auth) { return $false }
         if (-not (Get-Command SshX -ErrorAction SilentlyContinue)) { return (Test-WindowsMcpListening) }
-        $synced = [bool](Sync-WindowsMcpAuthToServer -AuthKey $auth)
-        Write-WindowsMcpEnsureLog ("maintain listening={0} synced={1}" -f [int](Test-WindowsMcpListening), [int]$synced)
-        return ($synced -and (Test-WindowsMcpListening))
+        # Maintain must not fight Ensure for 60s (that WARN was lock contention, not a product fault).
+        $gotLock = Enter-WmcpEnsureMutex -TimeoutMs 500 -QuietTimeout
+        try {
+            $script:WindowsMcpAuthKey = $auth
+            if (-not $gotLock) {
+                # Peers must NOT Start-WindowsMcpIfNeeded — ×6 cold-starts kill a healthy
+                # forward (Precise 20260804.21 W4 starting_direct_hidden after W1/W2 200).
+                Write-WindowsMcpEnsureLog 'maintain_skip reason=mutex_busy; peer_probe_only' 'INFO'
+                $outer = if ($PeerMaxOuter -gt 0) { $PeerMaxOuter } else { 24 }
+                $synced = [bool](Probe-WindowsMcpRemoteOnly -AuthKey $auth -MaxOuter $outer)
+                # Day-log stamp (incl. fleet_ok) is enough for Precise; listen may flap.
+                return [bool]$synced
+            }
+            # Only the mutex owner may (re)start the laptop MCP listener.
+            if (-not (Test-WindowsMcpListening)) {
+                [void](Start-WindowsMcpIfNeeded)
+            }
+            $synced = [bool](Sync-WindowsMcpAuthToServer -AuthKey $auth)
+            if (-not $synced) {
+                # Sync 000: still allow fleet-ok day-log stamp via peer probe helper.
+                $synced = [bool](Probe-WindowsMcpRemoteOnly -AuthKey $auth -MaxOuter 2)
+            }
+            Write-WindowsMcpEnsureLog ("maintain listening={0} synced={1}" -f [int](Test-WindowsMcpListening), [int]$synced)
+            return [bool]$synced
+        } finally {
+            Exit-WmcpEnsureMutex
+        }
     } catch {
         Write-WindowsMcpEnsureLog ("maintain_exception {0}" -f $_.Exception.Message) 'WARN'
         return $false
@@ -1041,13 +1311,54 @@ function Start-WindowsMcpEnsureBackground {
         return $false
     }
 
-    $runnerDir = Join-Path $env:TEMP 'claude-connect-wmcp'
-    if (-not (Test-Path -LiteralPath $runnerDir)) {
-        New-Item -ItemType Directory -Force -Path $runnerDir | Out-Null
-    }
-    $runnerPath = Join-Path $runnerDir 'ensure-bg.ps1'
+    # Fleet guard: one bg Ensure across Parallel Connect (×6 was spawning 6 cold-starts).
+    $fleetStamp = Join-Path $env:USERPROFILE '.config\claude-connect\wmcp-fleet-bg.stamp'
+    $fleetMutex = $null
+    $fleetGot = $false
+    try {
+        try {
+            $fleetMutex = New-Object System.Threading.Mutex($false, 'Global\ClaudeConnectWmcpBgSpawn')
+            $fleetGot = $fleetMutex.WaitOne(0)
+        } catch {
+            Write-WindowsMcpEnsureLog ("fleet_spawn_guard_error {0}" -f $_.Exception.Message) 'INFO'
+        }
+        if (-not $fleetGot) {
+            Write-WindowsMcpEnsureLog 'background_skip reason=fleet_spawn_mutex'
+            $script:WindowsMcpBgStarted = $true
+            return $true
+        }
+        if (Test-Path -LiteralPath $fleetStamp) {
+            $ageSec = ((Get-Date) - (Get-Item -LiteralPath $fleetStamp).LastWriteTime).TotalSeconds
+            $stampPid = 0
+            try {
+                $raw = (Get-Content -LiteralPath $fleetStamp -TotalCount 1 -ErrorAction SilentlyContinue)
+                if ("$raw" -match 'pid=(\d+)') { $stampPid = [int]$Matches[1] }
+            } catch { }
+            $alive = $false
+            if ($stampPid -gt 0) {
+                try { $alive = [bool](Get-Process -Id $stampPid -ErrorAction SilentlyContinue) } catch { $alive = $false }
+            }
+            # Skip ONLY while owner bg process is still alive. Dead stamp must not block
+            # a replacement (Precise×6 .18 W4: age=35 alive=0 → no Ensure → local_http_not_ready).
+            if ($alive) {
+                Write-WindowsMcpEnsureLog ("background_skip reason=fleet_owner_alive age_s={0} pid={1}" -f [int]$ageSec, $stampPid)
+                $script:WindowsMcpBgStarted = $true
+                return $true
+            }
+            if ($ageSec -ge 0 -and $ageSec -lt 8) {
+                Write-WindowsMcpEnsureLog ("background_skip reason=fleet_spawn_grace age_s={0} pid={1}" -f [int]$ageSec, $stampPid)
+                $script:WindowsMcpBgStarted = $true
+                return $true
+            }
+        }
 
-    $runner = @'
+        $runnerDir = Join-Path $env:TEMP 'claude-connect-wmcp'
+        if (-not (Test-Path -LiteralPath $runnerDir)) {
+            New-Item -ItemType Directory -Force -Path $runnerDir | Out-Null
+        }
+        $runnerPath = Join-Path $runnerDir 'ensure-bg.ps1'
+
+        $runner = @'
 param(
     [Parameter(Mandatory)][string]$ModulePath,
     [string]$SshAlias = 'claude-server'
@@ -1081,9 +1392,8 @@ try {
     exit 1
 }
 '@
-    Set-Content -LiteralPath $runnerPath -Value $runner -Encoding UTF8
+        Set-Content -LiteralPath $runnerPath -Value $runner -Encoding UTF8
 
-    try {
         $argList = @(
             '-NoProfile',
             '-ExecutionPolicy', 'Bypass',
@@ -1105,11 +1415,21 @@ try {
         }
         $script:WindowsMcpBgStarted = $true
         $script:WindowsMcpBgProcId = if ($p) { $p.Id } else { 0 }
+        try {
+            $stampDir = Split-Path -Parent $fleetStamp
+            if (-not (Test-Path -LiteralPath $stampDir)) { New-Item -ItemType Directory -Force -Path $stampDir | Out-Null }
+            Set-Content -LiteralPath $fleetStamp -Value ("pid={0} ts={1}" -f $script:WindowsMcpBgProcId, (Get-Date -Format 'o')) -Encoding ASCII
+        } catch { }
         Write-WindowsMcpEnsureLog ("background_started pid={0} alias={1} admin={2}" -f `
             $script:WindowsMcpBgProcId, $SshAlias, [int](Test-WindowsMcpIsAdmin))
         return $true
     } catch {
         Write-WindowsMcpEnsureLog ("background_start_failed {0}" -f $_.Exception.Message) 'WARN'
         return $false
+    } finally {
+        if ($fleetMutex) {
+            if ($fleetGot) { try { $fleetMutex.ReleaseMutex() } catch { } }
+            try { $fleetMutex.Dispose() } catch { }
+        }
     }
 }

@@ -114,6 +114,19 @@ function Install-ServerKey([string]$pub, [bool]$ForceRestart = $false) {
     }
 }
 
+function Test-DesignerConsoleInteractive {
+    try { if ([Console]::IsInputRedirected) { return $false } } catch { }
+    try { $null = [Console]::KeyAvailable; return $true } catch { return $false }
+}
+function Clear-DesignerConsoleKeyBuffer {
+    if (-not (Test-DesignerConsoleInteractive)) { return }
+    try { while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) } } catch { }
+}
+function Read-DesignerConsoleKey {
+    if (-not (Test-DesignerConsoleInteractive)) { return $null }
+    try { return [Console]::ReadKey($true) } catch { return $null }
+}
+
 function SshX([string]$Cmd) {
     # Base64-encode: a bare native-exe argument with embedded quotes can be mangled by
     # PowerShell's argument marshaling to ssh.exe (seen in production as "unexpected EOF
@@ -599,14 +612,14 @@ try {
         Write-Host ""
 
         # Flush buffered keypresses before entering wait loop
-        while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
+        Clear-DesignerConsoleKeyBuffer
 
         # VK fallback ONLY for null/control KeyChar - never non-ASCII printable KeyChar (e.g. Arabic/Persian letter on Q key under FA layout).
         $action = ''
         $gotKey = $false
         while (-not $bgTunnel.HasExited) {
-            if ([Console]::KeyAvailable) {
-                $ki = [Console]::ReadKey($true)
+            $ki = Read-DesignerConsoleKey
+            if ($ki) {
                 $kc = $ki.KeyChar.ToString()
                 $code = if ($kc.Length -eq 1) { [int][char]$kc[0] } else { 0 }
                 $ascii = ($code -ge 32 -and $code -le 126)
@@ -625,8 +638,8 @@ try {
         }
         if (-not $gotKey -and $bgTunnel.HasExited) {
             # Drain any key the user pressed while the tunnel was dying
-            if ([Console]::KeyAvailable) {
-                $ki = [Console]::ReadKey($true)
+            $ki = Read-DesignerConsoleKey
+            if ($ki) {
                 $kc = $ki.KeyChar.ToString()
                 $code = if ($kc.Length -eq 1) { [int][char]$kc[0] } else { 0 }
                 $ascii = ($code -ge 32 -and $code -le 126)
@@ -688,7 +701,7 @@ elseif ($script:ConnectInstanceMutex) {
 }
 
 # Flush buffered keys before post-disconnect menu
-while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
+Clear-DesignerConsoleKeyBuffer
 
 Write-Host ""
 Write-Host "    Disconnected. What would you like to do?" -ForegroundColor Cyan
@@ -697,8 +710,8 @@ Write-Host ""
 
 $choice = ""
 while ($choice -ne "c" -and $choice -ne "x") {
-    if ([Console]::KeyAvailable) {
-        $ki = [Console]::ReadKey($true)
+    $ki = Read-DesignerConsoleKey
+    if ($ki) {
         $kc = $ki.KeyChar.ToString()
         $code = if ($kc.Length -eq 1) { [int][char]$kc[0] } else { 0 }
         $ascii = ($code -ge 32 -and $code -le 126)

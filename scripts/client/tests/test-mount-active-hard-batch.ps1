@@ -88,6 +88,10 @@ Assert (
 $bgFn = Get-FunctionSource -Content $connect -Name 'Start-MountProjectBackground'
 Assert ($bgFn -match 'MOUNT_BG_STARTED project=') `
     'Start-MountProjectBackground logs MOUNT_BG_STARTED on parent kickoff'
+Assert ($bgFn -match 'MOUNT_BG_RETRY project=') `
+    'mount-bg runner retries transient SSH/mount failures (MOUNT_BG_RETRY)'
+Assert ($bgFn -match 'maxAttempts = 3') `
+    'mount-bg runner caps retries at 3 total attempts'
 Assert ($connect -match '(?ms)if \(\$skipRemount\).*?skip_remount_healthy') `
     'healthy git_mode=off skipRemount branch skips BG kick (single mounted project reuse)'
 

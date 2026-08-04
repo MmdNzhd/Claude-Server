@@ -69,6 +69,10 @@ $suites = @(
     @{ Name = 'log-sync-mkdir-no-find-on-fast-path'; Script = 'test-log-sync-mkdir-no-find-on-fast-path.ps1' }
     @{ Name = 'log-sync-nullsafe';      Script = 'test-log-sync-nullsafe.ps1' }
     @{ Name = 'log-sync-chunk-read-nullsafe'; Script = 'test-log-sync-chunk-read-nullsafe.ps1' }
+    @{ Name = 'log-sync-nre-at649-hard'; Script = 'test-log-sync-nre-at649-hard.ps1' }
+    @{ Name = 'agent-path-shared-p-hard'; Script = 'test-agent-path-shared-p-hard.ps1' }
+    @{ Name = 'windows-mcp-probe-000000-hard'; Script = 'test-windows-mcp-probe-000000-hard.ps1' }
+    @{ Name = 'cursor-launch-cold-race-hard'; Script = 'test-cursor-launch-cold-race-hard.ps1' }
     @{ Name = 'log-sync-delivery-nonerror'; Script = 'test-log-sync-delivery-nonerror.ps1' }
     @{ Name = 'log-sync-ack-no-feedback-loop'; Script = 'test-log-sync-ack-no-feedback-loop.ps1' }
     @{ Name = 'error-flush-contract';   Script = 'test-error-flush-contract.ps1' }
@@ -108,6 +112,7 @@ $suites = @(
     @{ Name = 'update-relaunch-hard-batch'; Script = 'test-update-relaunch-hard-batch.ps1' }
     @{ Name = 'versioned-layout-extra-hard-batch'; Script = 'test-versioned-layout-extra-hard-batch.ps1' }
     @{ Name = 'connect-ui-menu-hard-batch'; Script = 'test-connect-ui-menu-hard-batch.ps1' }
+    @{ Name = 'console-key-safe'; Script = 'test-console-key-safe.ps1' }
     @{ Name = 'server-laptop-exec-hard-batch'; Script = 'test-server-laptop-exec-hard-batch.ps1' }
     @{ Name = 'diagnostic-scorecard-hard-batch'; Script = 'test-diagnostic-scorecard-hard-batch.ps1' }
     # HARDER LIVE multi-agent suites (2026-07-27) — sequential; do not soften fails by editing prod
@@ -144,6 +149,9 @@ $suites = @(
     @{ Name = 'harder-live-slot-storm-keep'; Script = 'test-harder-live-slot-storm-keep.ps1' }
     @{ Name = 'harder-adversarial-keep-mount'; Script = 'test-harder-adversarial-keep-mount.ps1' }
     @{ Name = 'harder-live-mount-skew-gate'; Script = 'test-harder-live-mount-skew-gate.ps1' }
+    # E2E pyramid contracts only (no -Live; product files untouched)
+    @{ Name = 'e2e-connect-signal-harness'; Script = 'test-e2e-connect-signal-harness.ps1' }
+    @{ Name = 'e2e-agent-hello'; Script = 'test-e2e-agent-hello.ps1' }
     @{ Name = 'hard-cmd-flash-fleet-push'; Script = 'test-hard-cmd-flash-fleet-push.ps1' }
     @{ Name = 'p0-connect-fixes'; Script = 'test-p0-connect-fixes.ps1' }
     @{ Name = 'windows-mcp-no-orphan-cmd'; Script = 'test-windows-mcp-no-orphan-cmd.ps1' }

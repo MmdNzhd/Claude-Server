@@ -3,7 +3,7 @@
 #
 # Bundle co-origination stamp: must match connect.ps1 ConnectBuildId (publish bumps both).
 # Detects split-generation installs where version string alone is unchanged (P1.2 residual).
-$script:GitModeBuildId = '8bee02bf-624b-4994-b31e-e6f7e650f77f'
+$script:GitModeBuildId = 'e93ff6d0-5552-4050-9422-df96e090ba83'
 
 function Get-GitMode {
     # Site policy: GIT_MODE hide/server disabled. Always OFF (no .git rename).
@@ -255,10 +255,11 @@ function Write-TunnelDropLog {
         $parts += "banner=$(if ($Banner) { $Banner } else { '(empty)' })"
     }
     $msg = $parts -join ' '
+    # Auto-reconnect / soft sync flapping is expected under multi-Connect; recover is product.
     if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
-        Write-ConnectLog $msg 'WARN'
+        Write-ConnectLog $msg 'INFO'
     } else {
-        Write-GitModeLog $msg 'WARN'
+        Write-GitModeLog $msg 'INFO'
     }
 }
 
@@ -411,9 +412,16 @@ function Read-PostDisconnectKey {
         if ($left -le $TimeoutSec -and $left -gt 0) {
             Write-Host "`r    Default $DefaultChar in ${left}s...   " -NoNewline -ForegroundColor DarkGray
         }
-        if ([Console]::KeyAvailable) {
+        $ki = $null
+        if (Get-Command Read-ConnectConsoleKey -ErrorAction SilentlyContinue) {
+            $ki = Read-ConnectConsoleKey
+        } else {
+            try {
+                if ([Console]::KeyAvailable) { $ki = [Console]::ReadKey($true) }
+            } catch { $ki = $null }
+        }
+        if ($ki) {
             Write-Host ''
-            $ki = [Console]::ReadKey($true)
             $kcRaw = $ki.KeyChar.ToString()
             $code = if ($kcRaw.Length -eq 1) { [int][char]$kcRaw[0] } else { 0 }
             $ascii = ($code -ge 32 -and $code -le 126)
@@ -691,7 +699,17 @@ function Test-TunnelPortTcpOpen {
         }
     }
     $r = SshX "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/$probePort 2>/dev/null' && echo open || echo closed" 2>$null
+    $ec = 0
+    if ($null -ne $global:LASTEXITCODE) { $ec = [int]$global:LASTEXITCODE }
     $out = (($r -join '') -replace "`r",'').Trim()
+    # ssh.exe NTSTATUS / empty transport: unknown — NOT open (STALE_FORWARD Clear must not sticky-busy).
+    # Sync uses LastTunnelTcpProbeInconclusive to avoid TUNNEL_DROP; do not optimistic-open here.
+    if ($ec -lt 0 -or ($out -ne 'open' -and $out -ne 'closed')) {
+        $script:LastTunnelTcpProbeInconclusive = $true
+        Write-GitModeLog "TCP_STATE probe_inconclusive port=$probePort exit=$ec out=$out" 'INFO'
+        return $false
+    }
+    $script:LastTunnelTcpProbeInconclusive = $false
     $isOpen = ($out -eq 'open')
     Set-TunnelTcpState -Port $probePort -Open $isOpen
     return $isOpen
@@ -758,14 +776,26 @@ function Clear-ServerStaleTunnelForward {
         }
     }
     Write-GitModeLog "STALE_FORWARD: clearing server port=$TargetPort" 'DEBUG'
+    if (Get-Command Remove-LocalOrphanTunnel -ErrorAction SilentlyContinue) {
+        try { [void](Remove-LocalOrphanTunnel -TargetPort $TargetPort) } catch { }
+    }
     SshX "fuser -k ${TargetPort}/tcp 2>/dev/null || true; pkill -u `$USER -f '127\\.0\\.0\\.1:${TargetPort}' 2>/dev/null || true; pkill -u `$USER -f ' -p ${TargetPort} ' 2>/dev/null || true" 2>$null | Out-Null
     Clear-TunnelBannerCache
     Clear-TunnelAuthOwnedCache -TargetPort $TargetPort
-    # Keep short: long waits were a major "still slow" cost when ports were sticky.
-    for ($i = 1; $i -le 4; $i++) {
+    # 8×250ms (~2s): Match Mac; short 4× wait left sticky busy under ×6 fuser races (20260804.30).
+    for ($i = 1; $i -le 8; $i++) {
         Start-Sleep -Milliseconds 250
         Clear-TunnelBannerCache
-        if (-not (Test-TunnelPortTcpOpen -TargetPort $TargetPort)) {
+        $stillOpen = [bool](Test-TunnelPortTcpOpen -TargetPort $TargetPort)
+        if ($script:LastTunnelTcpProbeInconclusive) {
+            # Unknown ≠ confirmed busy; do not sticky-abort spawn (Precise×6 20260804.30).
+            Write-GitModeLog "STALE_FORWARD: port release inconclusive port=$TargetPort wait=$i" 'INFO'
+            Add-ClearedTunnelPort -TargetPort $TargetPort
+            $script:LastStaleForwardStillBusyPort = $null
+            $script:LastStaleForwardStillBusyAt = $null
+            return
+        }
+        if (-not $stillOpen) {
             Write-GitModeLog "STALE_FORWARD: port released port=$TargetPort wait=$i" 'DEBUG'
             Add-ClearedTunnelPort -TargetPort $TargetPort
             $script:LastStaleForwardStillBusyPort = $null
@@ -775,7 +805,7 @@ function Clear-ServerStaleTunnelForward {
     }
     $script:LastStaleForwardStillBusyPort = [int]$TargetPort
     $script:LastStaleForwardStillBusyAt = Get-Date
-    Write-GitModeLog "STALE_FORWARD: port still busy port=$TargetPort after wait" 'WARN'
+    Write-GitModeLog "STALE_FORWARD: port still busy port=$TargetPort after wait" 'INFO'
 }
 
 function Test-StaleForwardStillBusyAbort {
@@ -790,6 +820,7 @@ function Test-StaleForwardStillBusyAbort {
     if ($age -ge $windowSec) { return $false }
     $tcpOpen = $false
     try { $tcpOpen = [bool](Test-TunnelPortTcpOpen -TargetPort $TargetPort) } catch { $tcpOpen = $false }
+    if ($script:LastTunnelTcpProbeInconclusive) { return $false }
     if (-not $tcpOpen) { return $false }
     $localCount = @(Get-LocalTunnelSshPids -TargetPort $TargetPort).Count
     if ($localCount -gt 0) { return $false }
@@ -823,11 +854,15 @@ function Release-StaleTunnelPort {
         return
     }
     if (Test-TunnelPortTcpOpen) {
+        if ($script:LastTunnelTcpProbeInconclusive) {
+            Write-GitModeLog "STALE_FORWARD: skip_zombie_inconclusive port=$Port" 'INFO'
+            return
+        }
         if (Test-TunnelPortIsForeignPeer -TargetPort $Port) {
             Write-GitModeLog "STALE_FORWARD: skip_foreign_peer port=$Port tcp=open" 'INFO'
             return
         }
-        Write-GitModeLog "STALE_FORWARD: zombie port=$Port tcp=open banner=(empty)" 'WARN'
+        Write-GitModeLog "STALE_FORWARD: zombie port=$Port tcp=open banner=(empty)" 'INFO'
         Clear-ServerStaleTunnelForward -TargetPort $Port
     }
 }
@@ -1393,6 +1428,15 @@ for p in /proc/[0-9]*; do
   esac
 done
 conf=`$(grep -E '^TUNNEL_PORT=' "`$HOME/.claude-connect.conf" 2>/dev/null | tail -1 | cut -d= -f2- | tr -dc '0-9')
+# Empty ~/mounts/<id> can ls without sshfs (BG race) - require mount or bound -p.
+if [ "`$ls_ok" = "1" ] && [ -z "`$bound" ]; then
+  if grep -F " `$LP " /proc/mounts >/dev/null 2>&1 || grep -F " `$LP" /proc/mounts >/dev/null 2>&1; then
+    :
+  else
+    ls_ok=0
+    printf 'MOUNT_VERIFY pending_no_sshfs project=%s\n' "`$ID"
+  fi
+fi
 if [ -n "`$bound" ]; then
   shared=`$(ps -eo args 2>/dev/null | grep -F -- "-p `$bound" | grep -c '[s]shfs' || true)
 fi
@@ -1405,7 +1449,8 @@ fi
         $out = SshX $remote
         $lines = @(($out + '') -split "`r?`n" | Where-Object { $_ -match 'MOUNT_VERIFY|MOUNT_SHARED_P|DUAL_CONNECT' })
         foreach ($ln in $lines) {
-            $lvl = if ($ln -match 'MOUNT_SHARED_P|DUAL_CONNECT|ls_ok=0') { 'WARN' } else { 'INFO' }
+            # Shared-p multi-Connect is product (not a fault). Keep ls_ok=0 / pending as WARN.
+            $lvl = if ($ln -match 'ls_ok=0|pending_no_sshfs') { 'WARN' } else { 'INFO' }
             Write-GitModeLog $ln.Trim() $lvl
             if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
                 Write-ConnectLog $ln.Trim() $lvl
@@ -1420,15 +1465,15 @@ fi
         if ("$out" -match 'shared_p=(\d+)') { $sharedN = [int]$Matches[1] }
         if ("$out" -match 'bound_p=(\d+)') { $boundP = $Matches[1] }
         if ($sharedN -ge 2) {
-            $dualMsg = ("DUAL_CONNECT warn shared_p={0} port={1} project={2}" -f $sharedN, $(if ($boundP) { $boundP } else { '?' }), $proj)
-            Write-GitModeLog $dualMsg 'WARN'
+            $dualMsg = ("DUAL_CONNECT shared_p={0} port={1} project={2}" -f $sharedN, $(if ($boundP) { $boundP } else { '?' }), $proj)
+            Write-GitModeLog $dualMsg 'INFO'
             if (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
-                Write-ConnectLog $dualMsg 'WARN'
+                Write-ConnectLog $dualMsg 'INFO'
             }
         }
         # Never promote skipRemount / BG alone to healthy
         if ($MountOut -match 'skip_remount_healthy|started_in_background' -and ($out -notmatch 'ls_ok=1')) {
-            Write-GitModeLog ("MOUNT_VERIFY not_healthy_from_skip_alone project={0} out={1}" -f $proj, (($MountOut + '') -replace '\s+', ' ')) 'WARN'
+            Write-GitModeLog ("MOUNT_VERIFY not_healthy_from_skip_alone project={0} out={1}" -f $proj, (($MountOut + '') -replace '\s+', ' ')) 'INFO'
         }
     } catch {
         Write-GitModeLog ("MOUNT_VERIFY_FAIL project={0} err={1}" -f $proj, $_.Exception.Message) 'WARN'
@@ -2633,7 +2678,8 @@ function Test-ProxyReseedShouldKill {
         return $false
     }
     if (-not (Test-CanClaimCursorProxyOwner)) {
-        Write-GitModeLog "ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=$TunnelPid port=$Port" 'WARN'
+        # Multi-Connect shared-p: non-owners adopt proxy legs; cannot reseed — expected, not a fault.
+        Write-GitModeLog "ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=$TunnelPid port=$Port" 'INFO'
         return $false
     }
     return $true
@@ -2903,16 +2949,16 @@ function Complete-CursorProxyAfterTunnel {
                 if ($may) {
                     try { [void](Clear-CursorProxySettings) } catch {}
                 } else {
-                    Write-GitModeLog 'CURSOR_PROXY_CLEAR_SKIP: reason=windows_open_or_non_owner action=reload_for_server_direct' 'WARN'
+                    Write-GitModeLog 'CURSOR_PROXY_CLEAR_SKIP: reason=windows_open_or_non_owner action=reload_for_server_direct' 'INFO'
                 }
             }
-            Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail_front_down' 'WARN'
+            Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail_front_down' 'INFO'
         } else {
             # Front still listening but egress health failed (e.g. austria dead).
             if (Get-Command Clear-CursorProxySettingsSidecar -ErrorAction SilentlyContinue) {
                 try { [void](Clear-CursorProxySettingsSidecar) } catch {}
             }
-            Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail' 'WARN'
+            Write-GitModeLog 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail' 'INFO'
         }
     } elseif (Get-Command Repair-CursorProxySettingsToSidecar -ErrorAction SilentlyContinue) {
         # Health OK through 18998 - keep sticky settings aligned.
@@ -2938,11 +2984,12 @@ function Test-ProxyHealth {
     if ($HttpPort -le 0) { $HttpPort = Get-CursorHttpFrontPort }
     if ($SocksPort -le 0) { $SocksPort = Get-CursorSocksFrontPort }
     if ($HttpPort -le 0) {
-        Write-GitModeLog 'PROXY_HEALTH ok=0 reason=no_http_port' 'WARN'
+        # INFO not WARN: server_direct fallback is the normal path when sidecar is cold/racing.
+        Write-GitModeLog 'PROXY_HEALTH ok=0 reason=no_http_port' 'INFO'
         return $false
     }
     if (-not (Test-LocalPortOpen -PortNum $HttpPort)) {
-        Write-GitModeLog ("PROXY_HEALTH socks={0} http={1} ok=0 reason=http_not_listening" -f $SocksPort, $HttpPort) 'WARN'
+        Write-GitModeLog ("PROXY_HEALTH socks={0} http={1} ok=0 reason=http_not_listening" -f $SocksPort, $HttpPort) 'INFO'
         return $false
     }
     # Fast-fail when the sidecar backend legs are down: the front door (18998) can be up while
@@ -2951,7 +2998,7 @@ function Test-ProxyHealth {
     # bounded local port check on the backend short-circuits that stall straight to server_direct.
     if (Get-Command Test-CursorProxyBackendOpen -ErrorAction SilentlyContinue) {
         if (-not (Test-CursorProxyBackendOpen)) {
-            Write-GitModeLog ("PROXY_HEALTH socks={0} http={1} ok=0 reason=backend_not_listening" -f $SocksPort, $HttpPort) 'WARN'
+            Write-GitModeLog ("PROXY_HEALTH socks={0} http={1} ok=0 reason=backend_not_listening" -f $SocksPort, $HttpPort) 'INFO'
             $script:LastProxyHealthOk = $false
             return $false
         }
@@ -2974,12 +3021,12 @@ function Test-ProxyHealth {
             $resp.Close()
         }
     } catch {
-        Write-GitModeLog ("PROXY_HEALTH socks={0} http={1} ok=0 err={2}" -f $SocksPort, $HttpPort, $_.Exception.Message) 'WARN'
+        Write-GitModeLog ("PROXY_HEALTH socks={0} http={1} ok=0 err={2}" -f $SocksPort, $HttpPort, $_.Exception.Message) 'INFO'
         $script:LastProxyHealthOk = $false
         return $false
     }
     if (-not $ip) {
-        Write-GitModeLog ("PROXY_HEALTH socks={0} http={1} ok=0 reason=empty_ip" -f $SocksPort, $HttpPort) 'WARN'
+        Write-GitModeLog ("PROXY_HEALTH socks={0} http={1} ok=0 reason=empty_ip" -f $SocksPort, $HttpPort) 'INFO'
         $script:LastProxyHealthOk = $false
         return $false
     }
@@ -3304,7 +3351,10 @@ function Test-TunnelNeedsProxyReseed {
             return $false
         }
     }
-    Write-GitModeLog "ENSURE_TUNNEL reseed_needed reason=$state pid=$TunnelPid socks=$(Get-SocksProxyPort)" 'WARN'
+    # reason=missing is expected under Parallel Connect (proxy legs not yet bound) — INFO.
+    # Other states (dead/stale) stay WARN so real proxy faults remain visible.
+    $reseedLvl = if ($state -eq 'missing') { 'INFO' } else { 'WARN' }
+    Write-GitModeLog "ENSURE_TUNNEL reseed_needed reason=$state pid=$TunnelPid socks=$(Get-SocksProxyPort)" $reseedLvl
     return $true
 }
 
@@ -3620,7 +3670,7 @@ function Acquire-TunnelPort {
             } elseif (Test-TunnelPortIsForeignPeer -TargetPort $candPort -CurrentBgTunnel $CurrentBgTunnel -ProtectedProcessIds $ProtectedProcessIds) {
                 continue
             } else {
-                Write-GitModeLog "ACQUIRE_STALE: zombie port=$candPort tcp=open banner=(empty)" 'WARN'
+                Write-GitModeLog "ACQUIRE_STALE: zombie port=$candPort tcp=open banner=(empty)" 'INFO'
                 Clear-ServerStaleTunnelForward -TargetPort $candPort
                 Clear-TunnelBannerCache
                 $banner = Get-TunnelBanner
@@ -3753,7 +3803,7 @@ function Sync-SessionTunnelProcess {
     }
     if ($BgTunnel.Value -and $BgTunnel.Value.HasExited -and $script:LastTunnelExitLoggedPid -ne $BgTunnel.Value.Id) {
         $exitCode = Get-TunnelProcessExitCode -Process $BgTunnel.Value
-        Write-GitModeLog "TUNNEL_EXIT pid=$($BgTunnel.Value.Id) port=$Port exit_code=$exitCode reason=sync_observed_exit" 'WARN'
+        Write-GitModeLog "TUNNEL_EXIT pid=$($BgTunnel.Value.Id) port=$Port exit_code=$exitCode reason=sync_observed_exit" 'INFO'
         $script:LastTunnelExitLoggedPid = $BgTunnel.Value.Id
     }
 
@@ -3766,7 +3816,7 @@ function Sync-SessionTunnelProcess {
         try { $tcpOpen = [bool](Test-TunnelPortTcpOpen) } catch { $tcpOpen = $false }
         if ($tcpOpen) {
             $script:TunnelSoftFailCount++
-            Write-GitModeLog ("TUNNEL_SYNC soft_fail count=$script:TunnelSoftFailCount/$script:TunnelSoftFailBudget port=$Port reason=no_proc_tcp_open$(Get-TunnelSessionDiagSuffix)") 'WARN'
+            Write-GitModeLog ("TUNNEL_SYNC soft_fail count=$script:TunnelSoftFailCount/$script:TunnelSoftFailBudget port=$Port reason=no_proc_tcp_open$(Get-TunnelSessionDiagSuffix)") 'INFO'
             $null = Try-ReattachSessionTunnelProcess -BgTunnel $BgTunnel
             if ($script:TunnelSoftFailCount -ge $script:TunnelSoftFailBudget) {
                 # TCP still open => reverse forward is alive; Process handle was lost
@@ -3775,10 +3825,10 @@ function Sync-SessionTunnelProcess {
                 $dropPid = 0
                 if ($BgTunnel.Value) { $dropPid = $BgTunnel.Value.Id }
                 elseif ($script:LastTunnelExitLoggedPid) { $dropPid = $script:LastTunnelExitLoggedPid }
-                Write-GitModeLog ("TUNNEL_SYNC soft_fail_exhausted_keep_alive port=$Port reason=no_proc_tcp_open pid=$dropPid$(Get-TunnelSessionDiagSuffix)") 'WARN'
+                Write-GitModeLog ("TUNNEL_SYNC soft_fail_exhausted_keep_alive port=$Port reason=no_proc_tcp_open pid=$dropPid$(Get-TunnelSessionDiagSuffix)") 'INFO'
                 $script:TunnelSoftFailCount = 0; $script:TunnelSyncFailCount = 0
                 if (Test-NoProcShouldKeepAlive) { return $true }
-                Write-GitModeLog ("TUNNEL_SYNC soft_fail_exhausted_zombie_drop port=$Port reason=no_proc_tcp_open pid=$dropPid$(Get-TunnelSessionDiagSuffix)") 'WARN'
+                Write-GitModeLog ("TUNNEL_SYNC soft_fail_exhausted_zombie_drop port=$Port reason=no_proc_tcp_open pid=$dropPid$(Get-TunnelSessionDiagSuffix)") 'INFO'
                 Write-TunnelDropLog -Reason 'soft_fail_exhausted_zombie_drop' -TunnelPid $dropPid -TcpOpen $true
                 Release-StaleTunnelPort
                 $script:NoProcKeepAliveSince = $null
@@ -3820,7 +3870,7 @@ function Sync-SessionTunnelProcess {
                     try { $tcpOpen = [bool](Test-TunnelPortTcpOpen) } catch { $tcpOpen = $false }
                     if ($tcpOpen) {
                         $script:TunnelSoftFailCount++
-                        Write-GitModeLog ("TUNNEL_SYNC soft_fail count=$script:TunnelSoftFailCount/$script:TunnelSoftFailBudget pid=$($BgTunnel.Value.Id) port=$Port reason=banner_miss_tcp_open$(Get-TunnelSessionDiagSuffix)") 'WARN'
+                        Write-GitModeLog ("TUNNEL_SYNC soft_fail count=$script:TunnelSoftFailCount/$script:TunnelSoftFailBudget pid=$($BgTunnel.Value.Id) port=$Port reason=banner_miss_tcp_open$(Get-TunnelSessionDiagSuffix)") 'INFO'
                         $script:TunnelSyncFailCount = 0
                         if ($script:TunnelSoftFailCount -ge $script:TunnelSoftFailBudget) {
                             Write-TunnelDropLog -Reason 'banner_miss_tcp_open_budget' -TunnelPid $BgTunnel.Value.Id `
@@ -3831,6 +3881,10 @@ function Sync-SessionTunnelProcess {
                         }
                         return $true
                     } else {
+                        if ($script:LastTunnelTcpProbeInconclusive -or ($script:LastSshExit -lt 0)) {
+                            Write-GitModeLog ("TUNNEL_SYNC soft_fail reason=probe_inconclusive pid=$($BgTunnel.Value.Id) port=$Port ssh_exit=$script:LastSshExit$(Get-TunnelSessionDiagSuffix)") 'INFO'
+                            return $true
+                        }
                         $script:TunnelSyncFailCount++
                         $probeBanner = $script:TunnelBannerCacheBanner
                         if ($script:TunnelSyncFailCount -lt 3) {
@@ -3888,7 +3942,8 @@ function Wait-ForTunnelUp {
     for ($i = 1; $i -le $maxAttempts; $i++) {
         if ($TunnelProc -and $TunnelProc.HasExited) {
             $exitCode = Get-TunnelProcessExitCode -Process $TunnelProc
-            Write-GitModeLog "TUNNEL_WAIT fail=1 attempt=$i reason=ssh_died pid=$($TunnelProc.Id) exit_code=$exitCode" 'WARN'
+            # Intermediate spawn death: INFO (retry continues). Final timeout stays WARN below.
+            Write-GitModeLog "TUNNEL_WAIT fail=1 attempt=$i reason=ssh_died pid=$($TunnelProc.Id) exit_code=$exitCode" 'INFO'
             if (-not $Quiet) { Write-Host '    Tunnel check... SSH process died' -ForegroundColor Red }
             Release-StaleTunnelPort
             return $false
@@ -4559,7 +4614,8 @@ function Ensure-SessionTunnel {
     if ($null -eq $script:RefuseSpawnStreak) { $script:RefuseSpawnStreak = 0 }
     if (Test-StaleForwardStillBusyAbort -TargetPort $Port) {
         $busyPort = [int]$Port
-        Write-GitModeLog "ENSURE_TUNNEL refuse_spawn reason=stale_port_busy port=$busyPort" 'WARN'
+        # Intermediate refuse while rebinding: INFO (zero-noise). Exhausted/no_rebind stay WARN/ERROR.
+        Write-GitModeLog "ENSURE_TUNNEL refuse_spawn reason=stale_port_busy port=$busyPort" 'INFO'
         $script:RefuseSpawnStreak = [int]$script:RefuseSpawnStreak + 1
         if ([int]$script:RefuseSpawnStreak -ge [int]$script:RefuseSpawnStreakCap) {
             Write-GitModeLog ("ENSURE_TUNNEL refuse_spawn_streak_exhausted port={0} streak={1} cap={2}" -f $busyPort, $script:RefuseSpawnStreak, $script:RefuseSpawnStreakCap) 'ERROR'
@@ -4576,7 +4632,7 @@ function Ensure-SessionTunnel {
             } catch { $rebound = $false }
         }
         if ($rebound -and [int]$Port -gt 0 -and [int]$Port -ne $prevPort) {
-            Write-GitModeLog ("ENSURE_TUNNEL refuse_spawn reason=stale_port_busy_rebind from={0} to={1} streak={2}" -f $prevPort, $Port, $script:RefuseSpawnStreak) 'WARN'
+            Write-GitModeLog ("ENSURE_TUNNEL refuse_spawn reason=stale_port_busy_rebind from={0} to={1} streak={2}" -f $prevPort, $Port, $script:RefuseSpawnStreak) 'INFO'
             $script:LastStaleForwardStillBusyPort = $null
             $script:LastStaleForwardStillBusyAt = $null
             $script:RefuseSpawnStreak = 0
@@ -4598,9 +4654,10 @@ function Ensure-SessionTunnel {
             $script:Port = $prevPort
             $Port = $script:Port
             $script:TunnelSlot = $savedSlot
-            Write-GitModeLog ("ENSURE_TUNNEL refuse_spawn reason=stale_port_busy_no_rebind port={0} streak={1}" -f $busyPort, $script:RefuseSpawnStreak) 'WARN'
+            Write-GitModeLog ("ENSURE_TUNNEL refuse_spawn reason=stale_port_busy_no_rebind port={0} streak={1}" -f $busyPort, $script:RefuseSpawnStreak) 'INFO'
             $BgTunnel.Value = $null
-            Write-GitModeLog "ENSURE_TUNNEL end outcome=fail reason=refuse_spawn_no_rebind port=$busyPort" 'WARN'
+            # Soft fail one Ensure attempt; caller retries. Streak exhausted is ERROR above.
+            Write-GitModeLog "ENSURE_TUNNEL end outcome=fail reason=refuse_spawn_no_rebind port=$busyPort" 'INFO'
             return $false
         }
     }
@@ -4631,7 +4688,9 @@ function Ensure-SessionTunnel {
     }
     $script:TunnelWaitFailStreak = [int]$script:TunnelWaitFailStreak + 1
     if (-not $script:TunnelWaitBackoffSec) { $script:TunnelWaitBackoffSec = 2 }
-    Write-GitModeLog ("ENSURE_TUNNEL ok=0 reason=wait_timeout pid={0} streak={1} backoff_sec={2}" -f $BgTunnel.Value.Id, $script:TunnelWaitFailStreak, $script:TunnelWaitBackoffSec) 'WARN'
+    # Soft wait_timeout during Parallel Connect: INFO until budget exhausted (then ERROR).
+    $waitLvl = if ($script:TunnelWaitFailStreak -ge 6) { 'ERROR' } else { 'INFO' }
+    Write-GitModeLog ("ENSURE_TUNNEL ok=0 reason=wait_timeout pid={0} streak={1} backoff_sec={2}" -f $BgTunnel.Value.Id, $script:TunnelWaitFailStreak, $script:TunnelWaitBackoffSec) $waitLvl
     if ($script:TunnelWaitFailStreak -ge 6) {
         Write-GitModeLog 'ENSURE_TUNNEL wait_timeout_budget_exhausted surfacing_ui' 'ERROR'
     }
@@ -4644,7 +4703,7 @@ function Ensure-SessionTunnel {
         Stop-TunnelProcessWithExitLog -ProcessId $BgTunnel.Value.Id -Reason 'ensure_wait_timeout'
     }
     $BgTunnel.Value = $null
-    Write-GitModeLog "ENSURE_TUNNEL end outcome=fail reason=wait_timeout port=$Port" 'WARN'
+    Write-GitModeLog "ENSURE_TUNNEL end outcome=fail reason=wait_timeout port=$Port" $waitLvl
     return $false
 }
 
@@ -4741,11 +4800,22 @@ function Invoke-SshXChecked {
     $null = SshX $RemoteCmd 2>$null
     $ec = 0
     if ($null -ne $global:LASTEXITCODE) { $ec = [int]$global:LASTEXITCODE }
+    # SshX already retries NTSTATUS; one extra labeled retry for cleanup under ×6 teardown.
+    if ($ec -lt 0) {
+        Start-Sleep -Milliseconds 350
+        $null = SshX $RemoteCmd 2>$null
+        if ($null -ne $global:LASTEXITCODE) { $ec = [int]$global:LASTEXITCODE }
+    }
     if ($ec -ne 0) {
+        # Cleanup labels + NTSTATUS after retries: best-effort under spawn pressure (Precise zero-noise).
+        $lvl = 'WARN'
+        if ($ec -lt 0 -and $Label -match '^(MOUNT_DOWN|CLEAR_|PUSH_MKDIR|PUSH_MOVE|PUSH_CHMOD)') {
+            $lvl = 'INFO'
+        }
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
-            Write-GitModeLog ("{0} fail exit={1}" -f $Label, $ec) 'WARN'
+            Write-GitModeLog ("{0} fail exit={1}" -f $Label, $ec) $lvl
         } elseif (Get-Command Write-ConnectLog -ErrorAction SilentlyContinue) {
-            Write-ConnectLog ("{0} fail exit={1}" -f $Label, $ec) 'WARN'
+            Write-ConnectLog ("{0} fail exit={1}" -f $Label, $ec) $lvl
         } else {
             Write-Host ("  [!] {0} fail exit={1}" -f $Label, $ec) -ForegroundColor DarkYellow
         }
@@ -5031,6 +5101,18 @@ printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s am_only=%s publish_port=%s
     # and no SSH_END while Wait-DeferredServerSetup polled forever.
     $pushOut = @(SshX $remote -NoRetryOnTimeout 2>$null)
     $pushExit = $global:LASTEXITCODE
+    # Extra labeled retries when SshX still returns NTSTATUS (spawn storm) or empty result.
+    for ($pushTry = 1; $pushTry -le 2; $pushTry++) {
+        $pushRawTry = ($pushOut | Where-Object { $_ -match 'PUSH_CONF_RESULT' } | Select-Object -Last 1)
+        $hasTry = [bool]($pushRawTry -and "$pushRawTry" -match 'PUSH_CONF_RESULT')
+        if ($pushExit -ge 0 -and $hasTry) { break }
+        if ($pushExit -ge 0 -and -not $hasTry -and $pushExit -eq 0) { break }
+        if ($pushExit -ge 0 -and $pushExit -ne 0) { break }
+        Write-GitModeLog ("PUSH_CONF spawn_retry try={0} exit={1}" -f $pushTry, $pushExit) 'INFO'
+        Start-Sleep -Milliseconds (300 * $pushTry)
+        $pushOut = @(SshX $remote -NoRetryOnTimeout 2>$null)
+        $pushExit = $global:LASTEXITCODE
+    }
     $pushRaw = ($pushOut | Where-Object { $_ -match 'PUSH_CONF_RESULT' } | Select-Object -Last 1)
     $pushLine = if ($null -eq $pushRaw -or "$pushRaw" -eq '') { '(no result line)' } else { ([string]$pushRaw -replace '\s+', ' ').Trim() }
     if (-not $pushLine) { $pushLine = '(no result line)' }
@@ -5039,12 +5121,15 @@ printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s am_only=%s publish_port=%s
     # Exit 0 without PUSH_CONF_RESULT must NOT dedupe as success (silent false-ok).
     if ($pushExit -ne 0 -or -not $hasResult) {
         # Do not record dedupe on failure - allow immediate retry of the same prefer/clear key.
-        Write-GitModeLog "PUSH_CONF fail exit=$pushExit out=$pushLine" 'ERROR'
+        # NTSTATUS after retries = local spawn exhaustion (INFO); real remote fails stay ERROR.
+        $failLvl = if ($pushExit -lt 0) { 'INFO' } else { 'ERROR' }
+        Write-GitModeLog "PUSH_CONF fail exit=$pushExit out=$pushLine" $failLvl
         foreach ($sig in @('ABORT_EMPTY', 'port_empty_recovered', 'port_mismatch_keep', 'port_takeover', 'ACTIVE_MOUNT_GUARD', 'ACTIVE_MOUNT_STEAL', 'primary_soft_keep', 'primary_overwrite')) {
             if ($pushScan -match [regex]::Escape($sig)) {
-                Write-GitModeLog "PUSH_CONF signal=$sig out=$pushLine" 'WARN'
+                $sigLvl = if ($sig -eq 'ABORT_EMPTY') { 'WARN' } else { 'INFO' }
+                Write-GitModeLog "PUSH_CONF signal=$sig out=$pushLine" $sigLvl
                 if ($sig -eq 'ACTIVE_MOUNT_STEAL' -and $pushScan -match 'ACTIVE_MOUNT_STEAL from=(\S+) to=(\S+)') {
-                    Write-GitModeLog ("ACTIVE_MOUNT_STEAL from={0} to={1}" -f $Matches[1], $Matches[2]) 'WARN'
+                    Write-GitModeLog ("ACTIVE_MOUNT_STEAL from={0} to={1}" -f $Matches[1], $Matches[2]) 'INFO'
                 }
                 if ($sig -eq 'ACTIVE_MOUNT_GUARD') {
                     try {
@@ -5064,9 +5149,10 @@ printf 'PUSH_CONF_RESULT clear=%s prefer=%s active=%s am_only=%s publish_port=%s
         Write-GitModeLog "PUSH_CONF ok exit=$pushExit $pushLine" 'INFO'
         foreach ($sig in @('ABORT_EMPTY', 'port_empty_recovered', 'port_mismatch_keep', 'port_takeover', 'ACTIVE_MOUNT_GUARD', 'ACTIVE_MOUNT_STEAL', 'primary_soft_keep', 'primary_overwrite')) {
             if ($pushScan -match [regex]::Escape($sig)) {
-                Write-GitModeLog "PUSH_CONF signal=$sig out=$pushLine" 'WARN'
+                $sigLvl = if ($sig -eq 'ABORT_EMPTY') { 'WARN' } else { 'INFO' }
+                Write-GitModeLog "PUSH_CONF signal=$sig out=$pushLine" $sigLvl
                 if ($sig -eq 'ACTIVE_MOUNT_STEAL' -and $pushScan -match 'ACTIVE_MOUNT_STEAL from=(\S+) to=(\S+)') {
-                    Write-GitModeLog ("ACTIVE_MOUNT_STEAL from={0} to={1}" -f $Matches[1], $Matches[2]) 'WARN'
+                    Write-GitModeLog ("ACTIVE_MOUNT_STEAL from={0} to={1}" -f $Matches[1], $Matches[2]) 'INFO'
                 }
                 if ($sig -eq 'ACTIVE_MOUNT_GUARD') {
                     try {
@@ -5088,8 +5174,15 @@ function Read-RetryQuitKey {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $rk = ''
     while ($rk -ne 'r' -and $rk -ne 'q') {
-        if ([Console]::KeyAvailable) {
-            $ki2 = [Console]::ReadKey($true)
+        $ki2 = $null
+        if (Get-Command Read-ConnectConsoleKey -ErrorAction SilentlyContinue) {
+            $ki2 = Read-ConnectConsoleKey
+        } else {
+            try {
+                if ([Console]::KeyAvailable) { $ki2 = [Console]::ReadKey($true) }
+            } catch { $ki2 = $null }
+        }
+        if ($ki2) {
             $kc2 = $ki2.KeyChar.ToString()
             $code2 = if ($kc2.Length -eq 1) { [int][char]$kc2[0] } else { 0 }
             $ascii2 = ($code2 -ge 32 -and $code2 -le 126)
@@ -5323,10 +5416,15 @@ function Invoke-MountProject {
     # WS4: only assert BANNER_OK when this client already ran its own successful banner probe
     # this session (Test-TunnelUp) AND the caller trusts the tunnel - never on its own.
     $bannerOk = if ($TrustedTunnel -and $script:TunnelBannerCacheUp) { 'CLAUDE_TUNNEL_BANNER_OK=1 ' } else { '' }
+    # Session reverse-tunnel port (not fleet-published conf). Same contract as BG mount.
+    $sessionPortEnv = ''
+    if ($script:Port -and [int]$script:Port -ge 1024 -and [int]$script:Port -le 65535) {
+        $sessionPortEnv = "CLAUDE_MOUNT_TUNNEL_PORT=$([int]$script:Port) "
+    }
     # DEBUG c46ba1: opt-in server-side perf breakdown (PERF_HIDE_MS / PERF_SSHFS_MS) so a slow
     # `claude-mount up` can be split into git-hide-over-reverse-SSH vs the sshfs mount itself.
     $perfEnv = if ((Get-Command Test-ConnectPerfEnabled -ErrorAction SilentlyContinue) -and (Test-ConnectPerfEnabled)) { 'CLAUDE_CONNECT_PERF_LOG=1 ' } else { '' }
-    Write-GitModeLog "MOUNT_UP begin project=$ProjectId trusted=$TrustedTunnel banner_ok=$([bool]$bannerOk) check_hint=$CheckOkHint" 'DEBUG'
+    Write-GitModeLog "MOUNT_UP begin project=$ProjectId trusted=$TrustedTunnel banner_ok=$([bool]$bannerOk) check_hint=$CheckOkHint session_port_env=$([bool]$sessionPortEnv)" 'DEBUG'
     # A caller (e.g. Invoke-RecoverIfNeeded) may already have run the `check` probe this same
     # iteration - reuse that result to skip our own redundant SSH round-trip. This NEVER skips
     # the `$CM up` call itself below, because git hide/.claude-stub application must always run.
@@ -5336,7 +5434,7 @@ function Invoke-MountProject {
         Write-GitModeLog "MOUNT_UP off_mode_apply project=$ProjectId reason=check_ok_still_up" 'DEBUG'
     }
     $swMount = [System.Diagnostics.Stopwatch]::StartNew()
-    $mountOut = (SshX "${perfEnv}${trusted}${bannerOk}$CM up '$ProjectId' 2>&1") | Out-String
+    $mountOut = (SshX "${sessionPortEnv}${perfEnv}${trusted}${bannerOk}$CM up '$ProjectId' 2>&1") | Out-String
     $exitCode = $LASTEXITCODE
     $swMount.Stop()
     if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
@@ -5360,7 +5458,7 @@ function Invoke-MountProject {
         Write-Host '      -> server mount script outdated, pushing update...' -ForegroundColor DarkGray
         if (Push-ClaudeServerScripts -ConnectScriptDir $ConnectScriptDir -Alias $Alias) {
             $swRetry = [System.Diagnostics.Stopwatch]::StartNew()
-            $mountOut = (SshX "${perfEnv}${trusted}${bannerOk}$CM up '$ProjectId' 2>&1") | Out-String
+            $mountOut = (SshX "${sessionPortEnv}${perfEnv}${trusted}${bannerOk}$CM up '$ProjectId' 2>&1") | Out-String
             $exitCode = $LASTEXITCODE
             $swRetry.Stop()
             if (Get-Command Write-ConnectPerfLog -ErrorAction SilentlyContinue) {
@@ -5398,7 +5496,11 @@ function Remount-ProjectGit {
         Warn 'Tunnel dropped during remount - press R to reconnect'
         return $false
     }
-    $mountOut = (SshX "CLAUDE_TRUSTED_TUNNEL=1 $CM up '$ProjectId' 2>&1") | Out-String
+    $remountPortEnv = ''
+    if ($script:Port -and [int]$script:Port -ge 1024 -and [int]$script:Port -le 65535) {
+        $remountPortEnv = "CLAUDE_MOUNT_TUNNEL_PORT=$([int]$script:Port) "
+    }
+    $mountOut = (SshX "${remountPortEnv}CLAUDE_TRUSTED_TUNNEL=1 $CM up '$ProjectId' 2>&1") | Out-String
     Show-MountGitWarn $mountOut
     $mountOk = Test-MountSuccess -MountOut $mountOut -ExitCode $LASTEXITCODE
     if (-not $mountOk) {

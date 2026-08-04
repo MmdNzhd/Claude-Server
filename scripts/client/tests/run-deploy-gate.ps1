@@ -24,6 +24,7 @@ $CriticalScripts = @(
     'test-verdir-content-integrity.ps1'
     'test-setup-launch-exe-integrity.ps1'
     'test-no-stale-shadow-in-ship.ps1'
+    'test-console-key-safe.ps1'             # redirected-stdin KeyAvailable must not throw
 )
 
 # windows-mcp LIVE storm/chaos/brutal suites take many minutes and stall

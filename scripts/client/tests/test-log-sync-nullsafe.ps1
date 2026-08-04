@@ -51,8 +51,11 @@ foreach ($m in $bare) {
 }
 Assert-C '5' $guarded 'every proc result is null-checked before .Ok' $(if ($guarded) { 'ok' } else { 'see unguarded lines above' })
 
-$c6 = $ui -match 'LOG_SYNC_FAIL target=\{0\} detail=exception type=\{1\} at=\{2\}'
+$c6 = ($ui -match 'LOG_SYNC_FAIL target=\{0\} detail=\{1\} type=\{2\} at=\{3\}') -or ($ui -match 'LOG_SYNC_FAIL target=\{0\} detail=exception type=\{1\} at=\{2\}')
 Assert-C '6' $c6 'exception breadcrumb carries type= and at= (throw site)' $(if ($c6) { 'ok' } else { 'opaque breadcrumb' })
+
+$c6b = $ui -match 'function Write-ConnectLogSyncFailBreadcrumb' -and ($ui -match 'AppendAllText') -and ($ui -match 'detailKind = ''chunk_read_fail''')
+Assert-C '6b' $c6b 'fail breadcrumb helper + chunk-line reclassify present' $(if ($c6b) { 'ok' } else { 'missing helper/reclassify' })
 
 # --- live: drive the real function with connect-ui.ps1 dot-sourced ALONE ----
 $live = Join-Path $env:TEMP ("logsync-nullsafe-" + [guid]::NewGuid().ToString('N').Substring(0, 8))

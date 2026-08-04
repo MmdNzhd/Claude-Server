@@ -356,13 +356,16 @@ EOF
             for _push_sig in ABORT_EMPTY port_empty_recovered port_mismatch_keep port_takeover ACTIVE_MOUNT_GUARD ACTIVE_MOUNT_STEAL primary_soft_keep primary_overwrite; do
                 case "${result_line:-} ${push_out:-}" in
                     *"$_push_sig"*)
-                        connect_log "PUSH_CONF signal=$_push_sig out=${result_line:-no_result}" 'WARN'
+                        _sig_lvl=INFO
+                        [ "$_push_sig" = "ABORT_EMPTY" ] && _sig_lvl=WARN
+                        connect_log "PUSH_CONF signal=$_push_sig out=${result_line:-no_result}" "$_sig_lvl"
                         if [ "$_push_sig" = "ACTIVE_MOUNT_STEAL" ]; then
                             _steal_from="$(printf '%s' "$push_out" | sed -n 's/.*ACTIVE_MOUNT_STEAL from=\([^ ]*\) to=\([^ ]*\).*/\1/p' | head -1)"
                             _steal_to="$(printf '%s' "$push_out" | sed -n 's/.*ACTIVE_MOUNT_STEAL from=\([^ ]*\) to=\([^ ]*\).*/\2/p' | head -1)"
-                            [ -n "$_steal_from" ] && connect_log "ACTIVE_MOUNT_STEAL from=$_steal_from to=$_steal_to" 'WARN'
+                            [ -n "$_steal_from" ] && connect_log "ACTIVE_MOUNT_STEAL from=$_steal_from to=$_steal_to" 'INFO'
                             unset _steal_from _steal_to
                         fi
+                        unset _sig_lvl
                         ;;
                 esac
             done
@@ -381,13 +384,16 @@ EOF
         for _push_sig in ABORT_EMPTY port_empty_recovered port_mismatch_keep port_takeover ACTIVE_MOUNT_GUARD ACTIVE_MOUNT_STEAL primary_soft_keep primary_overwrite; do
             case "${result_line:-} ${push_out:-}" in
                 *"$_push_sig"*)
-                    connect_log "PUSH_CONF signal=$_push_sig out=${result_line:-no_result}" 'WARN'
+                    _sig_lvl=INFO
+                    [ "$_push_sig" = "ABORT_EMPTY" ] && _sig_lvl=WARN
+                    connect_log "PUSH_CONF signal=$_push_sig out=${result_line:-no_result}" "$_sig_lvl"
                     if [ "$_push_sig" = "ACTIVE_MOUNT_STEAL" ]; then
                         _steal_from="$(printf '%s' "$push_out" | sed -n 's/.*ACTIVE_MOUNT_STEAL from=\([^ ]*\) to=\([^ ]*\).*/\1/p' | head -1)"
                         _steal_to="$(printf '%s' "$push_out" | sed -n 's/.*ACTIVE_MOUNT_STEAL from=\([^ ]*\) to=\([^ ]*\).*/\2/p' | head -1)"
-                        [ -n "$_steal_from" ] && connect_log "ACTIVE_MOUNT_STEAL from=$_steal_from to=$_steal_to" 'WARN'
+                        [ -n "$_steal_from" ] && connect_log "ACTIVE_MOUNT_STEAL from=$_steal_from to=$_steal_to" 'INFO'
                         unset _steal_from _steal_to
                     fi
+                    unset _sig_lvl
                     ;;
             esac
         done
@@ -1081,7 +1087,7 @@ log_tunnel_drop() {
     [ -n "$drop_cause" ] && [ "$reason" = "auto_reconnect" ] && cause_part=" drop_cause=$drop_cause"
     [ -n "${bg_pid:-}" ] && bg_part=" bg_pid=$bg_pid"
     if declare -F connect_log >/dev/null 2>&1; then
-        connect_log "TUNNEL_DROP reason=$reason soft_fail=${_TUNNEL_SOFT_FAIL_COUNT:-0} sync_fail=${_TUNNEL_SYNC_FAIL_COUNT:-0} tcp_open=$tcp_open tunnel_up=$tunnel_up tunnel_sync_ok=$tunnel_sync_ok project=$project_id editor_opened=$editor_opened editor_seen=$editor_seen gen=$gen$cause_part$bg_part port=${PORT:-?}" 'WARN'
+        connect_log "TUNNEL_DROP reason=$reason soft_fail=${_TUNNEL_SOFT_FAIL_COUNT:-0} sync_fail=${_TUNNEL_SYNC_FAIL_COUNT:-0} tcp_open=$tcp_open tunnel_up=$tunnel_up tunnel_sync_ok=$tunnel_sync_ok project=$project_id editor_opened=$editor_opened editor_seen=$editor_seen gen=$gen$cause_part$bg_part port=${PORT:-?}" 'INFO'
     fi
 }
 
@@ -1535,6 +1541,14 @@ for p in /proc/[0-9]*; do
   esac
 done
 conf=\$(grep -E '^TUNNEL_PORT=' \"\$HOME/.claude-connect.conf\" 2>/dev/null | tail -1 | cut -d= -f2- | tr -dc '0-9')
+if [ \"\$ls_ok\" = \"1\" ] && [ -z \"\$bound\" ]; then
+  if grep -F \" \$LP \" /proc/mounts >/dev/null 2>&1 || grep -F \" \$LP\" /proc/mounts >/dev/null 2>&1; then
+    :
+  else
+    ls_ok=0
+    printf 'MOUNT_VERIFY pending_no_sshfs project=%s\\n' \"\$ID\"
+  fi
+fi
 if [ -n \"\$bound\" ]; then
   shared=\$(ps -eo args 2>/dev/null | grep -F -- \"-p \$bound\" | grep -c '[s]shfs' || true)
 fi
@@ -1555,7 +1569,7 @@ fi
             *MOUNT_VERIFY*|*MOUNT_SHARED_P*|*DUAL_CONNECT*)
                 if declare -F connect_log >/dev/null 2>&1; then
                     case "$line" in
-                        *MOUNT_SHARED_P*|*DUAL_CONNECT*|*ls_ok=0*) connect_log "$line" 'WARN' ;;
+                        *ls_ok=0*|*pending_no_sshfs*) connect_log "$line" 'WARN' ;;
                         *) connect_log "$line" 'INFO' ;;
                     esac
                 fi
@@ -1568,7 +1582,7 @@ EOF
     bound_p="$(printf '%s' "$out" | sed -n 's/.*bound_p=\([0-9][0-9]*\).*/\1/p' | head -1)"
     if [ "${shared_n:-0}" -ge 2 ] 2>/dev/null; then
         if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "DUAL_CONNECT warn shared_p=${shared_n} port=${bound_p:-?} project=${id}" 'WARN'
+            connect_log "DUAL_CONNECT shared_p=${shared_n} port=${bound_p:-?} project=${id}" 'INFO'
         fi
     fi
     if echo "$mount_out" | grep -qE 'skip_remount_healthy|started_in_background' \
@@ -1691,7 +1705,7 @@ proxy_reseed_should_kill() {
     tunnel_needs_proxy_reseed "$tunnel_pid" || return 1
     if ! can_claim_cursor_proxy_owner; then
         if declare -F connect_log >/dev/null 2>&1; then
-            connect_log "ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=$tunnel_pid port=${PORT:-}" 'WARN'
+            connect_log "ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=$tunnel_pid port=${PORT:-}" 'INFO'
         fi
         return 1
     fi
@@ -1949,7 +1963,7 @@ complete_cursor_proxy_after_tunnel() {
     if [ "$health_ok" -eq 0 ]; then
         if [ "$front_up" -eq 0 ]; then
             declare -F connect_log >/dev/null 2>&1 && \
-                connect_log 'CURSOR_PROXY_CLEAR force reason=18998_down_windows_open' 'WARN'
+                connect_log 'CURSOR_PROXY_CLEAR force reason=18998_down_windows_open' 'INFO'
             if declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
                 if declare -F test_may_clear_cursor_proxy_settings >/dev/null 2>&1; then
                     if test_may_clear_cursor_proxy_settings 1; then
@@ -1961,10 +1975,10 @@ complete_cursor_proxy_after_tunnel() {
                     clear_cursor_proxy_settings || true
                 fi
             fi
-            declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail_front_down' 'WARN'
+            declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail_front_down' 'INFO'
         else
             declare -F connect_log >/dev/null 2>&1 && \
-                connect_log 'CURSOR_PROXY_CLEAR force reason=backend_down' 'WARN'
+                connect_log 'CURSOR_PROXY_CLEAR force reason=backend_down' 'INFO'
             if declare -F clear_cursor_proxy_settings >/dev/null 2>&1; then
                 if declare -F test_may_clear_cursor_proxy_settings >/dev/null 2>&1; then
                     if test_may_clear_cursor_proxy_settings 1; then
@@ -1974,7 +1988,7 @@ complete_cursor_proxy_after_tunnel() {
                     clear_cursor_proxy_settings || true
                 fi
             fi
-            declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail' 'WARN'
+            declare -F connect_log >/dev/null 2>&1 && connect_log 'PROXY_FALLBACK mode=server_direct reason=proxy_health_fail' 'INFO'
         fi
     fi
     mode="$(get_cursor_proxy_mode)"
@@ -2274,7 +2288,7 @@ ensure_session_tunnel() {
         # Belt: never kill -R for proxy reseed when foreign owner cannot bind -L
         if [ "${_PROXY_RESEED:-0}" = "1" ] && ! can_claim_cursor_proxy_owner; then
             if declare -F connect_log >/dev/null 2>&1; then
-                connect_log "ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=$bg_pid port=${PORT:-}" 'WARN'
+                connect_log "ENSURE_TUNNEL reseed_skip reason=foreign_owner_cannot_bind pid=$bg_pid port=${PORT:-}" 'INFO'
             fi
             if declare -F complete_cursor_proxy_after_tunnel >/dev/null 2>&1; then
                 complete_cursor_proxy_after_tunnel || true
@@ -2315,7 +2329,7 @@ ensure_session_tunnel() {
     if ! remote_xray_socks_open; then
         if declare -F connect_log >/dev/null 2>&1; then
             connect_log "ENSURE_TUNNEL remote_xray_socks=closed port=${XRAY_SERVER_SOCKS_PORT} skipping_proxy_leg" 'INFO'
-            connect_log 'PROXY_FALLBACK mode=server_direct reason=xray_closed' 'WARN'
+            connect_log 'PROXY_FALLBACK mode=server_direct reason=xray_closed' 'INFO'
             connect_log 'CURSOR_PROXY_MODE mode=server_direct' 'INFO'
         fi
     elif [ "$_is_proxy_owner" -eq 0 ]; then

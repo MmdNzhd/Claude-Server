@@ -471,7 +471,7 @@ invoke_connect_manual_update() {
 _connect_log_sync_fail() {
     local detail="${1:-sync_fail}"
     if declare -F connect_log >/dev/null 2>&1; then
-        connect_log "LOG_SYNC_FAIL detail=${detail} (local kept; retry later)" 'WARN'
+        connect_log "LOG_SYNC_FAIL detail=${detail} (local kept; retry later)" 'INFO'
     fi
 }
 

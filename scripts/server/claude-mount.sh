@@ -65,6 +65,19 @@ _load_global() {
         mac|darwin|osx) LAPTOP_OS="mac" ;;
         *) LAPTOP_OS="windows" ;;
     esac
+    # Multi-Connect Precise×6 (20260804.16 W5): claude-mount used fleet-published
+    # TUNNEL_PORT=20020 while the Connect session's reverse tunnel was 20024; when
+    # primary died mid-mount → MOUNT_BG_FAIL. Client may pass the live session port.
+    if [ -n "${CLAUDE_MOUNT_TUNNEL_PORT:-}" ]; then
+        _ov="$(printf '%s' "$CLAUDE_MOUNT_TUNNEL_PORT" | tr -cd '0-9')"
+        if [ -n "$_ov" ] && [ "$_ov" -ge 1024 ] && [ "$_ov" -le 65535 ]; then
+            _was="${TUNNEL_PORT:-}"
+            if timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/${_ov}" 2>/dev/null; then
+                TUNNEL_PORT="$_ov"
+                echo "info: MOUNT_PORT_OVERRIDE session=${TUNNEL_PORT} conf_was=${_was:-none}" >&2
+            fi
+        fi
+    fi
 }
 
 # ---------------------------------------------------------------------------

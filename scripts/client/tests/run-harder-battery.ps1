@@ -29,7 +29,10 @@ $tests = @(
     'test-harder-live-acquire-keep-split.ps1',
     'test-harder-live-slot-storm-keep.ps1',
     'test-harder-adversarial-keep-mount.ps1',
-    'test-harder-live-mount-skew-gate.ps1'
+    'test-harder-live-mount-skew-gate.ps1',
+    # E2E pyramid contracts (no -Live)
+    'test-e2e-connect-signal-harness.ps1',
+    'test-e2e-agent-hello.ps1'
 )
 Write-Host ''
 Write-Host '=== HARD+++ BATTERY ===' -ForegroundColor White

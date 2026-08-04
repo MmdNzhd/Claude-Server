@@ -246,9 +246,18 @@ function Start-TcpPortRelay {
     } catch { $created = $true; $portMutex = $null }
     if (-not $created) {
         # Another owner already holds this port's mutex - never store a foreign handle.
+        # Wait for their relay to bind (silent false here caused SIDECAR socks=0 under ×6).
         try { if ($portMutex) { $portMutex.Dispose() } } catch {}
-        Start-Sleep -Milliseconds 500
-        return (Test-CursorProxySidecarListening -Port $ListenPort)
+        $waitDeadline = (Get-Date).AddSeconds(4)
+        $okWait = $false
+        while ((Get-Date) -lt $waitDeadline) {
+            if (Test-CursorProxySidecarListening -Port $ListenPort) { $okWait = $true; break }
+            Start-Sleep -Milliseconds 200
+        }
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("SIDECAR_START name={0} listen={1} backend={2} ok={3} via=mutex_wait" -f $Name, $ListenPort, $BackendPort, [int]$okWait) 'INFO'
+        }
+        return $okWait
     }
     # We created it (single-flight winner for this port) - hold the handle open for the
     # lifetime of this Connect process so Stop-CursorProxySidecarRelays can release it
@@ -404,12 +413,12 @@ function Clear-CursorProxySettingsSidecar {
     }
     if (-not $backendOk) {
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
-            Write-GitModeLog ("CURSOR_PROXY_CLEAR force reason=backend_down front_up={0} profile_count={1}" -f [int]$frontListening, $nOpen) 'WARN'
+            Write-GitModeLog ("CURSOR_PROXY_CLEAR force reason=backend_down front_up={0} profile_count={1}" -f [int]$frontListening, $nOpen) 'INFO'
         }
         # fall through to remove sticky 18998 — do NOT repair
     } elseif ($nOpen -gt 0 -and $frontListening) {
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
-            Write-GitModeLog ("CURSOR_PROXY_CLEAR_SKIP: reason=windows_open action=repair_sidecar_only profile_count={0}" -f $nOpen) 'WARN'
+            Write-GitModeLog ("CURSOR_PROXY_CLEAR_SKIP: reason=windows_open action=repair_sidecar_only profile_count={0}" -f $nOpen) 'INFO'
         }
         if (Get-Command Repair-CursorProxySettingsToSidecar -ErrorAction SilentlyContinue) {
             try { [void](Repair-CursorProxySettingsToSidecar) } catch {}
@@ -418,7 +427,7 @@ function Clear-CursorProxySettingsSidecar {
     }
     if ($nOpen -gt 0 -and -not $frontListening) {
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
-            Write-GitModeLog ("CURSOR_PROXY_CLEAR force reason=18998_down_windows_open profile_count={0}" -f $nOpen) 'WARN'
+            Write-GitModeLog ("CURSOR_PROXY_CLEAR force reason=18998_down_windows_open profile_count={0}" -f $nOpen) 'INFO'
         }
     }
     $anyChanged = $false
@@ -449,7 +458,7 @@ function Clear-CursorProxySettingsSidecar {
         if ($changed) {
             ($obj | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $settingsPath -Encoding UTF8
             if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
-                Write-GitModeLog ("CURSOR_PROXY_CLEAR removed_18998_dead_proxy path={0}" -f $settingsPath) 'WARN'
+                Write-GitModeLog ("CURSOR_PROXY_CLEAR removed_18998_dead_proxy path={0}" -f $settingsPath) 'INFO'
             }
             $anyChanged = $true
         }
@@ -464,29 +473,50 @@ function Start-CursorProxySidecar {
     if ($script:HttpProxyPort) { $httpBack = [int]$script:HttpProxyPort }
     $script:CursorSocksFrontPort = 18999
     $script:CursorHttpFrontPort = 18998
-    $a = Start-TcpPortRelay -ListenPort 18999 -BackendPort $socksBack -Name 'socks'
-    $b = Start-TcpPortRelay -ListenPort 18998 -BackendPort $httpBack -Name 'http'
-    try { Start-LegacyCursorProxyRelays | Out-Null } catch {}
-    $frontOk = ($a -and $b -and (Test-CursorProxySidecarListening -Port 18998))
+    $a = $false
+    $b = $false
     $backendOk = $false
-    if ($frontOk) {
-        try { $backendOk = [bool](Test-CursorProxyBackendOpen) } catch { $backendOk = $false }
+    $frontOk = $false
+    # Parallel Connect: socks mutex/bind can lose the first shot — retry both fronts.
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $a = Start-TcpPortRelay -ListenPort 18999 -BackendPort $socksBack -Name 'socks'
+        $b = Start-TcpPortRelay -ListenPort 18998 -BackendPort $httpBack -Name 'http'
+        try { Start-LegacyCursorProxyRelays | Out-Null } catch {}
+        $frontOk = ($a -and $b -and (Test-CursorProxySidecarListening -Port 18998) -and (Test-CursorProxySidecarListening -Port 18999))
+        if (-not $frontOk) {
+            if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+                Write-GitModeLog ("SIDECAR_START front_retry attempt={0} socks={1} http={2}" -f $attempt, [int]$a, [int]$b) 'INFO'
+            }
+            Start-Sleep -Milliseconds 400
+            continue
+        }
+        # -L backends can lag tunnel spawn by a few hundred ms under multi-Connect.
+        for ($bw = 0; $bw -lt 8; $bw++) {
+            try { $backendOk = [bool](Test-CursorProxyBackendOpen) } catch { $backendOk = $false }
+            if ($backendOk) { break }
+            Start-Sleep -Milliseconds 350
+        }
+        if ($backendOk) { break }
+        if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
+            Write-GitModeLog ("SIDECAR_START backend_retry attempt={0}" -f $attempt) 'INFO'
+        }
+        Start-Sleep -Milliseconds 400
     }
     $ok = [bool]($frontOk -and $backendOk)
     if ($ok) {
         try { Repair-CursorProxySettingsToSidecar | Out-Null } catch {}
         try { Start-CursorProxySidecarWatchdog | Out-Null } catch {}
     } else {
-        # Never leave Cursor pointed at a dead/blackhole 18998 (front without backend).
-        if ($frontOk -and -not $backendOk) {
+        # Never leave Cursor pointed at a dead/blackhole 18998 (partial front or no backend).
+        if ($a -or $b -or $frontOk) {
             if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
-                Write-GitModeLog 'SIDECAR_START front_up backend_down stopping_fronts' 'WARN'
+                Write-GitModeLog ("SIDECAR_START front_up backend_down stopping_fronts socks={0} http={1} backend={2}" -f [int]$a, [int]$b, [int]$backendOk) 'INFO'
             }
             try { Stop-CursorProxySidecarRelays | Out-Null } catch {}
         }
         try { Clear-CursorProxySettingsSidecar | Out-Null } catch {}
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
-            Write-GitModeLog ("SIDECAR_START ok=0 socks={0} http={1} backend={2}" -f [int]$a, [int]$b, [int]$backendOk) 'WARN'
+            Write-GitModeLog ("SIDECAR_START ok=0 socks={0} http={1} backend={2}" -f [int]$a, [int]$b, [int]$backendOk) 'INFO'
         }
     }
     return $ok
@@ -558,7 +588,7 @@ function Ensure-CursorProxySidecar {
     $frontOk = ((Test-CursorProxySidecarListening -Port 18998) -and (Test-CursorProxySidecarListening -Port 18999))
     if (-not $frontOk) {
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
-            Write-GitModeLog 'SIDECAR_ENSURE restarting_front_doors' 'WARN'
+            Write-GitModeLog 'SIDECAR_ENSURE restarting_front_doors' 'INFO'
         }
         $frontOk = [bool](Start-CursorProxySidecar)
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
@@ -572,7 +602,7 @@ function Ensure-CursorProxySidecar {
     $backendOk = Test-CursorProxyBackendOpen
     if (-not $backendOk) {
         if (Get-Command Write-GitModeLog -ErrorAction SilentlyContinue) {
-            Write-GitModeLog 'SIDECAR_ENSURE front_up backend_down stopping_fronts_clearing_settings' 'WARN'
+            Write-GitModeLog 'SIDECAR_ENSURE front_up backend_down stopping_fronts_clearing_settings' 'INFO'
         }
         # Stop listening fronts so Chromium/--proxy-server cannot blackhole into dead -L backends.
         try { Stop-CursorProxySidecarRelays | Out-Null } catch {}
