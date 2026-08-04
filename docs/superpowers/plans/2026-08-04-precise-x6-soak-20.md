@@ -51,13 +51,13 @@
   where `$SessionPort = $script:Port`.
 - [x] **Step 3:** Mirror in `Invoke-MountProject` / remount paths in `git-mode.ps1`.
 - [x] **Step 4:** Static test asserts connect.ps1 + claude-mount.sh contain override strings.
-- [ ] **Step 5:** Deploy claude-mount to Smart (`install` or user `~/.local/bin` copy).
+- [x] **Step 5:** Deploy claude-mount to Smart — verified live `smart ~/.local/bin/claude-mount` has `MOUNT_PORT_OVERRIDE` / `CLAUDE_MOUNT_TUNNEL_PORT` (20260804.33 publish + post-soak SSH check). Mac Connect path still has no session-port override (Windows-only today).
 
 ## Task 2: Warm launch wall-clock (L1)
 
 - [x] **Step 1:** In `Launch-RemoteEditor` warm attempt-1 loop, track `$swWarm`; cap wall at 25s.
 - [x] **Step 2:** If `window_count_increased` true for ≥4 consecutive ticks and still not `on_folder`, break strategy early and skip `remote-classic` (go to grace with 45s wall budget).
-- [x] **Step 3:** Keep `LAUNCH_RETRY` WARN when a strategy truly fails without promising.
+- [x] **Step 3:** Cascade `LAUNCH_RETRY` is INFO under warm ×6; final `LAUNCH_WARN` / `LAUNCH_FAIL` stay WARN/ERROR (Precise zero-noise).
 
 ## Task 3: WMCP abandoned mutex (W1)
 
@@ -71,8 +71,8 @@
 
 ## Task 5: Prove
 
-- [ ] Publish Smart client + deploy mount script.
-- [ ] Run soak 20 rounds; stop on first fail; fix and restart until 20/20.
+- [x] Publish Smart client + deploy mount script (`20260804.33` bundle + `~/.local/bin/claude-mount`).
+- [x] Run soak 20 rounds; stop on first fail; fix and restart until 20/20 (`precise-soak-20260804-064626`, commit `e9edd05`).
 
 ## Incident addendum 20260804.30 (soak `.29c` R5)
 
